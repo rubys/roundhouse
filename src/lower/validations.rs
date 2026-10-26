@@ -82,9 +82,20 @@ pub enum Check {
     /// every number between the endpoints, so this is not a value list.
     /// Default message: `"is not included in the list"`.
     Cover { begin: f64, end: f64, exclusive: bool },
-    /// String must match the regex.
+    /// Value must NOT appear in the set of literal values.
+    /// Default message: `"is reserved"`.
+    Exclusion { values: Vec<InclusionValue> },
+    /// Numeric `exclusion: { in: begin..end }`: the value must not be
+    /// covered by the range. Default message: `"is reserved"`.
+    NotCover { begin: f64, end: f64, exclusive: bool },
+    /// String must match the regex. `flags` is Ruby's own flag
+    /// characters (`i`, `m`, or both — see `ValidationRule::Format`).
     /// Default message: `"is invalid"`.
-    Format { pattern: String },
+    Format {
+        pattern: String,
+        #[serde(default)]
+        flags: String,
+    },
     /// String must be unique in the table (evaluator hits the DB).
     /// Default message: `"has already been taken"`.
     Uniqueness { scope: Vec<Symbol>, case_sensitive: bool },
@@ -119,6 +130,7 @@ impl Check {
             }
             Check::OnlyInteger => "must be an integer".into(),
             Check::Inclusion { .. } | Check::Cover { .. } => "is not included in the list".into(),
+            Check::Exclusion { .. } | Check::NotCover { .. } => "is reserved".into(),
             Check::Format { .. } => "is invalid".into(),
             Check::Uniqueness { .. } => "has already been taken".into(),
             Check::Custom { .. } => String::new(),
@@ -171,6 +183,12 @@ fn expand_rule(rule: &ValidationRule, out: &mut Vec<Check>) {
     match rule {
         ValidationRule::Presence => out.push(Check::Presence),
         ValidationRule::Absence => out.push(Check::Absence),
+        // Not a `Check`: the emitted `validate` body is
+        // `inline_acceptance_check`.
+        ValidationRule::Acceptance { .. } => {}
+        // Not a `Check`: the set is read on the record when it validates
+        // (`inline_set_call_check`).
+        ValidationRule::InclusionCall { .. } | ValidationRule::ExclusionCall { .. } => {}
         // `allow_nil` is not a `Check`. This fan-out is only read by
         // `tests/lower_validations.rs`. The emitted `validate` body is
         // `inline_length_check`, which is where nil is decided.
@@ -182,10 +200,10 @@ fn expand_rule(rule: &ValidationRule, out: &mut Vec<Check>) {
                 out.push(Check::MaxLength { n: *n, message: message.clone() });
             }
         }
-        ValidationRule::Format { pattern } => {
-            out.push(Check::Format { pattern: pattern.clone() });
+        ValidationRule::Format { pattern, flags, .. } => {
+            out.push(Check::Format { pattern: pattern.clone(), flags: flags.clone() });
         }
-        ValidationRule::Numericality { only_integer, gt, lt, gte, lte } => {
+        ValidationRule::Numericality { only_integer, gt, lt, gte, lte, .. } => {
             if *only_integer {
                 out.push(Check::OnlyInteger);
             }
@@ -218,7 +236,23 @@ fn expand_rule(rule: &ValidationRule, out: &mut Vec<Check>) {
                 out.push(Check::Inclusion { values: vs });
             }
         }
-        ValidationRule::Uniqueness { scope, case_sensitive } => {
+        ValidationRule::Exclusion { values, range } => {
+            if let Some(range) = range {
+                out.push(Check::NotCover {
+                    begin: range.begin,
+                    end: range.end,
+                    exclusive: range.exclusive,
+                });
+            }
+            let vs: Vec<InclusionValue> = values
+                .iter()
+                .filter_map(lit_to_inclusion_value)
+                .collect();
+            if !vs.is_empty() {
+                out.push(Check::Exclusion { values: vs });
+            }
+        }
+        ValidationRule::Uniqueness { scope, case_sensitive, .. } => {
             out.push(Check::Uniqueness {
                 scope: scope.clone(),
                 case_sensitive: *case_sensitive,
@@ -241,4 +275,40 @@ fn lit_to_inclusion_value(lit: &crate::expr::Literal) -> Option<InclusionValue> 
         Literal::Nil => None,
         Literal::Regex { .. } => None,
     }
+}
+
+/// `validates :attr, acceptance:` on an `attribute :attr, :boolean` is
+/// lowered only on the targets whose writer keeps Rails' nil (the ruby
+/// family, `BuildTarget::has_runtime_relation`). A strict target's field
+/// turns nil and `""` into `false`, so the check would reject a record
+/// Rails accepts; this reports the rule it leaves out, once per
+/// validation, as `uniqueness_gaps_for_target` does.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn acceptance_gaps_for_target(
+    app: &crate::App,
+    target: crate::build_target::BuildTarget,
+) -> Vec<crate::diagnostic::Diagnostic> {
+    if target.has_runtime_relation() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for model in &app.models {
+        for item in &model.body {
+            let crate::dialect::ModelBodyItem::Validation { validation, .. } = item else { continue };
+            if !validation.rules.iter().any(|r| matches!(r, ValidationRule::Acceptance { .. }))
+                || !crate::lower::model_to_library::markers::synthesized_boolean_attribute(model, &validation.attribute)
+            {
+                continue;
+            }
+            let mut d = crate::diagnostic::Diagnostic::unsupported(
+                item.span(),
+                Some(Symbol::from(target.as_str())),
+                format!("validates :{}, acceptance:", validation.attribute.as_str()),
+                "this target's Boolean attribute writer turns nil and \"\" into false, which the check would reject where Rails skips it",
+            );
+            d.severity = crate::diagnostic::Severity::Warning;
+            out.push(d);
+        }
+    }
+    out
 }

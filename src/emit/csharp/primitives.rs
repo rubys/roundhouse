@@ -28,6 +28,7 @@ const SERVER_CS: &str = include_str!("../../../runtime/csharp/Server.cs");
 // Parse` (stored text → DateTimeOffset, the `parse_db_time` intrinsic target)
 // plus the `JsonBuilder.EncodeDatetime(DateTimeOffset?)` overload.
 const RH_DATETIME_CS: &str = include_str!("../../../runtime/csharp/RhDateTime.cs");
+const I18N_HOST_CS: &str = include_str!("../../../runtime/csharp/I18nHost.cs");
 
 /// The hand-written runtime primitives, emitted under `app/runtime/`.
 pub fn primitives() -> Vec<EmittedFile> {
@@ -41,6 +42,7 @@ pub fn primitives() -> Vec<EmittedFile> {
         ("app/runtime/RhRuntime.cs", RH_RUNTIME_CS),
         ("app/runtime/Server.cs", SERVER_CS),
         ("app/runtime/RhDateTime.cs", RH_DATETIME_CS),
+        ("app/runtime/I18nHost.cs", I18N_HOST_CS),
     ];
     files
         .iter()

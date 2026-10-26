@@ -55,6 +55,7 @@ use super::util::{
 };
 use super::{survey, IngestError};
 
+use crate::ingest::prism_api::PrismLocation;
 /// The reopened class the tolerant-sgid shape lives on.
 const ATTACHMENT: &str = "ActionText::Attachment";
 /// The envelope key the hand-decode reads; its presence is what says
@@ -70,7 +71,7 @@ pub(super) fn ingest_on_load_reopens(source: &[u8], file: &str, app: &mut App) {
     let root = result.node();
     let src = String::from_utf8_lossy(source);
     let Some(prog) = root.as_program_node() else { return };
-    for stmt in prog.statements().body().iter() {
+    for stmt in load_time_statements(&prog) {
         let Some(call) = stmt.as_call_node() else { continue };
         if constant_id_str(&call.name()) != "on_load" {
             continue;
@@ -91,6 +92,13 @@ pub(super) fn ingest_on_load_reopens(source: &[u8], file: &str, app: &mut App) {
         if let Some(statements) = body.as_statements_node() {
             for stmt in statements.body().iter() {
                 let Some(include) = stmt.as_call_node() else { continue };
+                if hook == "active_record" {
+                    for id in extended_modules(&include) {
+                        if !app.load_hook_extended_macros.contains(&id) {
+                            app.load_hook_extended_macros.push(id);
+                        }
+                    }
+                }
                 if include.receiver().is_some() || constant_id_str(&include.name()) != "include" {
                     continue;
                 }
@@ -379,4 +387,68 @@ fn collect(node: &Node<'_>, class_side: bool, has_from_node: &mut bool, lists: &
             lists.push(out);
         }
     }
+}
+
+/// `extend M`, `ActiveRecord::Base.extend M` and `ActiveRecord::Base.send(:extend, M)`
+/// inside the active_record hook, each argument a constant path.
+fn extended_modules(call: &ruby_prism::CallNode<'_>) -> Vec<ClassId> {
+    let receiver_ok = call.receiver().is_none_or(|recv| {
+        constant_path_of(&recv).is_some_and(|p| p.iter().filter(|s| !s.is_empty()).map(String::as_str).eq(["ActiveRecord", "Base"]))
+    });
+    let Some(args) = call.arguments() else { return Vec::new() };
+    let mut args: Vec<Node<'_>> = args.arguments().iter().collect();
+    match constant_id_str(&call.name()) {
+        "extend" => {}
+        "send" | "public_send"
+            if call.receiver().is_some()
+                && args.first().and_then(|a| a.as_symbol_node()).is_some_and(|s| s.unescaped() == b"extend") =>
+        {
+            args.remove(0);
+        }
+        _ => return Vec::new(),
+    }
+    if !receiver_ok || args.is_empty() {
+        return Vec::new();
+    }
+    let paths: Option<Vec<ClassId>> = args
+        .iter()
+        .map(|arg| {
+            constant_path_of(arg).map(|p| ClassId(Symbol::from(p.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::"))))
+        })
+        .collect();
+    paths.unwrap_or_default()
+}
+
+fn load_time_statements<'pr>(prog: &ruby_prism::ProgramNode<'pr>) -> Vec<Node<'pr>> {
+    fn railtie(class: &ruby_prism::ClassNode<'_>) -> bool {
+        class.superclass().and_then(|sup| constant_path_of(&sup)).is_some_and(|path| {
+            let path: Vec<&str> = path.iter().map(String::as_str).filter(|s| !s.is_empty()).collect();
+            matches!(path.as_slice(), ["Rails", "Railtie"] | ["Rails", "Engine"])
+        })
+    }
+    fn walk<'pr>(stmts: Vec<Node<'pr>>, out: &mut Vec<Node<'pr>>, in_railtie: bool) {
+        for stmt in stmts {
+            if let Some(module) = stmt.as_module_node() {
+                walk(module.body().map(flatten_statements).unwrap_or_default(), out, false);
+                continue;
+            }
+            if let Some(class) = stmt.as_class_node() {
+                walk(class.body().map(flatten_statements).unwrap_or_default(), out, railtie(&class));
+                continue;
+            }
+            if in_railtie
+                && let Some(call) = stmt.as_call_node()
+                && call.receiver().is_none()
+                && constant_id_str(&call.name()) == "initializer"
+                && let Some(body) = call.block().and_then(|b| b.as_block_node()).and_then(|b| b.body())
+            {
+                out.extend(flatten_statements(body));
+                continue;
+            }
+            out.push(stmt);
+        }
+    }
+    let mut out = Vec::new();
+    walk(prog.statements().body().iter().collect(), &mut out, false);
+    out
 }

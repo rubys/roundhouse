@@ -264,6 +264,16 @@ module ActiveStorage
   # in the signed segment), so the router's own `.ext` format peel
   # (`moon.jpg` → `moon` + `format=jpg`) costs nothing here.
   module Routes
+    # The Rails paths of the controllers `table` names, for the test
+    # helper's `assert_recognizes`.
+    CONTROLLER_PATHS = {
+      active_storage_blobs_redirect: "active_storage/blobs/redirect",
+      active_storage_blobs_proxy: "active_storage/blobs/proxy",
+      active_storage_representations_redirect: "active_storage/representations/redirect",
+      active_storage_disk: "active_storage/disk",
+      active_storage_direct_uploads: "active_storage/direct_uploads"
+    }.freeze
+
     def self.table
       [
         ActionDispatch::Router::Route.new(
@@ -442,6 +452,7 @@ module ActiveStorage
       initializer_filters(action_name)
       return nil if performed?
       create
+      initializer_after_filters(action_name)
       nil
     end
 
@@ -449,6 +460,12 @@ module ActiveStorage
     # `project::apply_module_mixins`. Redefined by the generated reopen
     # at the end of boot.rb when the app registers one.
     def initializer_filters(action_name)
+      nil
+    end
+
+    # The same for an initializer's `after_action`, asked once the
+    # action has answered.
+    def initializer_after_filters(action_name)
       nil
     end
 
@@ -504,12 +521,17 @@ module ActiveStorage
       else
         show
       end
+      initializer_after_filters(action_name)
       nil
     end
 
-    # The seam an initializer's `before_action` is written into — see
-    # `DirectUploadsController#initializer_filters`.
+    # The seams an initializer's `before_action` and `after_action` are
+    # written into — see `DirectUploadsController#initializer_filters`.
     def initializer_filters(action_name)
+      nil
+    end
+
+    def initializer_after_filters(action_name)
       nil
     end
 
@@ -556,7 +578,6 @@ module ActiveStorage
         head(:not_found)
         return nil
       end
-      headers["Cache-Control"] = "max-age=3600, public"
       send_data(service.download(key), type: blob.content_type_for_serving, disposition: disposition)
       # send_data writes only `inline`/`attachment`; restore the
       # sanitized filename after that overwrite.

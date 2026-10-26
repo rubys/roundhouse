@@ -147,6 +147,7 @@ pub(crate) fn expand_delegates_in_class(lc: &mut LibraryClass) -> Vec<MethodDef>
         &[],
         &std::collections::HashSet::new(),
         None,
+        &std::collections::HashSet::new(),
         &[],
     )
 }
@@ -158,6 +159,7 @@ pub(super) fn expand_delegates(
     additional_method_bodies: &[Expr],
     blocked_names: &std::collections::HashSet<String>,
     supported_target_methods: Option<&std::collections::HashSet<(String, String, usize)>>,
+    method_targets: &std::collections::HashSet<String>,
     sources: &[crate::span::SourceFile],
 ) -> Vec<MethodDef> {
     let called_with_args = names_called_with_arguments(methods, additional_method_bodies);
@@ -166,6 +168,7 @@ pub(super) fn expand_delegates(
         &called_with_args,
         blocked_names,
         supported_target_methods,
+        method_targets,
         sources,
     );
     let delegates = take_delegate_decls_from_calls(unknown_calls, &mut eligibility);
@@ -267,6 +270,8 @@ fn receiver(target: &str) -> std::borrow::Cow<'_, str> {
         "args",
         "block",
         "value",
+        // The allow_nil forwarder's own local (`synthesized_source`).
+        "__allow_nil_target__",
         "key",
         "other",
         "__delegate_target",
@@ -326,6 +331,12 @@ fn synthesized_source(
             forwarder
         } else if let Some(attr) = m.strip_suffix('=') {
             ("value", format!("{t}.{attr} = value"))
+        } else if d.allow_nil {
+            // Rails' `_ = target; _.m if !_.nil?`: a nil target answers nil
+            // (the local is named so that no `to:` target can be shadowed by it)
+            // and any other (`false` too) is called through. Not `&.`, which
+            // the lowering spells as `&&` and would answer `false` for it.
+            ("", format!("__allow_nil_target__ = {t}\n    __allow_nil_target__.nil? ? nil : __allow_nil_target__.{m}"))
         } else {
             ("", format!("{t}.{m}"))
         };
@@ -372,8 +383,9 @@ mod tests {
     fn take_delegate_decls(lc: &mut LibraryClass) -> Vec<Delegation> {
         let called_with_args = names_called_with_arguments(&lc.methods, &[]);
         let blocked_names = std::collections::HashSet::new();
+        let no_targets = std::collections::HashSet::new();
         let mut eligibility =
-            DelegateEligibility::new(&lc.methods, &called_with_args, &blocked_names, None, &[]);
+            DelegateEligibility::new(&lc.methods, &called_with_args, &blocked_names, None, &no_targets, &[]);
         take_delegate_decls_from_calls(&mut lc.unknown_calls, &mut eligibility)
     }
 
@@ -549,8 +561,9 @@ mod tests {
             .collect();
         let called_with_args = names_called_with_arguments(&model.methods, &concern_bodies);
         let blocked_names = std::collections::HashSet::new();
+        let no_targets = std::collections::HashSet::new();
         let mut eligibility =
-            DelegateEligibility::new(&model.methods, &called_with_args, &blocked_names, None, &[]);
+            DelegateEligibility::new(&model.methods, &called_with_args, &blocked_names, None, &no_targets, &[]);
         let delegates = take_delegate_decls_from_calls(&mut model.unknown_calls, &mut eligibility);
         assert!(
             delegates.is_empty(),
@@ -568,8 +581,9 @@ mod tests {
         let mut model = library_class("class Post\n  delegate :title, to: :leaf\nend\n");
         let called_with_args = names_called_with_arguments(&model.methods, &[]);
         let blocked_names = ["title".to_string()].into_iter().collect();
+        let no_targets = std::collections::HashSet::new();
         let mut eligibility =
-            DelegateEligibility::new(&model.methods, &called_with_args, &blocked_names, None, &[]);
+            DelegateEligibility::new(&model.methods, &called_with_args, &blocked_names, None, &no_targets, &[]);
         let delegates = take_delegate_decls_from_calls(&mut model.unknown_calls, &mut eligibility);
         assert!(
             delegates.is_empty(),

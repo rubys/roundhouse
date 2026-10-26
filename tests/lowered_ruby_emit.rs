@@ -1201,18 +1201,22 @@ fn comments_build_expansion_uses_typed_factory() {
 #[test]
 fn comments_create_expands_assoc_build_to_typed_factory_with_fk() {
     // `@comment = @article.comments.build(comment_params)` lowers to:
-    //   @comment = Comment.from_params(comment_params)
-    //   @comment.article_id = @article.id
+    //   owner = @article
+    //   record = Comment.from_params(comment_params)
+    //   record.article_id = owner.id
+    //   @comment = record
     // The typed factory absorbs the permitted-fields assignment; the
     // FK setter follows the model's typed `attr_writer`.
     let files = lowered_real_blog_controllers();
     let src = find(&files, "comments_controller.rb");
     assert!(
-        src.contains("@comment = Comment.from_params(self.comment_params)"),
+        src.contains("rh_build_record_0 = Comment.from_params(self.comment_params)"),
         "expected typed-factory in build; got:\n{src}",
     );
     assert!(
-        src.contains("@comment.article_id = @article.id"),
+        src.contains("rh_build_owner_0 = @article")
+            && src.contains("rh_build_record_0.article_id = rh_build_owner_0.id")
+            && src.contains("@comment = rh_build_record_0"),
         "expected FK setter after typed factory; got:\n{src}",
     );
     assert!(
@@ -2625,11 +2629,11 @@ fn unsupported_expressions_raise_without_breaking_ruby_syntax() {
     let mut expr = Expr::new(Span::synthetic(), ExprNode::Const {
         path: vec![Symbol::from("Missing")],
     });
-    expr.diagnostic = Some(DiagnosticKind::Unsupported {
+    expr.set_diagnostic(Some(DiagnosticKind::Unsupported {
         target: None,
         construct: Symbol::from("constant"),
         detail: "Missing".into(),
-    });
+    }));
     let stub = ruby::emit_expr(&expr);
     for context in [
         format!("[1] + {stub}"),

@@ -13,6 +13,13 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "support/emit_and_run.rs"]
+#[allow(dead_code)]
+mod emit_and_run;
+#[path = "support/i18n_locales_app.rs"]
+#[allow(dead_code)]
+mod i18n_locales_app;
+
 use roundhouse::emit::csharp;
 use roundhouse::ingest::ingest_app;
 
@@ -175,4 +182,54 @@ fn parses_the_dotnet_test_summary() {
     assert_eq!(parse_passed_count(line), Some(21));
     // The `Passed!` banner alone (no counts) must NOT read as a count.
     assert_eq!(parse_passed_count("Build succeeded."), None);
+}
+
+#[test]
+#[ignore]
+fn real_blog_i18n_locales_run() {
+    // The answers `emit_and_run::i18n_locales` checks on CRuby, but for a String
+    // locale named in an error: C# has no Symbol apart from String, so `"de"` shows as `:de`.
+    let (emitted, errors) = i18n_locales_app::probe_app()
+        .edit("app/models/article.rb", i18n_locales_app::IN_LOCALE, "")
+        .emit(roundhouse::project::BuildTarget::CSharp);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("tests/I18nProbeTest.cs"), r#"using System;
+using System.Collections.Generic;
+using Xunit;
+
+namespace Roundhouse;
+
+public class I18nProbeTest
+{
+    private static void Expect(string what, object? got, object? want)
+    {
+        var g = System.Text.Json.JsonSerializer.Serialize(got);
+        var w = System.Text.Json.JsonSerializer.Serialize(want);
+        Assert.True(g == w, what + ": " + g);
+    }
+
+    [Fact]
+    public void LocalesAnswerAsRails()
+    {
+        Expect("lookups", Article.Lookups(), new List<object?> { "Hello", "Hi <x>", "1 item", "2 items", "Translation missing: en.probe.nope", "Cześć", "fallback 3", "en" });
+        Expect("polish", Article.Polish(), new List<object?> { "1 rzecz", "5 rzeczy", "English only", "Cześć", "Translation missing: pl.probe.nope", "Cześć", "Hi Ola", "pl" });
+        Expect("restored", I18n.Locale(), "en");
+        Expect("named", new List<object?> { Article.Named("pl"), Article.Named("en"), Article.Named(null) }, new List<object?> { "Cześć", "Hello", "Hello" });
+        Expect("dynamic", new List<object?> { Article.ProbeKey("greet"), Article.OnlyKey("xx") }, new List<object?> { "Hello", "Translation missing: en.probe.only_xx" });
+        var e = Assert.Throws<InvalidLocale>(() => Article.Named("de"));
+        Expect("named de", e.Message, ":de is not a valid locale");
+    }
+}
+"#).expect("write probe test");
+    let output = Command::new("dotnet")
+        .args(["test", "tests", "--nologo", "--filter", "I18nProbeTest"])
+        .current_dir(&emitted)
+        .output()
+        .expect("run dotnet test");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

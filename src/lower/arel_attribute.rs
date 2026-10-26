@@ -49,8 +49,46 @@ fn is_arel_table(ty: Option<&Ty>) -> bool {
 }
 
 fn rewrite(expr: &mut Expr) {
-    expr.node.for_each_child_mut(&mut rewrite);
+    let tables = arel_table_locals(expr);
+    rewrite_with(expr, &tables);
+}
+
+// The receiver's stamped type is not enough: a source gem's module body has no typed `self`, so `t = arel_table` stays untyped
+fn rewrite_with(expr: &mut Expr, tables: &std::collections::HashSet<Symbol>) {
+    expr.node.for_each_child_mut(&mut |c| rewrite_with(c, tables));
+    if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *expr.node
+        && method.as_str() == "[]"
+        && args.len() == 1
+        && (is_arel_table_call(r) || matches!(&*r.node, ExprNode::Var { name, .. } if tables.contains(name)))
+    {
+        *method = Symbol::from("attribute");
+        return;
+    }
     rewrite_node(expr);
+}
+
+fn is_arel_table_call(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Send { method, args, block: None, recv, .. } if method.as_str() == "arel_table" && args.is_empty()
+        && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef | ExprNode::Const { .. })))
+}
+
+/// Locals whose every write in `body` is `arel_table`.
+fn arel_table_locals(body: &Expr) -> std::collections::HashSet<Symbol> {
+    fn walk(e: &Expr, tables: &mut std::collections::HashSet<Symbol>, other: &mut std::collections::HashSet<Symbol>) {
+        let write = match &*e.node {
+            ExprNode::Assign { target: crate::expr::LValue::Var { name, .. }, value } | ExprNode::Let { name, value, .. } => Some((name, value)),
+            _ => None,
+        };
+        if let Some((name, value)) = write {
+            if is_arel_table_call(value) { tables.insert(name.clone()); } else { other.insert(name.clone()); }
+        }
+        e.node.for_each_child(&mut |c| walk(c, tables, other));
+    }
+    let mut tables = std::collections::HashSet::new();
+    let mut other = std::collections::HashSet::new();
+    walk(body, &mut tables, &mut other);
+    tables.retain(|n| !other.contains(n));
+    tables
 }
 
 pub(crate) fn rewrite_node(expr: &mut Expr) {

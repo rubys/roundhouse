@@ -65,12 +65,19 @@ reap_apt_orphans() {
 run_bounded() {
     local label="$1" attempts="$2" seconds="$3" reap="${4:-}"
     shift 4
-    local attempt
+    local attempt status
     for attempt in $(seq 1 "$attempts"); do
-        if timeout "$seconds" "$@"; then
+        status=0
+        timeout "$seconds" "$@" || status=$?
+        if [ "$status" -eq 0 ]; then
             return 0
         fi
-        echo "::warning::${label} attempt ${attempt}/${attempts} did not finish within ${seconds}s"
+        # Not one message for both: an unsupported runner image fails at once and read as a stall.
+        if [ "$status" -eq 124 ]; then
+            echo "::warning::${label} attempt ${attempt}/${attempts} did not finish within ${seconds}s"
+        else
+            echo "::warning::${label} attempt ${attempt}/${attempts} failed with exit status ${status}"
+        fi
         if [ "$reap" = "reap" ]; then
             reap_apt_orphans
         fi
@@ -83,12 +90,12 @@ run_bounded() {
 
 if ! run_bounded "playwright install-deps" "$DEPS_ATTEMPTS" "$DEPS_TIMEOUT" reap \
     npx playwright install-deps chromium; then
-    echo "::error::playwright install-deps did not finish in ${DEPS_ATTEMPTS} bounded attempts of ${DEPS_TIMEOUT}s"
+    echo "::error::playwright install-deps did not succeed in ${DEPS_ATTEMPTS} bounded attempts of ${DEPS_TIMEOUT}s"
     exit 1
 fi
 
 if ! run_bounded "playwright install" "$BROWSER_ATTEMPTS" "$BROWSER_TIMEOUT" noreap \
     npx playwright install --only-shell chromium; then
-    echo "::error::playwright install did not finish in ${BROWSER_ATTEMPTS} bounded attempts of ${BROWSER_TIMEOUT}s"
+    echo "::error::playwright install did not succeed in ${BROWSER_ATTEMPTS} bounded attempts of ${BROWSER_TIMEOUT}s"
     exit 1
 fi

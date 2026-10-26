@@ -22,7 +22,7 @@ fn probe(case: &str) {
         .unwrap_or_else(std::env::temp_dir);
     let dir = base.join(format!("roundhouse-stmt-lru-{}-{case}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    for file in ["db.rb", "active_support_time_parsing.rb"] {
+    for file in ["db.rb", "active_support_time_parsing.rb", "active_support_interval.rb", "active_support_duration.rb"] {
         std::fs::copy(root.join("runtime/spinel").join(file), dir.join(file)).unwrap();
     }
     std::fs::copy(

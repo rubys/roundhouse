@@ -43,6 +43,13 @@ fn owner(d: &Diagnostic) -> &str {
     }
 }
 
+fn holder(d: &Diagnostic) -> &str {
+    match &d.kind {
+        DiagnosticKind::UnconsumedInitializer { holder, .. } => holder.as_str(),
+        _ => unreachable!(),
+    }
+}
+
 fn location(d: &Diagnostic) -> &str {
     match &d.kind {
         DiagnosticKind::UnconsumedInitializer { location, .. } => location.as_str(),
@@ -158,7 +165,8 @@ fn inert_allowlisted_statements_are_not_reported_but_a_computed_value_is() {
          Rails.application.config.action_dispatch.cookies_serializer = :json\n\
          Rails.application.config.assets.version = \"1.0\"\n\
          Rails.application.config.filter_parameters += Secrets.names\n\
-         Rails.application.config.generators do |g|\n  g.orm :active_record\nend\n",
+         Rails.application.config.generators do |g|\n  g.orm :active_record\nend\n\
+         ActiveStorage::Transformers::Vips\n",
     )]);
     // The computed `Secrets.names` could do anything; the literal ones cannot.
     assert_eq!(statements(&ledger), ["Rails.application.config.filter_parameters +="]);
@@ -182,6 +190,11 @@ fn every_recognizer_that_reads_an_initializer_keeps_its_statement_out_of_the_led
         ("config/initializers/formats.rb", "Time::DATE_FORMATS[:short_date] = \"%b %e\"\n"),
         ("config/initializers/mixins.rb", "Target.include Concern\n"),
         ("config/initializers/filters.rb", "Target.before_action :guard, only: [:show]\n"),
+        (
+            "config/initializers/headers.rb",
+            "ActiveSupport.on_load(:active_storage_blob) do\n  \
+             Target.after_action only: :show do\n    response.set_header(\"Cache-Control\", \"public\")\n  end\nend\n",
+        ),
         (
             "config/initializers/sqlite.rb",
             "conn.create_function(\"regexp\", 2) do |fn, pattern, expr|\n  fn.result = 1\nend\n",
@@ -246,10 +259,10 @@ fn a_spelling_the_recognizer_does_not_read_stays_in_the_ledger() {
 
 #[test]
 fn a_recognizer_that_does_not_apply_leaves_its_statement_in_the_ledger() {
-    // `session_store` is read only from session_store.rb; a time format only
+    // The long forgery setting spelling is unread; a time format is read only
     // at the top level; `config.x` assignments only at the top or in configure.
     let (_, ledger) = ingest(&[
-        ("config/initializers/other.rb", "Rails.application.config.session_store :cookie_store, key: \"_app\"\n"),
+        ("config/initializers/other.rb", "Rails.application.config.action_controller.forgery_protection_verification_strategy = :header_only\n"),
         (
             "config/initializers/nested.rb",
             "Rails.application.config.to_prepare do\n  Time::DATE_FORMATS[:short_date] = \"%b %e\"\n  Rails.application.config.app_version = \"1\"\nend\n",
@@ -260,11 +273,38 @@ fn a_recognizer_that_does_not_apply_leaves_its_statement_in_the_ledger() {
     assert_eq!(
         got,
         [
+            "Rails.application.config.action_controller.forgery_protection_verification_strat",
             "Rails.application.config.app_version =",
-            "Rails.application.config.session_store",
             "Time::DATE_FORMATS[] =",
         ]
     );
+}
+
+#[test]
+fn a_session_store_in_another_initializer_reaches_the_cookie_key() {
+    let (app, ledger) = ingest(&[(
+        "config/initializers/other.rb",
+        "Rails.application.config.session_store :cookie_store, key: \"_app\"\n",
+    )]);
+    assert!(ledger.is_empty());
+    let application = app.rails_application.expect("initializer application reopen");
+    let method = application.methods.iter().find(|m| m.name.as_str() == "session_cookie_key").unwrap();
+    assert!(roundhouse::emit::ruby::emit_method(method).contains("_app"));
+}
+
+#[test]
+fn a_mixed_conditional_with_session_store_stays_in_the_ledger() {
+    // A session_store sibling must not consume an unread assignment that
+    // shares its conditional — the ledger has to keep reporting the whole if.
+    let (_, ledger) = ingest(&[(
+        "config/initializers/mixed.rb",
+        "if Rails.env.production?\n\
+           Rails.application.config.session_store :cookie_store, key: \"_prod\"\n\
+           Rails.application.config.action_controller.forgery_protection_verification_strategy = :header_only\n\
+         end\n",
+    )]);
+    assert_eq!(ledger.len(), 1);
+    assert!(statement(&ledger[0]).starts_with("if "));
 }
 
 #[test]
@@ -365,6 +405,7 @@ fn the_ledger_is_a_warning_and_never_a_survey_gap() {
     let summary = roundhouse::ingest::initializer_ledger::render_summary(&diags);
     assert!(summary.contains("Initializer ledger: 1 unconsumed statement(s)"), "{summary}");
     assert!(summary.contains("[1×] c.a ="), "{summary}");
+    assert!(summary.contains("by owner: unknown 1"), "{summary}");
 }
 
 #[test]
@@ -431,6 +472,7 @@ fn a_statement_the_ledger_calls_consumed_has_its_recognizers_effect_on_the_app()
         ),
         ("config/initializers/formats.rb", "Time::DATE_FORMATS[:short_date] = \"%b %e\"\n"),
         ("config/initializers/filters.rb", "Target.before_action :guard, only: [:show]\n"),
+        ("config/initializers/headers.rb", "Target.after_action { headers[\"X-Seen\"] = \"1\" }\n"),
         (
             "config/initializers/sqlite.rb",
             "conn.create_function(\"regexp\", 2) do |fn, pattern, expr|\n  fn.result = 1\nend\n",
@@ -442,6 +484,7 @@ fn a_statement_the_ledger_calls_consumed_has_its_recognizers_effect_on_the_app()
     assert!(ledger.is_empty(), "{:?}", statements(&ledger));
     assert!(!app.time_formats.is_empty());
     assert_eq!(app.initializer_filters.len(), 1);
+    assert_eq!(app.initializer_response_headers.len(), 1);
     assert_eq!(app.sql_functions.len(), 1);
     let names: Vec<&str> = app
         .rails_application
@@ -457,4 +500,97 @@ fn a_statement_the_ledger_calls_consumed_has_its_recognizers_effect_on_the_app()
             && names.contains(&"action_cable_allow_same_origin_as_host"),
         "{names:?}"
     );
+}
+
+const HOLDER_LOCK: &str = "GEM\n  remote: https://rubygems.org/\n  specs:\n    devise (4.9.4)\n    doorkeeper (5.8.0)\n    lograge (0.14.0)\n    omniauth (2.1.2)\n    rack (3.1.8)\n    rack-attack (6.7.0)\n    railties (8.0.1)\n\nDEPENDENCIES\n  devise\n  doorkeeper\n  lograge\n  omniauth\n  rack-attack\n  railties\n";
+
+#[test]
+fn each_dropped_statement_names_who_it_belongs_to() {
+    let (_, ledger) = ingest(&[
+        ("Gemfile.lock", HOLDER_LOCK),
+        ("app/models/audit.rb", "class Audit
+  def self.record_boot; end
+end
+"),
+        (
+            "config/initializers/boot.rb",
+            "Rails.application.config.middleware.use Rack::Deflater
+             Rails.application.config.assets.paths << \"vendor\"
+             Rails.autoloaders.main.ignore(\"lib/tasks\")
+             Devise.setup do |config|
+  config.password_length = 8..128
+end
+             Doorkeeper.configure do
+  orm :active_record
+end
+             Rack::Attack.throttle(\"req/ip\", limit: 300, period: 300) { |req| req.ip }
+             OmniAuth.config.logger = Rails.logger
+             Audit.record_boot
+             Rails.application.config.after_initialize { Audit.record_boot }
+             if ENV[\"SLOW\"]
+  Rails.application.config.middleware.insert_before 0, Rack::Runtime
+end
+             Unheard::Of.start
+",
+        ),
+    ]);
+    let got: Vec<(&str, &str)> = ledger.iter().map(|d| (statement(d), holder(d))).collect();
+    assert_eq!(
+        got,
+        [
+            ("Rails.application.config.middleware.use", "rails"),
+            ("Rails.application.config.assets.paths.<<", "rails-boot-only"),
+            ("Rails.autoloaders.main.ignore", "rails-boot-only"),
+            ("config.password_length =", "gem:devise:modeled"),
+            ("orm :active_record", "gem:doorkeeper:unknown"),
+            ("Rack::Attack.throttle", "gem:rack-attack:unknown"),
+            ("OmniAuth.config.logger =", "gem:omniauth:unknown"),
+            ("Audit.record_boot", "app"),
+            ("Rails.application.config.after_initialize", "app"),
+            ("if ENV[\"SLOW\"]", "rails"),
+            ("Unheard::Of.start", "unknown"),
+        ]
+    );
+    let middleware = &ledger[0];
+    assert_eq!(middleware.severity, Severity::Warning);
+    assert!(middleware.message.ends_with("it is Rails behaviour the running app answers without"), "{}", middleware.message);
+    assert!(ledger[5].message.ends_with("it belongs to the gem `rack-attack` (unknown)"), "{}", ledger[5].message);
+}
+
+#[test]
+fn a_rooted_configure_block_and_an_in_repo_gem_keep_their_gems() {
+    let (_, ledger) = ingest(&[
+        ("Gemfile.lock", "PATH\n  remote: vendor/catalog\n  specs:\n    catalog (0.1.0)\n\nGEM\n  remote: https://rubygems.org/\n  specs:\n    devise (4.9.4)\n\nDEPENDENCIES\n  catalog!\n  devise\n"),
+        (
+            "config/initializers/boot.rb",
+            "::Devise.setup do |config|\n  config.password_length = 8..128\nend\nCatalog.configure do |c|\n  c.size = 3\nend\n",
+        ),
+    ]);
+    let got: Vec<(&str, &str)> = ledger.iter().map(|d| (statement(d), holder(d))).collect();
+    assert_eq!(got, [("config.password_length =", "gem:devise:modeled"), ("c.size =", "gem:catalog:in-repo")]);
+}
+
+#[test]
+fn a_filter_parameters_list_with_a_regexp_and_comments_is_read() {
+    let (_, ledger) = ingest(&[(
+        "config/initializers/filter_parameter_logging.rb",
+        "Rails.application.config.filter_parameters += [\n  # keys named like an API key, not their ids\n  :passw,\n  /\\bapi_key(?!_id\\b)/,\n]\n\
+         Rails.application.config.filter_parameters += [/(?:card|cvv)[_.]code{1,2}/, :pin]\n\
+         Rails.application.config.filter_parameters += [/#{Secrets.prefix}_key/]\n",
+    )]);
+    // Plain Regexps are read, `,` and `]` inside them included; an
+    // interpolated one could be anything.
+    assert_eq!(statements(&ledger), ["Rails.application.config.filter_parameters +="]);
+    assert_eq!(location(&ledger[0]), "config/initializers/filter_parameter_logging.rb:7:1");
+}
+
+#[test]
+fn a_filter_parameters_operand_after_a_comment_or_blank_line_is_read() {
+    let (_, ledger) = ingest(&[(
+        "config/initializers/filter_parameter_logging.rb",
+        "Rails.application.config.filter_parameters +=\n  # credentials\n  [:password]\n\
+         Rails.application.config.filter_parameters +=\n\n  [:token]\n\
+         Rails.application.config.filter_parameters += [\n  # secrets\n  :secret,\n]\n",
+    )]);
+    assert!(ledger.is_empty(), "{:?}", statements(&ledger));
 }

@@ -67,6 +67,7 @@ use std::collections::BTreeMap;
 use crate::app::App;
 use crate::expr::{Expr, ExprNode};
 use crate::ident::Symbol;
+use crate::ty::Ty;
 
 /// App-defined `to_fs` formats, as the lowering consults them.
 pub(crate) type TimeFormats = BTreeMap<Symbol, crate::app::TimeFormat>;
@@ -168,7 +169,16 @@ fn rewrite_node_inner(expr: &mut Expr, formats: &TimeFormats) {
         let span = expr.span;
         let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
         let ExprNode::Send { recv: Some(t), .. } = node else { unreachable!() };
-        let getutc = Expr::new(
+        // Built after analysis, so typed here: `getutc` answers a Time
+        // for any time the receiver is, and stays gradual on an untyped
+        // receiver (`1.hour.from_now`). Untyped, it read to the
+        // post-lowering diagnostics as a method nothing defines.
+        let getutc_ty = match t.ty.as_ref() {
+            None | Some(Ty::Var { .. }) => None,
+            Some(Ty::Untyped) => Some(Ty::Untyped),
+            Some(_) => Some(Ty::Time),
+        };
+        let mut getutc = Expr::new(
             span,
             ExprNode::Send {
                 recv: Some(t),
@@ -178,6 +188,7 @@ fn rewrite_node_inner(expr: &mut Expr, formats: &TimeFormats) {
                 parenthesized: false,
             },
         );
+        getutc.ty = getutc_ty;
         let fmt = Expr::new(
             span,
             ExprNode::Lit {

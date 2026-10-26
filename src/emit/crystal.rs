@@ -66,6 +66,8 @@ const CR_DB_SOURCE: &str = include_str!("../../runtime/crystal/db.cr");
 // (stored text → Time, the `parse_db_time` intrinsic target) plus the
 // `JsonBuilder.encode_datetime(Time?)` overload.
 const CR_DATETIME_SOURCE: &str = include_str!("../../runtime/crystal/datetime.cr");
+const CR_I18N_HOST_SOURCE: &str = include_str!("../../runtime/crystal/i18n_host.cr");
+const CR_CORE_ERRORS_SOURCE: &str = include_str!("../../runtime/crystal/core_errors.cr");
 const CR_HTTP_SOURCE: &str = include_str!("../../runtime/crystal/http.cr");
 const CR_PARAM_VALUE_SOURCE: &str = include_str!("../../runtime/crystal/param_value.cr");
 const CR_PARAMS_SOURCE: &str = include_str!("../../runtime/crystal/params.cr");
@@ -141,6 +143,14 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     files.push(EmittedFile {
         path: PathBuf::from("src/datetime.cr"),
         content: CR_DATETIME_SOURCE.to_string(),
+    });
+    files.push(EmittedFile {
+        path: PathBuf::from("src/i18n_host.cr"),
+        content: CR_I18N_HOST_SOURCE.to_string(),
+    });
+    files.push(EmittedFile {
+        path: PathBuf::from("src/core_errors.cr"),
+        content: CR_CORE_ERRORS_SOURCE.to_string(),
     });
     files.push(EmittedFile {
         path: PathBuf::from("src/http.cr"),

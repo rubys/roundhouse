@@ -18,22 +18,36 @@
 #
 # One reconnect: on a connection error the connection is dropped, a new
 # one opened, and the push sent once more, as redis-client's
-# `reconnect_attempts: 1` does for Sidekiq. Like Sidekiq, that can
-# duplicate a job whose first LPUSH reached Redis before the socket
-# died. A command error is not retried.
+# `reconnect_attempts: 1` does for Sidekiq. That covers the first
+# connect too: a push that can't connect tries once more before it
+# raises, as redis-client's `ensure_connected` does. Like Sidekiq, the
+# retry can duplicate a job whose first LPUSH reached Redis before the
+# socket died. A command error is not retried.
+#
+# Connect and read timeouts, at redis-client's 1 s defaults that Sidekiq
+# runs with: a Redis that stops answering costs a request one second
+# (two, with the reconnect) instead of hanging it. Running out raises
+# `Redis::CannotConnectError` or `Redis::TimeoutError`, both
+# `BaseConnectionError`s, so a timed-out read takes the reconnect above.
 require "redis"
 
 module SidekiqRedis
+  CONNECT_TIMEOUT = 1.0
+  READ_TIMEOUT = 1.0
   CONN = []
   CONN_PID = [0]
   LOCK = Mutex.new
 
+  # `used` holds the connection the first attempt got, if it got one:
+  # a connect that fails leaves nothing to discard.
   def self.push(url, queue, json)
-    conn = acquire(url)
+    used = []
     begin
+      conn = acquire(url)
+      used.push(conn)
       LOCK.synchronize { send_push(conn, queue, json) }
     rescue Redis::BaseConnectionError
-      discard(conn)
+      discard(used[0]) if used.length > 0
       conn = acquire(url)
       LOCK.synchronize { send_push(conn, queue, json) }
     end
@@ -41,11 +55,13 @@ module SidekiqRedis
   end
 
   def self.schedule(url, at, json)
-    conn = acquire(url)
+    used = []
     begin
+      conn = acquire(url)
+      used.push(conn)
       LOCK.synchronize { conn.zadd("schedule", at, json) }
     rescue Redis::BaseConnectionError
-      discard(conn)
+      discard(used[0]) if used.length > 0
       conn = acquire(url)
       LOCK.synchronize { conn.zadd("schedule", at, json) }
     end
@@ -79,7 +95,7 @@ module SidekiqRedis
   # `password:` overrides the URL's, as the explicit option does on both
   # clients.
   def self.open(url, password)
-    conn = password == "" ? Redis.new(url: url) : Redis.new(url: url, password: password)
+    conn = password == "" ? Redis.new(url: url, connect_timeout: CONNECT_TIMEOUT, read_timeout: READ_TIMEOUT) : Redis.new(url: url, password: password, connect_timeout: CONNECT_TIMEOUT, read_timeout: READ_TIMEOUT)
     begin
       conn.ping
     rescue StandardError => e
@@ -121,6 +137,66 @@ module SidekiqRedis
       end
     end
     nil
+  end
+
+  # ---- the worker (runtime/sidekiq_worker.rb) --------------------------
+  #
+  # The worker holds its own connections, one per processor thread and
+  # one for control, so these take the connection rather than sharing
+  # CONN. A blocking BRPOP's read deadline is its own timeout plus
+  # READ_TIMEOUT on both clients, as redis-rb sets it.
+
+  def self.worker_open(url)
+    open(url, SidekiqPush.password)
+  end
+
+  # BRPOP: [key, value], or [] when the timeout passes (redis-rb answers
+  # nil there; spinel-redis answers []).
+  def self.fetch(conn, keys, timeout)
+    popped = conn.brpop(keys, timeout: timeout)
+    popped.nil? ? [] : popped
+  end
+
+  # The jobs back on the right of their queues, where BRPOP takes them
+  # next: one RPUSH per queue, the jobs in the order given, in one round
+  # trip, as Sidekiq's bulk_requeue sends them.
+  def self.requeue(conn, keys, jobs)
+    order = []
+    i = 0
+    while i < keys.length
+      order.push(keys[i]) unless order.include?(keys[i])
+      i += 1
+    end
+    conn.pipelined do |p|
+      order.each do |key|
+        batch = []
+        j = 0
+        while j < keys.length
+          batch.push(jobs[j]) if keys[j] == key
+          j += 1
+        end
+        p.rpush(key, batch)
+      end
+    end
+    nil
+  end
+
+  # ZADD dead, then the trims by age (scores up to `oldest`) and by
+  # count (ranks 0..`keep`, a negative String).
+  def self.write_dead(conn, now, json, oldest, keep)
+    conn.pipelined do |p|
+      p.zadd("dead", now, json)
+      p.zremrangebyscore("dead", "-inf", oldest)
+      p.zremrangebyrank("dead", "0", keep)
+    end
+    nil
+  end
+
+  # Leave at once, with processor threads still parked: no at_exit, no
+  # ensure, as Sidekiq's process ends after its requeue.
+  def self.hard_exit(code)
+    $stdout.flush
+    exit!(code)
   end
 
   def self.close_quietly(conn)

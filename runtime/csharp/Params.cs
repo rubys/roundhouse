@@ -39,4 +39,20 @@ public static class Params
     {
         return sub.TryGetValue(key, out var value) && value is string;
     }
+
+    // The scalar readers the params lowering emits, and its record of
+    // multiparameter keys. Those keys (`title(1)`) are modeled on the
+    // Ruby family only (runtime/ruby/params.rb); this target ignores
+    // them, as it always has, so these pass through.
+    public static bool ScalarProvided(Dictionary<string, object?> sub, string key) => Provided(sub, key);
+
+    public static string Scalar(Dictionary<string, object?> sub, string key) => Str(sub, key, "");
+
+    public static List<string> NoFields() => new List<string>();
+
+    public static List<string> MultiparameterFields(Dictionary<string, object?> sub, List<string> keys) => new List<string>();
+
+    public static bool MultiparameterUnsupported(Dictionary<string, object?> sub, List<string> keys) => false;
+
+    public static bool AnyOf(List<string> list, List<string> names) => names.Exists(list.Contains);
 }

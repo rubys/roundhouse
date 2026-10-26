@@ -144,3 +144,43 @@ puts "ALL OK"
         )
         .assert_passes();
 }
+
+/// A Regexp filter (Rails accepts them beside Symbols and Strings) is
+/// applied as written: matched against each key, nested ones included,
+/// case-sensitively, while a Symbol still matches any key containing it,
+/// in any case. A comment inside the list is not a filter. The expected
+/// body is Rails 8.1.4's answer to the same request.
+#[test]
+fn a_regexp_filter_masks_the_keys_it_matches() {
+    emit_and_run::empty_app()
+        .write(
+            "config/application.rb",
+            "require_relative \"boot\"\nrequire \"rails/all\"\n\nmodule Shop\n  class Application < Rails::Application\n    config.load_defaults 8.1\n    config.api_only = true\n  end\nend\n",
+        )
+        .write(
+            "config/initializers/filter_parameter_logging.rb",
+            "Rails.application.config.filter_parameters += [\n  # passwords, and keys named like an API key (but not their ids)\n  :passw,\n  /\\bapi_key(?!_id\\b)/,\n]\n",
+        )
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::API\nend\n")
+        .write(
+            "app/controllers/widgets_controller.rb",
+            "class WidgetsController < ApplicationController\n  def filtered\n    render json: { logged: request.filtered_parameters }\n  end\nend\n",
+        )
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  post \"widgets/filtered\", to: \"widgets#filtered\"\nend\n",
+        )
+        .run_ruby(
+            r##"
+body = %({"widget":{"api_key":"a","api_key_id":"b","my_api_key":"c","API_KEY":"d","password":"e","Passwd":"f"},"list":[{"api_key":"g"}]})
+env = { "REQUEST_METHOD" => "POST", "PATH_INFO" => "/widgets/filtered", "QUERY_STRING" => "", "CONTENT_TYPE" => "application/json", "CONTENT_LENGTH" => body.bytesize.to_s, "rack.input" => StringIO.new(body) }
+status, _headers, out = Main.run_rack(env)
+text = +""
+out.each { |part| text << part }
+want = %({"logged":{"widget":{"api_key":"[FILTERED]","api_key_id":"b","my_api_key":"c","API_KEY":"d","password":"[FILTERED]","Passwd":"[FILTERED]"},"list":[{"api_key":"[FILTERED]"}],"controller":"widgets","action":"filtered"}})
+raise "#{status} #{text}" unless status == 200 && text == want
+puts "ALL OK"
+"##,
+        )
+        .assert_passes();
+}

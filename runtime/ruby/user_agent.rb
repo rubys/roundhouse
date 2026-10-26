@@ -41,12 +41,20 @@
 class UserAgentToken
   def initialize(product, version, comment)
     @product = product
+    # Lowercased once, here: `UserAgent.product?` compares names
+    # case-insensitively, and a page asks it again for every browser
+    # predicate (campfire's PWA partials ask a dozen times).
+    @product_key = product.downcase
     @version = version.nil? || version.empty? ? "" : version
     @comment = comment.nil? ? [] : comment.split("; ")
   end
 
   def product
     @product
+  end
+
+  def product_key
+    @product_key
   end
 
   def version
@@ -195,12 +203,14 @@ class UserAgent
   # `detect_product` — the gem compares product names case-INSENSITIVELY
   # (which is why its own `detect_product("CriOs")` finds `CriOS`).
   def self.product?(tokens, name)
-    tokens.each { |t| return true if t.product.downcase == name.downcase }
+    key = name.downcase
+    tokens.each { |t| return true if t.product_key == key }
     false
   end
 
   def self.find_product(tokens, name)
-    tokens.each { |t| return t if t.product.downcase == name.downcase }
+    key = name.downcase
+    tokens.each { |t| return t if t.product_key == key }
     nil
   end
 

@@ -167,10 +167,14 @@ Focused checks do not replace the default-suite commit bar. Native toolchain
 and framework integrations are generally ignored so local default tests do not
 require every SDK. They are not all separate GitHub jobs; see [CI](../ci/README.md).
 
-The test profile uses `opt-level = 1` to reduce compiler pipeline costs across
+The local test profile uses `opt-level = 1` to reduce compiler pipeline costs across
 the integration suites. It keeps debug assertions, overflow checks, and
 file/line backtraces. No test selection or ignored-test rule changes.
 The first build costs more; later runs reuse the optimized artifacts.
+
+Unit CI overrides optimization only for the `roundhouse` package.
+It uses `opt-level=0` for archive and documentation builds while dependencies
+stay optimized. See the [CI execution guide](../ci/README.md#unit-test-execution).
 
 On an ARM64 macOS checkout, three runs of each built test binary gave these
 median times. These measurements exclude compilation:

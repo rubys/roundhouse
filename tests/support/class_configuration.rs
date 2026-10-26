@@ -89,6 +89,100 @@ raise "empty receiver isolation" if ChildController.window_options.equal?(MonthC
 puts "finite class configuration contract passed"
 "#;
 
+/// Class writer and instance method share a name. The instance method
+/// reads the store; `self.class.configure_window` is still the writer.
+/// A parent instance method of that name stays the bare-call target when
+/// the concern does not define its own instance method.
+pub fn same_name_overlay() -> super::emit_and_run::Overlay {
+    super::emit_and_run::real_blog()
+        .write(
+            "app/controllers/concerns/window_settings.rb",
+            r#"
+module WindowSettings
+  extend ActiveSupport::Concern
+  class_methods do
+    def configure_window(**opts)
+      @window_options = opts
+    end
+    def window_options
+      @window_options || {}
+    end
+  end
+  def configure_window
+    self.class.window_options
+  end
+end
+"#,
+        )
+        .write(
+            "app/controllers/month_controller.rb",
+            r#"
+class MonthController < ApplicationController
+  include WindowSettings
+  configure_window mode: :month, days: 3
+  def snapshot
+    configure_window
+  end
+  def rewrite
+    self.class.configure_window mode: :week, days: 1
+    configure_window
+  end
+end
+"#,
+        )
+        .write(
+            "app/controllers/parent_controller.rb",
+            r#"
+class ParentController < ApplicationController
+  def configure_window(value)
+    value.to_s.upcase
+  end
+end
+"#,
+        )
+        .write(
+            "app/controllers/concerns/store_only.rb",
+            r#"
+module StoreOnly
+  extend ActiveSupport::Concern
+  class_methods do
+    def configure_window(**opts)
+      @window_options = opts
+    end
+    def window_options
+      @window_options || {}
+    end
+  end
+end
+"#,
+        )
+        .write(
+            "app/controllers/child_controller.rb",
+            r#"
+class ChildController < ParentController
+  include StoreOnly
+  configure_window mode: :year, days: 0
+  def stored
+    self.class.window_options
+  end
+  def inherited_instance
+    configure_window("kept")
+  end
+end
+"#,
+        )
+}
+
+pub const SAME_NAME_ASSERTIONS: &str = r#"
+require_relative "app/controllers/month_controller"
+require_relative "app/controllers/child_controller"
+raise "instance read #{MonthController.new.snapshot.inspect}" unless MonthController.new.snapshot == {mode: :month, days: 3}
+raise "class writer #{MonthController.new.rewrite.inspect}" unless MonthController.new.rewrite == {mode: :week, days: 1}
+raise "child store #{ChildController.window_options.inspect}" unless ChildController.new.stored == {mode: :year, days: 0}
+raise "inherited instance #{ChildController.new.inherited_instance.inspect}" unless ChildController.new.inherited_instance == "KEPT"
+puts "class and instance configuration names passed"
+"#;
+
 pub const ASSERTIONS: &str = r#"
 require_relative "app/controllers/month_controller"
 require_relative "app/controllers/year_controller"

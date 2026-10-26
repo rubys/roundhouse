@@ -4,6 +4,7 @@ require "zlib"
 require_relative "tep_core"
 require_relative "url"
 require_relative "net"
+require_relative "unix_listener"
 require_relative "streamer"
 # BroadcastSubscription is needed by app.rb (which type-seeds the
 # subscriber registry) and broadcast.rb.
@@ -20,6 +21,8 @@ require_relative "server"
 # calls Tep::Presence.untrack_by_fd.
 require_relative "presence"
 require_relative "broadcast"
+# Thruster's response cache, which App#dispatch consults before the app.
+require_relative "thruster_cache"
 # App owns the broadcast-subscriber registries (and the app's display
 # name) on the Tep::APP singleton; broadcast.rb, cable.rb and the
 # server read it.

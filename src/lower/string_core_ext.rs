@@ -1,11 +1,15 @@
 //! String core-ext grounding, one table.
 //!
 //! `(name, receiver shape, arity, runtime receiver, runtime name)` for
-//! `humanize`, `titleize`, `underscore`, `demodulize`, `singularize`,
-//! `remove`, `ordinalize`, and `parameterize`. The bodies stay in
+//! `humanize`, `titleize`/`titlecase`, `underscore`, `demodulize`,
+//! `singularize`, `camelize`/`camelcase`, `classify`, `dasherize`,
+//! `deconstantize`, `foreign_key`, `remove`, `ordinalize`, and
+//! `parameterize`. The bodies stay in
 //! `runtime/ruby/active_support_inflections.rb` and
 //! `runtime/ruby/inflector_ext.rb` (`Inflector.parameterize`); this
-//! pass only rewrites the call.
+//! pass only rewrites the call. `tableize` and `strip_heredoc` have no
+//! runtime body, so analysis refuses them (`String extension`) instead
+//! of typing them as a String.
 //!
 //! `parameterize` stays on model `def` bodies and unknown model-body
 //! expressions. The fused view walk does not apply that row, which is
@@ -109,6 +113,75 @@ const STRING_CORE_EXT: &[StringCoreExt] = &[
         arity: 0,
         runtime_receiver: &["ActiveSupport"],
         runtime_name: "singularize",
+        site: Site::Fused,
+        stamp_string: true,
+    },
+    // Rails' alias of `titleize`, its own runtime method so a nil
+    // receiver's error names `titlecase`, as Rails' does.
+    StringCoreExt {
+        name: "titlecase",
+        receiver: ReceiverShape::StringOrNil,
+        arity: 0,
+        runtime_receiver: &["ActiveSupport"],
+        runtime_name: "titlecase",
+        site: Site::Fused,
+        stamp_string: true,
+    },
+    // The String methods over the `ActiveSupport::Inflector` bodies: nil
+    // raises in the runtime, as it does in Rails.
+    StringCoreExt {
+        name: "camelize",
+        receiver: ReceiverShape::StringOrNil,
+        arity: 0,
+        runtime_receiver: &["ActiveSupport"],
+        runtime_name: "camelize",
+        site: Site::Fused,
+        stamp_string: true,
+    },
+    // Rails' alias of `camelize`, its own runtime method for the same
+    // reason as `titlecase`.
+    StringCoreExt {
+        name: "camelcase",
+        receiver: ReceiverShape::StringOrNil,
+        arity: 0,
+        runtime_receiver: &["ActiveSupport"],
+        runtime_name: "camelcase",
+        site: Site::Fused,
+        stamp_string: true,
+    },
+    StringCoreExt {
+        name: "classify",
+        receiver: ReceiverShape::StringOrNil,
+        arity: 0,
+        runtime_receiver: &["ActiveSupport"],
+        runtime_name: "classify",
+        site: Site::Fused,
+        stamp_string: true,
+    },
+    StringCoreExt {
+        name: "dasherize",
+        receiver: ReceiverShape::StringOrNil,
+        arity: 0,
+        runtime_receiver: &["ActiveSupport"],
+        runtime_name: "dasherize",
+        site: Site::Fused,
+        stamp_string: true,
+    },
+    StringCoreExt {
+        name: "deconstantize",
+        receiver: ReceiverShape::StringOrNil,
+        arity: 0,
+        runtime_receiver: &["ActiveSupport"],
+        runtime_name: "deconstantize",
+        site: Site::Fused,
+        stamp_string: true,
+    },
+    StringCoreExt {
+        name: "foreign_key",
+        receiver: ReceiverShape::StringOrNil,
+        arity: 0,
+        runtime_receiver: &["ActiveSupport"],
+        runtime_name: "foreign_key",
         site: Site::Fused,
         stamp_string: true,
     },
@@ -262,6 +335,13 @@ mod tests {
         "underscore",
         "demodulize",
         "singularize",
+        "titlecase",
+        "camelize",
+        "camelcase",
+        "classify",
+        "dasherize",
+        "deconstantize",
+        "foreign_key",
         "remove",
         "ordinalize",
         "parameterize",
@@ -382,6 +462,37 @@ mod tests {
             Some(&["ActiveSupport".to_string(), "Inflector".to_string()][..])
         );
 
+        // An alias keeps its own name, so the runtime's nil error can name it.
+        let mut camelcase = call(Some(Ty::Str), "camelcase", 0);
+        assert!(rewrite_node(&mut camelcase, Site::Fused));
+        assert_eq!(
+            const_path(&camelcase).as_deref(),
+            Some(&["ActiveSupport".to_string()][..])
+        );
+        assert!(
+            matches!(&*camelcase.node, ExprNode::Send { method, .. } if method.as_str() == "camelcase")
+        );
+        let mut titlecase = call(Some(Ty::Str), "titlecase", 0);
+        assert!(rewrite_node(&mut titlecase, Site::Fused));
+        assert!(
+            matches!(&*titlecase.node, ExprNode::Send { method, .. } if method.as_str() == "titlecase")
+        );
+        assert_eq!(
+            const_path(&titlecase).as_deref(),
+            Some(&["ActiveSupport".to_string()][..])
+        );
+
+        // A nullable receiver grounds too: the runtime raises on nil, as Rails does.
+        let mut nullable_classify = call(
+            Some(Ty::Union {
+                variants: vec![Ty::Str, Ty::Nil].into(),
+            }),
+            "classify",
+            0,
+        );
+        assert!(rewrite_node(&mut nullable_classify, Site::Fused));
+        assert_eq!(nullable_classify.ty, Some(Ty::Str));
+
         let mut remove = call(Some(Ty::Str), "remove", 1);
         assert!(rewrite_node(&mut remove, Site::Fused));
         let mut multi = call(Some(Ty::Str), "remove", 2);
@@ -427,7 +538,7 @@ mod tests {
             ),
             (
                 "app/views/stories/show.html.erb",
-                "<p><%= \"Hello World\".parameterize %></p>\n<p><%= \"Hello World\".humanize %></p>\n",
+                "<p><%= \"Hello World\".parameterize %></p>\n<p><%= \"Hello World\".humanize %></p>\n<p><%= \"gear_boxes\".classify %></p>\n",
             ),
         ]
         .into_iter()
@@ -470,6 +581,10 @@ mod tests {
         assert!(
             view.contains("ActiveSupport.humanize(\"Hello World\")"),
             "views still ground humanize:\n{view}"
+        );
+        assert!(
+            view.contains("ActiveSupport.classify(\"gear_boxes\")"),
+            "views ground classify too:\n{view}"
         );
     }
 }

@@ -201,7 +201,12 @@ pub(super) fn push_association_methods(
     model: &Model,
     models: &[Model],
     through_joins: &ThroughJoins,
+    runtime_relation: super::RuntimeRelation,
 ) {
+    // The ruby family's belongs_to writer stores nil for a nil value, as
+    // Rails does. A strict target's key field is its column's non-nil
+    // type, so there it stores the sentinel (`fk_sentinel`).
+    let keeps_nil = runtime_relation == super::RuntimeRelation::Present;
     let owner = &model.name;
     for (span, assoc) in model.spanned_associations() {
         let before = methods.len();
@@ -226,7 +231,7 @@ pub(super) fn push_association_methods(
                 // A through reader is a Relation. Whether this name is
                 // one is the same map the writer and destroy read.
                 let through_relation = through_joins.get(name).is_some();
-                methods.push(synth_has_many_reader(
+                let mut reader = synth_has_many_reader(
                     owner,
                     name,
                     target,
@@ -235,7 +240,21 @@ pub(super) fn push_association_methods(
                     as_interface.as_ref(),
                     scope.as_ref(),
                     through_relation,
-                ));
+                    keeps_nil,
+                );
+                if crate::lower::default_scope::reader_replaces_scope(models, assoc) {
+                    reroot_unscoping(&mut reader.body, target, foreign_key);
+                }
+                // An autosaving association (`ingest::autosave`) keeps what
+                // it loads, as Rails' association target does: the owner's
+                // validation and save reach the same child objects the app
+                // edited. Only the ruby family generates the marker.
+                if !through_relation
+                    && super::model_defines_instance_method(model, &Symbol::from(format!("__autosave_{}_save", name.as_str())))
+                {
+                    memoize_reader(&mut reader, name);
+                }
+                methods.push(reader);
                 methods.push(synth_preload_setter(owner, name, target));
                 // `<name>_loaded?` / `<name>_target`: the eager-load cache
                 // read from outside the record. `scope_chain`'s seed arm
@@ -414,6 +433,7 @@ pub(super) fn push_association_methods(
                         &type_col,
                         &assoc_pk,
                         sentinel,
+                        keeps_nil,
                     ));
                 }
             }
@@ -444,7 +464,7 @@ pub(super) fn push_association_methods(
                 // target's own primary key.
                 let assoc_pk =
                     crate::lower::scope_chain::association_primary_key(models, target, primary_key.as_ref());
-                methods.push(synth_belongs_to_reader(owner, name, target, foreign_key, &assoc_pk, sentinel.clone()));
+                methods.push(synth_belongs_to_reader(owner, name, target, foreign_key, &assoc_pk, sentinel.clone(), keeps_nil));
                 // Rails provides the writer alongside the reader
                 // (`comment.story = obj` stores the foreign key). A
                 // custom writer in the model body must win (Rails: the
@@ -459,7 +479,7 @@ pub(super) fn push_association_methods(
                         .iter()
                         .any(|m| m.name == writer_name && m.receiver == MethodReceiver::Instance)
                 {
-                    methods.push(synth_belongs_to_writer(owner, name, target, foreign_key, &assoc_pk, sentinel));
+                    methods.push(synth_belongs_to_writer(owner, name, target, foreign_key, &assoc_pk, sentinel, keeps_nil));
                 }
                 push_singular_loaded_reader(methods, model, owner, name);
             }
@@ -484,6 +504,7 @@ pub(super) fn push_association_methods(
                     &owner_key,
                     as_interface.as_ref(),
                     scope.as_ref(),
+                    keeps_nil,
                 ));
                 methods.push(synth_has_one_preload_setter(owner, name, target));
                 push_singular_loaded_reader(methods, model, owner, name);
@@ -589,6 +610,58 @@ fn push_association_names(methods: &mut Vec<MethodDef>, model: &Model) {
     });
 }
 
+/// `return <value> if new_record? && <owner key absent>`: Rails'
+/// `find_target?` / `null_scope?`, under which a has_one or has_many of
+/// an owner that is a new record without its key doesn't query
+/// (`ForeignAssociation#foreign_key_present?`). The ruby family's new
+/// record holds `id` 0 (its column's default), not nil, so 0 counts as
+/// absent for `id`; a custom key column is absent when nil or empty.
+fn unsaved_owner_guard(owner_key: &Symbol, value: Expr) -> Expr {
+    let key = || Expr::new(Span::synthetic(), ExprNode::Ivar { name: owner_key.clone() });
+    let send = |recv: Expr, method: &str, args: Vec<Expr>| {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send { recv: Some(recv), method: Symbol::from(method), args, block: None, parenthesized: false },
+        )
+    };
+    let or = |left: Expr, right: Expr| {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::BoolOp {
+                op: crate::expr::BoolOpKind::Or,
+                surface: crate::expr::BoolOpSurface::default(),
+                left,
+                right,
+            },
+        )
+    };
+    let absent = if owner_key.as_str() == "id" {
+        or(send(key(), "nil?", vec![]), send(key(), "==", vec![lit_int(0)]))
+    } else {
+        or(send(key(), "nil?", vec![]), send(send(key(), "to_s", vec![]), "empty?", vec![]))
+    };
+    let new_record = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send { recv: None, method: Symbol::from("new_record?"), args: vec![], block: None, parenthesized: false },
+    );
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond: Expr::new(
+                Span::synthetic(),
+                ExprNode::BoolOp {
+                    op: crate::expr::BoolOpKind::And,
+                    surface: crate::expr::BoolOpSurface::default(),
+                    left: new_record,
+                    right: absent,
+                },
+            ),
+            then_branch: Expr::new(Span::synthetic(), ExprNode::Return { value }),
+            else_branch: nil_lit(),
+        },
+    )
+}
+
 /// A keyed association (`primary_key:` other than `id`) must not match
 /// when the owner's key is NULL: Rails answers nil / empty for it, but
 /// `where(fk: nil)` is `fk IS NULL`, which would return every orphan
@@ -615,6 +688,59 @@ fn guard_nil_owner_key(query: Expr, foreign_key: &Symbol, owner_key: &Symbol) ->
     )
 }
 
+/// `Target.where(fk => @id)` in the reader becomes
+/// `Target.unscope(where: :fk).where(fk => @id)`: the default scope's
+/// condition on the key goes, the owner's stays.
+fn reroot_unscoping(body: &mut Expr, target: &ClassId, foreign_key: &Symbol) {
+    fn walk(e: &mut Expr, target: &ClassId, foreign_key: &Symbol) -> bool {
+        match &mut *e.node {
+            ExprNode::Send { recv: Some(recv), method, .. } if method.as_str() == "where" => {
+                let is_target = matches!(&*recv.node, ExprNode::Const { path }
+                    if path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::") == target.0.as_str());
+                if is_target {
+                    let key = Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Sym { value: Symbol::from("where") } });
+                    let unscoped = Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Send {
+                            recv: Some(recv.clone()),
+                            method: Symbol::from("unscope"),
+                            args: vec![Expr::new(
+                                Span::synthetic(),
+                                ExprNode::Hash { entries: vec![(key, lit_sym(foreign_key.clone()))], kwargs: true },
+                            )],
+                            block: None,
+                            parenthesized: true,
+                        },
+                    );
+                    *recv = unscoped;
+                    return true;
+                }
+                walk(recv, target, foreign_key)
+            }
+            ExprNode::Send { recv: Some(recv), .. } => walk(recv, target, foreign_key),
+            ExprNode::Seq { exprs } => exprs.iter_mut().any(|x| walk(x, target, foreign_key)),
+            _ => false,
+        }
+    }
+    walk(body, target, foreign_key);
+}
+
+/// The reader's last statement (the query) becomes
+/// `@<name>_cache = <query>; @<name>_loaded = true; @<name>_cache`.
+fn memoize_reader(reader: &mut MethodDef, name: &Symbol) {
+    let ExprNode::Seq { exprs } = &mut *reader.body.node else { return };
+    let Some(query) = exprs.pop() else { return };
+    let assign = |target: Symbol, value: Expr| {
+        Expr::new(Span::synthetic(), ExprNode::Assign { target: LValue::Ivar { name: target }, value })
+    };
+    exprs.push(assign(cache_ivar(name), query));
+    exprs.push(assign(
+        loaded_ivar(name),
+        Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Bool { value: true } }),
+    ));
+    exprs.push(Expr::new(Span::synthetic(), ExprNode::Ivar { name: cache_ivar(name) }));
+}
+
 fn synth_has_many_reader(
     owner: &ClassId,
     name: &Symbol,
@@ -624,6 +750,7 @@ fn synth_has_many_reader(
     as_interface: Option<&Symbol>,
     scope: Option<&Expr>,
     through: bool,
+    unsaved_guard: bool,
 ) -> MethodDef {
     // def comments; Comment.where(article_id: @id); end
     //
@@ -719,7 +846,14 @@ fn synth_has_many_reader(
             else_branch: nil_lit(),
         },
     );
-    let body = seq(vec![guard, lazy_query]);
+    let empty = Expr::new(
+        Span::synthetic(),
+        ExprNode::Array { elements: vec![], style: crate::expr::ArrayStyle::Brackets },
+    );
+    let body = match (unsaved_guard && !through).then(|| unsaved_owner_guard(owner_key, empty)) {
+        Some(unsaved) => seq(vec![guard, unsaved, lazy_query]),
+        None => seq(vec![guard, lazy_query]),
+    };
 
     // has_many reader — body computes (`Comment.where(...)`), so it
     // must remain a Method even though Ruby's `article.comments` reads
@@ -1058,6 +1192,7 @@ fn synth_has_one_reader(
     owner_key: &Symbol,
     as_interface: Option<&Symbol>,
     scope: Option<&Expr>,
+    unsaved_guard: bool,
 ) -> MethodDef {
     let mut entries = vec![(
         lit_sym(foreign_key.clone()),
@@ -1125,7 +1260,11 @@ fn synth_has_one_reader(
         name: name.clone(),
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
-        body: seq(vec![guard, first]),
+        body: if unsaved_guard {
+            seq(vec![guard, unsaved_owner_guard(owner_key, nil_lit()), first])
+        } else {
+            seq(vec![guard, first])
+        },
         signature: Some(fn_sig(
             vec![],
             Ty::Union {
@@ -1520,6 +1659,7 @@ fn synth_belongs_to_reader(
     foreign_key: &Symbol,
     assoc_pk: &Symbol,
     sentinel: Expr,
+    keeps_nil: bool,
 ) -> MethodDef {
     // def article
     //   @article_id == 0 ? nil : Article.find_by(id: @article_id)
@@ -1538,6 +1678,30 @@ fn synth_belongs_to_reader(
             parenthesized: false,
         },
     );
+    // `@article_id.nil? || @article_id == 0` where the writer keeps nil.
+    let cond = if keeps_nil {
+        let nil = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(Expr::new(Span::synthetic(), ExprNode::Ivar { name: foreign_key.clone() })),
+                method: Symbol::from("nil?"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::BoolOp {
+                op: crate::expr::BoolOpKind::Or,
+                surface: crate::expr::BoolOpSurface::Symbol,
+                left: nil,
+                right: cond,
+            },
+        )
+    } else {
+        cond
+    };
 
     let find_by = Expr::new(
         Span::synthetic(),
@@ -1724,6 +1888,7 @@ fn synth_polymorphic_writer(
     type_col: &Symbol,
     assoc_pk: &Symbol,
     sentinel: Expr,
+    keeps_nil: bool,
 ) -> MethodDef {
     // def notifiable=(value)
     //   if value.nil?
@@ -1786,10 +1951,12 @@ fn synth_polymorphic_writer(
         Span::synthetic(),
         ExprNode::If {
             cond: nil_check,
-            then_branch: seq(vec![
-                assign(foreign_key, sentinel),
-                assign(&type_col, lit_str("")),
-            ]),
+            // Rails clears both columns to nil; the ruby family does too.
+            then_branch: if keeps_nil {
+                seq(vec![assign(foreign_key, nil_lit()), assign(&type_col, nil_lit())])
+            } else {
+                seq(vec![assign(foreign_key, sentinel), assign(&type_col, lit_str(""))])
+            },
             else_branch: seq(vec![assign(foreign_key, id_read), type_switch]),
         },
     );
@@ -1836,6 +2003,7 @@ fn synth_belongs_to_writer(
     foreign_key: &Symbol,
     assoc_pk: &Symbol,
     sentinel: Expr,
+    keeps_nil: bool,
 ) -> MethodDef {
     // def story=(value)
     //   if value.nil?
@@ -1845,8 +2013,10 @@ fn synth_belongs_to_writer(
     //   end
     // end
     //
-    // Stores the foreign key, mirroring the reader's `@fk == 0` nil
-    // sentinel (fk columns are non-nullable Int in the schema typing).
+    // Stores the foreign key. A nil value stores nil on the ruby family,
+    // as Rails does (`@story_id = nil`); a strict target mirrors the
+    // reader's `@fk == 0` nil sentinel, its key field being the column's
+    // non-nil type.
     // No object cache: the reader re-queries by fk, which matches its
     // existing shape — assigning an UNSAVED record then reading the
     // association back is the one Rails behavior this doesn't cover.
@@ -1884,7 +2054,7 @@ fn synth_belongs_to_writer(
         Span::synthetic(),
         ExprNode::If {
             cond: nil_check,
-            then_branch: fk_assign(sentinel),
+            then_branch: fk_assign(if keeps_nil { nil_lit() } else { sentinel }),
             else_branch: fk_assign(id_read),
         },
     );

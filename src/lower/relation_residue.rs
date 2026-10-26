@@ -114,11 +114,32 @@ fn walk(e: &Expr, in_chain: bool, ctx: &FoldCtx, diags: &mut Vec<Diagnostic>) {
                 ),
             ));
         }
+        // Not only Relation-typed heads: a query on an untyped receiver (a Pundit `scope.where`) reaches a strict target as a call nothing defines.
+        let untyped_query = !in_chain
+            && !folds
+            && !is_relation_head
+            && QUERY_ONLY_METHODS.contains(&method.as_str())
+            && recv.as_ref().is_some_and(|r| receiver_unknown(r.ty.as_ref()));
+        if untyped_query {
+            diags.push(crate::lower::residue_diagnostic(
+                "relation_residue",
+                "dynamic_relation",
+                e.span,
+                "untyped_relation_query",
+                format!(
+                    "relation query `{}` on a receiver of unknown type — not folded \
+                     to SQL at transpile time; executes on the runtime Relation in \
+                     ruby-family targets, unsupported at strict-target emit",
+                    method.as_str(),
+                ),
+            ));
+        }
         // The receiver spine below a Relation-typed Send is the same
         // chain — suppress duplicate entries. Everything else starts
         // a fresh chain.
         let spine = in_chain
             || folds
+            || untyped_query
             || matches!(e.ty.as_ref(), Some(Ty::Relation { .. }));
         if let Some(r) = recv {
             walk(r, spine, ctx, diags);
@@ -132,6 +153,26 @@ fn walk(e: &Expr, in_chain: bool, ctx: &FoldCtx, diags: &mut Vec<Diagnostic>) {
         return;
     }
     e.node.for_each_child(&mut |c| walk(c, false, ctx, diags));
+}
+
+/// ActiveRecord's query methods that no Array, Hash or String answers, so a call to one on an untyped receiver is a relation query.
+const QUERY_ONLY_METHODS: &[&str] = &[
+    "where", "rewhere", "order", "reorder", "limit", "offset", "joins", "left_joins",
+    "left_outer_joins", "includes", "preload", "eager_load", "references", "pluck", "pick",
+    "group", "having", "distinct", "unscope", "find_by", "find_by!", "find_each", "find_in_batches",
+    "in_batches", "update_all", "delete_all", "destroy_all", "none",
+];
+
+fn receiver_unknown(ty: Option<&Ty>) -> bool {
+    match ty {
+        None | Some(Ty::Untyped) | Some(Ty::Var { .. }) => true,
+        // An ivar read is the value or nil: `@scope` is `Var | nil`.
+        Some(Ty::Union { variants }) => {
+            variants.iter().any(|v| matches!(v, Ty::Untyped | Ty::Var { .. }))
+                && variants.iter().all(|v| matches!(v, Ty::Untyped | Ty::Var { .. } | Ty::Nil))
+        }
+        _ => false,
+    }
 }
 
 /// Act on what the residue message says, for the target actually being
@@ -159,13 +200,75 @@ fn walk(e: &Expr, in_chain: bool, ctx: &FoldCtx, diags: &mut Vec<Diagnostic>) {
 /// The invariant: a residue that predicts "unsupported at emit" for the
 /// target being emitted must fail that emit.
 ///
-/// Host-only, like the `project::BuildTarget` it reads and the CLI that
-/// calls it: the wasm build excludes `project` (see `lib.rs`), and the
+/// Host-only: the CLI is the emit gate that raises these, and the
 /// playground has no emit gate to raise anything for.
+/// `validates :attr, uniqueness: …` needs a query at validation time,
+/// which only the targets that ship the runtime Relation lower
+/// (`model_to_library::RuntimeRelation::Present`). Elsewhere the rule is
+/// not lowered, and this reports it, as the gap it was before, once per
+/// validation, so the emit says what it leaves out.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn uniqueness_gaps_for_target(app: &App, target: crate::build_target::BuildTarget) -> Vec<Diagnostic> {
+    if target.has_runtime_relation() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for model in &app.models {
+        for item in &model.body {
+            let crate::dialect::ModelBodyItem::Validation { validation, .. } = item else { continue };
+            if !validation.rules.iter().any(|r| matches!(r, crate::dialect::ValidationRule::Uniqueness { .. })) {
+                continue;
+            }
+            let mut d = Diagnostic::unsupported(
+                item.span(),
+                Some(crate::ident::Symbol::from(target.as_str())),
+                format!("validates :{}, uniqueness:", validation.attribute.as_str()),
+                "the uniqueness query needs the runtime Relation, which this target does not ship; Rails rejects records this build saves",
+            );
+            d.severity = crate::diagnostic::Severity::Warning;
+            out.push(d);
+        }
+    }
+    out
+}
+
+/// `default_scope { where(…) }` is applied by the runtime Relation when a
+/// relation is built (`lower::default_scope`). A target without one would
+/// answer every query on the model from the whole table, so the scope is
+/// an error there, once per model, never a silent unscoped read.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn default_scope_gaps_for_target(app: &App, target: crate::build_target::BuildTarget) -> Vec<Diagnostic> {
+    if target.has_runtime_relation() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for model in &app.models {
+        if crate::lower::default_scope::default_scope(model).is_none() {
+            continue;
+        }
+        let Some(item) = model.body.iter().find(|item| {
+            matches!(item, crate::dialect::ModelBodyItem::Unknown { expr, .. }
+                if matches!(&*expr.node, crate::expr::ExprNode::Send { method, .. } if method.as_str() == "default_scope"))
+        }) else {
+            continue;
+        };
+        out.push(Diagnostic::unsupported(
+            item.span(),
+            Some(crate::ident::Symbol::from(target.as_str())),
+            "default_scope",
+            format!(
+                "`{}`'s default scope is applied by the runtime Relation, which this target does not ship; its queries would read the rows the scope hides",
+                model.name.0.as_str()
+            ),
+        ));
+    }
+    out
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub fn elevate_dynamic_relation_for_target(
     diags: &mut [Diagnostic],
-    target: crate::project::BuildTarget,
+    target: crate::build_target::BuildTarget,
 ) {
     if target.has_runtime_relation() {
         return;

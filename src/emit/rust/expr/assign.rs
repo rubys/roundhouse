@@ -15,10 +15,25 @@ use super::{
 };
 
 pub(super) fn emit_assign(target: &LValue, value: &Expr) -> String {
-    let rhs = emit_expr(value);
+    // Not the `&str` literal: Ruby's `buf = +""` is a buffer the code appends to, which a Rust literal cannot be
+    let rhs = if matches!(&*value.node, ExprNode::Lit { value: crate::expr::Literal::Str { .. } })
+        && value.hint() == &Some(crate::expr::IrHint::MutableStringLiteral)
+    {
+        format!("String::from({})", emit_expr(value))
+    } else {
+        emit_expr(value)
+    };
     match target {
         LValue::Var { name, .. } => {
             let name_str = name.as_str().to_string();
+            // `local = @field`: Ruby copies a reference; Rust would move
+            // the field out of `self`, which the method only borrows
+            // (E0507). Copy it, as a tail read of the same field does.
+            let rhs = if reads_non_copy_field(value) && !rhs.ends_with(".clone()") {
+                format!("{rhs}.clone()")
+            } else {
+                rhs
+            };
             // Track local-var declared type for the narrowing-aware
             // Var read. Only records on first assignment — subsequent
             // rebinds leave the recorded declared type alone (Rust's
@@ -224,6 +239,22 @@ pub(super) fn emit_assign(target: &LValue, value: &Expr) -> String {
             format!("let {name} = {rhs}")
         }
     }
+}
+
+/// True when `value` is a bare `@field` read that renders as
+/// `self.<field>` of a non-Copy type, so binding it to a local would
+/// move it out of `self`. Constructor ivars are locals and
+/// module-singleton reads already clone, so neither counts. The struct
+/// field's declared type is the authority; the expression's own type
+/// stands in only when the field table has no entry.
+fn reads_non_copy_field(value: &Expr) -> bool {
+    let ExprNode::Ivar { name } = &*value.node else { return false };
+    if in_constructor() || in_module_singleton() {
+        return false;
+    }
+    ivar_field_ty(name.as_str())
+        .or_else(|| value.ty.clone())
+        .is_some_and(|t| !super::util::is_copy_ty(&t))
 }
 
 /// Return `Hash<K, V>` when `value` is the empty `{}` literal AND

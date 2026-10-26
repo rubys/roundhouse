@@ -67,11 +67,12 @@ module Tep
         @app = app
       end
 
-      def run(port, workers, quiet)
+      def run(port, workers, quiet, unix = UnixListener.new(""))
         sfd = Sock.sphttp_listen_on(Tep::APP.bind_host, port, workers > 1 ? 1 : 0)
         if sfd < 0
           $stderr.puts Tep.display_name + ": cannot bind to port " +
                        port.to_s + " (already in use?)"
+          unix.close
           exit(1)
         end
         if !quiet
@@ -92,26 +93,25 @@ module Tep
         # of its own. One process is the shape the binary is measured
         # in; the option stays for the operator who wants processes.
         if workers > 1
+          pids = [0]
+          pids.pop
           i = 0
           while i < workers
             pid = Sock.sphttp_fork
             if pid == 0
-              Tep::Server::Threaded.run_worker(sfd)
+              Tep::Server::Threaded.run_worker(sfd, unix.unix_fd)
+              unix.close
               Sock.sphttp_exit(0)   # same reason as the single-process exit below
             end
+            pids.push(pid) if pid > 0
             i += 1
           end
-          loop do
-            gone = Sock.sphttp_wait_any
-            if gone < 0
-              break
-            end
-          end
+          Tep.reap_workers(pids)
           if Sock.sphttp_shutdown_requested != 0
             Tep.on_shutdown
           end
         else
-          Tep::Server::Threaded.run_worker(sfd)
+          Tep::Server::Threaded.run_worker(sfd, unix.unix_fd)
           if Sock.sphttp_shutdown_requested != 0
             Tep.on_shutdown
           end
@@ -120,9 +120,16 @@ module Tep
           # parked on sockets that may never speak again (a keep-alive
           # waits 30s, an idle WebSocket 300s). A server asked to stop
           # stops.
+          unix.close
+          Sock.sphttp_close(sfd)
           Sock.sphttp_exit(0)
         end
-        0
+        unix.close
+        Sock.sphttp_close(sfd)
+        Sock.sphttp_exit(0)
+      ensure
+        unix.close
+        Sock.sphttp_close(sfd) if sfd >= 0
       end
 
       # The accept loop, on the calling thread. A TIMED wait on the listen
@@ -132,7 +139,18 @@ module Tep
       # woken to read it -- the first threaded build ignored SIGTERM until
       # the next connection came in. Then a non-blocking accept, which
       # answers -1 for a spurious wake and is retried.
-      def self.run_worker(sfd)
+      def self.run_worker(sfd, ufd = -1)
+        if ufd >= 0
+          unix_accept = Thread.new(ufd) { |fd| Tep::Server::Threaded.accept_loop(fd, "unix") }
+          Tep::Server::Threaded.accept_loop(sfd, "tcp")
+          unix_accept.join
+        else
+          Tep::Server::Threaded.accept_loop(sfd, "tcp")
+        end
+        0
+      end
+
+      def self.accept_loop(sfd, transport)
         Sock.sphttp_set_nonblock(sfd)
         lio = IO.for_fd(sfd, autoclose: false)
         while true
@@ -149,7 +167,7 @@ module Tep
           end
           Sock.sphttp_set_nonblock(client)
           Thread.new(client) do |c|
-            Tep::Server::Threaded.handle_connection(c)
+            Tep::Server::Threaded.handle_connection(c, transport)
           end
         end
         lio.close
@@ -173,7 +191,7 @@ module Tep
       # The wrapper is taken outside the `ensure` so `io` stays an IO,
       # not an IO-or-nil, in handle_one's signature; a failed dup closes
       # the fd itself.
-      def self.handle_connection(client)
+      def self.handle_connection(client, transport = "tcp")
         begin
           io = IO.for_fd(client, autoclose: false)
         rescue StandardError
@@ -184,7 +202,7 @@ module Tep
           input = InputBuffer.new
           keep_going = true
           while keep_going
-            keep_going = Tep::Server::Threaded.handle_one(client, io, input)
+            keep_going = Tep::Server::Threaded.handle_one(client, io, input, transport)
           end
         ensure
           io.close
@@ -195,7 +213,7 @@ module Tep
 
       # Process exactly one request on `client`. Returns true to keep the
       # connection open for the next keep-alive request, false to close.
-      def self.handle_one(client, io, input = InputBuffer.new)
+      def self.handle_one(client, io, input = InputBuffer.new, transport = "tcp")
         blob = Tep::Server::Threaded.read_request_blob(client, io, KEEPALIVE_TIMEOUT, input)
         if blob.length == 0
           return false
@@ -205,6 +223,7 @@ module Tep
           Tep::Server::Threaded.send_simple(client, 400, "bad request")
           return false
         end
+        req.listener_transport = transport
 
         # Before the drain, which is what held the bytes (Request#body_refusal).
         refusal = req.body_refusal(Tep.max_body_bytes)

@@ -129,7 +129,7 @@ fn synth_row_attr_reader(owner: &ClassId, col: &Column) -> MethodDef {
     // column reads NULL as nil. Keeping the Row non-nilable while the
     // model slot is nilable puts a type error on every hydration
     // assignment (`instance.set_body(row.body())`).
-    let col_ty = super::ty_of_column_slot(col);
+    let col_ty = super::ty_of_column_stored(col);
     let body = with_ty(
         Expr::new(Span::synthetic(), ExprNode::Ivar { name: col.name.clone() }),
         col_ty.clone(),
@@ -155,7 +155,7 @@ fn synth_row_attr_reader(owner: &ClassId, col: &Column) -> MethodDef {
 
 fn synth_row_attr_writer(owner: &ClassId, col: &Column) -> MethodDef {
     let value_param = Symbol::from("value");
-    let col_ty = super::ty_of_column_slot(col);
+    let col_ty = super::ty_of_column_stored(col);
     let rhs = with_ty(var_ref(value_param.clone()), col_ty.clone());
     let body = with_ty(
         Expr::new(
@@ -204,7 +204,7 @@ fn synth_row_attr_writer(owner: &ClassId, col: &Column) -> MethodDef {
 fn synth_row_initialize(owner: &ClassId, table: &Table) -> MethodDef {
     let mut stmts: Vec<Expr> = Vec::new();
     for col in &table.columns {
-        let col_ty = super::ty_of_column_slot(col);
+        let col_ty = super::ty_of_column_stored(col);
         // A nullable slot starts nil — the type's zero would be a value
         // the DB never stored.
         let default_lit = if matches!(col_ty, Ty::Union { .. }) {
@@ -295,7 +295,7 @@ fn synth_row_from_raw(owner: &ClassId, table: &Table) -> MethodDef {
     ));
 
     for col in &table.columns {
-        let col_ty = super::ty_of_column_slot(col);
+        let col_ty = super::ty_of_column_stored(col);
         // String-keyed lookup (`row["id"]`) instead of symbol-keyed
         // (`row[:id]`). Adapter rows arrive as `Hash[Str, _]` — Crystal
         // and TS can't dynamically create Symbols at runtime, so the

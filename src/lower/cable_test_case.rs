@@ -44,6 +44,21 @@
 //! not a literal keyword hash, is reported and left as written — the
 //! harness has no `subscribe`, so the test fails loudly with the reason
 //! rather than subscribing to the wrong channel.
+//!
+//! A connection test that builds its own connection writes Rails 8.2's
+//! constructor, a server and a socket; this runtime builds one from the
+//! handshake's cookie jar, so the pair is spelled for the harness:
+//!
+//! ```ruby
+//! ApplicationCable::Connection.new(ActionCable::Connection::TestServer.new(ActionCable.server), socket)
+//!   # → ActionCable::Connection.accept_test_socket(socket)
+//! ```
+//!
+//! `accept_test_socket` builds the app's connection the way
+//! `Cable.identify` does, over the socket's request's cookie jar, and
+//! accepts it on the socket. Only `ApplicationCable::Connection` — the
+//! one class that factory builds — and only with a `TestServer.new(…)`
+//! server; any other class is reported and left as written.
 
 use crate::app::App;
 use crate::diagnostic::{Diagnostic, Severity};
@@ -58,6 +73,8 @@ const CHANNEL_TEST_CASE: &str = "ActionCable::Channel::TestCase";
 /// so is never in `library_classes` — `Channel.build` always carries an
 /// arm for it.
 const STOCK_CHANNEL: &str = "Turbo::StreamsChannel";
+/// The connection class `ActionCable::Connection.build` constructs.
+const APP_CONNECTION: &str = "ApplicationCable::Connection";
 
 pub fn apply_cable_test_case_lowering(app: &mut App) -> Vec<Diagnostic> {
     let channels: BTreeSet<String> = app
@@ -128,6 +145,26 @@ fn rewrite(e: &mut Expr, channel: Option<&str>, diags: &mut Vec<Diagnostic>) {
                 vec![record],
             );
             *e = send(span, None, "assert_has_stream", vec![broadcasting]);
+        }
+        (Some(r), "new") if args.len() == 2 && is_test_server_new(&args[0]) => {
+            if !is_const(r, APP_CONNECTION) {
+                let mut d = Diagnostic::unsupported(
+                    span,
+                    None,
+                    "Connection.new",
+                    "a connection built over `ActionCable::Connection::TestServer` is served only for `ApplicationCable::Connection`, the class the runtime's connection factory builds",
+                );
+                d.severity = Severity::Warning;
+                diags.push(d);
+                return;
+            }
+            let sock = args.remove(1);
+            *e = send(
+                span,
+                Some(const_path(span, "ActionCable::Connection")),
+                "accept_test_socket",
+                vec![sock],
+            );
         }
         (Some(r), "signed_stream_name") if args.len() == 1 && is_const(r, STOCK_CHANNEL) => {
             let Some(name) = stream_name_of(&args[0]) else {
@@ -208,6 +245,12 @@ fn stream_name_of(streamables: &Expr) -> Option<Expr> {
         [InterpPart::Expr { expr }] => expr.clone(),
         _ => Expr::new(span, ExprNode::StringInterp { parts }),
     })
+}
+
+/// `ActionCable::Connection::TestServer.new(…)`.
+fn is_test_server_new(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Send { recv: Some(r), method, block: None, .. }
+        if method.as_str() == "new" && is_const(r, "ActionCable::Connection::TestServer"))
 }
 
 fn is_const(e: &Expr, path: &str) -> bool {
@@ -328,6 +371,38 @@ mod tests {
         let diags = apply_cable_test_case_lowering(&mut app);
         assert_eq!(diags.len(), 1, "{diags:?}");
         assert!(lowered(&app).contains("subscribe room_id: 1"), "{}", lowered(&app));
+    }
+
+    #[test]
+    fn a_connection_built_over_a_test_server_is_accepted_on_its_socket() {
+        let tm = test_module(
+            "ApplicationCable::ConnectionTest",
+            "ActionCable::Connection::TestCase",
+            None,
+            "rejected = ApplicationCable::Connection.new ActionCable::Connection::TestServer.new(ActionCable.server), ActionCable::Connection::TestSocket.new(request)",
+        );
+        let mut app = app_with(tm, &[]);
+        let diags = apply_cable_test_case_lowering(&mut app);
+        assert!(diags.is_empty(), "{diags:?}");
+        let out = lowered(&app);
+        assert!(
+            out.contains("ActionCable::Connection.accept_test_socket(ActionCable::Connection::TestSocket.new(request))"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn another_connection_class_over_a_test_server_is_reported_and_left() {
+        let tm = test_module(
+            "OtherConnectionTest",
+            "ActionCable::Connection::TestCase",
+            None,
+            "c = OtherConnection.new(ActionCable::Connection::TestServer.new(ActionCable.server), sock)",
+        );
+        let mut app = app_with(tm, &[]);
+        let diags = apply_cable_test_case_lowering(&mut app);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert!(!lowered(&app).contains("accept_test_socket"), "{}", lowered(&app));
     }
 
     #[test]

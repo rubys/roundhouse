@@ -107,7 +107,68 @@ pub(crate) fn push_secure_password_methods(methods: &mut Vec<MethodDef>, model: 
         AccessorKind::AttributeWriter,
         true,
     );
+    // Rails 7.1's `<attr>_salt`: the digest's bcrypt salt, nil while there
+    // is no digest. Campfire binds its transfer link to it
+    // (`generates_token_for :transfer … { password_salt&.last(10) }`).
+    push_synth_instance_method(
+        methods,
+        model,
+        Symbol::from(format!("{}_salt", attr.as_str())),
+        Vec::new(),
+        salt_body(&digest),
+        Some(fn_sig(vec![], Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() })),
+        AccessorKind::Method,
+        false,
+    );
+    // Rails 7.1's `<attr>_challenge`, the current password a form asks for
+    // before the password changes: a plain virtual attribute, as the
+    // confirmation is. Rails checks it only under its own validations;
+    // an app on `validations: false` checks it itself (campfire's
+    // `password_challenge_matches`).
+    let challenge = Symbol::from(format!("{}_challenge", attr.as_str()));
+    push_synth_instance_method(
+        methods,
+        model,
+        challenge.clone(),
+        Vec::new(),
+        ivar_read(&challenge),
+        Some(fn_sig(vec![], Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() })),
+        AccessorKind::AttributeReader,
+        false,
+    );
+    let challenge_value = Symbol::from("value");
+    push_synth_instance_method(
+        methods,
+        model,
+        Symbol::from(format!("{}=", challenge.as_str())),
+        vec![Param::positional(challenge_value.clone())],
+        plain_ivar_assign(&challenge, &challenge_value),
+        Some(fn_sig(vec![(challenge_value, Ty::Str)], Ty::Nil)),
+        AccessorKind::AttributeWriter,
+        true,
+    );
     push_reset_token_methods(methods, model, &attr);
+}
+
+/// `@<digest>.nil? || @<digest>.empty? ? nil : BCrypt::Password.new(@<digest>).salt`
+/// — Rails' `BCrypt::Password.new(digest).salt if digest.present?`.
+fn salt_body(digest: &Symbol) -> Expr {
+    let blank = sp_expr(ExprNode::BoolOp {
+        op: crate::expr::BoolOpKind::Or,
+        surface: crate::expr::BoolOpSurface::Symbol,
+        left: send(Some(ivar_read(digest)), "nil?", vec![]),
+        right: send(Some(ivar_read(digest)), "empty?", vec![]),
+    });
+    let wrapped = send(
+        Some(sp_expr(ExprNode::Const { path: vec![Symbol::from("BCrypt"), Symbol::from("Password")] })),
+        "new",
+        vec![ivar_read(digest)],
+    );
+    sp_expr(ExprNode::If {
+        cond: blank,
+        then_branch: sp_expr(ExprNode::Lit { value: Literal::Nil }),
+        else_branch: send(Some(wrapped), "salt", vec![]),
+    })
 }
 
 /// Rails 8's `has_secure_password` also generates a password-reset
@@ -435,7 +496,7 @@ pub fn apply_secure_password_super(app: &mut App) {
 /// Type a synthesized writer body the way the analyzer would have,
 /// since it is built after the analyzer ran and `diagnose` reports an
 /// untyped read or call in a model body: the String parameter `param`,
-/// `BCrypt::Password` and its `create`, `to_s` and `nil?`.
+/// `BCrypt::Password` and its `create`, `to_s`, `nil?` and `empty?`.
 fn type_writer_body(e: &mut Expr, param: &Symbol) {
     e.node.for_each_child_mut(&mut |c| type_writer_body(c, param));
     let bcrypt = || Ty::Class {
@@ -448,7 +509,7 @@ fn type_writer_body(e: &mut Expr, param: &Symbol) {
         ExprNode::Send { method, .. } => match method.as_str() {
             "create" => Some(bcrypt()),
             "to_s" => Some(Ty::Str),
-            "nil?" => Some(Ty::Bool),
+            "nil?" | "empty?" => Some(Ty::Bool),
             _ => e.ty.clone(),
         },
         ExprNode::Lit { value: Literal::Nil } => Some(Ty::Nil),
@@ -639,11 +700,23 @@ fn authenticate_body(digest: &Symbol) -> Expr {
     })
 }
 
-/// The plaintext writer Rails' macro provides:
-///   `@<attr> = v; @<attr>_digest = BCrypt::Password.create(v).to_s unless v.nil?`
+/// The plaintext writer Rails' macro provides (ActiveModel::SecurePassword,
+/// 7.1):
+///
+///   if v.nil?        then @<attr> = nil  (Rails also sets the digest to nil)
+///   elsif v.empty?   then nothing at all
+///   else @<attr> = v; @<attr>_digest = BCrypt::Password.create(v).to_s
+///
 /// (`.to_s` because BCrypt::Password subclasses String but the digest
-/// column stores plain text). Nil skips digest generation, mirroring
-/// Rails' blank-guard closely enough for the login/rehash paths.
+/// column stores plain text.) An EMPTY password changes nothing, which is
+/// what a profile form that leaves the password blank relies on:
+/// campfire's `update` passes `password: ""`, and hashing it gave the
+/// digest a new value, so `saved_change_to_password_digest?` was true and
+/// `after_update :sign_out_all_sessions` signed every other session out.
+///
+/// DIVERGENCE, nil: Rails also writes nil to the digest. The digest slot
+/// is a String on the strict targets (the column is `null: false` in the
+/// apps that use this), so the digest is kept; the plaintext is cleared.
 fn plaintext_writer_body(attr: &Symbol, digest: &Symbol) -> Expr {
     let value_var = || {
         sp_expr(ExprNode::Var { id: VarId(0), name: Symbol::from("unencrypted_password") })
@@ -651,6 +724,10 @@ fn plaintext_writer_body(attr: &Symbol, digest: &Symbol) -> Expr {
     let store_plain = sp_expr(ExprNode::Assign {
         target: LValue::Ivar { name: attr.clone() },
         value: value_var(),
+    });
+    let clear_plain = sp_expr(ExprNode::Assign {
+        target: LValue::Ivar { name: attr.clone() },
+        value: sp_expr(ExprNode::Lit { value: Literal::Nil }),
     });
     let create = sp_expr(ExprNode::Send {
         recv: Some(sp_expr(ExprNode::Const {
@@ -668,19 +745,25 @@ fn plaintext_writer_body(attr: &Symbol, digest: &Symbol) -> Expr {
         block: None,
         parenthesized: false,
     });
-    let guarded_digest = sp_expr(ExprNode::If {
-        cond: sp_expr(ExprNode::Send {
-            recv: Some(value_var()),
-            method: Symbol::from("nil?"),
-            args: Vec::new(),
-            block: None,
-            parenthesized: false,
-        }),
-        then_branch: sp_expr(ExprNode::Lit { value: Literal::Nil }),
-        else_branch: sp_expr(ExprNode::Assign {
-            target: LValue::Ivar { name: digest.clone() },
-            value: digest_str,
-        }),
+    let store_digest = sp_expr(ExprNode::Assign {
+        target: LValue::Ivar { name: digest.clone() },
+        value: digest_str,
     });
-    sp_expr(ExprNode::Seq { exprs: vec![store_plain, guarded_digest] })
+    let pred = |name: &str| sp_expr(ExprNode::Send {
+        recv: Some(value_var()),
+        method: Symbol::from(name),
+        args: Vec::new(),
+        block: None,
+        parenthesized: false,
+    });
+    let non_nil = sp_expr(ExprNode::If {
+        cond: pred("empty?"),
+        then_branch: sp_expr(ExprNode::Lit { value: Literal::Nil }),
+        else_branch: sp_expr(ExprNode::Seq { exprs: vec![store_plain, store_digest] }),
+    });
+    sp_expr(ExprNode::If {
+        cond: pred("nil?"),
+        then_branch: clear_plain,
+        else_branch: non_nil,
+    })
 }

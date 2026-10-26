@@ -27,6 +27,8 @@ pub struct Hoisted {
 struct Seen {
     depth: usize,
     tys: Vec<Option<Ty>>,
+    // Not only a reassigned local: one a `begin` body binds is read by its rescue or ensure, outside the try scope
+    in_try: bool,
 }
 
 /// Locals first assigned at a nested depth and assigned more than once,
@@ -35,7 +37,7 @@ pub fn hoisted_locals(body: &Expr) -> Vec<Hoisted> {
     let mut info: BTreeMap<String, Seen> = BTreeMap::new();
     walk(body, 0, &mut info);
     info.into_iter()
-        .filter(|(_, s)| s.depth > 0 && s.tys.len() > 1)
+        .filter(|(_, s)| s.depth > 0 && (s.tys.len() > 1 || s.in_try))
         .map(|(name, s)| Hoisted { name, tys: s.tys })
         .collect()
 }
@@ -44,7 +46,7 @@ fn walk(e: &Expr, depth: usize, info: &mut BTreeMap<String, Seen>) {
     if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*e.node {
         let ty = value.ty.clone().filter(|t| !matches!(t, Ty::Nil));
         info.entry(name.as_str().to_string())
-            .or_insert(Seen { depth, tys: Vec::new() })
+            .or_insert(Seen { depth, tys: Vec::new(), in_try: false })
             .tys
             .push(ty);
     }
@@ -86,6 +88,25 @@ fn walk(e: &Expr, depth: usize, info: &mut BTreeMap<String, Seen>) {
         ExprNode::Seq { exprs } => {
             for c in exprs {
                 walk(c, depth, info);
+            }
+        }
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            let mut inner: BTreeMap<String, Seen> = BTreeMap::new();
+            walk(body, depth + 1, &mut inner);
+            for r in rescues {
+                walk(&r.body, depth + 1, &mut inner);
+            }
+            for e in else_branch.iter().chain(ensure.iter()) {
+                walk(e, depth + 1, &mut inner);
+            }
+            for (name, mut seen) in inner {
+                match info.get_mut(&name) {
+                    Some(outer) => outer.tys.extend(seen.tys),
+                    None => {
+                        seen.in_try = true;
+                        info.insert(name, seen);
+                    }
+                }
             }
         }
         ExprNode::Assign { value, .. } | ExprNode::OpAssign { value, .. } => {

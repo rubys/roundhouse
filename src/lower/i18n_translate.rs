@@ -1211,10 +1211,10 @@ fn bind_all_options(call: &mut Call, span: Span) -> Vec<Expr> {
 ///
 /// ```ruby
 /// begin
-///   __i18n_locale_prev = I18n.enter_locale(l)
+///   i18n_locale_prev = I18n.enter_locale(l)
 ///   body              # or action.call
 /// ensure
-///   I18n.leave_locale(__i18n_locale_prev)
+///   I18n.leave_locale(i18n_locale_prev)
 /// end
 /// ```
 ///
@@ -1249,7 +1249,8 @@ fn with_locale(e: &Expr) -> Option<Expr> {
     };
     // Every node is stamped: the lowered IR is diagnosed again.
     let prev_ty = Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
-    let prev = Symbol::from(format!("__i18n_locale_prev_{}", span.start));
+    // Not underscored: Elixir warns on reading a local whose name starts with `_`
+    let prev = Symbol::from(format!("i18n_locale_prev_{}", span.start));
     let read_prev = Expr { ty: Some(prev_ty.clone()), ..Expr::new(span, ExprNode::Var { id: VarId(0), name: prev.clone() }) };
     let enter = Expr { ty: Some(prev_ty.clone()), ..const_send(span, "I18n", "enter_locale", vec![locale.clone()]) };
     let leave = Expr { ty: Some(Ty::Nil), ..const_send(span, "I18n", "leave_locale", vec![read_prev]) };

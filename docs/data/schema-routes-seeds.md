@@ -124,7 +124,8 @@ installed by a PostgreSQL deployment.
 Postgres column types map to their SQLite storage at
 ingest (`uuid` → TEXT via `ColumnType::Uuid`, `json`/`jsonb` → the same
 text-backed JSON representation, `citext` → text, `timestamptz` → datetime,
-`inet`/`cidr`/`macaddr`/`enum` → string); a type with no mapping is an
+`interval` → INTEGER via `ColumnType::Interval` with an `ActiveSupport::Duration`
+reader, `inet`/`cidr`/`macaddr`/`enum` → string); a type with no mapping is an
 ingest error (a ledger line under `--survey`), never a silent drop — its index would still be
 emitted and the DDL would not apply. A non-integer primary key
 (`create_table …, id: :uuid` / `primary_key: "identifier", id:

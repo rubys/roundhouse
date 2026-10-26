@@ -8,10 +8,21 @@ module ActiveSupport
   def self.singularize: (String text) -> String
   def self.humanize: (String? text) -> String
   def self.titleize: (String? text) -> String
+  # String methods over the Inflector bodies; nil raises as in Rails.
+  def self.camelize: (String? text) -> String
+  def self.camelcase: (String? text) -> String
+  def self.titlecase: (String? text) -> String
+  def self.classify: (String? text) -> String
+  def self.dasherize: (String? text) -> String
+  def self.deconstantize: (String? text) -> String
+  def self.foreign_key: (String? text) -> String
 
   module Inflector
     # Default Rails 8.1.4 behavior without configured acronym tables.
     def self.camelize: (String text, ?bool uppercase_first_letter) -> String
+    def self.dasherize: (String text) -> String
+    # Singular from the regular-suffix ActiveSupport.singularize.
+    def self.classify: (String table_name) -> String
     def self.deconstantize: (String text) -> String
     def self.foreign_key: (String class_name, ?bool separate_class_name_and_id_with_underscore) -> String
     def self.upcase_first: (String text) -> String

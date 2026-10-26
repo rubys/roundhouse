@@ -221,7 +221,7 @@ fn ex_literal_for(value: &str, ty: &crate::ty::Ty) -> String {
         Ty::Bool => match value {
             "true" | "1" => "true".into(),
             "false" | "0" => "false".into(),
-            _ => format!("false # TODO: coerce {value:?}"),
+            _ => crate::emit::diagnostics::report_unsupported(crate::span::Span::synthetic(), "elixir", "fixture value", format!("{value:?} for a Boolean column")),
         },
         _ => format!("{value:?}"),
     }
@@ -391,7 +391,10 @@ fn emit_ctrl_test_send(
             "unprocessable_entity" | "unprocessable_content" => {
                 "TestResponse.assert_unprocessable(resp)".to_string()
             }
-            other => format!("TestResponse.assert_status(resp, 200) # TODO: {other:?}"),
+            other => match crate::lower::controller_test::asserted_status_code(other) {
+                Some(code) => format!("TestResponse.assert_status(resp, {code})"),
+                None => crate::emit::diagnostics::report_unsupported(crate::span::Span::synthetic(), "elixir", "assert_response", format!("`:{other}` names no single status")),
+            },
         },
         Some(ControllerTestSend::AssertRedirectedTo { url }) => {
             format!("TestResponse.assert_redirected_to(resp, {})", emit_url_expr(url, app, ctx))
@@ -449,10 +452,7 @@ fn emit_assert_select(
 ) -> String {
     use crate::lower::AssertSelectKind;
     let ExprNode::Lit { value: Literal::Str { value: selector } } = &*selector_expr.node else {
-        return format!(
-            "TestResponse.assert_select(resp, {}) # TODO: dynamic selector",
-            emit_ctrl_test_expr(selector_expr, app, ctx),
-        );
+        return crate::emit::diagnostics::report_unsupported(selector_expr.span, "elixir", "assert_select", "a selector computed when the test runs");
     };
     match kind {
         AssertSelectKind::Text(expr) => {
@@ -587,7 +587,7 @@ fn emit_ctrl_test_expr(expr: &Expr, app: &App, ctx: ExTestCtx) -> String {
                 out
             },
         ),
-        _ => "nil # TODO expr".to_string(),
+        other => crate::emit::diagnostics::report_unsupported(expr.span, "elixir", other.kind_str(), "in a controller test"),
     }
 }
 
@@ -718,7 +718,7 @@ fn emit_model_test_expr(e: &Expr, ctx: ExTestCtx) -> String {
                 .collect();
             format!("%{{{}}}", parts.join(", "))
         }
-        _ => format!("# TODO: model test emit for {:?}", std::mem::discriminant(&*e.node)),
+        other => crate::emit::diagnostics::report_unsupported(e.span, "elixir", other.kind_str(), "in a model test"),
     }
 }
 

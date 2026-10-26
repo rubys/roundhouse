@@ -1,0 +1,6 @@
+module I18nHost
+  def self.locale_name: () -> String
+  def self.set_locale_name: (String name) -> String
+  def self.env_name: () -> String
+  def self.table_text: () -> String
+end

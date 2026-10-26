@@ -1,10 +1,12 @@
 class UserAgentToken
   @product: String
+  @product_key: String
   @version: String
   @comment: Array[String]
 
   def initialize: (String product, String version, String? comment) -> void
   def product: () -> String
+  def product_key: () -> String
   def version: () -> String
   def comment: () -> Array[String]
 end

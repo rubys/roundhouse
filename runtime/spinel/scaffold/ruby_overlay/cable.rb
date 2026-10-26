@@ -70,6 +70,96 @@ module Cable
   PROTOCOLS = ["actioncable-v1-json"].freeze
   PING_INTERVAL = 3 # seconds — matches Action Cable's BEAT_INTERVAL
 
+  # Where a worker's time goes, for profiling under load. Off unless
+  # ROUNDHOUSE_CABLE_STATS names a period in seconds; then every period
+  # each worker writes one line per stage to stderr:
+  #
+  #   [roundhouse stats] <unix ms> <pid> <stage> <count per bucket, tab-separated>
+  #
+  # with buckets bounded above by BOUNDS milliseconds (the last is
+  # unbounded), so scripts/campfire-users-fold.rb can add up any window.
+  # The stages of one subscribe, in order:
+  #
+  #   pool     queued for a Workers thread
+  #   app      the channel's `subscribed` (Db included)
+  #   reactor  queued for the reactor thread with the outcome
+  #   hub      waiting for the hub to acknowledge a stream (cable_hub.rb),
+  #            which holds the reactor thread
+  #   total    the command's arrival to the confirmation
+  #
+  # And beside them:
+  #
+  #   loop_lag   how late a 10 ms timer on Falcon's event loop fires
+  #              (falcon.rb): the time every request on that worker waited
+  #   db_permit  a write waiting behind this process's writers
+  #   db_flock   a write waiting behind another process's (Db's flock)
+  #   gc         not a histogram: GC.stat's time (ms), major and minor
+  #              collections over the period
+  #   major_by   not a histogram: major collections by GC.latest_gc_info's
+  #              reason (`nofree:3  oldgen:1`), read at loop_lag's ticks,
+  #              so two majors between ticks count as the later one's
+  module Stats
+    PERIOD = ENV["ROUNDHOUSE_CABLE_STATS"].to_f
+    ON = PERIOD > 0
+    BOUNDS = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000].freeze
+    LOCK = Mutex.new
+    @counts = Hash.new { |h, stage| h[stage] = Array.new(BOUNDS.size + 1, 0) }
+    @major_by = Hash.new(0)
+    @majors_seen = nil
+
+    def self.now
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    end
+
+    def self.record(stage, since)
+      ms = (now - since) * 1000
+      bucket = BOUNDS.index { |b| ms <= b } || BOUNDS.size
+      LOCK.synchronize { @counts[stage][bucket] += 1 }
+      nil
+    end
+
+    # Called often (loop_lag's tick): notes the reason for each major
+    # collection since the last call.
+    def self.note_gc
+      majors = GC.stat(:major_gc_count)
+      return if majors == @majors_seen
+      reason = @majors_seen && GC.latest_gc_info(:major_by)
+      @majors_seen = majors
+      LOCK.synchronize { @major_by[reason.to_s] += 1 } if reason
+      nil
+    end
+
+    def self.report
+      counts = LOCK.synchronize { c = @counts; @counts = Hash.new { |h, stage| h[stage] = Array.new(BOUNDS.size + 1, 0) }; c }
+      major_by = LOCK.synchronize { m = @major_by; @major_by = Hash.new(0); m }
+      stamp = Process.clock_gettime(Process::CLOCK_REALTIME, :millisecond)
+      counts.each { |stage, row| $stderr.puts "[roundhouse stats] #{stamp} #{Process.pid} #{stage}\t#{row.join("\t")}" }
+      gc = GC.stat.values_at(:time, :major_gc_count, :minor_gc_count)
+      last = @last_gc || gc
+      @last_gc = gc
+      $stderr.puts "[roundhouse stats] #{stamp} #{Process.pid} gc\t#{gc.zip(last).map { |now, was| now - was }.join("\t")}"
+      $stderr.puts "[roundhouse stats] #{stamp} #{Process.pid} major_by\t#{major_by.map { |r, n| "#{r}:#{n}" }.join("\t")}" unless major_by.empty?
+      nil
+    end
+
+    # Per process: a forked worker starts its own reporter.
+    def self.ensure_reporting
+      return unless ON
+      return if @reporter_pid == Process.pid
+
+      @reporter_pid = Process.pid
+      @last_gc = nil
+      Db.wait_observer = method(:record) if defined?(Db) && Db.respond_to?(:wait_observer=)
+      Thread.new do
+        loop do
+          sleep PERIOD
+          report
+        end
+      end
+      nil
+    end
+  end
+
   # The single event loop. Owns the selector, the connection table and
   # the heartbeat deadline; serializes every mutation of both onto its
   # own thread via `post`.
@@ -139,6 +229,7 @@ module Cable
 
           @thread = Thread.new { run }
           @thread.name = "cable-reactor" if @thread.respond_to?(:name=)
+          Stats.ensure_reporting
         end
         nil
       end
@@ -224,7 +315,10 @@ module Cable
       # table mid-iteration.
       def beat
         payload = %({"type":"ping","message":#{Time.now.to_i}})
-        @connections.values.each { |conn| conn.send_text(payload) }
+        @connections.values.each do |conn|
+          conn.send_text(payload)
+          conn.app_beat
+        end
         nil
       end
     end
@@ -377,6 +471,15 @@ module Cable
   # Reactor thread only (see the threading contract above), so no lock.
   module Registry
     SUBS = {}
+    # Told when a stream gains its first subscriber here and loses its last:
+    # the cross-worker hub routes by it (runtime/cable_hub.rb). Set once,
+    # before any connection subscribes.
+    WATCHERS = []
+
+    def self.watch(watcher)
+      WATCHERS << watcher
+      nil
+    end
 
     # Called from Puma request threads by `Broadcasts.record` after a
     # model commit. Returns as soon as the closure is queued — the
@@ -431,8 +534,10 @@ module Cable
     end
 
     def self.subscribe(stream, conn)
+      fresh = !SUBS.key?(stream)
       list = (SUBS[stream] ||= [])
       list << conn unless list.include?(conn)
+      WATCHERS.each { |watcher| watcher.stream_added(stream) } if fresh
       nil
     end
 
@@ -440,13 +545,20 @@ module Cable
       list = SUBS[stream]
       return nil if list.nil?
       list.delete(conn)
-      SUBS.delete(stream) if list.empty?
+      if list.empty?
+        SUBS.delete(stream)
+        WATCHERS.each { |watcher| watcher.stream_removed(stream) }
+      end
       nil
     end
 
     def self.unsubscribe_all(conn)
       SUBS.each_value { |list| list.delete(conn) }
-      SUBS.delete_if { |_stream, list| list.empty? }
+      emptied = SUBS.select { |_stream, list| list.empty? }.keys
+      emptied.each do |stream|
+        SUBS.delete(stream)
+        WATCHERS.each { |watcher| watcher.stream_removed(stream) }
+      end
       nil
     end
   end
@@ -484,6 +596,7 @@ module Cable
       @monitor = nil
       @closed = false
       @identity = identity
+      identity.transport = self unless identity.nil?
       @internal_channel = nil
 
       @driver = WebSocket::Driver.rack(EnvAdapter.new(env, self), protocols: PROTOCOLS)
@@ -531,6 +644,42 @@ module Cable
       send_json({ "type" => "disconnect", "reason" => "remote", "reconnect" => reconnect ? true : false })
       on_writable
       close
+    end
+
+    # The heartbeat's call into the app: Rails' `connection.beat`, which
+    # campfire overrides to look its session up again now and then. Reactor
+    # thread, as Rails' heartbeat runs it on its event loop; work an app
+    # wants done off it goes through `perform_work`. An app error is the
+    # app's, not the reactor's.
+    def app_beat
+      return nil if @closed || @identity.nil?
+      @identity.beat
+      nil
+    rescue StandardError => e
+      warn "[cable] beat: #{e.class}: #{e.message}"
+      nil
+    end
+
+    # `ActionCable::Connection::Base#close(reason:, reconnect:)`, from any
+    # thread: the disconnect frame and the close run on the reactor, as the
+    # internal channel's disconnect does.
+    def close_with_reason(reason, reconnect)
+      Reactor.post do
+        unless @closed
+          send_json({ "type" => "disconnect", "reason" => reason, "reconnect" => reconnect ? true : false })
+          on_writable
+          close
+        end
+      end
+      nil
+    end
+
+    # `ActionCable::Connection::Base#perform_work`'s socket half: the
+    # app's work on a cable worker, with a database connection, as Rails
+    # hands it to its pool.
+    def perform_work(receiver)
+      Workers.post { Db.with_connection { receiver.call } }
+      nil
     end
 
     def identifiers_for(stream)
@@ -720,11 +869,24 @@ module Cable
 
       @channels[identifier_json] = :pending
       conn = self
+      arrived = Stats.now if Stats::ON
       Workers.post do
+        if Stats::ON
+          Stats.record("pool", arrived)
+          started = Stats.now
+        end
         outcome = Db.with_connection do
           Dispatch.subscribe(klass, conn, identifier_json, identifier)
         end
-        Reactor.post { conn.subscribe_settled(identifier_json, outcome) }
+        if Stats::ON
+          Stats.record("app", started)
+          settling = Stats.now
+        end
+        Reactor.post do
+          Stats.record("reactor", settling) if Stats::ON
+          conn.subscribe_settled(identifier_json, outcome)
+          Stats.record("total", arrived) if Stats::ON
+        end
       end
     end
 

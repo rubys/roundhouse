@@ -80,7 +80,11 @@ pub fn apply_mailer_class_side(app: &mut App) -> Vec<Diagnostic> {
             .collect();
         let mut wrappers: Vec<crate::dialect::MethodDef> = Vec::new();
         for m in &lc.methods {
+            // ActionMailer's class-side proxy answers only the public
+            // action methods (`action_methods`): a private or protected
+            // helper or filter is never reachable as `Mailer.name`.
             if m.receiver != crate::dialect::MethodReceiver::Instance
+                || m.visibility != crate::dialect::MethodVisibility::Public
                 || m.name.as_str() == "initialize"
                 || class_side.contains(m.name.as_str())
             {

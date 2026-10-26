@@ -1,0 +1,14 @@
+module ActiveModel
+  class Validator
+    @options: Hash[Symbol, untyped]
+    def initialize: (?Hash[Symbol, untyped] options) -> void
+    def options: () -> Hash[Symbol, untyped]
+    def validate: (untyped record) -> nil
+  end
+  class EachValidator < Validator
+    @attributes: Array[Symbol]
+    def initialize: (?Hash[Symbol, untyped] options) -> void
+    def attributes: () -> Array[Symbol]
+    def validate_each: (untyped record, Symbol attribute, untyped value) -> nil
+  end
+end

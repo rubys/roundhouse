@@ -94,26 +94,37 @@ end
     assert!(src.contains("def validate"), "{src}");
 }
 
-/// `on:` narrows a validation to one persistence context. Running it
-/// unconditionally would reject records Rails accepts, so the call is
-/// left where it was rather than promoted — campfire's `Room` writes
-/// exactly this shape (`validate :direct_rooms_keep_their_type, on:
-/// :update`).
+/// `on:` narrows a validation to one persistence context, so the call
+/// runs only behind that context's `persisted?` test — never
+/// unconditionally, which would reject records Rails accepts. campfire's
+/// `Room` writes `validate :direct_rooms_keep_their_type, on: :update`,
+/// and its `Session` the `on: :create` twin. A context Rails does not
+/// infer from persistence (`on: :publish`) still keeps the call out.
 #[test]
-fn a_validate_carrying_on_is_not_promoted_to_an_always_on_check() {
+fn a_validate_carrying_on_runs_only_in_that_context() {
     let src = emitted(
         r#"class Post < ApplicationRecord
   validate :type_is_unchanged, on: :update
+  validate :fresh_only, on: :create
+  validate :at_publish, on: :publish
 
   def type_is_unchanged
     errors.add :url, "changed"
+  end
+
+  def fresh_only
+    errors.add :url, "fresh"
+  end
+
+  def at_publish
+    errors.add :url, "publish"
   end
 end
 "#,
     );
     let synthesized = src.split("def validate\n").nth(1).unwrap_or("");
-    assert!(
-        !synthesized.contains("type_is_unchanged"),
-        "an `on:`-narrowed validation must not run unconditionally:\n{src}",
-    );
+    let synthesized = synthesized.split("\n  end\n").next().unwrap_or("");
+    assert!(synthesized.contains("type_is_unchanged if self.persisted?"), "{src}");
+    assert!(synthesized.contains("fresh_only if !(self.persisted?)"), "{src}");
+    assert!(!synthesized.contains("at_publish"), "{src}");
 }

@@ -99,7 +99,7 @@ fn errors_rb_transpiles_to_typescript_classes() {
     let classes = parse_library_with_rbs(&ruby, &rbs, "runtime/ruby/active_record/errors.rb")
         .expect("parse_library_with_rbs");
 
-    assert_eq!(classes.len(), 23, "expected 23 classes; got {}", classes.len());
+    assert_eq!(classes.len(), 24, "expected 24 classes; got {}", classes.len());
 
     let not_found = classes
         .iter()
@@ -156,6 +156,17 @@ fn errors_rb_transpiles_to_typescript_classes() {
         inv_ts.contains("super("),
         "missing super call: {inv_ts}"
     );
+
+    let not_destroyed = classes
+        .iter()
+        .find(|c| c.name.0.as_str() == "ActiveRecord::RecordNotDestroyed")
+        .expect("ActiveRecord::RecordNotDestroyed");
+    let nd_ts = emit_library_class(not_destroyed).expect("emit RecordNotDestroyed");
+    assert!(
+        nd_ts.contains("export class RecordNotDestroyed extends ActiveRecordError"),
+        "RecordNotDestroyed: {nd_ts}"
+    );
+    assert!(nd_ts.contains("record:"), "missing record field: {nd_ts}");
 }
 
 /// Phase 1 gap survey: the full set of `runtime/ruby/*` files this

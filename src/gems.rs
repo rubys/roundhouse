@@ -69,6 +69,11 @@ pub(crate) const GEM_REQUIRES: &[&str] = &[
     "rails-html-sanitizer",
     "net/http/persistent",
     "web-push",
+    "faraday",
+    "faraday/multipart",
+    "faraday/retry",
+    "retryable",
+    "jwt",
 ];
 
 /// Whether the compiler's own tables have a Ruby-family tree declare or
@@ -86,7 +91,7 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
     // (constant an emitted body names, gem that defines it). Only gems
     // whose absence is a RUNTIME error belong here — the list is the
     // façade's, not a survey of what an app might like.
-    const RUNTIME_GEMS: [(Marker, &str); 16] = [
+    const RUNTIME_GEMS: [(Marker, &str); 22] = [
         (Marker::Constant("BCrypt"), "bcrypt"),
         (Marker::Constant("HTMLEntities"), "htmlentities"),
         (Marker::Constant("ROTP"), "rotp"),
@@ -173,6 +178,37 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
         // installed, which the app's own Gemfile (image_processing →
         // ruby-vips) already asked of the machine.
         (Marker::AnyText(&[VARIATION_MARKER]), "ruby-vips"),
+        // The HTTP client an app calls. The real gem runs on this lane;
+        // the strict targets refuse it (`lower::ruby_family_gems`). `Constant`
+        // matches `Faraday.new` / `Faraday::…` / `rescue Faraday`; the
+        // `AnyText` needles catch bare value uses (`CLIENT = Faraday`,
+        // `register(Faraday)`) that `names_constant` skips — without
+        // matching identifiers like `FaradayHolder`.
+        (Marker::Constant("Faraday"), "faraday"),
+        (Marker::AnyText(&["= Faraday", "(Faraday)", "Faraday,", ", Faraday"]), "faraday"),
+        // Its middleware gems. `request :multipart` / `request :retry`
+        // name no constant, and without the gem Faraday raises at the
+        // first connection that registers them.
+        (
+            Marker::AnyText(&[
+                "Faraday::Multipart",
+                "Faraday::UploadIO",
+                "Faraday::FilePart",
+                "Faraday::ParamPart",
+                "Faraday::CompositeReadIO",
+                "request :multipart",
+                "request(:multipart",
+            ]),
+            "faraday-multipart",
+        ),
+        (
+            Marker::AnyText(&["Faraday::Retry", "request :retry", "request(:retry"]),
+            "faraday-retry",
+        ),
+        // Retryable and JWT, as Faraday: the real gems on this lane,
+        // refused on the strict targets (`lower::ruby_family_gems`).
+        (Marker::Constant("Retryable"), "retryable"),
+        (Marker::Constant("JWT"), "jwt"),
     ];
     &RUNTIME_GEMS
 }
@@ -210,12 +246,17 @@ pub struct Lockfile {
     /// analyzed like the rest of the app rather than being a boundary.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub in_repo: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source: Vec<String>,
     /// Git repositories and locked revisions, in source order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub git: Vec<GitSource>,
     /// Runtime dependencies of each resolved spec, in lockfile order.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub spec_deps: std::collections::BTreeMap<String, Vec<String>>,
+    /// The `PLATFORMS` section.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub platforms: Vec<String>,
 }
 
 /// One `GIT` source from a Bundler lockfile.
@@ -299,6 +340,11 @@ impl Lockfile {
                         }
                     }
                 }
+                "PLATFORMS" => {
+                    if indent == 2 {
+                        lock.platforms.push(body.to_string());
+                    }
+                }
                 "DEPENDENCIES" => {
                     if indent == 2 {
                         // `rails (~> 8.0.2)` / `debug` / `rails!` (a
@@ -323,6 +369,10 @@ impl Lockfile {
     /// Does `name` live in this repository (a `PATH` source)?
     pub fn is_in_repo(&self, name: &str) -> bool {
         self.in_repo.iter().any(|n| n == name)
+    }
+
+    pub fn is_source(&self, name: &str) -> bool {
+        self.source.iter().any(|n| n == name)
     }
 
     /// The repository and revision that provide `name`, if it is Git-backed.
@@ -360,6 +410,12 @@ impl Lockfile {
     pub fn version_of(&self, name: &str) -> Option<&str> {
         self.specs.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
     }
+
+    // Not cut at the first `-`: `1.2.3-alpha` is a prerelease, only a listed platform is a suffix.
+    pub fn release_version_of(&self, name: &str) -> Option<&str> {
+        let version = self.version_of(name)?;
+        Some(self.platforms.iter().find_map(|p| version.strip_suffix(p.as_str())?.strip_suffix('-')).unwrap_or(version))
+    }
 }
 
 /// What the analyzer makes of a gem.
@@ -386,6 +442,7 @@ pub enum GemFate {
     /// analyzer has to model: a dispatch that fails on its constants is
     /// a fact about the analysis of that code, and is reported as such.
     InRepo,
+    Source,
 }
 
 impl GemFate {
@@ -397,6 +454,7 @@ impl GemFate {
             GemFate::Infrastructure => "infrastructure",
             GemFate::Unknown => "unknown",
             GemFate::InRepo => "in-repo",
+            GemFate::Source => "source",
         }
     }
 }
@@ -430,7 +488,13 @@ impl GemCensus {
             .map(|name| GemEntry {
                 name: name.clone(),
                 version: lock.version_of(name).map(|v| v.to_string()),
-                fate: if lock.is_in_repo(name) { GemFate::InRepo } else { fate_of(name) },
+                fate: if lock.is_in_repo(name) {
+                    GemFate::InRepo
+                } else if lock.is_source(name) {
+                    GemFate::Source
+                } else {
+                    fate_of(name)
+                },
             })
             .collect();
         let transitive = lock.specs.len().saturating_sub(gems.len());
@@ -456,6 +520,7 @@ impl GemCensus {
             GemFate::Modeled,
             GemFate::Infrastructure,
             GemFate::InRepo,
+            GemFate::Source,
         ] {
             let n = self.count(fate);
             if n > 0 {
@@ -547,10 +612,14 @@ const FATES: &[(&str, GemFate)] = &[
     ("faker", GemFate::Modeled),       // catalog/gems: Faker::*
     ("friendly_id", GemFate::Modeled), // lower/friendly_id + registry: friendly_id/friendly/to_param, Relation#friendly_find (slugged [+history] finder only; slug generation on save, :scoped/:finders/:simple_i18n unmodeled)
     ("geared_pagination", GemFate::Modeled), // registry/controllers: set_page_and_extract_portion_from
+    ("faraday", GemFate::Modeled),     // catalog/gems: Faraday; the real gem on ruby and jruby, lower/ruby_family_gems refuses every other target
+    ("faraday-multipart", GemFate::Modeled), // catalog/gems: Faraday::Multipart, as faraday
+    ("faraday-retry", GemFate::Modeled), // request :retry, as faraday
     ("htmlentities", GemFate::Modeled), // catalog/gems: HTMLEntities
     ("image_processing", GemFate::Modeled), // active_storage variants seam
     ("inertia_rails", GemFate::Modeled), // ingest/inertia: render inertia:, inertia_share; runtime action_controller/inertia
     ("invisible_captcha", GemFate::Modeled), // before_action + spam? on subtitle honeypot only
+    ("jwt", GemFate::Modeled),         // catalog/gems: JWT; the real gem on ruby and jruby, lower/ruby_family_gems refuses every other target
     ("kaminari", GemFate::Modeled),    // Relation#page / per / paginate
     ("mail", GemFate::Modeled),        // catalog/gems: Mail::Address; ActionMailer
     ("mocha", GemFate::Modeled),       // lower/mocha bridge
@@ -563,6 +632,7 @@ const FATES: &[(&str, GemFate)] = &[
     ("pushover", GemFate::Modeled),    // catalog/gems: Pushover
     ("rack-mini-profiler", GemFate::Modeled), // catalog/gems: Rack::MiniProfiler
     ("representable", GemFate::Modeled), // ingest/representable: Decorator + JSON, property/collection subset
+    ("retryable", GemFate::Modeled),   // catalog/gems: Retryable; the real gem on ruby and jruby, lower/ruby_family_gems refuses every other target
     ("rotp", GemFate::Modeled),        // catalog/gems: ROTP::*
     ("rqrcode", GemFate::Modeled),     // catalog/gems: RQRCode::QRCode
     ("ruby-vips", GemFate::Modeled),   // active_storage variants seam
@@ -624,9 +694,10 @@ const FATES: &[(&str, GemFate)] = &[
     ("pry", GemFate::Infrastructure),
     ("pry-rails", GemFate::Infrastructure),
     ("puma", GemFate::Infrastructure),
-    ("rack-attack", GemFate::Infrastructure),
-    ("rack-cors", GemFate::Infrastructure),
-    ("rack-protection", GemFate::Infrastructure),
+    // Not rack-attack, rack-cors or rack-protection: a middleware that
+    // throttles a request, writes its CORS headers or refuses one it reads
+    // as an attack changes what the app answers, and nothing in the app
+    // calls it for a dispatch failure to show that it is missing.
     ("rack-test", GemFate::Infrastructure),
     ("rails-controller-testing", GemFate::Infrastructure),
     ("rails-dom-testing", GemFate::Infrastructure),
@@ -741,6 +812,10 @@ pub(crate) fn gem_providing_dsl(lock: &Lockfile, dsl: &str) -> Option<&'static s
         .copied()
 }
 
+pub fn claims_surface(gem: &str) -> bool {
+    SURFACES.iter().any(|(name, _)| *name == gem)
+}
+
 /// The gem whose surface a method name belongs to, if any of the
 /// gems in `lock` claim it. `None` when no present gem claims the
 /// name. Modeled gems never claim (their surface resolves).
@@ -762,23 +837,28 @@ pub fn namespace_of(gem: &str) -> String {
         ("aws-sdk-core", "Aws"),
         ("bcrypt", "BCrypt"),
         ("cancancan", "CanCan"),
+        ("caxlsx", "Axlsx"),
         ("combine_pdf", "CombinePDF"),
+        ("duckdb", "DuckDB"),
         ("fast_excel", "FastExcel"),
         ("graphql", "GraphQL"),
         ("htmlentities", "HTMLEntities"),
         ("http", "HTTP"),
         ("i18n", "I18n"),
         ("jwt", "JWT"),
+        ("mcp", "MCP"),
         ("mini_magick", "MiniMagick"),
         ("net-http-persistent", "Net"),
         ("nokogiri", "Nokogiri"),
         ("oj", "Oj"),
         ("pdf-reader", "PDF"),
         ("pg", "PG"),
+        ("polars-df", "Polars"),
         ("rack-attack", "Rack"),
         ("rqrcode", "RQRCode"),
         ("rotp", "ROTP"),
         ("ruby-vips", "Vips"),
+        ("ruby_llm", "RubyLLM"),
         ("rubyzip", "Zip"),
         // sorbet-runtime's entire app-facing surface is `T` — `T.let`,
         // `T::Enum`, `T::Struct` — which the name-derived namespace
@@ -794,6 +874,24 @@ pub fn namespace_of(gem: &str) -> String {
         return (*ns).to_string();
     }
     camelize(gem)
+}
+
+/// Whether `boot.rb` should `require` a locked unknown gem by its own name
+/// once the emitted program names that gem's namespace.
+///
+/// A normal gem's entry file is `lib/<gem>.rb`, and the constant lowercases
+/// to that name (`duckdb` → `DuckDB`). The same file exists for three
+/// irregular constants: `caxlsx` (`lib/caxlsx.rb`), `polars-df`
+/// (`lib/polars-df.rb`), and `ruby_llm` (`lib/ruby_llm.rb`). Requiring the
+/// lowercased constant (`axlsx`, `polars`, `rubyllm`) is not that entry.
+///
+/// `rubyzip` is not in this set. `require "rubyzip"` is not a file; the gem
+/// loads as `zip`.
+pub fn loads_by_gem_name(gem: &str) -> bool {
+    if namespace_of(gem).eq_ignore_ascii_case(gem) {
+        return true;
+    }
+    matches!(gem, "caxlsx" | "polars-df" | "ruby_llm")
 }
 
 /// The top-level constants a gem might define, best guess first: the
@@ -829,6 +927,41 @@ fn camelize(gem: &str) -> String {
             }
         })
         .collect()
+}
+
+/// The resolved specs whose namespace `constant_path` sits under. A gem's
+/// own spelling nests at its dashes (`rack-attack` → `Rack::Attack`); its
+/// conventional namespace and first segment count too, below that. The
+/// longest match wins, and ties at the same rank are all returned.
+pub fn lock_gems_owning_constant<'a>(lock: &'a Lockfile, constant_path: &str) -> Vec<&'a str> {
+    let path = constant_path.trim_start_matches("::");
+    // Not case-sensitive: `OmniAuth` is the omniauth gem's, `PgHero` pghero's.
+    let under = |ns: &str| {
+        path.len() >= ns.len()
+            && path.is_char_boundary(ns.len())
+            && path[..ns.len()].eq_ignore_ascii_case(ns)
+            && (path.len() == ns.len() || path[ns.len()..].starts_with("::"))
+    };
+    let mut best: Vec<&str> = Vec::new();
+    let mut best_rank = (0usize, false);
+    for (name, _) in &lock.specs {
+        let nested = name.split('-').map(camelize).collect::<Vec<_>>().join("::");
+        let rank = if under(&nested) {
+            (nested.len(), true)
+        } else if let Some(ns) = namespace_candidates(name).into_iter().filter(|ns| under(ns)).max_by_key(|ns| ns.len()) {
+            (ns.len(), false)
+        } else {
+            continue;
+        };
+        if rank > best_rank {
+            best_rank = rank;
+            best.clear();
+        }
+        if rank == best_rank && !best.contains(&name.as_str()) {
+            best.push(name.as_str());
+        }
+    }
+    best
 }
 
 /// The unique resolved unknown gem whose namespace `constant_path`
@@ -1306,9 +1439,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_release_version_drops_only_a_listed_platform() {
+        let lock = Lockfile::parse("GEM\n  specs:\n    nokogiri (1.18.3-arm64-darwin)\n    pre (1.2.3-alpha)\n    rails (8.0.2)\n\nPLATFORMS\n  arm64-darwin\n  ruby\n");
+        assert_eq!(lock.release_version_of("nokogiri"), Some("1.18.3"));
+        assert_eq!(lock.release_version_of("pre"), Some("1.2.3-alpha"));
+        assert_eq!(lock.release_version_of("rails"), Some("8.0.2"));
+        assert_eq!(lock.release_version_of("absent"), None);
+    }
+
+    #[test]
     fn git_activation_orders_dependencies_and_terminates_cycles() {
         let lock = Lockfile::parse("GIT\n  remote: https://example.invalid/parent.git\n  revision: 1111111111111111111111111111111111111111\n  specs:\n    parent (1.0)\n      child\n\nGIT\n  remote: https://example.invalid/child.git\n  revision: 2222222222222222222222222222222222222222\n  specs:\n    child (2.0)\n      parent\n\nGEM\n  specs:\n    client (3.0)\n      parent\n\nDEPENDENCIES\n  client\n");
         assert_eq!(lock.git_specs_in_closure(&["client", "parent"]), ["child", "parent"]);
+    }
+
+    #[test]
+    fn a_constant_belongs_to_the_gem_nested_deepest_over_it() {
+        let lock = Lockfile::parse("GEM\n  specs:\n    omniauth (2.1.2)\n    rack (3.1.8)\n    rack-attack (6.7.0)\n    rack-cors (2.0.2)\n    sentry-rails (5.0)\n    sentry-ruby (5.0)\n\nDEPENDENCIES\n  omniauth\n  rack-attack\n  rack-cors\n  sentry-rails\n  sentry-ruby\n");
+        assert_eq!(lock_gems_owning_constant(&lock, "Rack::Attack"), ["rack-attack"]);
+        assert_eq!(lock_gems_owning_constant(&lock, "Rack::Utils"), ["rack"]);
+        assert_eq!(lock_gems_owning_constant(&lock, "OmniAuth::Strategies"), ["omniauth"]);
+        assert_eq!(lock_gems_owning_constant(&lock, "Sentry"), ["sentry-rails", "sentry-ruby"]);
+        assert!(lock_gems_owning_constant(&lock, "Devise").is_empty());
     }
 
     #[test]
@@ -1396,6 +1548,14 @@ BUNDLED WITH
         assert_eq!(namespace_of("front_matter_parser"), "FrontMatterParser");
         assert_eq!(namespace_of("aws-sdk-s3"), "Aws");
         assert_eq!(namespace_of("rubyzip"), "Zip");
+        assert_eq!(namespace_of("polars-df"), "Polars");
+        assert_eq!(namespace_of("ruby_llm"), "RubyLLM");
+        assert_eq!(namespace_of("caxlsx"), "Axlsx");
+        assert_eq!(namespace_of("duckdb"), "DuckDB");
+        assert_eq!(namespace_of("mcp"), "MCP");
+        for gem in ["polars-df", "ruby_llm", "caxlsx", "duckdb", "mcp", "rubyzip"] {
+            assert_eq!(fate_of(gem), GemFate::Unknown, "{gem} stays unmodeled");
+        }
         let census = GemCensus::of(&Lockfile::parse(LOCK));
         assert_eq!(gem_owning_constant(&census, "Redcarpet::Markdown"), Some("redcarpet"));
         assert_eq!(namespace_of("sorbet-runtime"), "T");
@@ -1417,6 +1577,119 @@ BUNDLED WITH
         let lock = Lockfile::parse(LOCK);
         assert_eq!(gem_claiming_method(&lock, "policy_scope"), Some("pundit"));
         assert_eq!(gem_claiming_method(&lock, "acts_as_list"), None, "acts-as-list is not in this lock");
+    }
+
+    #[test]
+    fn irregular_namespaces_pass_through_ruby_emit_for_any_lockfile() {
+        let lock = "\
+GEM
+  remote: https://rubygems.org/
+  specs:
+    caxlsx (4.2.0)
+    duckdb (1.3.1)
+    mcp (0.4.0)
+    polars-df (0.20.0)
+    ruby_llm (1.8.2)
+    rubyzip (2.3.2)
+
+DEPENDENCIES
+  caxlsx
+  duckdb
+  mcp
+  polars-df
+  ruby_llm
+  rubyzip
+";
+        let source = "\
+class Export
+  def run
+    Zip::File.open(\"a.zip\")
+    Polars::DataFrame.new
+    RubyLLM.chat
+    Axlsx::Package.new
+    DuckDB::Database.open
+    MCP::Server.new
+  end
+end
+";
+        let tree = [
+            ("Gemfile.lock", lock),
+            ("lib/export.rb", source),
+        ]
+        .into_iter()
+        .map(|(path, text)| (std::path::PathBuf::from(path), text.as_bytes().to_vec()))
+        .collect();
+        let app = crate::ingest::ingest_app_from_tree(tree).expect("ingest locked irregular gems");
+        let namespaces = locked_external_gem_namespaces(&app);
+        for name in ["Zip", "Polars", "RubyLLM", "Axlsx", "DuckDB", "MCP"] {
+            assert!(namespaces.contains(name), "{name} missing from {namespaces:?}");
+        }
+        for miss in ["Rubyzip", "PolarsDf", "RubyLlm", "Caxlsx", "Duckdb", "Mcp"] {
+            assert!(
+                !namespaces.contains(miss),
+                "camelized miss {miss} must not be the Ruby-emit pass-through key"
+            );
+        }
+        assert!(
+            !detail_names_external_namespace("Mcp::Tool", "MCP"),
+            "an app module Mcp is a different constant from the mcp gem"
+        );
+        let census = GemCensus::of(app.gem_lock.as_ref().expect("lock"));
+        for gem in ["caxlsx", "duckdb", "mcp", "polars-df", "ruby_llm", "rubyzip"] {
+            assert_eq!(
+                census.gems.iter().find(|g| g.name == gem).map(|g| g.fate),
+                Some(GemFate::Unknown),
+                "{gem} must stay unknown"
+            );
+        }
+        assert_eq!(gem_owning_constant(&census, "Polars::DataFrame"), Some("polars-df"));
+        assert_eq!(gem_owning_constant(&census, "RubyLLM::Chat"), Some("ruby_llm"));
+        assert_eq!(gem_owning_constant(&census, "Axlsx::Package"), Some("caxlsx"));
+        assert_eq!(gem_owning_constant(&census, "DuckDB::Database"), Some("duckdb"));
+        assert_eq!(gem_owning_constant(&census, "MCP::Server"), Some("mcp"));
+        assert_eq!(gem_owning_constant(&census, "Zip::File"), Some("rubyzip"));
+
+        let files = crate::project::target_files(&app, std::path::Path::new("."), crate::project::BuildTarget::Ruby)
+            .expect("emit Ruby project");
+        let export = files
+            .iter()
+            .find(|(_, content)| content.contains("class Export"))
+            .map(|(_, content)| content.as_str())
+            .expect("emitted Export");
+        for konst in ["Zip::File", "Polars::DataFrame", "RubyLLM.chat", "Axlsx::Package", "DuckDB::Database", "MCP::Server"] {
+            assert!(
+                export.contains(konst),
+                "Ruby emit must keep locked gem constant {konst}:\n{export}"
+            );
+        }
+        assert!(
+            !export.contains("PolarsDf") && !export.contains("RubyLlm") && !export.contains("Caxlsx"),
+            "emit must not rewrite the gem's real constant:\n{export}"
+        );
+        let gemfile = files.iter().find(|(path, _)| path == "Gemfile").expect("Gemfile").1.as_str();
+        for pin in [
+            "gem \"caxlsx\", \"= 4.2.0\"",
+            "gem \"duckdb\", \"= 1.3.1\"",
+            "gem \"mcp\", \"= 0.4.0\"",
+            "gem \"polars-df\", \"= 0.20.0\"",
+            "gem \"ruby_llm\", \"= 1.8.2\"",
+            "gem \"rubyzip\", \"= 2.3.2\"",
+        ] {
+            assert!(gemfile.contains(pin), "missing {pin} in\n{gemfile}");
+        }
+        let boot = files.iter().find(|(path, _)| path == "boot.rb").expect("boot.rb").1.as_str();
+        for feature in ["caxlsx", "duckdb", "mcp", "polars-df", "ruby_llm"] {
+            assert!(
+                boot.contains(&format!("require {feature:?}")),
+                "boot must load {feature} by gem name:\n{boot}"
+            );
+        }
+        assert!(
+            !boot.contains("require \"rubyzip\""),
+            "rubyzip has no rubyzip.rb entry; boot must not require that name:\n{boot}"
+        );
+        assert!(loads_by_gem_name("duckdb") && loads_by_gem_name("mcp"));
+        assert!(!loads_by_gem_name("rubyzip"));
     }
 
     #[test]

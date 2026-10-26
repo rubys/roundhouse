@@ -681,7 +681,7 @@ impl Printer {
             }
             JsExpr::Regex { pattern, flags } => {
                 self.word("/");
-                self.word(pattern);
+                self.word(&escape_regex_slashes(pattern));
                 self.word("/");
                 self.word(flags);
             }
@@ -982,6 +982,37 @@ fn escape_template_text(s: &str) -> String {
     out
 }
 
+/// Escape each unescaped `/` so `pattern` can sit between a JS regex
+/// literal's `/` delimiters: a pattern folded from a String
+/// (`Regexp.union("http://")`, which Ruby's own escape leaves alone) or
+/// read from `%r{a/b}` holds a bare one, which closed the literal early.
+/// An escaped `\/` is left alone, and a `\\` does not make the next `/`
+/// look escaped (the same toggle as the Ruby-family
+/// `escape_regex_delimiters`). A `/` inside a character class needs no
+/// escape there and keeps its spelling. Nothing else is touched: that helper also
+/// escapes `#` before `{`, `@` or `$`, and `\#` is a SyntaxError in a JS
+/// regex with the `u` flag.
+fn escape_regex_slashes(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len() + 4);
+    let mut prev_backslash = false;
+    // A `/` inside a character class does not end a JS literal, so the
+    // class is left as written.
+    let mut in_class = false;
+    for c in pattern.chars() {
+        if !prev_backslash {
+            match c {
+                '/' if !in_class => out.push('\\'),
+                '[' => in_class = true,
+                ']' => in_class = false,
+                _ => {}
+            }
+        }
+        out.push(c);
+        prev_backslash = c == '\\' && !prev_backslash;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::js_ast::*;
@@ -1006,6 +1037,23 @@ mod tests {
 
     fn num(s: &str) -> Js {
         Js::synth(JsExpr::Num(s.into()))
+    }
+
+    /// A bare `/` in the pattern is escaped so the literal does not close
+    /// early; an escaped one, and `#`, are left as they are.
+    #[test]
+    fn a_regex_literal_escapes_a_bare_slash() {
+        let re = |pattern: &str, flags: &str| {
+            print_expr(&Js::synth(JsExpr::Regex { pattern: pattern.into(), flags: flags.into() }))
+        };
+        assert_eq!(re("http://", ""), r"/http:\/\//");
+        assert_eq!(re(r"a\/b", ""), r"/a\/b/");
+        assert_eq!(re(r"a\\/b", ""), r"/a\\\/b/");
+        assert_eq!(re("x#{y}", "u"), "/x#{y}/u");
+        // In a class, `/` cannot end the literal: left as written, as is
+        // an escaped `]` that does not close the class.
+        assert_eq!(re(r"[,/:]a/b", ""), r"/[,/:]a\/b/");
+        assert_eq!(re(r"[\]/]/", ""), r"/[\]/]\//");
     }
 
     #[test]

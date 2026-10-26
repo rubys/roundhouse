@@ -136,6 +136,33 @@ end
     assert!(diags.is_empty(), "grounded site should not produce residue: {diags:?}");
 }
 
+/// A method with a trailing `rescue` (campfire's `SessionsController
+/// #create` grew `rescue ActiveRecord::RecordInvalid`) holds its whole
+/// body as the `begin`'s; the expansion goes into that body, ahead of the
+/// statement it feeds, instead of being left uninlined.
+#[test]
+fn a_method_with_a_trailing_rescue_hoists_into_its_body() {
+    let (out, diags) = lower_and_emit(
+        r#"
+class Doorman
+  def admit(email, secret)
+    if user = User.active.authenticate_by(email_address: email, password: secret)
+      user
+    end
+  rescue ArgumentError
+    nil
+  end
+end
+"#,
+    );
+    let bind = out.find("__auth = User.active.find_by").expect(&format!("bind:\n{out}"));
+    let cond = out.find("if user = __auth").expect(&format!("consumer:\n{out}"));
+    let rescue = out.find("rescue ArgumentError").expect(&format!("rescue kept:\n{out}"));
+    assert!(bind < cond && cond < rescue, "the expansion goes inside the rescued body, before its consumer:\n{out}");
+    assert!(!out.contains("authenticate_by"), "nothing left uninlined:\n{out}");
+    assert!(diags.is_empty(), "grounded site should not produce residue: {diags:?}");
+}
+
 #[test]
 fn model_without_the_macro_stays_put_with_residue() {
     let (out, diags) = lower_and_emit(

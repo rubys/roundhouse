@@ -982,25 +982,10 @@ ActionController::Base.perform_caching = false
 
 # ---- Query assertions ------------------------------------------------
 #
-# Rails' `ActiveSupport::Notifications.subscribed(callback,
-# "sql.active_record") { … }` and the `ActiveRecord::Assertions::
-# QueryAssertions` built on it, over `Db.capture_sql`, which records
-# every statement a prepare/exec issues and skips a query-cache replay,
-# as Rails' counter skips CACHE events. The callback gets Rails' five
-# arguments; the payload carries `:sql` and `:name` ("SQL", since the
-# runtime does not name its queries). Called after the block rather than
-# during it, which no test can tell: they collect, then inspect.
-module ActiveSupport
-  module Notifications
-    def self.subscribed(callback, name, &block)
-      return block.call unless name == "sql.active_record"
-      result = nil
-      statements = Db.capture_sql { result = block.call }
-      statements.each { |sql| callback.call(name, nil, nil, nil, { sql: sql, name: "SQL" }) }
-      result
-    end
-  end
-end
+# `ActiveSupport::Notifications.subscribed` lives in
+# runtime/ruby/active_support_notifications.rb. SQL for that name drains
+# `Db.capture_sql` after the block. QueryAssertions below read the same
+# log directly and skip schema statements.
 
 module ActiveRecord
   module Assertions
@@ -1454,8 +1439,243 @@ module RequestDispatch
 end
 
 module ActionDispatch
+  module Assertions
+    # Rails' `ActionDispatch::Assertions::RoutingAssertions`:
+    # `assert_recognizes`, `assert_generates` and `assert_routing`.
+    module RoutingAssertions
+      # `assert_recognizes(expected_options, path, extras = {}, message = nil)`.
+      # `path` is a String (a GET) or `{ method: verb, path: path }`;
+      # `method: :all` checks GET, POST, PUT and DELETE in turn. What
+      # the router recognizes is the route's `controller` and `action`
+      # (`controller` the Rails path of a namespaced one,
+      # "admin/posts"), its dynamic segments and `format` when the path
+      # has one, with `extras` merged over them; every key a String,
+      # as Rails' `path_parameters`. It must equal `expected_options`
+      # with its keys stringified and its values as given.
+      def assert_recognizes(expected_options, path, extras = {}, message = nil)
+        verb = "GET"
+        request_path = ""
+        if path.is_a?(Hash)
+          verb = path[:method].to_s.upcase
+          verb = "GET" if verb.empty?
+          request_path = path[:path].to_s
+        else
+          request_path = path.to_s
+        end
+        if verb == "ALL"
+          ["GET", "POST", "PUT", "DELETE"].each do |each_verb|
+            assert_recognizes(expected_options, { method: each_verb, path: request_path }, extras, message)
+          end
+          return
+        end
+        recognized = recognized_path_parameters(verb, request_path)
+        extras.each { |key, value| recognized[key.to_s] = value }
+        expected = {}
+        expected_options.each { |key, value| expected[key.to_s] = value }
+        return if expected == recognized
+        raise(message || "The recognized options <#{recognized.inspect}> did not match <#{expected.inspect}>")
+      end
+
+      # Rails' `recognize_path` (`ActionDispatch::Routing::RouteSet`)
+      # over the app's route table, keyed by String, in the steps of
+      # the ruby overlay's `Rails.application.routes.recognize_path`:
+      # the whole string normalized unless it is a full URL (one
+      # leading slash, no doubled slash, no trailing slash, uppercase
+      # percent-encoded octets), then the query, the fragment and a
+      # URL's scheme and host cut off. What is left must match a route
+      # as it is, so a slash before the query (`/articles/1/?x=1`)
+      # matches none, as in Rails. Redirect routes are skipped, as
+      # Rails skips them.
+      def recognized_path_parameters(verb, path)
+        require_relative "../config/routes"
+        request_path = path
+        unless request_path.include?("://")
+          request_path = ("/" + request_path).squeeze("/")
+          request_path = request_path.delete_suffix("/") unless request_path == "/"
+          request_path = request_path.gsub(/%[a-f0-9]{2}/) { |octet| octet.upcase }
+        end
+        scheme = request_path.partition("://")[0]
+        # As in `URI.parse`: what comes before "://" is a scheme only
+        # when it holds no "/", "?" or "#"; otherwise the "://" is in
+        # the query or the fragment, and there is no host to cut off.
+        if request_path.include?("://") && !scheme.empty? && !scheme.include?("/") && !scheme.include?("?") && !scheme.include?("#")
+          # The authority ends at the first "/", "?" or "#": a slash in
+          # the query or the fragment is not the path's.
+          rest = request_path.partition("://")[2].partition("?")[0].partition("#")[0]
+          slash = rest.index("/")
+          request_path = slash.nil? ? "/" : rest[slash..]
+        end
+        request_path = request_path.partition("?")[0].partition("#")[0]
+        request_path = "/" + request_path unless request_path.start_with?("/")
+        table = ([RouteTable.root] + RouteTable.table + ActiveStorage::Routes.table).reject { |route| route.controller == :roundhouse_redirects }
+        matched = ActionDispatch::Router.match(verb, request_path, table)
+        matched = nil if request_path != "/" && request_path.end_with?("/")
+        raise "No route matches #{path.inspect}" if matched.nil?
+        controller = RouteTable::CONTROLLER_PATHS[matched.controller] || ActiveStorage::Routes::CONTROLLER_PATHS[matched.controller] || matched.controller.to_s
+        recognized = { "controller" => controller, "action" => matched.action.to_s }
+        format = ""
+        matched.path_params.each do |name, value|
+          if name == "format"
+            format = value
+          else
+            recognized[name] = value
+          end
+        end
+        # A forced format (`get "/rss" => "home#index", format: "rss"`)
+        # is one of the route's defaults, which Rails recognizes too.
+        format = matched.req_format.to_s if format.empty? && !matched.req_format.nil?
+        recognized["format"] = format unless format.empty?
+        recognized
+      end
+
+      # Rails' `assert_generates(expected_path, options, defaults = {},
+      # extras = {}, message = nil)`: the path the routes generate from
+      # `options` (`generate_extras`) must be `expected_path`, and the
+      # options that went to the query instead of the path must be
+      # `extras`. A full URL is compared by its path.
+      def assert_generates(expected_path, options, defaults = {}, extras = {}, message = nil)
+        if expected_path.include?("://")
+          rest = expected_path.partition("://")[2]
+          slash = rest.index("/")
+          expected_path = slash.nil? ? "/" : rest[slash..]
+        else
+          expected_path = "/" + expected_path unless expected_path.start_with?("/")
+        end
+        given = generation_parts(defaults)
+        generation_parts(options).each { |key, value| given[key] = value }
+        route = generated_route(given)
+        query_keys = generated_query_keys(route, generation_parts(options))
+        found_extras = {}
+        options.each { |key, value| found_extras[key] = value if query_keys.include?(key.to_s) }
+        raise(message || "found extras <#{found_extras.inspect}>, not <#{extras.inspect}>") unless extras == found_extras
+        path = generated_route_path(route, given)
+        return if expected_path == path
+        raise(message || "The generated path <#{path}> did not match <#{expected_path}>")
+      end
+
+      # Rails' `assert_routing`: `assert_recognizes` one way, then
+      # `assert_generates` back from the options `defaults` does not
+      # name.
+      def assert_routing(path, options, defaults = {}, extras = {}, message = nil)
+        assert_recognizes(options, path, extras, message)
+        generate_options = {}
+        options.each { |key, value| generate_options[key] = value unless defaults.key?(key) }
+        request_path = path.is_a?(Hash) ? path[:path].to_s : path.to_s
+        assert_generates(request_path, generate_options, defaults, extras, message)
+      end
+
+      # The values a route is generated from, keyed by String, as
+      # `to_param` gives them; nil leaves the key out.
+      def generation_parts(options)
+        parts = {}
+        options.each do |key, value|
+          next if value.nil?
+          parts[key.to_s] = value.is_a?(ActiveRecord::Base) ? value.to_param.to_s : value.to_s
+        end
+        parts
+      end
+
+      # The route Rails' `Journey::Formatter#match_route` picks, over the
+      # app's routes in declaration order (redirects left out, as
+      # generation never yields them). A candidate's controller, action
+      # and forced format must equal the given ones; a route missing a
+      # value for one of its segments, or whose generated path its own
+      # constraints refuse, is skipped. Of the rest, the highest
+      # `Route#score` wins: two for each of those required defaults,
+      # one for each segment given a value (the implicit `(.:format)`
+      # counted too); a tie goes to the earlier route.
+      def generated_route(given)
+        require_relative "../config/routes"
+        routes = RouteTable.table.dup
+        routes.insert(RouteTable.root_position, RouteTable.root)
+        best = nil
+        best_score = -1
+        routes.each do |route|
+          next if route.controller == :roundhouse_redirects
+          controller = RouteTable::CONTROLLER_PATHS[route.controller] || route.controller.to_s
+          next unless given["controller"] == controller && given["action"] == route.action.to_s
+          required = 2
+          unless route.req_format.nil?
+            next unless given["format"] == route.req_format.to_s
+            required = 3
+          end
+          names = generation_segment_names(route.pattern)
+          next unless names.all? { |name| given.key?(name) }
+          path = generated_route_path(route, given)
+          bare = route.req_format.nil? && given.key?("format") ? path.delete_suffix("." + given["format"].to_s) : path
+          next if ActionDispatch::Router.match_pattern(route.pattern, bare, route.int_params + "", route.seg_constraints + "").nil?
+          score = required * 2 + names.length
+          score += 1 if route.req_format.nil? && route.pattern != "/" && given.key?("format")
+          if score > best_score
+            best = route
+            best_score = score
+          end
+        end
+        raise "No route matches {#{generation_options_text(given)}}" if best.nil?
+        best
+      end
+
+      # `{action: "show", controller: "articles"}`, as Rails' message
+      # spells the options it could not route.
+      def generation_options_text(given)
+        given.keys.sort.map { |key| "#{key}: #{given[key].inspect}" }.join(", ")
+      end
+
+      # The `:name` and `*name` segments of a route pattern, a literal
+      # prefix (`/~:user`) or suffix (`/c/:id.json`) aside.
+      def generation_segment_names(pattern)
+        names = []
+        pattern.split("/").each do |segment|
+          at = segment.index(":") || segment.index("*")
+          next if at.nil?
+          name = segment[at + 1, segment.length].to_s
+          stop = name.index(/[^A-Za-z0-9_]/)
+          names << (stop.nil? ? name : name[0, stop].to_s)
+        end
+        names
+      end
+
+      # The pattern with each segment's value in place, escaped as
+      # Journey escapes a segment (a glob as a path), and `.format`
+      # appended when the format was given and the route does not force
+      # one.
+      def generated_route_path(route, given)
+        out = []
+        route.pattern.split("/").each do |segment|
+          at = segment.index(":") || segment.index("*")
+          if at.nil?
+            out << segment
+            next
+          end
+          glob = segment[at, 1] == "*"
+          name = segment[at + 1, segment.length].to_s
+          stop = name.index(/[^A-Za-z0-9_]/)
+          tail = stop.nil? ? "" : name[stop, name.length].to_s
+          name = name[0, stop].to_s unless stop.nil?
+          value = ActionDispatch::Router.escape_path(given[name].to_s)
+          value = value.gsub("/", "%2F") unless glob
+          out << segment[0, at].to_s + value + tail
+        end
+        path = out.join("/")
+        path = "/" if path.empty?
+        path += "." + given["format"].to_s if route.req_format.nil? && route.pattern != "/" && given.key?("format")
+        path
+      end
+
+      # The options that go to the query: those neither a segment of the
+      # route nor one of its defaults (controller, action, a forced
+      # format) take.
+      def generated_query_keys(route, options)
+        used = generation_segment_names(route.pattern) + ["controller", "action"]
+        used << "format" if !route.req_format.nil? || route.pattern != "/"
+        options.keys.reject { |key| used.include?(key) }
+      end
+    end
+  end
+
   class IntegrationTest < TestBase
     include RequestDispatch
+    include Assertions::RoutingAssertions
   end
 
   # `ActionDispatch::Integration::Session.new(Rails.application)` — a
@@ -1618,14 +1838,99 @@ module ActionCable
   end
 
   module Connection
+    # Rails' `ActionCable::Connection::TestSocket` (8.2): the socket a
+    # `Connection::TestCase` connection is accepted on. It records what
+    # the connection was told — `transmissions`, the frames, and
+    # `closed` — and runs `perform_work` inline, as Rails' test server
+    # does, so a test's `connection.beat` has finished its work when it
+    # returns. `close_with_reason` is the call `Connection::Base#close`
+    # makes on its socket on both lanes, answered with the disconnect
+    # frame Rails' `close` transmits and the close.
+    #
+    # `build_request(path, cookies:)` is Rails' request for a socket, cut
+    # to what a connection here reads off it: the path and the cookie jar.
+    class TestSocket
+      class Request
+        attr_reader :path, :cookie_jar
+
+        def initialize(path, cookie_jar)
+          @path = path
+          @cookie_jar = cookie_jar
+        end
+      end
+
+      def self.build_request(path, cookies:)
+        Request.new(path, cookies)
+      end
+
+      attr_reader :request, :transmissions, :closed
+
+      def initialize(request)
+        @request = request
+        @transmissions = [{ type: "", reason: "", reconnect: false }]
+        @transmissions.pop
+        @closed = false
+      end
+
+      def close_with_reason(reason, reconnect)
+        @transmissions << { type: "disconnect", reason: reason.to_s, reconnect: reconnect ? true : false }
+        @closed = true
+        nil
+      end
+
+      def perform_work(receiver)
+        receiver.call
+        nil
+      end
+    end
+
+    # Rails' `ActionCable::Connection::TestServer`, which a test hands a
+    # connection it builds itself. Its executor and pub/sub are the
+    # socket's here (`TestSocket#perform_work` runs inline), so it holds
+    # nothing; `lower::cable_test_case` drops it from the constructor.
+    class TestServer
+      def initialize(server)
+        @server = server
+      end
+    end
+
+    # What a test's `ApplicationCable::Connection.new(TestServer.new(…),
+    # socket)` lowers to (`lower::cable_test_case`): Rails 8.2 builds a
+    # connection from a server and a socket, this runtime from the
+    # handshake's cookie jar — so the connection is built the way
+    # `Cable.identify` builds one, over the socket's jar, and accepted on
+    # the socket.
+    def self.accept_test_socket(sock)
+      conn = build(sock.request.cookie_jar)
+      conn.transport = sock
+      conn
+    end
+
+    # Rails' `handle_open`, the server's call when a socket opens:
+    # `connect`, and a rejection answered by closing with the
+    # unauthorized reason and no reconnect. The live servers on both
+    # lanes refuse an unauthorized handshake before it is a socket
+    # (`Cable.upgrade` answers 401), so only a test reaches this.
+    class Base
+      def handle_open
+        begin
+          connect
+        rescue ActionCable::Connection::Authorization::UnauthorizedError
+          close(reason: ActionCable::INTERNAL[:disconnect_reasons][:unauthorized], reconnect: false)
+        end
+        nil
+      end
+    end
+
     # `ActionCable::Connection::TestCase` — Rails' way of running an
-    # app's `connect` against a cookie jar the test seeded, with no
-    # socket. `cookies.signed[:session_token] = token` writes the jar,
-    # `connect` builds the app's connection class over it (the same
-    # factory `Cable.identify` uses, so this IS the handshake's code
-    # path minus the socket) and runs `connect`; `connection` is the
-    # identified object, and `assert_reject_connection` is the
-    # `reject_unauthorized_connection` raise, caught.
+    # app's `connect` against a cookie jar the test seeded.
+    # `cookies.signed[:session_token] = token` writes the jar, `connect`
+    # builds the app's connection class over it (the same factory
+    # `Cable.identify` uses, so this IS the handshake's code path) on a
+    # fresh `TestSocket` and runs `connect`; `connection` is the
+    # identified object, `socket` what it was told, and
+    # `assert_reject_connection` is the `reject_unauthorized_connection`
+    # raise, caught.
     class TestCase < TestBase
       def cookies
         @__cookies = ActionController::CookieJar.new if @__cookies.nil?
@@ -1633,10 +1938,19 @@ module ActionCable
       end
 
       def connect
+        sock = ActionCable::Connection::TestSocket.new(
+          ActionCable::Connection::TestSocket.build_request("/cable", cookies: cookies)
+        )
+        @__socket = sock
         conn = ActionCable::Connection.build(cookies)
+        conn.transport = sock
         conn.connect
         @__connection = conn
         nil
+      end
+
+      def socket
+        @__socket
       end
 
       # Rails: `check_connected!` — "Must be connected!".
@@ -1660,6 +1974,149 @@ module ActionCable
           raise "Expected to reject connection but no rejection was made"
         end
         nil
+      end
+    end
+  end
+end
+
+module ActionController
+  # Rails' `ActionController::TestCase` (8.1): a functional test that
+  # runs one controller's actions directly, without routing a path.
+  # `@controller` (the controller under test) and `@__controller_route`
+  # (its router symbol) are assigned at the start of each test by the
+  # `controller_test_case` lowering, as Rails'
+  # `setup_controller_request_and_response` builds the controller before
+  # the test's own setup.
+  #
+  # `get :show, params: { id: 1 }` is Rails' `process`:
+  # - before each request but the first, the instance variables the
+  #   previous ones left on the controller are cleared, and the
+  #   controller's response state is reset (`recycle!`);
+  # - the params become what a request carries, Strings
+  #   (`ActionController::TestRequest#assign_parameters`: a record by
+  #   `to_param`, nil as "", nested Hashes and Arrays alike);
+  # - the route is checked as Rails generates it: a route of this
+  #   controller and action whose dynamic segments all have a value,
+  #   whatever its verb, the first in the table; none is "No route
+  #   matches", Rails' ActionController::UrlGenerationError. The values
+  #   used by the path are the path parameters, the rest the request's
+  #   params, and `format:` is one of them;
+  # - `session:` and `flash:` are merged into the test's session and
+  #   flash, which persist across the test's requests (`session[:u] = x`
+  #   before a request reaches it); `xhr: true` sets the XHR headers;
+  # - the action runs through the same `run_controller` an integration
+  #   test's request ends in, and `response` / `@response` is the result.
+  class TestCase < TestBase
+    include RequestDispatch
+    include ActionDispatch::Assertions::RoutingAssertions
+
+    def get(action, params: {}, session: {}, flash: {}, format: nil, xhr: false, as: nil)
+      process(action, "GET", params, session, flash, format, xhr, as)
+    end
+
+    def post(action, params: {}, session: {}, flash: {}, format: nil, xhr: false, as: nil)
+      process(action, "POST", params, session, flash, format, xhr, as)
+    end
+
+    def patch(action, params: {}, session: {}, flash: {}, format: nil, xhr: false, as: nil)
+      process(action, "PATCH", params, session, flash, format, xhr, as)
+    end
+
+    def put(action, params: {}, session: {}, flash: {}, format: nil, xhr: false, as: nil)
+      process(action, "PUT", params, session, flash, format, xhr, as)
+    end
+
+    def delete(action, params: {}, session: {}, flash: {}, format: nil, xhr: false, as: nil)
+      process(action, "DELETE", params, session, flash, format, xhr, as)
+    end
+
+    def head(action, params: {}, session: {}, flash: {}, format: nil, xhr: false, as: nil)
+      process(action, "HEAD", params, session, flash, format, xhr, as)
+    end
+
+    def session
+      @__session ||= ActionDispatch::Session.new
+    end
+
+    def flash
+      @__flash ||= ActionDispatch::Flash.new
+    end
+
+    def process(action, method, params, session_values, flash_values, format, xhr, as)
+      require_relative "../config/routes"
+      @controller.clear_instance_variables_between_requests if @__processed
+      @__processed = true
+      @controller.recycle!
+      wanted = action.to_s
+      request_params = stringify_keys({})
+      params.each { |key, value| request_params[key.to_s] = test_request_param(value) }
+      request_params["format"] = format.to_s unless format.nil?
+      route = nil
+      path_params = {}
+      path = ""
+      table = [RouteTable.root] + RouteTable.table
+      i = 0
+      while i < table.length && route.nil?
+        candidate = table[i]
+        i += 1
+        next unless candidate.controller == @__controller_route && candidate.action.to_s == wanted
+        captured = {}
+        segments = []
+        fits = true
+        candidate.pattern_parts.each do |part|
+          if part.start_with?(":") || part.start_with?("*")
+            value = request_params[part[1..]]
+            if value.nil? || value.to_s.empty?
+              fits = false
+            else
+              captured[part[1..]] = value.to_s
+              segments << value.to_s
+            end
+          else
+            segments << part
+          end
+        end
+        next unless fits
+        route = candidate
+        path_params = captured
+        path = segments.join("/")
+      end
+      if route.nil?
+        controller_path = RouteTable::CONTROLLER_PATHS[@__controller_route] || @__controller_route.to_s
+        raise "No route matches {action: #{wanted.inspect}, controller: #{controller_path.inspect}}"
+      end
+      path = "/" if path.empty?
+      unless format.nil?
+        path = path + "." + format.to_s
+        path_params["format"] = format.to_s
+      end
+      rest = stringify_keys({})
+      request_params.each { |key, value| rest[key] = value unless path_params.key?(key) }
+      session_values.each { |key, value| session[key] = value }
+      flash_values.each { |key, value| flash[key] = value }
+      headers = {}
+      if xhr
+        headers["HTTP_X_REQUESTED_WITH"] = "XMLHttpRequest"
+        headers["HTTP_ACCEPT"] = "text/javascript, text/html, application/xml, text/xml, */*"
+      end
+      run_controller(@controller, route.action, path_params, nil, method, method, path, "", rest, headers, as)
+    end
+
+    # A param value as a request carries it: what Rails' TestRequest
+    # gets back from encoding the params into the query or the body.
+    def test_request_param(value)
+      if value.is_a?(Hash)
+        out = stringify_keys({})
+        value.each { |key, inner| out[key.to_s] = test_request_param(inner) }
+        out
+      elsif value.is_a?(Array)
+        value.map { |inner| test_request_param(inner) }
+      elsif value.nil?
+        ""
+      elsif value.is_a?(ActiveRecord::Base)
+        value.to_param.to_s
+      else
+        value.to_s
       end
     end
   end
@@ -1791,6 +2248,15 @@ module RequestDispatch
     @__response
   end
 
+  # The last request's flash, as Rails' integration tests read it
+  # (`assert_equal "✓", flash[:notice]` after an unfollowed redirect).
+  # The dispatch already keeps it in `@__flash` to carry into the next
+  # request; this is its reader.
+  def flash
+    @__flash = ActionDispatch::Flash.new if @__flash.nil?
+    @__flash
+  end
+
   # `host! "once.campfire.test"` — the Host every subsequent request in
   # this test carries. Rails' integration tests set it when the app
   # reads the host back: campfire's messages_controller_test does,
@@ -1900,6 +2366,15 @@ module RequestDispatch
                  when :comments then CommentsController.new
                  else ActiveStorage::Routes.instantiate_controller(matched.controller)
                  end
+    run_controller(controller, matched.action, matched.path_params, matched.req_format, method, wire_method, path, query, params, headers, as)
+  end
+
+  # The request through `controller`, once the route is known: the
+  # params, session, flash, cookies and request the controller reads,
+  # the action run inside a connection lease, and the response kept.
+  # `dispatch_request` comes here after the router matched the path;
+  # ActionController::TestCase#process with the controller it holds.
+  def run_controller(controller, action, path_params, req_format, method, wire_method, path, query, params, headers, as)
     # Test fixtures pass Symbol-keyed nested hashes (`{article: {title:
     # ...}}`); the wire-level request body is String-keyed at runtime.
     # Stringify recursively so the harness shape matches what the
@@ -1949,9 +2424,9 @@ module RequestDispatch
       from_query.each { |k, v| merged[k] = v }
     end
     # Rails' `params.merge!(path_parameters)`: the route's own segments win over both.
-    matched.path_params.each { |k, v| merged[k.to_s] = v }
+    path_params.each { |k, v| merged[k.to_s] = v }
     controller.params  = merged
-    controller.path_parameters = matched.path_params
+    controller.path_parameters = path_params
     controller.session = @__session ||= ActionDispatch::Session.new
     controller.flash   = @__flash   ||= ActionDispatch::Flash.new
     # The inbound jar is the browser's whole state — what the test has
@@ -1973,12 +2448,14 @@ module RequestDispatch
     # `to_sym`, the same shape main.rb uses and for the same reason: a
     # Symbol materialized from a runtime String is not a shape the
     # strict targets share.
-    path_format = matched.path_params.fetch("format", "")
+    path_format = path_params.fetch("format", "")
     controller.request_format = :json if path_format == "json"
     controller.request_format = :turbo_stream if path_format == "turbo_stream"
     controller.request_format = :rss if path_format == "rss"
-    controller.request_format = :json if matched.req_format == :json
-    controller.request_format = :rss if matched.req_format == :rss
+    if path_format.empty?
+      controller.request_format = :json if req_format == :json
+      controller.request_format = :rss if req_format == :rss
+    end
     controller.request_format = :json if as == :json
     # The request object, built the way the dispatcher builds it (see
     # `main.rb`'s `controller.request = ActionDispatch::Request.new(...)`).
@@ -2066,7 +2543,7 @@ module RequestDispatch
       Db.query_cache_begin unless cached
       Db.read_snapshot_begin if snapshot
       begin
-        controller.process_action(matched.action)
+        controller.process_action(action)
       ensure
         Db.read_snapshot_end if snapshot
         Db.query_cache_end unless cached
@@ -2077,7 +2554,7 @@ module RequestDispatch
         Db.query_cache_begin unless cached
         Db.read_snapshot_begin if snapshot
         begin
-          controller.process_action(matched.action)
+          controller.process_action(action)
         ensure
           Db.read_snapshot_end if snapshot
           Db.query_cache_end unless cached
@@ -2172,11 +2649,27 @@ module RequestDispatch
     hash.each do |k, v|
       if v.is_a?(Hash)
         out[k.to_s] = stringify_keys(v)
+      elsif v.is_a?(Array)
+        # A form's `items[][name]` arrives as String-keyed hashes too,
+        # at any depth of nesting.
+        out[k.to_s] = stringify_list(v)
       else
         out[k.to_s] = v
       end
     end
     out
+  end
+
+  def stringify_list(list)
+    list.map do |item|
+      if item.is_a?(Hash)
+        stringify_keys(item)
+      elsif item.is_a?(Array)
+        stringify_list(item)
+      else
+        item
+      end
+    end
   end
 
   # Symbol-form HTTP-status assertion. Real-blog tests pass `:success`,

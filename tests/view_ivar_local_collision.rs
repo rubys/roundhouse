@@ -93,7 +93,7 @@ fn each_ivar_gets_its_own_parameter() {
     let views = emitted(ruby::emit_lowered_views(&app));
     let show = find(&views, "app/views/posts/show.rb");
     let parsed = ruby_prism::parse(show.as_bytes());
-    let errors: Vec<String> = parsed.errors().map(|e| e.message().to_string()).collect();
+    let errors: Vec<String> = parsed.errors().map(|e| String::from_utf8_lossy(e.message()).into_owned()).collect();
     assert!(errors.is_empty(), "show.rb does not parse: {errors:?}\n{show}");
     assert!(show.contains("def self.show(class__, class_, post,"), "{show}");
 

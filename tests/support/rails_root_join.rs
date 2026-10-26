@@ -20,6 +20,18 @@ pub fn overlay() -> super::emit_and_run::Overlay {
   def self.storage_dir
     (Rails.root + "storage").to_s
   end
+
+  def self.text_at(path)
+    File.read(path)
+  end
+
+  def self.routes_by_string
+    text_at(Rails.root.to_s + "/config/routes.rb")
+  end
+
+  def self.routes_by_path
+    text_at(Rails.root.join("config", "routes.rb"))
+  end
 "#,
     )
 }
@@ -30,5 +42,6 @@ raise "no parts: #{Article.source_root.inspect}" unless Article.source_root == r
 raise "two parts: #{Article.source_dir.inspect}" unless Article.source_dir == root + "/source/posts"
 raise "three parts: #{Article.source_file.inspect}" unless Article.source_file == root + "/source/posts/index.md"
 raise "plus: #{Article.storage_dir.inspect}" unless Article.storage_dir == root + "/storage"
+raise "path and String: #{Article.routes_by_path.inspect}" unless Article.routes_by_path == Article.routes_by_string && !Article.routes_by_path.empty?
 puts "Rails.root.join contract passed"
 "#;

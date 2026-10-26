@@ -390,7 +390,7 @@ fn runtime(native: bool) {
     std::fs::create_dir_all(&dir).unwrap();
     let _cleanup = ScratchDir(dir.clone());
     let prelude = if native {
-        for name in ["db.rb", "active_support_time_parsing.rb"] {
+        for name in ["db.rb", "active_support_time_parsing.rb", "active_support_interval.rb", "active_support_duration.rb"] {
             std::fs::copy(root.join("runtime/spinel").join(name), dir.join(name)).unwrap();
         }
         "require_relative \"db\"\n".to_string()

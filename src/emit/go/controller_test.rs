@@ -153,8 +153,10 @@ fn emit_go_ctrl_test_send(
         }
         Some(ControllerTestSend::AssertResponse { sym }) => match sym.as_str() {
             "success" => "resp.AssertOk()".to_string(),
-            "unprocessable_entity" | "unprocessable_content" => "resp.AssertUnprocessable()".to_string(),
-            other => format!("resp.AssertStatus(200) // TODO: {other:?}"),
+            other => match crate::lower::controller_test::asserted_status_code(other) {
+                Some(code) => format!("resp.AssertStatus({code})"),
+                None => crate::emit::diagnostics::report_unsupported(crate::span::Span::synthetic(), "go2", "assert_response", format!("`:{other}` names no single status")),
+            },
         },
         Some(ControllerTestSend::AssertRedirectedTo { url }) => {
             let u = emit_go_url_expr(url, app, ctx);
@@ -218,10 +220,7 @@ fn emit_go_assert_select_classified(
     let ExprNode::Lit { value: Literal::Str { value: selector } } =
         &*selector_expr.node
     else {
-        return format!(
-            "resp.AssertSelect({}) // TODO: dynamic selector",
-            emit_go_ctrl_test_expr(selector_expr, app, ctx),
-        );
+        return crate::emit::diagnostics::report_unsupported(selector_expr.span, "go2", "assert_select", "a selector computed when the test runs");
     };
     match kind {
         AssertSelectKind::Text(expr) => {
@@ -364,7 +363,7 @@ fn emit_go_ctrl_test_expr(expr: &Expr, app: &App, ctx: &GoTestCtx) -> String {
             }
             format!("fmt.Sprintf({format:?}, {})", values.join(", "))
         }
-        _ => "nil /* TODO expr */".to_string(),
+        other => crate::emit::diagnostics::report_unsupported(expr.span, "go2", other.kind_str(), "in a controller test"),
     }
 }
 

@@ -14,4 +14,12 @@
 module ActiveRecord
   class ConnectionNotEstablished < StandardError
   end
+
+  # A failed open and a timed-out open. Both are
+  # ConnectionNotEstablished, so a rescue of the parent catches them.
+  class ConnectionFailed < ConnectionNotEstablished
+  end
+
+  class ConnectionTimeoutError < ConnectionNotEstablished
+  end
 end

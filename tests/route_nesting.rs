@@ -302,3 +302,38 @@ fn a_later_empty_except_clears_an_earlier_except() {
     );
     assert!(r.iter().any(|a| a == "show"), "{r:?}");
 }
+
+#[test]
+fn a_resources_alias_names_its_children_and_their_param() {
+    // Rails 8.1.4 (`bin/rails routes`):
+    //   pin_person     POST /users/:id/pin           users#pin
+    //   search_people  GET  /users/search            users#search
+    //   person_notes   GET  /users/:person_id/notes  notes#index
+    //   people         GET  /users                   users#index
+    // `as:` renames the children's helpers and the nested param, not
+    // the path segment or the controller. The children used to read the
+    // parent's original name: `pin_user`, `user_notes` at
+    // `/users/:user_id/notes`.
+    let src = r#"
+  resources :users, as: :people, only: [:index] do
+    member { post :pin }
+    collection { get :search }
+    resources :notes, only: [:index]
+  end
+"#;
+    let r = routes_of(src);
+    assert_eq!(find(&r, "pin_person"), Some("/users/:id/pin"), "{r:?}");
+    assert_eq!(find(&r, "search_people"), Some("/users/search"), "{r:?}");
+    assert_eq!(find(&r, "person_notes"), Some("/users/:person_id/notes"), "{r:?}");
+    assert_eq!(find(&r, "people"), Some("/users"), "{r:?}");
+    for old in ["pin_user", "search_users", "user_notes"] {
+        assert_eq!(find(&r, old), None, "{r:?}");
+    }
+    let controllers: Vec<String> = flat_routes_of(src)
+        .iter()
+        .map(|f| format!("{}#{}", f.controller.0.as_str(), f.action.as_str()))
+        .collect();
+    for want in ["UsersController#pin", "UsersController#search", "NotesController#index"] {
+        assert!(controllers.iter().any(|c| c == want), "{want}: {controllers:?}");
+    }
+}

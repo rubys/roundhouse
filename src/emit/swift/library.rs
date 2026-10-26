@@ -103,6 +103,37 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
         .map(|s| type_name(s.as_str()))
         .unwrap_or_default();
     register_params_for(&name, methods);
+    // Not left bare: a module renders with no class context, so a bare call to a throwing sibling would get no `try`
+    let qualified: Vec<MethodDef>;
+    let methods: &[MethodDef] = match methods.first().and_then(|m| m.enclosing_class.as_ref()) {
+        Some(owner) => {
+            let owner = crate::ident::ClassId(owner.clone());
+            let names: std::collections::HashSet<crate::ident::Symbol> = methods.iter().map(|m| m.name.clone()).collect();
+            qualified = methods
+                .iter()
+                .cloned()
+                .map(|mut m| {
+                    super::route_errors::qualify_siblings(&mut m.body, &owner, &names);
+                    m
+                })
+                .collect();
+            &qualified
+        }
+        None => methods,
+    };
+    loop {
+        let mut changed = false;
+        for m in methods {
+            let method = camel(m.name.as_str());
+            if !super::expr::throws_lookup(&name, &method) && super::expr::body_throws(&m.body, &name) {
+                super::expr::register_throws(format!("{name}.{method}"));
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
     let mut out = format!("enum {name} {{\n");
     out.push_str(&emit_module_ivars(methods, &BTreeMap::new()));
     for m in methods {
@@ -341,6 +372,14 @@ pub fn register_throws_contract(class: &str, method_camel: &str) {
 /// (via the swift_units transform) and the models; `swift::emit` resets
 /// the registries once at start.
 pub fn register_classes(lcs: &[LibraryClass]) {
+    // Not only in the loop below: a module listed before the error classes it raises would run its throws fixpoint without them
+    for lc in lcs {
+        if let Some(p) = &lc.parent
+            && is_core_error(p.0.as_str().rsplit("::").next().unwrap_or(""))
+        {
+            super::expr::register_error_class(type_name(lc.name.0.as_str()));
+        }
+    }
     for lc in lcs {
         let cls = type_name(lc.name.0.as_str());
         // Pure readers collapse into properties, so they're NOT methods
@@ -367,7 +406,7 @@ pub fn register_classes(lcs: &[LibraryClass]) {
         // walk.
         if let Some(p) = &lc.parent {
             let pn = p.0.as_str().rsplit("::").next().unwrap_or("");
-            if matches!(pn, "StandardError" | "RuntimeError" | "Exception") {
+            if is_core_error(pn) {
                 super::expr::register_error_class(cls.clone());
             } else {
                 super::expr::register_class_parent(cls.clone(), type_name(p.0.as_str()));
@@ -578,10 +617,7 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     // (`expr::set_error_class`).
     let is_error_class = matches!(
         &lc.parent,
-        Some(p) if matches!(
-            p.0.as_str().rsplit("::").next().unwrap_or(""),
-            "StandardError" | "RuntimeError" | "Exception"
-        )
+        Some(p) if is_core_error(p.0.as_str().rsplit("::").next().unwrap_or(""))
     );
     super::expr::set_error_class(is_error_class);
     let header = match &lc.parent {
@@ -593,6 +629,10 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     out.push_str(" {\n");
     if is_error_class {
         out.push_str("    var message: String = \"\"\n");
+        // Not the implicit init alone: `raise X, "message"` builds the error with its message
+        if !lc.methods.iter().any(|m| m.receiver == MethodReceiver::Instance && m.name.as_str() == "initialize") {
+            out.push_str("    init() {}\n    init(_ message: String) { self.message = message }\n");
+        }
     }
 
     // Properties. A slot an ANCESTOR already declares is skipped —
@@ -1060,7 +1100,7 @@ fn emit_method_impl(m: &MethodDef, is_static: bool, ctx: Option<&ClassCtx>) -> S
         Some(Ty::Fn { params, .. }) => Some(params),
         _ => None,
     };
-    let params: Vec<String> = m
+    let mut params: Vec<String> = m
         .params
         .iter()
         .enumerate()
@@ -1076,16 +1116,25 @@ fn emit_method_impl(m: &MethodDef, is_static: bool, ctx: Option<&ClassCtx>) -> S
             }
         })
         .collect();
+    // Not left for `yield` to reach nothing: a yielding method takes its block as a closure, as the Kotlin and C# trees do
+    if body_has_yield(&m.body) {
+        let bt = match m.signature.as_ref() {
+            Some(Ty::Fn { block: Some(b), .. }) => swift_ty(b),
+            _ => "(Any?) -> Void".to_string(),
+        };
+        params.push(format!("_ block: {bt}"));
+    }
 
     // Ruby `initialize` → a real Swift `init` (no func keyword, no
     // return clause; `self.`-qualified property assigns let ctor params
     // shadow the properties).
     let is_init = !is_static && m.name.as_str() == "initialize";
 
-    // Return type.
+    // Return type. Not Void for a method without a signature: an app method's answer is its body's type
     let ret_ty = match m.signature.as_ref() {
         Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
-        _ => None,
+        _ if m.name.as_str() == "initialize" => None,
+        _ => m.body.ty.clone().filter(|t| !t.is_open()),
     };
     let returns_value =
         !is_init && !force_unit && matches!(&ret_ty, Some(t) if !matches!(t, Ty::Nil));
@@ -1151,7 +1200,9 @@ fn emit_method_impl(m: &MethodDef, is_static: bool, ctx: Option<&ClassCtx>) -> S
     // directly, via a throwing callee, or by registered contract
     // (ancestor walk covers throwing overrides of a contract decl) —
     // carries `throws`.
-    let cls_name = ctx.map(|c| c.name.as_str()).unwrap_or("");
+    // Not "" for a module: an enum's static methods call each other bare, and the fixpoint registered them under its name
+    let module_name = super::expr::current_class();
+    let cls_name = ctx.map(|c| c.name.as_str()).unwrap_or(module_name.as_str());
     let throws_kw = if super::expr::body_throws(&m.body, cls_name)
         || (!cls_name.is_empty() && super::expr::throws_lookup(cls_name, &name))
     {
@@ -1352,4 +1403,23 @@ fn try_default_for(ty: &Ty) -> Option<String> {
         Ty::Untyped | Ty::Var { .. } => "nil".to_string(),
         _ => return None,
     })
+}
+
+fn body_has_yield(e: &Expr) -> bool {
+    if matches!(&*e.node, ExprNode::Yield { .. }) {
+        return true;
+    }
+    let mut found = false;
+    // Into blocks too: Ruby's `items.each { |i| yield i }` yields to the method's own block
+    e.node.for_each_child(&mut |c| found |= body_has_yield(c));
+    found
+}
+
+// Not StandardError alone: ArgumentError and the other core errors are what a runtime raises too, and Swift has none of them
+fn is_core_error(name: &str) -> bool {
+    matches!(
+        name,
+        "StandardError" | "RuntimeError" | "Exception" | "ArgumentError" | "TypeError" | "NameError"
+            | "NoMethodError" | "NotImplementedError" | "KeyError" | "IndexError"
+    )
 }

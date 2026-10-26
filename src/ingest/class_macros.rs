@@ -33,11 +33,12 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::App;
-use crate::dialect::{MethodDef, MethodReceiver, MethodVisibility, ModelBodyItem, Param};
+use crate::dialect::{LibraryClass, MethodDef, MethodReceiver, MethodVisibility, ModelBodyItem, Param};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol};
 use crate::span::{SourceFile, Span};
 
+use crate::ingest::prism_api::PrismLocation;
 const MAX_DEPTH: usize = 8;
 
 pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile]) {
@@ -47,14 +48,62 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile]) {
         .filter_map(|m| Some((m.name.clone(), m.parent.clone()?)))
         .chain(app.library_classes.iter().filter(|lc| !lc.is_module).filter_map(|lc| Some((lc.name.clone(), lc.parent.clone()?))))
         .collect();
+    let hooks = hook_macro_table(app);
+    let cvar_readers: HashMap<(String, String), Symbol> = app
+        .library_classes
+        .iter()
+        .flat_map(|c| {
+            c.methods.iter().filter(|m| m.receiver == MethodReceiver::Class && m.params.is_empty()).filter_map(move |m| {
+                let body = match &*m.body.node {
+                    ExprNode::Seq { exprs } if exprs.len() == 1 => &exprs[0],
+                    _ => &m.body,
+                };
+                match &*body.node {
+                    ExprNode::Var { name, .. } if name.as_str().starts_with("@@") => {
+                        Some(((c.name.0.as_str().to_string(), name.as_str().to_string()), m.name.clone()))
+                    }
+                    _ => None,
+                }
+            })
+        })
+        .collect();
+    let mut module_methods: HashMap<String, Vec<MethodDef>> = HashMap::new();
+    for lc in app.library_classes.iter().filter(|lc| lc.is_module) {
+        module_methods.entry(lc.name.0.as_str().to_string()).or_default().extend(lc.methods.iter().filter(|m| m.receiver == MethodReceiver::Instance).cloned());
+    }
+    let extended_from: HashMap<Symbol, ClassId> = app
+        .load_hook_extended_macros
+        .iter()
+        .flat_map(|id| {
+            app.library_classes.iter().filter(move |c| &c.name == id).flat_map(move |c| {
+                c.methods.iter().filter(|m| m.receiver == MethodReceiver::Instance).map(move |m| (m.name.clone(), id.clone()))
+            })
+        })
+        .collect();
+    let frozen = frozen_readers(app, sources);
+    let known: HashSet<String> = app
+        .library_classes
+        .iter()
+        .map(|c| c.name.0.as_str().to_string())
+        .chain(app.models.iter().map(|m| m.name.0.as_str().to_string()))
+        .collect();
     for model_index in 0..app.models.len() {
         let ancestors = ancestors(app, &parents, &app.models[model_index].name);
-        if ancestors.is_empty() {
+        let mut table = class_method_table(app, &ancestors);
+        // Not the model's own: the `on_load` reopen of ActiveRecord::Base carries the hook's very definitions (audited's Concern).
+        let own_names: HashSet<Symbol> =
+            table.iter().filter(|(name, def)| hooks.get(*name).is_none_or(|hook| hook.name_span != def.name_span)).map(|(name, _)| name.clone()).collect();
+        for (name, def) in &hooks {
+            table.entry(name.clone()).or_insert_with(|| def.clone());
+        }
+        if table.is_empty() {
             continue;
         }
-        let table = class_method_table(app, &ancestors);
-        let macros: HashSet<Symbol> =
-            table.keys().filter(|name| reaches_definition(name, &table, 0)).cloned().collect();
+        let macros: HashSet<Symbol> = table
+            .keys()
+            .filter(|name| (hooks.contains_key(*name) && !own_names.contains(*name)) || reaches_definition(name, &table, 0))
+            .cloned()
+            .collect();
         if macros.is_empty() {
             continue;
         }
@@ -87,13 +136,32 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile]) {
         let mut defined: HashSet<(Symbol, MethodReceiver)> = HashSet::new();
         let mut reserved: Option<HashSet<Symbol>> = None;
         let mut expansions: HashMap<usize, Vec<ModelBodyItem>> = HashMap::new();
+        let mut defaults: indexmap::IndexMap<Symbol, Expr> = indexmap::IndexMap::new();
+        let mut extended: HashSet<ClassId> = HashSet::new();
+        let mut included: Vec<String> = app.load_hook_class_macros.iter().map(|id| id.0.as_str().to_string()).collect();
+        for id in ancestors.iter().chain(std::iter::once(&model.name)) {
+            for item in app.models.iter().filter(|m| &m.name == id).flat_map(|m| m.body.iter()) {
+                if let ModelBodyItem::Unknown { expr, .. } = item
+                    && let ExprNode::Send { recv: None, method, args, .. } = &*expr.node
+                    && method.as_str() == "include"
+                {
+                    included.extend(args.iter().filter_map(|a| match &*a.node {
+                        ExprNode::Const { path } => Some(path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::")),
+                        _ => None,
+                    }));
+                }
+            }
+            for lc in app.library_classes.iter().filter(|lc| &lc.name == id) {
+                included.extend(lc.includes.iter().map(|i| i.0.as_str().trim_start_matches("::").to_string()));
+            }
+        }
         for (index, item) in model.body.iter().enumerate() {
             let ModelBodyItem::Unknown { expr, .. } = item else { continue };
             let ExprNode::Send { recv, method, args, block, .. } = &*expr.node else { continue };
             if !macros.contains(method) || recv.as_ref().is_some_and(|r| !matches!(&*r.node, ExprNode::SelfRef)) {
                 continue;
             }
-            let mut run = Run { table: &table, constants: &constants, prefix: &prefix, counter, out: Vec::new(), methods: Vec::new(), aliases: Vec::new(), strings: HashMap::new(), owner: model.name.0.clone(), sources };
+            let mut run = Run { table: &table, constants: &constants, frozen: &frozen, cvar_readers: &cvar_readers, included: included.clone(), module_methods: &module_methods, extended: HashMap::new(), evaluated: Vec::new(), known: &known, scope: None, prefix: &prefix, counter, out: Vec::new(), replayed: HashSet::new(), class_attrs: HashMap::new(), unset_cattrs: HashMap::new(), methods: Vec::new(), aliases: Vec::new(), strings: HashMap::new(), owner: model.name.0.clone(), sources };
             let result = if block.is_some() {
                 Err("it is passed a block".to_string())
             } else if redefined {
@@ -120,12 +188,37 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile]) {
             match result {
                 Ok(()) => {
                     counter = run.counter;
-                    let mut items: Vec<ModelBodyItem> = run
-                        .out
-                        .into_iter()
-                        .map(|expr| ModelBodyItem::Unknown { expr, leading_comments: Vec::new(), leading_blank_line: false })
-                        .collect();
+                    let mut items: Vec<ModelBodyItem> = Vec::new();
+                    // Not left to the hook: Rails extends every model with the module, so the macro's class-side readers answer here too.
+                    if !own_names.contains(method)
+                        && let Some(module) = extended_from.get(method)
+                        && extended.insert(module.clone())
+                    {
+                        let path = std::iter::once(Symbol::from("")).chain(module.0.as_str().split("::").map(Symbol::from)).collect();
+                        let extend = Expr::new(expr.span, ExprNode::Send {
+                            recv: None,
+                            method: Symbol::from("extend"),
+                            args: vec![Expr::new(expr.span, ExprNode::Const { path })],
+                            block: None,
+                            parenthesized: false,
+                        });
+                        items.extend(replay(&extend, &model.name, &mut defaults));
+                    }
+                    for (index, mut statement) in run.out.into_iter().enumerate() {
+                        if run.replayed.contains(&index) {
+                            items.extend(replay(&statement, &model.name, &mut defaults));
+                        } else {
+                            // At the call, not the gem's line: the model's body orders its statements by offset.
+                            if !matches!(&*statement.node, ExprNode::Assign { target: LValue::Const { .. }, .. }) {
+                                statement.span = expr.span;
+                            }
+                            items.push(ModelBodyItem::Unknown { expr: statement, leading_comments: Vec::new(), leading_blank_line: false });
+                        }
+                    }
                     items.extend(run.methods.into_iter().map(|method| ModelBodyItem::Method { method, leading_comments: Vec::new(), leading_blank_line: false }));
+                    for code in &run.evaluated {
+                        items.extend(replay_source(code, &model.name, &mut defaults));
+                    }
                     items.extend(run.aliases.into_iter().map(|(new, old, span)| ModelBodyItem::Alias { new, old, leading_comments: Vec::new(), leading_blank_line: false, span }));
                     expansions.insert(index, items);
                 }
@@ -143,6 +236,7 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile]) {
             continue;
         }
         let model = &mut app.models[model_index];
+        model.class_attr_defaults.extend(defaults);
         let mut body = Vec::with_capacity(model.body.len());
         for (index, item) in std::mem::take(&mut model.body).into_iter().enumerate() {
             match expansions.remove(&index) {
@@ -151,6 +245,405 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile]) {
             }
         }
         model.body = body;
+    }
+    // A plain class's body call to its own (or an ancestor's) `def self.` macro
+    // runs as the class loads, as a model's does (#1281). Replayed instead, a
+    // `define_method` with a computed name is one the Spinel target refuses.
+    // Only a run that just defines methods expands; a call that can't is
+    // reported once, here, and not replayed.
+    for lc_index in 0..app.library_classes.len() {
+        let lc = &app.library_classes[lc_index];
+        if lc.is_module || lc.origin.is_some() || lc.unknown_calls.is_empty() {
+            continue;
+        }
+        let mut lineage = vec![lc.name.clone()];
+        lineage.extend(ancestors(app, &parents, &lc.name));
+        let table = class_method_table(app, &lineage);
+        let macros: HashSet<Symbol> = table.keys().filter(|name| reaches_definition(name, &table, 0)).cloned().collect();
+        if macros.is_empty() {
+            continue;
+        }
+        let constants = literal_constants(app, &lineage);
+        let redefined = table.contains_key(&Symbol::from("define_method")) || table.contains_key(&Symbol::from("define_singleton_method"));
+        let own: HashSet<(Symbol, MethodReceiver)> = lc.methods.iter().map(|m| (m.name.clone(), m.receiver)).collect();
+        let prefix = slot_prefix(lc.name.0.as_str());
+        let included: Vec<String> = lineage
+            .iter()
+            .flat_map(|id| app.library_classes.iter().filter(move |c| &c.name == id))
+            .flat_map(|c| c.includes.iter().map(|i| i.0.as_str().trim_start_matches("::").to_string()))
+            .collect();
+        let mut counter = 0usize;
+        let mut defined: HashSet<(Symbol, MethodReceiver)> = HashSet::new();
+        let mut added: Vec<MethodDef> = Vec::new();
+        let mut consumed: HashSet<usize> = HashSet::new();
+        let mut expanded: HashMap<Symbol, usize> = HashMap::new();
+        let mut failed: HashSet<Symbol> = HashSet::new();
+        for (index, expr) in lc.unknown_calls.iter().enumerate() {
+            let ExprNode::Send { recv, method, args, block, .. } = &*expr.node else { continue };
+            if !macros.contains(method) || recv.as_ref().is_some_and(|r| !matches!(&*r.node, ExprNode::SelfRef)) {
+                continue;
+            }
+            let mut run = Run { table: &table, constants: &constants, frozen: &frozen, cvar_readers: &cvar_readers, included: included.clone(), module_methods: &module_methods, extended: HashMap::new(), evaluated: Vec::new(), known: &known, scope: None, prefix: &prefix, counter, out: Vec::new(), replayed: HashSet::new(), class_attrs: HashMap::new(), unset_cattrs: HashMap::new(), methods: Vec::new(), aliases: Vec::new(), strings: HashMap::new(), owner: lc.name.0.clone(), sources };
+            let result = if block.is_some() {
+                Err("it is passed a block".to_string())
+            } else if redefined {
+                Err("the class redefines `define_method`".to_string())
+            } else if !call_syntax_kept(expr, sources) {
+                Err("its arguments use a splat or a block argument".to_string())
+            } else {
+                run.call(method, args, &HashMap::new(), 0)
+            }
+            .and_then(|()| {
+                // Not a plain class's to carry: what a model's expansion places in its body.
+                if !run.out.is_empty() || !run.evaluated.is_empty() || !run.aliases.is_empty() || !run.extended.is_empty() || !run.class_attrs.is_empty() {
+                    return Err("it does more than define methods".to_string());
+                }
+                for m in &run.methods {
+                    let key = (m.name.clone(), m.receiver);
+                    if own.contains(&key) || !defined.insert(key) {
+                        return Err(format!("`{}` is defined twice", m.name.as_str()));
+                    }
+                }
+                Ok(())
+            });
+            consumed.insert(index);
+            match result {
+                Ok(()) => {
+                    counter = run.counter;
+                    added.extend(run.methods);
+                    *expanded.entry(method.clone()).or_default() += 1;
+                }
+                Err(why) => {
+                    failed.insert(method.clone());
+                    super::prism::push(crate::diagnostic::Diagnostic::unsupported(
+                        expr.span,
+                        None,
+                        "class macro",
+                        format!("`{}` defines methods this call does not expand ({why}), so they are missing", method.as_str()),
+                    ));
+                }
+            }
+        }
+        if consumed.is_empty() {
+            continue;
+        }
+        // The class's own macro goes too once every mention of it is a call that expanded: its body
+        // (`define_method(meth, …)` over a name known only when it runs) is what a target refuses.
+        let spent: HashSet<Symbol> = expanded
+            .iter()
+            .filter(|(name, calls)| !failed.contains(*name) && mentions(name.as_str(), sources) == **calls)
+            .map(|(name, _)| name.clone())
+            .collect();
+        let lc = &mut app.library_classes[lc_index];
+        lc.methods.retain(|m| !(m.receiver == MethodReceiver::Class && spent.contains(&m.name)));
+        lc.methods.extend(added);
+        let calls = std::mem::take(&mut lc.unknown_calls);
+        lc.unknown_calls = calls.into_iter().enumerate().filter(|(i, _)| !consumed.contains(i)).map(|(_, e)| e).collect();
+    }
+}
+
+pub(crate) fn hook_macro_calls(app: &App) -> HashSet<Symbol> {
+    let hooks = hook_macro_table(app);
+    let mut called = HashSet::new();
+    for model in &app.models {
+        for item in &model.body {
+            let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+            if let ExprNode::Send { recv, method, .. } = &*expr.node
+                && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
+                && hooks.contains_key(method)
+            {
+                called.insert(method.clone());
+            }
+        }
+    }
+    called
+}
+
+/// Not kept once expanded: analyzed on the gem's module, the macro's `has_many` and `include` are reported.
+pub(crate) fn drop_expanded_hook_macros(app: &mut App, expanded: &HashSet<Symbol>, sources: &[SourceFile]) {
+    if expanded.is_empty() {
+        return;
+    }
+    // The `on_load` reopen of ActiveRecord::Base carries an included hook module's class methods too
+    let origins: Vec<(ClassId, MethodReceiver)> = app
+        .load_hook_class_macros
+        .iter()
+        .map(|id| (id.clone(), MethodReceiver::Class))
+        .chain(app.load_hook_extended_macros.iter().map(|id| (id.clone(), MethodReceiver::Instance)))
+        .chain(std::iter::once((ClassId(Symbol::from("ActiveRecord::Base")), MethodReceiver::Class)))
+        .collect();
+    let hooked = |class: &ClassId, m: &MethodDef| origins.iter().any(|(id, receiver)| id == class && *receiver == m.receiver);
+    // Not kept for a caller nothing calls: ancestry's `acts_as_tree` only forwards to the expanded `has_ancestry`.
+    let dead: HashSet<Symbol> = app
+        .library_classes
+        .iter()
+        .flat_map(|c| c.methods.iter().filter(|m| hooked(&c.name, m)))
+        .filter(|m| !expanded.contains(&m.name) && !implicitly_called(m.name.as_str()) && !mentioned(m.name.as_str(), sources))
+        .map(|m| m.name.clone())
+        .collect();
+    let mut called: HashSet<Symbol> = HashSet::new();
+    let mut note = |e: &Expr| {
+        visit(e, &mut |x| {
+            if let ExprNode::Send { method, .. } = &*x.node
+                && expanded.contains(method)
+            {
+                called.insert(method.clone());
+            }
+        })
+    };
+    for model in &app.models {
+        for item in &model.body {
+            if let ModelBodyItem::Unknown { expr, .. } = item {
+                note(expr);
+            }
+        }
+        for m in model.methods() {
+            note(&m.body);
+        }
+    }
+    for class in &app.library_classes {
+        for call in &class.unknown_calls {
+            note(call);
+        }
+        for m in &class.methods {
+            if !expanded.contains(&m.name) && !(hooked(&class.name, m) && dead.contains(&m.name)) {
+                note(&m.body);
+            }
+        }
+    }
+    for class in app.library_classes.iter_mut() {
+        let name = class.name.clone();
+        class.methods.retain(|m| {
+            !origins.iter().any(|(id, receiver)| id == &name && *receiver == m.receiver)
+                || (!dead.contains(&m.name) && (!expanded.contains(&m.name) || called.contains(&m.name)))
+        });
+    }
+}
+
+/// The macros a gem's `ActiveSupport.on_load(:active_record)` gives
+/// every model: an included module's class methods, an extended
+/// module's instance methods, each as a class method of the model.
+fn hook_macro_table(app: &App) -> HashMap<Symbol, MethodDef> {
+    let mut table = HashMap::new();
+    let sources = app
+        .load_hook_class_macros
+        .iter()
+        .map(|id| (id, MethodReceiver::Class))
+        .chain(app.load_hook_extended_macros.iter().map(|id| (id, MethodReceiver::Instance)));
+    for (id, receiver) in sources {
+        for class in app.library_classes.iter().filter(|c| &c.name == id) {
+            for m in class.methods.iter().filter(|m| m.receiver == receiver) {
+                let mut def = m.clone();
+                def.receiver = MethodReceiver::Class;
+                table.entry(def.name.clone()).or_insert(def);
+            }
+        }
+    }
+    table
+}
+
+/// `Owner.reader` whose body reads a class variable the class body
+/// initializes to a literal, and which nothing in the program writes
+/// again: ancestry's `Ancestry.default_ancestry_format`. Its setter
+/// exists, so a call to it anywhere (or a `class_variable_set` naming
+/// the variable) keeps the reader a value known only when it runs.
+fn frozen_readers(app: &App, sources: &[SourceFile]) -> HashMap<(String, Symbol), Expr> {
+    let mut out = HashMap::new();
+    // Not computed up front: it scans every source per method, and most apps have no frozen reader to ask about.
+    let dead: std::cell::OnceCell<Vec<(usize, usize, usize)>> = std::cell::OnceCell::new();
+    for class in &app.library_classes {
+        let initial: HashMap<&str, &Expr> = class
+            .class_ivar_initializers
+            .iter()
+            .filter_map(|e| match &*e.node {
+                ExprNode::Assign { target: LValue::Var { name, .. }, value }
+                    if name.as_str().starts_with("@@") && matches!(&*value.node, ExprNode::Lit { .. }) =>
+                {
+                    Some((name.as_str(), value))
+                }
+                _ => None,
+            })
+            .collect();
+        if initial.is_empty() {
+            continue;
+        }
+        // Not only `def self.` readers: a module's reader answers on whoever `extend`s it (rolify's `Rolify.orm`).
+        let owners: Vec<(&str, MethodReceiver)> = std::iter::once((class.name.0.as_str(), MethodReceiver::Class))
+            .chain(extenders(app, class).into_iter().map(|owner| (owner, MethodReceiver::Instance)))
+            .collect();
+        for (owner, receiver) in owners {
+            for reader in class.methods.iter().filter(|m| m.receiver == receiver && m.params.is_empty()) {
+                let body = match &*reader.body.node {
+                    ExprNode::Seq { exprs } if exprs.len() == 1 => &exprs[0],
+                    _ => &reader.body,
+                };
+                let ExprNode::Var { name: cvar, .. } = &*body.node else { continue };
+                let Some(value) = initial.get(cvar.as_str()) else { continue };
+                let writers: Vec<&MethodDef> = class.methods.iter().filter(|m| assigns(&m.body, cvar)).collect();
+                if writers.iter().any(|w| !w.name.as_str().ends_with('=')) {
+                    continue;
+                }
+                let setters: Vec<&str> = writers.iter().map(|w| w.name.as_str().trim_end_matches('=')).collect();
+                let dead = dead.get_or_init(|| uncalled_bodies(app, sources));
+                if sources.iter().enumerate().any(|(i, source)| writes_through(&source.text, &setters, cvar.as_str(), &|at| dead.iter().any(|&(f, a, b)| f == i && a <= at && at < b))) {
+                    continue;
+                }
+                out.insert((owner.to_string(), reader.name.clone()), (*value).clone());
+            }
+        }
+    }
+    out
+}
+
+fn extenders<'a>(app: &'a App, module: &LibraryClass) -> Vec<&'a str> {
+    if !module.is_module {
+        return Vec::new();
+    }
+    let name = module.name.0.as_str();
+    app.library_classes
+        .iter()
+        .filter(|owner| {
+            owner.unknown_calls.iter().any(|call| match &*call.node {
+                ExprNode::Send { recv: None, method, args, .. } if method.as_str() == "extend" => args.iter().any(|a| match &*a.node {
+                    ExprNode::Const { path } => {
+                        let written = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
+                        written == name || format!("{}::{written}", owner.name.0.as_str()) == name
+                    }
+                    _ => false,
+                }),
+                _ => false,
+            })
+        })
+        .map(|owner| owner.name.0.as_str())
+        .collect()
+}
+
+// Not every write counts: one in a method nothing calls never runs (rolify's `use_dynamic_shortcuts`).
+fn uncalled_bodies(app: &App, sources: &[SourceFile]) -> Vec<(usize, usize, usize)> {
+    let mut out = Vec::new();
+    for class in &app.library_classes {
+        for m in class.methods.iter().filter(|m| !mentioned(m.name.as_str(), sources)) {
+            // Not the body's own span: a multi-statement body is a synthetic Seq.
+            let mut range: Option<(crate::span::FileId, u32, u32)> = None;
+            visit(&m.body, &mut |e| {
+                if e.span.is_synthetic() {
+                    return;
+                }
+                range = Some(match range {
+                    Some((file, a, b)) if file == e.span.file => (file, a.min(e.span.start), b.max(e.span.end)),
+                    Some(other) => other,
+                    None => (e.span.file, e.span.start, e.span.end),
+                });
+            });
+            if let Some((file, a, b)) = range
+                && let Some(i) = file.0.checked_sub(1)
+            {
+                out.push((i as usize, a as usize, b as usize));
+            }
+        }
+    }
+    out
+}
+
+// Not "unmentioned, so dead": Ruby and Rails call these by protocol, with no call in any source.
+fn implicitly_called(name: &str) -> bool {
+    matches!(
+        name,
+        "inherited" | "included" | "extended" | "prepended" | "method_added" | "method_missing" | "respond_to_missing?"
+            | "initialize" | "table_name_prefix" | "table_name_suffix" | "to_s" | "inspect" | "==" | "hash" | "eql?" | "<=>"
+            | "to_param" | "to_partial_path" | "model_name"
+    )
+}
+
+fn mentioned(name: &str, sources: &[SourceFile]) -> bool {
+    mentions(name, sources) > 0
+}
+
+/// How many times the sources name `name` as a word, outside its `def`.
+fn mentions(name: &str, sources: &[SourceFile]) -> usize {
+    sources
+        .iter()
+        .map(|source| {
+            source
+                .text
+                .match_indices(name)
+                .filter(|(at, _)| {
+                    let before = &source.text[..*at];
+                    let after = &source.text[at + name.len()..];
+                    let word = !before.ends_with(|c: char| c.is_alphanumeric() || c == '_')
+                        && !after.starts_with(|c: char| c.is_alphanumeric() || c == '_' || c == '?' || c == '!' || c == '=');
+                    word && !before.ends_with("def ") && !before.ends_with("def self.")
+                })
+                .count()
+        })
+        .sum()
+}
+
+/// Whether `text` calls one of `setters` (`Owner.name = v`, `send(:name=, v)`)
+/// or sets the variable reflectively. Over-matching only keeps a value unfolded.
+fn writes_through(text: &str, setters: &[&str], cvar: &str, dead: &dyn Fn(usize) -> bool) -> bool {
+    for setter in setters {
+        for (at, _) in text.match_indices(setter) {
+            if dead(at) {
+                continue;
+            }
+            let before = &text[..at];
+            let after = &text[at + setter.len()..];
+            let assigns = after.trim_start().starts_with('=') && !after.trim_start().starts_with("==");
+            // `send(:name=, v)` and `send("name=", v)` name the setter as a Symbol or a String
+            let named = before.ends_with(':') || before.ends_with('"') || before.ends_with('\'');
+            if (assigns && before.ends_with('.') && !before.ends_with("def self.")) || (named && after.starts_with('=')) {
+                return true;
+            }
+        }
+    }
+    text.contains("class_variable_set") && text.contains(&cvar[2..])
+}
+
+/// A class-body declaration the macro ran, as the model's own: written
+/// back as Ruby and read the way the model's body is.
+fn replay(statement: &Expr, owner: &ClassId, defaults: &mut indexmap::IndexMap<Symbol, Expr>) -> Vec<ModelBodyItem> {
+    let unknown = || vec![ModelBodyItem::Unknown { expr: statement.clone(), leading_comments: Vec::new(), leading_blank_line: false }];
+    let source = crate::emit::ruby::expr::emit_expr(statement);
+    replay_text(&source, owner, defaults).unwrap_or_else(unknown)
+}
+
+fn replay_source(code: &str, owner: &ClassId, defaults: &mut indexmap::IndexMap<Symbol, Expr>) -> Vec<ModelBodyItem> {
+    replay_text(code, owner, defaults).expect("read when the run evaluated it")
+}
+
+fn replay_text(source: &str, owner: &ClassId, defaults: &mut indexmap::IndexMap<Symbol, Expr>) -> Option<Vec<ModelBodyItem>> {
+    let unknown = || None;
+    let parsed = super::prism::parse_silent(source.as_bytes());
+    if parsed.errors().next().is_some() {
+        return unknown();
+    }
+    let Some(program) = parsed.node().as_program_node() else { return unknown() };
+    let mut items = Vec::new();
+    for stmt in program.statements().body().iter() {
+        match super::model::ingest_model_body_items(&stmt, owner, "<class macro>", Vec::new(), Some(&mut *defaults), &super::model::ClassConsts::default()) {
+            Ok(mut ingested) => {
+                for item in &mut ingested {
+                    mark_constants(item);
+                }
+                items.extend(ingested);
+            }
+            Err(_) => return unknown(),
+        }
+    }
+    Some(items)
+}
+
+// A replayed statement's span points into a fragment the constant resolver never indexed, so its constants are read as written
+fn mark_constants(item: &mut ModelBodyItem) {
+    fn mark(e: &mut Expr) {
+        if matches!(&*e.node, ExprNode::Const { .. }) {
+            e.decisions |= crate::expr::GENERATED_CONST_REF;
+        }
+        e.node.for_each_child_mut(&mut mark);
+    }
+    if let ModelBodyItem::Unknown { expr, .. } = item {
+        mark(expr);
     }
 }
 
@@ -277,10 +770,32 @@ enum Val {
 struct Run<'a> {
     table: &'a HashMap<Symbol, MethodDef>,
     constants: &'a HashMap<Symbol, Expr>,
+    frozen: &'a HashMap<(String, Symbol), Expr>,
+    cvar_readers: &'a HashMap<(String, String), Symbol>,
+    /// The modules the class has included so far, by full name.
+    included: Vec<String>,
+    module_methods: &'a HashMap<String, Vec<MethodDef>>,
+    /// What the class's own `extend` in this run added to its class side.
+    extended: HashMap<Symbol, MethodDef>,
+    /// Ruby source the run `class_eval`ed on the class, in order.
+    evaluated: Vec<String>,
+    /// Every class and module this program declares, by full name.
+    known: &'a HashSet<String>,
+    /// The module the running macro is defined in.
+    scope: Option<Symbol>,
     prefix: &'a str,
     counter: usize,
     /// Class-body statements, in the order the macro runs them.
     out: Vec<Expr>,
+    /// Indexes into `out` of the declarations to read as the model's
+    /// body (`validate`, `cattr_accessor`, a mixin) rather than keep as
+    /// a statement.
+    replayed: HashSet<usize>,
+    /// What `self.x = …` set, for a later read of `x`.
+    class_attrs: HashMap<Symbol, Val>,
+    /// A `cattr_*`/`mattr_*` declared in this run and not yet written,
+    /// by name: the index of its declaration in `out`.
+    unset_cattrs: HashMap<Symbol, usize>,
     methods: Vec<MethodDef>,
     aliases: Vec<(Symbol, Symbol, Span)>,
     /// One constant per captured String, so every method shares it.
@@ -296,29 +811,41 @@ impl Run<'_> {
         if depth > MAX_DEPTH {
             return Err("its calls nest too deep".into());
         }
-        let def = self.table.get(name).ok_or_else(|| format!("`{}` is not one of the class's methods", name.as_str()))?;
-        if !super::model_macros::supported_source_signature(def, self.sources) {
+        let def = self.method_def(name).cloned().ok_or_else(|| format!("`{}` is not one of the class's methods", name.as_str()))?;
+        if !super::model_macros::supported_source_signature(&def, self.sources, true, true) {
             return Err(format!("`{}`'s parameters are not ones it binds", name.as_str()));
         }
-        let mut bound = self.bind(def, args, env)?;
+        let mut bound = self.bind(&def, args, env)?;
         let statements: Vec<Expr> = match &*def.body.node {
             ExprNode::Seq { exprs } => exprs.clone(),
             _ => vec![def.body.clone()],
         };
-        for st in &statements {
-            if self.exec(st, &mut bound, depth)? {
-                break;
-            }
+        let inner = def.enclosing_class.clone().or_else(|| self.scope.clone());
+        let outer = std::mem::replace(&mut self.scope, inner);
+        let ran = statements.iter().try_for_each(|st| match self.exec(st, &mut bound, depth) {
+            Ok(true) => Err(None),
+            Ok(false) => Ok(()),
+            Err(why) => Err(Some(why)),
+        });
+        self.scope = outer;
+        match ran {
+            Err(Some(why)) => Err(why),
+            _ => Ok(()),
         }
-        Ok(())
+    }
+
+    fn method_def(&self, name: &Symbol) -> Option<&MethodDef> {
+        self.table.get(name).or_else(|| self.extended.get(name))
     }
 
     fn bind(&mut self, def: &MethodDef, args: &[Expr], env: &Env) -> Result<Env, String> {
-        if def.block_param.is_some() || def.params.iter().any(|p| p.rest || p.from_kwrest) {
-            return Err("its parameters include a rest or a block".into());
+        if def.block_param.is_some() || def.params.iter().any(|p| p.from_kwrest) {
+            return Err("its parameters include a keyword rest or a block".into());
         }
+        let takes_keywords = def.params.iter().any(|p| p.keyword || p.from_keyword);
         let (positional, keywords): (&[Expr], Vec<(Symbol, Expr)>) = match args.last().map(|a| &*a.node) {
-            Some(ExprNode::Hash { entries, kwargs: true }) => {
+            // Not split off without keyword parameters: Ruby hands a `*rest` the trailing Hash as one more element.
+            Some(ExprNode::Hash { entries, kwargs: true }) if takes_keywords || !def.params.iter().any(|p| p.rest) => {
                 let mut kw = Vec::new();
                 for (k, v) in entries {
                     let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node else {
@@ -333,7 +860,21 @@ impl Run<'_> {
         let mut keywords: HashMap<Symbol, Expr> = keywords.into_iter().collect();
         let mut positional = positional.iter();
         let mut bound = Env::new();
-        for p in &def.params {
+        let required_after_rest = |at: usize| def.params[at + 1..].iter().filter(|p| !p.keyword && !p.from_keyword && p.default.is_none() && !p.rest).count();
+        for (at, p) in def.params.iter().enumerate() {
+            if p.rest {
+                let mut rest = Vec::new();
+                while positional.len() > required_after_rest(at) {
+                    let e = positional.next().expect("counted").clone();
+                    match self.eval(&e, env)? {
+                        Val::Lit(v) => rest.push(v),
+                        v => rest.push(self.read(&v, e.span)),
+                    }
+                }
+                let span = rest.first().map_or(def.name_span, |e: &Expr| e.span);
+                bound.insert(p.name.clone(), Val::Lit(Expr::new(span, ExprNode::Array { elements: rest, style: Default::default() })));
+                continue;
+            }
             let given = if p.keyword || p.from_keyword { keywords.remove(&p.name) } else { positional.next().cloned() };
             let val = match (given, &p.default) {
                 (Some(e), _) => self.eval(&e, env)?,
@@ -391,6 +932,13 @@ impl Run<'_> {
                 match method.as_str() {
                     "define_method" | "define_singleton_method" => {
                         let receiver = if method.as_str() == "define_method" { MethodReceiver::Instance } else { MethodReceiver::Class };
+                        // `define_method(:label, Mod.instance_method(:label))`: a copy of the app module's method.
+                        if let [name, value] = args.as_slice()
+                            && block.is_none()
+                            && receiver == MethodReceiver::Instance
+                        {
+                            return self.define_from_instance_method(name, value, env).map(|()| false);
+                        }
                         let [name] = args.as_slice() else { return Err("a definition is given other than one name".into()) };
                         let Some(block) = block else { return Err("a definition has no block".into()) };
                         if !definition_syntax_kept(st, self.sources) {
@@ -406,12 +954,233 @@ impl Run<'_> {
                         Ok(false)
                     }
                     "raise" | "fail" => Err("it raises".into()),
-                    _ if self.table.contains_key(method) && block.is_none() => {
+                    "class_eval" | "class_exec" | "module_eval" if args.is_empty() => {
+                        let Some(b) = block else { return Err("a `class_eval` has neither a block nor a String".into()) };
+                        let ExprNode::Lambda { params, rest_param: None, body, .. } = &*b.node else {
+                            return Err("a `class_eval` block takes parameters".into());
+                        };
+                        if !params.is_empty() {
+                            return Err("a `class_eval` block takes parameters".into());
+                        }
+                        let statements: Vec<Expr> = match &*body.node {
+                            ExprNode::Seq { exprs } => exprs.clone(),
+                            _ => vec![body.clone()],
+                        };
+                        for statement in &statements {
+                            // Not refused as a nested `def`: inside the class's own `class_eval` it is the class's method, as written.
+                            if let Some(def) = statement.nested_def() {
+                                let mut def = def.clone();
+                                def.enclosing_class = Some(self.owner.clone());
+                                self.methods.push(def);
+                                continue;
+                            }
+                            if self.exec(statement, env, depth)? {
+                                return Ok(true);
+                            }
+                        }
+                        Ok(false)
+                    }
+                    "class_eval" | "module_eval" if block.is_none() && !args.is_empty() => {
+                        let Some(Val::Lit(code)) = self.fold(&args[0], env) else {
+                            return Err("it `class_eval`s a String known only when it runs".into());
+                        };
+                        let ExprNode::Lit { value: Literal::Str { value: code } } = &*code.node else {
+                            return Err("it `class_eval`s other than a String".into());
+                        };
+                        if replay_text(code, &ClassId(self.owner.clone()), &mut indexmap::IndexMap::new()).is_none() {
+                            return Err("the String it `class_eval`s is not a class body this can read".into());
+                        }
+                        self.evaluated.push(code.clone());
+                        Ok(false)
+                    }
+                    "include" | "extend"
+                        if block.is_none() && !args.is_empty() && args.iter().all(|a| matches!(&*a.node, ExprNode::Const { .. })) =>
+                    {
+                        let mut statement = st.clone();
+                        if let ExprNode::Send { args, .. } = &mut *statement.node {
+                            for arg in args.iter_mut() {
+                                let ExprNode::Const { path } = &mut *arg.node else { continue };
+                                let Some(resolved) = self.resolve_module(path) else {
+                                    return Err(format!(
+                                        "its `{}` is not a module this program defines",
+                                        path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::")
+                                    ));
+                                };
+                                let full = resolved.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
+                                if method.as_str() == "include" {
+                                    self.included.push(full);
+                                } else if let Some(methods) = self.module_methods.get(&full) {
+                                    for m in methods {
+                                        let mut def = m.clone();
+                                        def.receiver = MethodReceiver::Class;
+                                        self.extended.entry(def.name.clone()).or_insert(def);
+                                    }
+                                }
+                                *path = resolved;
+                            }
+                        }
+                        self.declare(statement);
+                        Ok(false)
+                    }
+                    name if name.ends_with('=')
+                        && !matches!(name, "==" | "!=" | "<=" | ">=" | "===")
+                        && recv.is_some()
+                        && block.is_none()
+                        && args.len() == 1
+                        // Not run when the class's own `extend` brought the writer: the model replays the write, which calls it there (ancestry's `orphan_strategy=`).
+                        && self.table.get(method).is_none_or(attr_writer) =>
+                    {
+                        let v = self.eval(&args[0], env)?;
+                        let read = self.read(&v, args[0].span);
+                        let attr = Symbol::from(name.trim_end_matches('='));
+                        self.class_attrs.insert(attr.clone(), v);
+                        // Not replayed as the call: the writer is the macro module's, which sets the class's own `@x`.
+                        if let Some(def) = self.method_def(method)
+                            && let Some(ivar) = writer_ivar(def)
+                        {
+                            let value = match self.class_attrs.get(&attr) {
+                                Some(Val::Lit(e)) => e.clone(),
+                                _ => read,
+                            };
+                            self.out.push(Expr::new(st.span, ExprNode::Assign { target: LValue::Ivar { name: ivar }, value }));
+                            return Ok(false);
+                        }
+                        // The first write after the declaration is its default, which the model's cattr reads as one
+                        if let Some(index) = self.unset_cattrs.remove(&attr)
+                            && let ExprNode::Send { args, .. } = &mut *self.out[index].node
+                        {
+                            let key = lit(read.span, Literal::Sym { value: Symbol::from("default") });
+                            args.push(Expr::new(read.span, ExprNode::Hash { entries: vec![(key, read)], kwargs: true }));
+                            return Ok(false);
+                        }
+                        let mut assigned = st.clone();
+                        if let ExprNode::Send { args, .. } = &mut *assigned.node {
+                            args[0] = read;
+                        }
+                        self.declare(assigned);
+                        Ok(false)
+                    }
+                    // Not expanded: a dedicated lowering claims such an installer (`has_markdown`), and a name it cannot read fails closed.
+                    "has_one" | "has_many" | "belongs_to" | "has_and_belongs_to_many" | "scope"
+                        if args.first().is_some_and(|a| matches!(&*a.node, ExprNode::Send { recv: Some(r), method, .. }
+                            if method.as_str() == "to_sym" && matches!(&*r.node, ExprNode::StringInterp { .. }))) =>
+                    {
+                        Err(format!("it declares a `{}` whose name is built from its arguments", method.as_str()))
+                    }
+                    name if CLASS_BODY_DECLARATIONS.contains(&name) && block.is_none() && self.method_def(method).is_none() => {
+                        let declared = self.substitute(st, env, &HashSet::new())?;
+                        if matches!(name, "cattr_accessor" | "cattr_reader" | "mattr_accessor" | "mattr_reader")
+                            && let ExprNode::Send { args, .. } = &*declared.node
+                            && let [arg] = args.as_slice()
+                            && let ExprNode::Lit { value: Literal::Sym { value } } = &*arg.node
+                        {
+                            self.unset_cattrs.insert(value.clone(), self.out.len());
+                        }
+                        self.declare(declared);
+                        Ok(false)
+                    }
+                    _ if self.method_def(method).is_some() && block.is_none() => {
                         let args: Vec<Expr> = args.clone();
                         self.call(method, &args, env, depth + 1).map(|()| false)
                     }
                     _ => Err(format!("it calls `{}`", method.as_str())),
                 }
+            }
+            ExprNode::Assign { target: LValue::Attr { recv, name }, value } if matches!(&*recv.node, ExprNode::SelfRef) => {
+                let v = self.eval(value, env)?;
+                let read = self.read(&v, value.span);
+                self.class_attrs.insert(name.clone(), v);
+                let mut assigned = st.clone();
+                if let ExprNode::Assign { value, .. } = &mut *assigned.node {
+                    *value = read;
+                }
+                self.declare(assigned);
+                Ok(false)
+            }
+            ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+                if matches!(method.as_str(), "reverse_merge!" | "merge!" | "update")
+                    && let ExprNode::Var { name, .. } = &*r.node
+                    && let [other] = args.as_slice() =>
+            {
+                let (Some(Val::Lit(mine)), Some(Val::Lit(theirs))) = (env.get(name).cloned(), self.fold(other, env)) else {
+                    return Err(format!("a `{}` merges a value known only when it runs", method.as_str()));
+                };
+                let (ExprNode::Hash { entries: mine_entries, kwargs }, ExprNode::Hash { entries: their_entries, .. }) = (&*mine.node, &*theirs.node) else {
+                    return Err(format!("a `{}` merges other than two Hashes", method.as_str()));
+                };
+                let mut merged = mine_entries.clone();
+                for (k, v) in their_entries {
+                    let ExprNode::Lit { value: key } = &*k.node else { return Err("a merged key is not a literal".into()) };
+                    let mut at = None;
+                    for (i, (mk, _)) in merged.iter().enumerate() {
+                        let ExprNode::Lit { value: mkey } = &*mk.node else { return Err("a merged key is not a literal".into()) };
+                        if literal_eq(mkey, key).ok_or_else(|| "a merged key is not comparable".to_string())? {
+                            at = Some(i);
+                        }
+                    }
+                    match (at, method.as_str()) {
+                        (Some(_), "reverse_merge!") => {}
+                        (Some(i), _) => merged[i].1 = v.clone(),
+                        (None, _) => merged.push((k.clone(), v.clone())),
+                    }
+                }
+                env.insert(name.clone(), Val::Lit(Expr::new(mine.span, ExprNode::Hash { entries: merged, kwargs: *kwargs })));
+                Ok(false)
+            }
+            // Not replayed as written: in the model's body `@@x` would name the model's class variable, not the macro module's.
+            ExprNode::Send { recv: Some(r), method, args, block: None, parenthesized }
+                if let ExprNode::Var { name, .. } = &*r.node
+                    && name.as_str().starts_with("@@") =>
+            {
+                let module = self.scope.clone().ok_or_else(|| "it writes a class variable outside a module".to_string())?;
+                let reader = self
+                    .cvar_readers
+                    .get(&(module.as_str().to_string(), name.as_str().to_string()))
+                    .ok_or_else(|| format!("its module has no reader for `{}`", name.as_str()))?;
+                let mut folded = Vec::new();
+                for a in args {
+                    match self.eval(a, env)? {
+                        Val::Lit(e) => folded.push(e),
+                        v => folded.push(self.read(&v, a.span)),
+                    }
+                }
+                let path = std::iter::once(Symbol::from("")).chain(module.as_str().split("::").map(Symbol::from)).collect();
+                let mut owner = Expr::new(r.span, ExprNode::Const { path });
+                owner.decisions |= crate::expr::GENERATED_CONST_REF;
+                let recv = Expr::new(r.span, ExprNode::Send { recv: Some(owner), method: reader.clone(), args: Vec::new(), block: None, parenthesized: false });
+                let mut statement = Expr::new(st.span, ExprNode::Send { recv: Some(recv), method: method.clone(), args: folded, block: None, parenthesized: *parenthesized });
+                statement.decisions |= crate::expr::REPLAYED_CLASS_BODY;
+                self.out.push(statement);
+                Ok(false)
+            }
+            // A loop over what the macro was given: each element runs the block, as Ruby does.
+            ExprNode::Send { recv: Some(r), method, args, block: Some(b), .. }
+                if matches!(method.as_str(), "each" | "each_pair") && args.is_empty() =>
+            {
+                let Some(Val::Lit(over)) = self.fold(r, env) else { return Err("it loops over a value known only when it runs".into()) };
+                let ExprNode::Lambda { params, rest_param: None, body, .. } = &*b.node else { return Err("a loop's block takes other than plain parameters".into()) };
+                let rows: Vec<Vec<Expr>> = match &*over.node {
+                    ExprNode::Hash { entries, .. } => entries.iter().map(|(k, v)| vec![k.clone(), v.clone()]).collect(),
+                    ExprNode::Array { elements, .. } => elements.iter().map(|e| vec![e.clone()]).collect(),
+                    _ => return Err("it loops over a value that is not a literal Hash or Array".into()),
+                };
+                // Not a key: Ruby hands a one-parameter block over a Hash the `[key, value]` pair
+                if matches!(&*over.node, ExprNode::Hash { .. }) && params.len() != 2 {
+                    return Err("a loop over a Hash binds other than its key and value".into());
+                }
+                for row in rows {
+                    if params.len() > row.len() {
+                        return Err("a loop's block takes more parameters than each element has".into());
+                    }
+                    let mut inner = env.clone();
+                    for (param, value) in params.iter().zip(row.iter()) {
+                        inner.insert(param.clone(), Val::Lit(value.clone()));
+                    }
+                    if self.exec(body, &mut inner, depth)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
             }
             // The class's own state: run where the macro runs, in the calling class's body.
             _ if touches_class_state(st) => {
@@ -423,6 +1192,29 @@ impl Run<'_> {
         }
     }
 
+    // Rooted, not as written: the model's body would read `Role` as its own app's constant, not the macro module's.
+    fn resolve_module(&self, path: &[Symbol]) -> Option<Vec<Symbol>> {
+        let rooted = path.first().is_some_and(|s| s.as_str().is_empty());
+        let written = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
+        let full = |name: &str| std::iter::once(Symbol::from("")).chain(name.split("::").map(Symbol::from)).collect();
+        if !rooted {
+            let mut scope = self.scope.as_ref().map(|s| s.as_str().to_string());
+            while let Some(outer) = scope {
+                let candidate = format!("{outer}::{written}");
+                if self.known.contains(&candidate) {
+                    return Some(full(&candidate));
+                }
+                scope = outer.rsplit_once("::").map(|(o, _)| o.to_string());
+            }
+        }
+        self.known.contains(&written).then(|| full(&written))
+    }
+
+    fn declare(&mut self, statement: Expr) {
+        self.replayed.insert(self.out.len());
+        self.out.push(statement);
+    }
+
     fn literal_name(&mut self, name: &Expr, env: &Env) -> Result<Symbol, String> {
         match self.fold(name, env) {
             Some(Val::Lit(e)) => match &*e.node {
@@ -432,6 +1224,44 @@ impl Run<'_> {
             },
             _ => Err("a defined name is known only when it runs".into()),
         }
+    }
+
+    /// `define_method(name, Mod.instance_method(name2))` where `Mod` is an app
+    /// module that defines `name2`: that method's `def`, copied in as `name`.
+    fn define_from_instance_method(&mut self, name: &Expr, value: &Expr, env: &Env) -> Result<(), String> {
+        let ExprNode::Send { recv: Some(module), method, args, block: None, .. } = &*value.node else {
+            return Err("a definition is given other than one name".into());
+        };
+        let [source] = args.as_slice() else { return Err("a definition is given other than one name".into()) };
+        if method.as_str() != "instance_method" {
+            return Err("a definition is given other than one name".into());
+        }
+        let path = match self.fold(module, env) {
+            Some(Val::Lit(e)) => match &*e.node {
+                ExprNode::Const { path } => path.clone(),
+                _ => return Err("an `instance_method` receiver is not a module".into()),
+            },
+            _ => return Err("an `instance_method` receiver is known only when it runs".into()),
+        };
+        let written = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
+        let Some(resolved) = self.resolve_module(&path) else {
+            return Err(format!("its `{written}` is not a module this program defines"));
+        };
+        let full = resolved.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
+        let source = self.literal_name(source, env)?;
+        let name = self.literal_name(name, env)?;
+        if !valid_def_name(&name) {
+            return Err(format!("`{}` is not a method name", name.as_str()));
+        }
+        let Some(found) = self.module_methods.get(&full).and_then(|methods| methods.iter().find(|m| m.name == source)) else {
+            return Err(format!("`{full}` defines no `{}`", source.as_str()));
+        };
+        let mut def = found.clone();
+        def.name = name;
+        def.receiver = MethodReceiver::Instance;
+        def.enclosing_class = Some(self.owner.clone());
+        self.methods.push(def);
+        Ok(())
     }
 
     fn define(&mut self, receiver: MethodReceiver, name: &Expr, block: &Expr, env: &Env) -> Result<(), String> {
@@ -500,8 +1330,169 @@ impl Run<'_> {
 
     fn fold(&mut self, e: &Expr, env: &Env) -> Option<Val> {
         match &*e.node {
-            ExprNode::Lit { .. } => Some(Val::Lit(e.clone())),
+            ExprNode::Lit { .. } | ExprNode::SelfRef => Some(Val::Lit(e.clone())),
+            // A module this program defines is itself (`borrow(Gadget, :label)`).
+            ExprNode::Const { path } if self.resolve_module(path).is_some() => Some(Val::Lit(e.clone())),
             ExprNode::Var { name, .. } => env.get(name).cloned(),
+            ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+                if args.is_empty()
+                    && let ExprNode::Const { path } = &*r.node
+                    && let Some(value) = self.frozen.get(&(
+                        path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::"),
+                        method.clone(),
+                    )) =>
+            {
+                Some(Val::Lit(Expr { span: e.span, ..value.clone() }))
+            }
+            ExprNode::Hash { entries, kwargs } => {
+                let mut folded = Vec::new();
+                for (k, v) in entries {
+                    let (Val::Lit(k), Val::Lit(v)) = (self.fold(k, env)?, self.fold(v, env)?) else { return None };
+                    folded.push((k, v));
+                }
+                Some(Val::Lit(Expr::new(e.span, ExprNode::Hash { entries: folded, kwargs: *kwargs })))
+            }
+            ExprNode::Array { elements, style } => {
+                let mut folded = Vec::new();
+                for el in elements {
+                    let Val::Lit(el) = self.fold(el, env)? else { return None };
+                    folded.push(el);
+                }
+                Some(Val::Lit(Expr::new(e.span, ExprNode::Array { elements: folded, style: style.clone() })))
+            }
+            ExprNode::Send { recv, method, args, block: None, .. }
+                if args.is_empty() && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) && self.class_attrs.contains_key(method) =>
+            {
+                self.class_attrs.get(method).cloned()
+            }
+            ExprNode::Send { recv, method, args, block: None, .. }
+                if args.is_empty()
+                    && matches!(method.as_str(), "to_s" | "name")
+                    && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
+                    && !self.class_attrs.contains_key(method)
+                    && self.method_def(method).is_none() =>
+            {
+                Some(Val::Lit(lit(e.span, Literal::Str { value: self.owner.as_str().to_string() })))
+            }
+            ExprNode::Send { recv, method, args, block: None, .. }
+                if args.is_empty()
+                    && method.as_str() == "included_modules"
+                    && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
+                    && self.method_def(method).is_none() =>
+            {
+                let elements = self
+                    .included
+                    .iter()
+                    .map(|name| Expr::new(e.span, ExprNode::Const { path: std::iter::once(Symbol::from("")).chain(name.split("::").map(Symbol::from)).collect() }))
+                    .collect();
+                Some(Val::Lit(Expr::new(e.span, ExprNode::Array { elements, style: Default::default() })))
+            }
+            ExprNode::Send { recv, method, args, block: None, .. }
+                if args.is_empty()
+                    && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
+                    && !self.class_attrs.contains_key(method)
+                    && !self.methods.iter().any(|m| &m.name == method)
+                    && let Some(def) = self.method_def(method)
+                    && def.params.is_empty()
+                    && let ExprNode::Lit { .. } = &*match &*def.body.node {
+                        ExprNode::Seq { exprs } if exprs.len() == 1 => &exprs[0],
+                        _ => &def.body,
+                    }
+                    .node =>
+            {
+                let body = match &*def.body.node {
+                    ExprNode::Seq { exprs } if exprs.len() == 1 => exprs[0].clone(),
+                    _ => def.body.clone(),
+                };
+                Some(Val::Lit(Expr { span: e.span, ..body }))
+            }
+            ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+                if args.is_empty() && matches!(method.as_str(), "to_a" | "flatten" | "compact" | "uniq") =>
+            {
+                let Val::Lit(recv) = self.fold(r, env)? else { return None };
+                let ExprNode::Array { elements, style } = &*recv.node else { return None };
+                let mut out: Vec<Expr> = Vec::new();
+                for el in elements {
+                    match (method.as_str(), &*el.node) {
+                        ("flatten", ExprNode::Array { elements: inner, .. }) => {
+                            if inner.iter().any(|i| matches!(&*i.node, ExprNode::Array { .. })) {
+                                return None;
+                            }
+                            out.extend(inner.iter().cloned());
+                        }
+                        ("compact", ExprNode::Lit { value: Literal::Nil }) => {}
+                        ("uniq", ExprNode::Lit { value }) => {
+                            let mut seen = false;
+                            for o in &out {
+                                let ExprNode::Lit { value: o } = &*o.node else { return None };
+                                seen |= literal_eq(o, value)?;
+                            }
+                            if !seen {
+                                out.push(el.clone());
+                            }
+                        }
+                        ("uniq", _) => return None,
+                        _ => out.push(el.clone()),
+                    }
+                }
+                Some(Val::Lit(Expr::new(e.span, ExprNode::Array { elements: out, style: style.clone() })))
+            }
+            ExprNode::Send { recv: Some(r), method, args, block: Some(b), .. }
+                if args.is_empty() && matches!(method.as_str(), "map" | "collect") =>
+            {
+                let Val::Lit(recv) = self.fold(r, env)? else { return None };
+                let ExprNode::Array { elements, style } = &*recv.node else { return None };
+                let ExprNode::Lambda { params, rest_param: None, body, .. } = &*b.node else { return None };
+                let [param] = params.as_slice() else { return None };
+                let mut out = Vec::new();
+                for el in elements {
+                    let mut inner = env.clone();
+                    inner.insert(param.clone(), Val::Lit(el.clone()));
+                    let Val::Lit(v) = self.fold(body, &inner)? else { return None };
+                    out.push(v);
+                }
+                Some(Val::Lit(Expr::new(e.span, ExprNode::Array { elements: out, style: style.clone() })))
+            }
+            ExprNode::Send { recv: Some(r), method, args, block: Some(b), .. }
+                if args.is_empty() && matches!(method.as_str(), "reject" | "select" | "filter") =>
+            {
+                let Val::Lit(recv) = self.fold(r, env)? else { return None };
+                let ExprNode::Hash { entries, kwargs } = &*recv.node else { return None };
+                let ExprNode::Lambda { params, rest_param: None, body, .. } = &*b.node else { return None };
+                let [key_param, value_param] = params.as_slice() else { return None };
+                let mut kept = Vec::new();
+                for (k, v) in entries {
+                    let mut inner = env.clone();
+                    inner.insert(key_param.clone(), Val::Lit(k.clone()));
+                    inner.insert(value_param.clone(), Val::Lit(v.clone()));
+                    let answer = self.fold(body, &inner)?;
+                    if self.truthy(&answer)? == (method.as_str() != "reject") {
+                        kept.push((k.clone(), v.clone()));
+                    }
+                }
+                Some(Val::Lit(Expr::new(e.span, ExprNode::Hash { entries: kept, kwargs: *kwargs })))
+            }
+            ExprNode::Send { recv: Some(r), method, args, block: None, .. } if self.fold_query(r, method, args, env).is_some() => {
+                self.fold_query(r, method, args, env).map(|value| Val::Lit(lit(e.span, value)))
+            }
+            ExprNode::Send { recv: Some(r), method, args, block: None, .. } if method.as_str() == "[]" || method.as_str() == "presence" => {
+                let Val::Lit(recv) = self.fold(r, env)? else { return None };
+                match (&*recv.node, method.as_str(), args.as_slice()) {
+                    (ExprNode::Hash { entries, .. }, "[]", [key]) => {
+                        let Val::Lit(key) = self.fold(key, env)? else { return None };
+                        let ExprNode::Lit { value: key } = &*key.node else { return None };
+                        for (k, v) in entries {
+                            let ExprNode::Lit { value: k } = &*k.node else { return None };
+                            if literal_eq(k, key)? {
+                                return Some(Val::Lit(v.clone()));
+                            }
+                        }
+                        Some(Val::Lit(lit(e.span, Literal::Nil)))
+                    }
+                    (_, "presence", []) => Some(Val::Lit(if blank(&recv)? { lit(e.span, Literal::Nil) } else { recv.clone() })),
+                    _ => None,
+                }
+            }
             ExprNode::StringInterp { .. } => {
                 let mut text = String::new();
                 let mut ok = true;
@@ -527,6 +1518,11 @@ impl Run<'_> {
                 let recv = self.fold(r, env)?;
                 let Val::Lit(recv) = recv else { return None };
                 let ExprNode::Lit { value } = &*recv.node else { return None };
+                if let Literal::Str { value: text } = value
+                    && let Some(folded) = inflected(method.as_str(), text, args, |a| self.fold(a, env))
+                {
+                    return Some(Val::Lit(lit(e.span, Literal::Str { value: folded })));
+                }
                 match (method.as_str(), value, args.as_slice()) {
                     ("to_s", _, []) => lit_text(&Val::Lit(recv.clone())).map(|t| Val::Lit(lit(e.span, Literal::Str { value: t }))),
                     ("to_sym", _, []) => lit_text(&Val::Lit(recv.clone())).map(|t| Val::Lit(lit(e.span, Literal::Sym { value: Symbol::from(t.as_str()) }))),
@@ -553,6 +1549,64 @@ impl Run<'_> {
             }
             _ => None,
         }
+    }
+
+    /// A question with a literal answer about a literal: `is_a?`,
+    /// `present?`, `blank?`, `include?`, `!`.
+    fn fold_query(&mut self, r: &Expr, method: &Symbol, args: &[Expr], env: &Env) -> Option<Literal> {
+        if !matches!(method.as_str(), "is_a?" | "kind_of?" | "present?" | "blank?" | "empty?" | "include?" | "!") {
+            return None;
+        }
+        let Val::Lit(recv) = self.fold(r, env)? else { return None };
+        let answer = match (method.as_str(), args) {
+            ("is_a?" | "kind_of?", [class]) => {
+                let ExprNode::Const { path } = &*class.node else { return None };
+                let written: Vec<&str> = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+                let kind = match &*recv.node {
+                    ExprNode::Hash { .. } => "Hash",
+                    ExprNode::Array { .. } => "Array",
+                    ExprNode::Lit { value: Literal::Str { .. } } => "String",
+                    ExprNode::Lit { value: Literal::Sym { .. } } => "Symbol",
+                    ExprNode::Lit { value: Literal::Int { .. } } => "Integer",
+                    ExprNode::Lit { value: Literal::Nil } => "NilClass",
+                    _ => return None,
+                };
+                match written.as_slice() {
+                    [name] if *name == kind => true,
+                    [name] if matches!(*name, "Hash" | "Array" | "String" | "Symbol" | "Integer" | "NilClass") => false,
+                    _ => return None,
+                }
+            }
+            ("present?", []) => !blank(&recv)?,
+            ("blank?", []) => blank(&recv)?,
+            ("empty?", []) => match &*recv.node {
+                ExprNode::Hash { entries, .. } => entries.is_empty(),
+                ExprNode::Array { elements, .. } => elements.is_empty(),
+                ExprNode::Lit { value: Literal::Str { value } } => value.is_empty(),
+                _ => return None,
+            },
+            ("include?", [needle]) if let ExprNode::Const { path } = &*needle.node => {
+                let ExprNode::Array { elements, .. } = &*recv.node else { return None };
+                // Not a module this program defines: its presence among Rails' own ancestors is not known here.
+                let wanted = self.resolve_module(path)?;
+                let name = |p: &[Symbol]| p.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
+                elements.iter().any(|el| matches!(&*el.node, ExprNode::Const { path } if name(path) == name(&wanted)))
+            }
+            ("include?", [needle]) => {
+                let ExprNode::Array { elements, .. } = &*recv.node else { return None };
+                let Val::Lit(needle) = self.fold(needle, env)? else { return None };
+                let ExprNode::Lit { value: needle } = &*needle.node else { return None };
+                let mut found = false;
+                for el in elements {
+                    let ExprNode::Lit { value } = &*el.node else { return None };
+                    found |= literal_eq(value, needle)?;
+                }
+                found
+            }
+            ("!", []) => !self.truthy(&Val::Lit(recv))?,
+            _ => return None,
+        };
+        Some(Literal::Bool { value: answer })
     }
 
     fn truthy(&self, v: &Val) -> Option<bool> {
@@ -643,7 +1697,7 @@ fn source_text<'s>(span: Span, sources: &'s [SourceFile]) -> Option<&'s [u8]> {
 /// which the IR would have flattened into ordinary arguments.
 fn call_syntax_kept(call: &Expr, sources: &[SourceFile]) -> bool {
     let Some(text) = source_text(call.span, sources) else { return false };
-    let parsed = ruby_prism::parse(text);
+    let parsed = super::prism::parse_silent(text);
     if parsed.errors().next().is_some() {
         return false;
     }
@@ -660,16 +1714,31 @@ fn call_syntax_kept(call: &Expr, sources: &[SourceFile]) -> bool {
 
 /// A `define_method` as written has no splat, nested `def`, `defined?`,
 /// and its block takes plain parameters: what the IR would have erased
-/// into a simpler, different definition.
+/// into a simpler, different definition. A splat in a rescue clause's
+/// class list (`rescue Timeout::Error, *ERRORS => e`) is not an argument
+/// splat: the IR keeps it as written, a `Splat` among the clause's
+/// classes, so it erases nothing.
 fn definition_syntax_kept(statement: &Expr, sources: &[SourceFile]) -> bool {
     let Some(text) = source_text(statement.span, sources) else { return false };
-    let parsed = ruby_prism::parse(text);
+    let parsed = super::prism::parse_silent(text);
     if parsed.errors().next().is_some() {
         return false;
     }
-    struct Erased(bool);
+    struct Erased(bool, std::collections::HashSet<usize>);
     impl<'pr> ruby_prism::Visit<'pr> for Erased {
+        fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
+            for e in node.exceptions().iter() {
+                if e.as_splat_node().is_some() {
+                    self.1.insert(e.location().start_offset());
+                }
+            }
+            ruby_prism::visit_rescue_node(self, node);
+        }
+
         fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+            if node.as_splat_node().is_some() && self.1.contains(&node.location().start_offset()) {
+                return;
+            }
             self.0 |= node.as_splat_node().is_some()
                 || node.as_assoc_splat_node().is_some()
                 || node.as_def_node().is_some()
@@ -680,7 +1749,7 @@ fn definition_syntax_kept(statement: &Expr, sources: &[SourceFile]) -> bool {
                 || node.as_block_parameter_node().is_some();
         }
     }
-    let mut erased = Erased(false);
+    let mut erased = Erased(false, Default::default());
     ruby_prism::Visit::visit(&mut erased, &parsed.node());
     !erased.0
 }
@@ -713,8 +1782,93 @@ fn describe(st: &Expr) -> String {
     }
 }
 
+/// ActiveSupport's `blank?` on a literal.
+fn blank(e: &Expr) -> Option<bool> {
+    Some(match &*e.node {
+        ExprNode::Lit { value: Literal::Nil } => true,
+        ExprNode::Lit { value: Literal::Bool { value } } => !value,
+        ExprNode::Lit { value: Literal::Str { value } } => value.trim().is_empty(),
+        ExprNode::Lit { .. } => false,
+        ExprNode::Hash { entries, .. } => entries.is_empty(),
+        ExprNode::Array { elements, .. } => elements.is_empty(),
+        _ => return None,
+    })
+}
+
+/// What a macro may declare on its caller, replayed in the caller's body.
+const CLASS_BODY_DECLARATIONS: &[&str] = &[
+    "cattr_accessor", "cattr_reader", "cattr_writer", "mattr_accessor", "mattr_reader", "mattr_writer", "class_attribute",
+    "attribute", "validates", "validate", "validates_presence_of", "validates_numericality_of", "validates_uniqueness_of",
+    "before_validation", "after_validation", "before_save", "after_save", "around_save", "before_create", "after_create",
+    "before_update", "after_update", "before_destroy", "after_destroy", "after_commit", "after_touch",
+    "scope", "has_many", "has_one", "belongs_to", "has_and_belongs_to_many", "delegate",
+    "attr_accessor", "attr_reader", "attr_writer",
+];
+
 fn lit(span: Span, value: Literal) -> Expr {
     Expr::new(span, ExprNode::Lit { value })
+}
+
+fn attr_writer(def: &MethodDef) -> bool {
+    writer_ivar(def).is_some()
+}
+
+fn writer_ivar(def: &MethodDef) -> Option<Symbol> {
+    let body = match &*def.body.node {
+        ExprNode::Seq { exprs } if exprs.len() == 1 => &exprs[0],
+        _ => &def.body,
+    };
+    let [param] = def.params.as_slice() else { return None };
+    match &*body.node {
+        ExprNode::Assign { target: LValue::Ivar { name }, value } if matches!(&*value.node, ExprNode::Var { name: v, .. } if v == &param.name) => Some(name.clone()),
+        _ => None,
+    }
+}
+
+// A `gsub` pattern with a metacharacter is left alone: folding it would need Ruby's regex engine.
+fn inflected(method: &str, text: &str, args: &[Expr], mut fold: impl FnMut(&Expr) -> Option<Val>) -> Option<String> {
+    use crate::naming;
+    let pluralize = |path: &str| match path.rsplit_once('/') {
+        Some((ns, last)) => format!("{ns}/{}", naming::pluralize_snake(last)),
+        None => naming::pluralize_snake(path),
+    };
+    Some(match (method, args) {
+        ("camelize", []) => naming::camelize_path(text),
+        ("underscore", []) => naming::underscore(text),
+        ("tableize", []) => pluralize(&naming::underscore(text)),
+        ("pluralize", []) => pluralize(text),
+        ("singularize", []) => naming::singularize_last(text),
+        ("classify", []) => naming::classify_path(text),
+        ("demodulize", []) => naming::demodulize(text).to_string(),
+        ("gsub", [pattern, replacement]) => {
+            let ExprNode::Lit { value: Literal::Regex { pattern, flags } } = &*pattern.node else { return None };
+            let plain: String = {
+                let mut out = String::new();
+                let mut chars = pattern.chars();
+                while let Some(c) = chars.next() {
+                    match c {
+                        '\\' => match chars.next() {
+                            Some(n) if !n.is_ascii_alphanumeric() => out.push(n),
+                            _ => return None,
+                        },
+                        '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' => return None,
+                        c => out.push(c),
+                    }
+                }
+                out
+            };
+            if !flags.is_empty() || plain.is_empty() {
+                return None;
+            }
+            let Val::Lit(replacement) = fold(replacement)? else { return None };
+            let ExprNode::Lit { value: Literal::Str { value: replacement } } = &*replacement.node else { return None };
+            if replacement.contains('\\') {
+                return None;
+            }
+            text.replace(&plain, replacement)
+        }
+        _ => return None,
+    })
 }
 
 fn lit_text(v: &Val) -> Option<String> {
@@ -781,7 +1935,7 @@ fn collapse_literal_send(e: &mut Expr) {
 
 fn valid_def_name(name: &Symbol) -> bool {
     let header = format!("def {name}\nend\n");
-    let parsed = ruby_prism::parse(header.as_bytes());
+    let parsed = super::prism::parse_silent(header.as_bytes());
     let node = parsed.node();
     let Some(program) = node.as_program_node() else { return false };
     let nodes: Vec<_> = program.statements().body().iter().collect();

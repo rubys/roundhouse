@@ -162,17 +162,15 @@ fn ambiguous_assoc_name_resolves_through_the_owner_ivar_name() {
     );
 }
 
-/// `as: :notable` keys rows by `notable_id` AND `notable_type`. A seed
-/// of only the id half would reach every other implementor's rows, so
-/// the chain is declined and keeps its source shape.
+/// `as: :notable` keys rows by `notable_id` AND `notable_type`: the seed carries both halves.
 #[test]
-fn polymorphic_has_many_declines_rather_than_seeding_half_the_key() {
+fn polymorphic_has_many_seeds_both_halves_of_the_key() {
     let show = shown();
     assert!(
-        !show.contains("Relation.new(Note).where(notable_id:"),
-        "no id-only seed for an `as:` association:\n{show}"
+        show.contains("Relation.new(Note).where(notable_id: @room.id, notable_type: \"Room\")"),
+        "id and type seed for an `as:` association:\n{show}"
     );
-    assert!(show.contains("@room.notes.recent"), "chain keeps its source shape:\n{show}");
+    assert!(!show.contains("Relation.new(Note).where(notable_id: @room.id)."), "never the id half alone:\n{show}");
 }
 
 /// A scope that can change the row set (`-> { where(archived: false) }`)

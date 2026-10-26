@@ -1,0 +1,32 @@
+module I18n
+  module Locale
+    module Tag
+      def self.tag: (String | Symbol | nil tag) -> Simple
+
+      class Simple
+        def self.tag: (String | Symbol | nil tag) -> Simple
+        @tag: Symbol
+        def initialize: (String | Symbol | nil tag) -> void
+        def subtags: () -> Array[String]
+        def to_sym: () -> Symbol
+        def to_s: () -> String
+        def to_a: () -> Array[String]
+      end
+
+      class Rfc4646
+        def self.tag: (String | Symbol | nil tag) -> Rfc4646?
+        def extension: () -> String?
+        def privateuse: () -> String?
+        def grandfathered: () -> String?
+        def initialize: (String? language, String? script, String? region, String? variant, String? extension, String? privateuse, String? grandfathered) -> void
+        def language: () -> String?
+        def script: () -> String?
+        def region: () -> String?
+        def variant: () -> String?
+        def to_sym: () -> Symbol
+        def to_s: () -> String
+        def to_a: () -> Array[String?]
+      end
+    end
+  end
+end

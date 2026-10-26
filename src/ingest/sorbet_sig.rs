@@ -28,6 +28,7 @@ use crate::ty::{Param, ParamKind, Ty};
 
 use super::util::constant_id_str;
 
+use crate::ingest::prism_api::PrismLocation;
 /// Method signatures declared with `sig` in one Ruby file, keyed by the
 /// enclosing class's qualified name.
 pub fn ingest_sorbet_signatures(source: &[u8]) -> HashMap<ClassId, HashMap<Symbol, Ty>> {
@@ -43,7 +44,7 @@ pub fn ingest_sorbet_declarations(
     HashMap<ClassId, HashMap<Symbol, Ty>>,
     HashMap<ClassId, std::collections::HashSet<Symbol>>,
 ) {
-    let result = ruby_prism::parse(source);
+    let result = super::prism::parse_silent(source);
     let node = result.node();
     let Some(program) = node.as_program_node() else {
         return (HashMap::new(), HashMap::new());
@@ -347,7 +348,7 @@ fn literal_ty(node: &Node<'_>) -> Option<Ty> {
 
 pub(super) fn symbol_name(node: &Node<'_>) -> Option<String> {
     let symbol = node.as_symbol_node()?;
-    Some(String::from_utf8_lossy(symbol.value_loc()?.as_slice()).into_owned())
+    Some(String::from_utf8_lossy(symbol.unescaped()).into_owned())
 }
 
 /// Does the `sig` chain carry the `abstract` modifier?
@@ -450,7 +451,7 @@ fn signature_ty(
                         let assoc = element.as_assoc_node()?;
                         let key = assoc.key();
                         let key = key.as_symbol_node()?;
-                        let name = String::from_utf8_lossy(key.value_loc()?.as_slice()).into_owned();
+                        let name = String::from_utf8_lossy(key.unescaped()).into_owned();
                         declared.insert(name, sorbet_ty(&assoc.value(), self_is_instance, aliases)?);
                     }
                 }
@@ -545,7 +546,7 @@ pub(super) fn def_parameters(
         let name = node.name()?;
         out.push((constant_id_str(&name).to_string(), ParamKind::KeywordRest));
     }
-    if let Some(block) = parameters.block() {
+    if let Some(block) = crate::ingest::prism_api::block_parameter(&parameters) {
         let name = block.name()?;
         out.push((constant_id_str(&name).to_string(), ParamKind::Block));
     }
@@ -641,7 +642,7 @@ pub(super) fn sorbet_ty(
             let assoc = element.as_assoc_node()?;
             let key = assoc.key();
             let key = key.as_symbol_node()?;
-            let name = String::from_utf8_lossy(key.value_loc()?.as_slice()).into_owned();
+            let name = String::from_utf8_lossy(key.unescaped()).into_owned();
             fields.insert(
                 Symbol::new(&name),
                 sorbet_ty(&assoc.value(), self_is_instance, aliases)?,
@@ -805,7 +806,7 @@ fn sorbet_proc_ty(
                             let key = assoc.key();
                             let key = key.as_symbol_node()?;
                             let name =
-                                String::from_utf8_lossy(key.value_loc()?.as_slice()).into_owned();
+                                String::from_utf8_lossy(key.unescaped()).into_owned();
                             params.push(Param {
                                 name: Symbol::new(&name),
                                 ty: sorbet_ty(&assoc.value(), self_is_instance, aliases)?.into(),

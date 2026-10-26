@@ -1,0 +1,31 @@
+module ActiveRecord
+  module Tasks
+    class MigrationFile
+      def initialize: (String version, String path) -> void
+      def version: () -> String
+      def path: () -> String
+    end
+
+    module DatabaseTasks
+      def self.assume_migrated_upto_version: (String version) -> nil
+      def self.version_at_most?: (String version, String limit) -> bool
+      def self.numeric_version: (String version) -> String
+      def self.apply_pending: (String target) -> nil
+      def self.pending?: (Array[MigrationFile] files, String target) -> bool
+      def self.version_recorded?: (String version) -> bool
+      def self.migration_files: () -> Array[MigrationFile]
+      def self.leading_digits: (String name) -> String
+      def self.sort_migrations: (Array[MigrationFile] files) -> Array[MigrationFile]
+      def self.apply_migration: (String text) -> nil
+      def self.leading_spaces: (String raw) -> Integer
+      def self.method_name: (String line) -> String
+      def self.apply_change_column: (String line) -> nil
+      def self.parts_of: (String text) -> Array[String]
+      def self.clean_token: (String piece) -> String
+      def self.rebuild_column: (String table, String column, String type_name) -> nil
+      def self.refuse_unpreserved: (String table) -> nil
+      def self.keyword?: (String ddl, String word) -> bool
+      def self.refuse_incoming_foreign_keys: (String table) -> nil
+    end
+  end
+end

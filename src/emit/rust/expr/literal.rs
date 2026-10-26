@@ -114,6 +114,12 @@ pub(super) fn emit_hash(entries: &[(Expr, Expr)]) -> String {
                         v_raw.clone()
                     };
                     format!("{bare}.clone()")
+                } else if matches!(v_ty, crate::ty::Ty::Str | crate::ty::Ty::Sym)
+                    && matches!(&*v.node, ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } })
+                    && !str_color_handled
+                {
+                    // The key's spelling, for the same reason: a literal is `&str`, the slot an owned String
+                    format!("{v_raw}.to_string()")
                 } else {
                     coerce_arg_for_param_ty(v, v_ty)
                 }
@@ -229,10 +235,7 @@ pub(super) fn attach_block(base: &str, block: &Expr) -> String {
     let closure = match &*block.node {
         ExprNode::Lambda { params, body, .. } => emit_closure(params, body),
         ExprNode::Var { name, .. } => name.as_str().to_string(),
-        _ => format!(
-            "/* TODO rust2: non-Lambda/non-Var block: {:?} */",
-            std::mem::discriminant(&*block.node)
-        ),
+        _ => crate::emit::diagnostics::report_unsupported(block.span, "rust", block.node.kind_str(), "block argument"),
     };
     if let Some(stripped) = base.strip_suffix("()") {
         format!("{stripped}({closure})")
@@ -463,12 +466,61 @@ pub(crate) fn emit_literal(lit: &Literal) -> String {
         Literal::Str { value } => format!("{value:?}"),
         Literal::Sym { value } => format!("{:?}", value.as_str()),
         Literal::Regex { pattern, flags } => {
-            let source = if flags.is_empty() {
-                pattern.clone()
-            } else {
-                format!("(?{flags}){pattern}")
-            };
+            // Ruby's `m` is Rust `s` (dot-all); Ruby's `^`/`$` are always
+            // line anchors, so flagged `m` also needs Rust `m`.
+            let source = crate::emit::shared::regex_literal::re2_style_regex_source(pattern, flags);
             format!("regex::Regex::new({source:?}).unwrap()")
         }
+    }
+}
+
+#[cfg(test)]
+mod regex_flag_tests {
+    #[test]
+    fn rubys_m_keeps_line_anchors_as_well_as_dotall() {
+        assert_eq!(emit_literal(&regex("^b.c$", "m")), r#"regex::Regex::new("(?sm)^b.c$").unwrap()"#);
+    }
+
+    use super::emit_literal;
+    use crate::expr::Literal;
+
+    fn regex(pattern: &str, flags: &str) -> Literal {
+        Literal::Regex { pattern: pattern.to_string(), flags: flags.to_string() }
+    }
+
+    #[test]
+    fn empty_flags_render_a_bare_pattern_not_an_invalid_group() {
+        // `regex::Regex::new("(?)…")` is a parse error — empty flags
+        // must not grow an empty `(?...)` prefix.
+        assert_eq!(
+            emit_literal(&regex("a.b", "")),
+            r#"regex::Regex::new("a.b").unwrap()"#
+        );
+    }
+
+    #[test]
+    fn ignore_case_passes_through_as_rust_i() {
+        assert_eq!(
+            emit_literal(&regex("a.b", "i")),
+            r#"regex::Regex::new("(?i)a.b").unwrap()"#
+        );
+    }
+
+    #[test]
+    fn rubys_m_maps_to_rusts_s_and_m() {
+        // Ruby's `m` is Rust `s` (dot-all). Ruby's `^`/`$` are always
+        // line anchors, so flagged `m` also needs Rust `m`.
+        assert_eq!(
+            emit_literal(&regex("a.b", "m")),
+            r#"regex::Regex::new("(?sm)a.b").unwrap()"#
+        );
+    }
+
+    #[test]
+    fn ignore_case_and_dot_matches_newline_combine() {
+        assert_eq!(
+            emit_literal(&regex("a.b", "im")),
+            r#"regex::Regex::new("(?ism)a.b").unwrap()"#
+        );
     }
 }

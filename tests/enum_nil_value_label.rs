@@ -50,8 +50,12 @@ fn nil_valued_enum_reader_answers_labels() {
     let (emitted, _errors) = app().emit(BuildTarget::Spinel);
     let model = std::fs::read_to_string(emitted.join("app/models/widget.rb")).expect("widget.rb emitted");
     assert!(
-        model.contains(r#"ActiveRecord.enum_label(@kind, ["small", "large"], [0, 1])"#),
+        model.contains("ActiveRecord.enum_label(@kind, Widget::KIND_ENUM_LABELS, Widget::KIND_ENUM_VALUES)"),
         "the reader must map the stored value to its label:\n{model}"
+    );
+    assert!(
+        model.contains(r#"KIND_ENUM_LABELS = ["small", "large"]"#) && model.contains("KIND_ENUM_VALUES = [0, 1]"),
+        "the mapping, less its nil entry, is the model's constants:\n{model}"
     );
     assert!(model.contains(r#""unknown""#), "the NULL branch must answer the nil entry's label:\n{model}");
 }

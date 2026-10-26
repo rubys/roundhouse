@@ -66,6 +66,36 @@ end
 "#,
         ),
         (
+            "app/policies/story_scope.rb",
+            r#"class StoryScope
+  def initialize(user, scope)
+    @user = user
+    @scope = scope
+  end
+
+  def resolve
+    scope.where("score > ?", 1)
+  end
+
+  def resolve_not
+    scope.where.not(title: "x")
+  end
+
+  def grouped
+    scope.group(:score).count
+  end
+
+  def counted(items)
+    items.select { |i| i }.count
+  end
+
+  private
+
+  attr_reader :user, :scope
+end
+"#,
+        ),
+        (
             "config/routes.rb",
             "Rails.application.routes.draw do\n  get \"/\", to: \"home#index\"\nend\n",
         ),
@@ -208,7 +238,7 @@ fn only_the_dynamic_relation_residue_is_elevated() {
     let mut diags = diagnostics();
     let before: Vec<String> = diags
         .iter()
-        .filter(|d| !d.message.contains("relation chain stays dynamic"))
+        .filter(|d| !d.message.contains("relation chain stays dynamic") && !d.message.contains("on a receiver of unknown type"))
         .map(Diagnostic::to_string)
         .collect();
     roundhouse::lower::relation_residue::elevate_dynamic_relation_for_target(
@@ -217,8 +247,40 @@ fn only_the_dynamic_relation_residue_is_elevated() {
     );
     let after: Vec<String> = diags
         .iter()
-        .filter(|d| !d.message.contains("relation chain stays dynamic"))
+        .filter(|d| !d.message.contains("relation chain stays dynamic") && !d.message.contains("on a receiver of unknown type"))
         .map(Diagnostic::to_string)
         .collect();
     assert_eq!(before, after, "no other diagnostic is touched");
+}
+
+/// The entries for queries on a receiver the analyzer could not type.
+fn untyped_queries_for(target: BuildTarget) -> Vec<Diagnostic> {
+    let mut diags = diagnostics();
+    roundhouse::lower::relation_residue::elevate_dynamic_relation_for_target(&mut diags, target);
+    diags
+        .into_iter()
+        .filter(|d| d.message.contains("on a receiver of unknown type"))
+        .collect()
+}
+
+#[test]
+fn a_query_on_an_untyped_receiver_is_ledgered_once_per_chain() {
+    // `scope.where("score > ?", 1)` and `scope.where.not(...)`: the
+    // scope is a constructor argument nothing types, so the chain is no
+    // Relation to the analyzer and no Arel fold, yet a strict target
+    // has nothing that answers `where`. One entry per chain head
+    // (`group(:score).count` is one, at `group`), and `select { }.count`
+    // (Array's too) is not one.
+    let entries = untyped_queries_for(BuildTarget::Ruby);
+    assert_eq!(entries.len(), 3, "{entries:?}");
+    assert_eq!(entries.iter().filter(|d| d.message.contains("`where`")).count(), 2, "{entries:?}");
+    assert_eq!(entries.iter().filter(|d| d.message.contains("`group`")).count(), 1, "{entries:?}");
+    assert!(entries.iter().all(|d| d.severity == Severity::Warning), "{entries:?}");
+}
+
+#[test]
+fn a_query_on_an_untyped_receiver_fails_a_strict_emit() {
+    let entries = untyped_queries_for(BuildTarget::Typescript);
+    assert_eq!(entries.len(), 3, "{entries:?}");
+    assert!(entries.iter().all(|d| d.severity == Severity::Error), "{entries:?}");
 }

@@ -33,6 +33,9 @@
 require_relative "boot"
 
 module Main
+  # The framework class used by the nominal ParseError fallback.
+  FrameworkParseError = ActionDispatch::Http::Parameters::ParseError
+
   # Dispatch one request to a response descriptor — the single source
   # of routing / controller / flash / redirect logic. Returns the
   # 10-tuple `[status, body, content_type, location, set_cookies,
@@ -167,10 +170,16 @@ module Main
     request_format = :xml if path_format == "xml"
     # `/service-worker.js`: campfire's raw service-worker template.
     request_format = :js if path_format == "js"
-    # A route-forced format (`get "/rss" => "home#index", :format =>
-    # "rss"`) overrides the path-suffix sniff — the URL has no
-    # extension but the route pins the response format.
-    request_format = matched.req_format unless matched.req_format.nil?
+    # A route's default format (`get "/rss" => "home#index", :format =>
+    # "rss"`, `defaults: { format: :json }`) fills in what the request
+    # left out, as in Rails: it applies only when the path carried no
+    # extension, and is then written to `params[:format]` too (as a
+    # String, which the action reads). `/widgets/1.html` keeps html on a
+    # route defaulting to json.
+    if path_format.empty? && !matched.req_format.nil?
+      request_format = matched.req_format
+      matched.path_params["format"] = matched.req_format.to_s
+    end
 
     # `--target futamura`'s whole-route bridge serves only the actions
     # the analysis cleared (src/emit/futamura/routes.rb); any other
@@ -297,9 +306,15 @@ module Main
       # param; an html one may still name `?format=`.
       format_param = request_format == :html ? merged["format"].to_s : request_format.to_s
       return not_found_response(format_param, request_path, request, env)
-    rescue ActionController::ParameterMissing, ActionController::BadRequest
-      # `params.expect` / `params.require` refused the request and the app
-      # did not rescue it: Rails' rescue_responses answer :bad_request.
+    rescue ActionController::ParameterMissing, ActionController::BadRequest,
+           ActionDispatch::Http::Parameters::ParseError => error
+      # The app's handlers have already run. Rails' rescue_responses map
+      # an unhandled ParseError to :bad_request by its exact class name;
+      # an application subclass has no default mapping.
+      # Bind the built-ins so application instance/class overrides cannot
+      # turn a subclass into the framework's exact exception class.
+      raise if Kernel.instance_method(:is_a?).bind_call(error, FrameworkParseError) &&
+               !Kernel.instance_method(:instance_of?).bind_call(error, FrameworkParseError)
       return [400, "<h1>400 Bad Request</h1>", "text/html; charset=utf-8", nil, {}, {}, {}, {}, {}]
     rescue ActiveRecord::RecordInvalid, ActiveRecord::RecordNotSaved, ActionController::InvalidAuthenticityToken
       # Not a 500: Rails' rescue_responses answer these with 422.

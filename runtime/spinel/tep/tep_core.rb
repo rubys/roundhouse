@@ -5,8 +5,8 @@ require_relative "../http_headers"
 
 module Tep
   # The name the server announces itself by. scaffold/main.rb sets
-  # Tep::APP.name to the app's own name (the underscored module that
-  # wraps its Rails::Application, supplied by ingest) before it starts
+  # Tep::APP.name to the app's own name (its GlobalID app name,
+  # supplied by ingest) before it starts
   # the server; the binary's file name is the fallback.
   def self.display_name
     n = Tep::APP.name
@@ -280,6 +280,19 @@ module Tep
       @gzip_bodies[key] = gz
     end
     gz
+  end
+
+  # Not the app's spelling: a header Hash is case-sensitive, so a downcased Content-Encoding went unseen and the body was gzipped again
+  HEADER_NAMES = ["Content-Type", "Content-Length", "Content-Encoding", "Transfer-Encoding", "Connection", "Vary", "Location"]
+
+  def self.header_name(name)
+    lower = name.downcase
+    i = 0
+    while i < HEADER_NAMES.length
+      return HEADER_NAMES[i] if HEADER_NAMES[i].downcase == lower
+      i += 1
+    end
+    name
   end
 
   # Honour Accept-Encoding: gzip the way campfire's `use Rack::Deflater`

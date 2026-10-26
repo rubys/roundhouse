@@ -393,6 +393,64 @@ class RouterTest < Minitest::Test
 
   # The inverse a routing redirect's `%{name}` needs: Rails' PATH set
   # escaped over the decoded capture (including UTF-8 bytes as `%XX`).
+  # `foo|bar` compiled by segment_pattern.rs. First alternative wins,
+  # and a longer string that merely starts with a branch does not.
+  def test_segment_pattern_alternation_is_a_whole_segment_match
+    pattern = "A9.L1003.foo9.L1003.bar"
+    assert_equal true, ActionDispatch::Router.segment_pattern_match(pattern, "foo")
+    assert_equal true, ActionDispatch::Router.segment_pattern_match(pattern, "bar")
+    assert_equal false, ActionDispatch::Router.segment_pattern_match(pattern, "foobar")
+    assert_equal false, ActionDispatch::Router.segment_pattern_match(pattern, "fo")
+    assert_equal false, ActionDispatch::Router.segment_pattern_match(pattern, "")
+  end
+
+  # `\d{2}` is two exact digit classes, not the literal text "{2}".
+  def test_segment_pattern_exact_repeat_matches_only_that_many_digits
+    one = "C10010.0123456789"
+    pattern = one + one
+    assert_equal true, ActionDispatch::Router.segment_pattern_match(pattern, "12")
+    assert_equal false, ActionDispatch::Router.segment_pattern_match(pattern, "1")
+    assert_equal false, ActionDispatch::Router.segment_pattern_match(pattern, "123")
+    assert_equal false, ActionDispatch::Router.segment_pattern_match(pattern, "ab")
+  end
+
+  # `(?:a|ab)c` — different-length branches, tried as whole matches.
+  def test_segment_pattern_different_length_alternatives
+    pattern = "A8.L1002.ac9.L1003.abc"
+    assert_equal true, ActionDispatch::Router.segment_pattern_match(pattern, "ac")
+    assert_equal true, ActionDispatch::Router.segment_pattern_match(pattern, "abc")
+    assert_equal false, ActionDispatch::Router.segment_pattern_match(pattern, "ab")
+    assert_equal false, ActionDispatch::Router.segment_pattern_match(pattern, "a")
+  end
+
+  # The same programs, carried on a route the way lowering emits them:
+  # `constraints: { code: /(?:ABR|SNB)\d{2}/ }` refuses a third prefix
+  # and a short tail, and the helper route is not this test's concern.
+  def test_route_constraint_alternation_rejects_the_other_prefix
+    digits = "C10010.0123456789"
+    branch = "L1003.ABR" + digits + digits
+    other = "L1003.SNB" + digits + digits
+    pattern = "A" + branch.length.to_s + "." + branch + other.length.to_s + "." + other
+    seg = "4.code" + pattern.length.to_s + "." + pattern
+    table = [
+      ActionDispatch::Router::Route.new("GET", "/codes/:code", :widgets_controller, :show, nil, "", seg),
+      ActionDispatch::Router::Route.new("GET", "/codes/:code", :widgets_controller, :other),
+    ]
+    matched = ActionDispatch::Router.match("GET", "/codes/ABR12", table)
+    raise "expected match" if matched.nil?
+    assert_equal :show, matched.action
+    assert_equal "ABR12", matched.path_params["code"]
+    matched = ActionDispatch::Router.match("GET", "/codes/SNB99", table)
+    raise "expected match" if matched.nil?
+    assert_equal :show, matched.action
+    missed = ActionDispatch::Router.match("GET", "/codes/SEE12", table)
+    raise "expected fallthrough" if missed.nil?
+    assert_equal :other, missed.action
+    missed = ActionDispatch::Router.match("GET", "/codes/ABR1", table)
+    raise "expected fallthrough" if missed.nil?
+    assert_equal :other, missed.action
+  end
+
   def test_escape_path_reverses_a_decoded_capture
     assert_equal "a%23top%3Fx%20y/b:c@d!e%5Bf%5D", ActionDispatch::Router.escape_path("a#top?x y/b:c@d!e[f]")
     assert_equal "100%25", ActionDispatch::Router.escape_path("100%")

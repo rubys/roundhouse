@@ -109,14 +109,14 @@ fn emitted_csharp_router_keeps_loop_steps_nonnullable() {
     assert!(router.contains("var advance = Router.PercentAdvance(@byte);"), "{router}");
 }
 
-/// Only Router's invalid-capture errors become catchable Swift errors. The
-/// packaged matcher and both request boundaries must share that exact carrier.
+/// Router's invalid-capture errors are an ArgumentError subclass the request
+/// boundaries catch by name; the packaged matcher and both share that carrier.
 #[test]
 fn emitted_swift_router_carries_errors_to_request_boundaries() {
     let (emitted, errors) = emit_and_run::real_blog().emit(roundhouse::project::BuildTarget::Swift);
     assert!(errors.is_empty(), "{errors:?}");
     let router = std::fs::read_to_string(emitted.join("Sources/App/Router.swift")).unwrap();
-    assert!(router.contains("struct RoutePathEncodingError: Error"), "{router}");
+    assert!(router.contains("class RoutePathEncodingError: ArgumentError"), "{router}");
     assert!(router.contains("throw RoutePathEncodingError(\"Invalid encoding for path parameter\")"), "{router}");
     let signature = router.lines().find(|line| line.contains("static func match(")).expect("Router.match signature");
     assert!(signature.contains("throws -> MatchResult?"), "{signature}");

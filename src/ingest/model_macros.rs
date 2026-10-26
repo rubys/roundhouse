@@ -20,13 +20,17 @@ use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol};
 use crate::span::SourceFile;
 
+use crate::ingest::prism_api::PrismLocation;
 mod class_eval;
 
 pub(crate) fn expand_model_macros(
     app: &mut App,
     sources: &[SourceFile],
 ) -> super::IngestResult<()> {
-    if app.concern_spliced_class_methods.is_empty() && app.load_hook_class_macros.is_empty() {
+    if app.concern_spliced_class_methods.is_empty()
+        && app.load_hook_class_macros.is_empty()
+        && app.load_hook_extended_macros.is_empty()
+    {
         return Ok(());
     }
     let mut params_specs =
@@ -35,22 +39,38 @@ pub(crate) fn expand_model_macros(
     // Index once. Do not clone these defs onto every model, and do not
     // pretend the hook mixin was `include`d — availability is an
     // explicit load-hook origin check below.
-    let hook_macros: HashMap<Symbol, (ClassId, MethodDef)> = {
-        let mut map = HashMap::new();
-        for id in &app.load_hook_class_macros {
-            let Some(class) = app.library_classes.iter().find(|c| &c.name == id) else {
-                continue;
-            };
-            for m in &class.methods {
-                if m.receiver == MethodReceiver::Class && has_definition(&m.body) {
-                    map.entry(m.name.clone())
-                        .or_insert_with(|| (id.clone(), m.clone()));
-                }
+    let hook_sources = app
+        .load_hook_class_macros
+        .iter()
+        .map(|id| (id, MethodReceiver::Class))
+        .chain(app.load_hook_extended_macros.iter().map(|id| (id, MethodReceiver::Instance)));
+    let mut hook_macros: HashMap<Symbol, (ClassId, MethodDef)> = HashMap::new();
+    let mut hook_providers: HashMap<Symbol, usize> = HashMap::new();
+    for (id, receiver) in hook_sources {
+        let Some(class) = app.library_classes.iter().find(|c| &c.name == id) else {
+            if receiver == MethodReceiver::Instance {
+                super::survey::record(&super::IngestError::Unsupported {
+                    file: id.to_string(),
+                    message: format!(
+                        "`ActiveSupport.on_load(:active_record)` extends `{id}`, which is not ingested: the macros it gives every model are unknown"
+                    ),
+                });
+            }
+            continue;
+        };
+        for m in class.methods.iter().filter(|m| m.receiver == receiver) {
+            *hook_providers.entry(m.name.clone()).or_default() += 1;
+            if has_definition(&m.body) {
+                hook_macros.entry(m.name.clone()).or_insert_with(|| (id.clone(), m.clone()));
             }
         }
-        map
-    };
-    let hook_origins: HashSet<ClassId> = app.load_hook_class_macros.iter().cloned().collect();
+    }
+    let hook_origins: HashSet<ClassId> = app
+        .load_hook_class_macros
+        .iter()
+        .chain(&app.load_hook_extended_macros)
+        .cloned()
+        .collect();
     for model_index in 0..app.models.len() {
         let model = &app.models[model_index];
         let origins = app
@@ -145,10 +165,11 @@ pub(crate) fn expand_model_macros(
             let providers = app
                 .library_classes
                 .iter()
-                .filter(|c| included.contains(&c.name) || hook_origins.contains(&c.name))
+                .filter(|c| included.contains(&c.name) && !hook_origins.contains(&c.name))
                 .flat_map(|c| &c.methods)
                 .filter(|m| m.receiver == MethodReceiver::Class && &m.name == method)
-                .count();
+                .count()
+                + hook_providers.get(method).copied().unwrap_or(0);
             let methods = (recv.is_none()
                 && block.is_none()
                 && (included.contains(origin) || hook_origins.contains(origin))
@@ -169,10 +190,19 @@ pub(crate) fn expand_model_macros(
                         MethodReceiver::Class,
                     )
                 })
-                && supported_source_signature(def, sources)
+                && supported_source_signature(def, sources, false, false)
                 && supported_source_call(expr, sources))
             .then(|| expand(def, args, sources, &model.name))
-            .flatten();
+            .flatten()
+            .filter(|expansion| mixins_resolve_alike(app, origin, &expansion.items))
+            .map(|mut expansion| {
+                mark_mixin_constants(&mut expansion.items);
+                expansion
+            });
+            // A load-hook macro this cannot expand is the partial evaluator's to run or refuse (`class_macros`)
+            if methods.is_none() && hook_origins.contains(origin) && !macros.contains_key(method) {
+                continue;
+            }
             candidates.push((index, method.clone(), methods));
         }
         if candidates.is_empty() {
@@ -245,7 +275,7 @@ pub(crate) fn expand_model_macros(
                 super::survey::unwrap_or_record::<()>(Err(super::IngestError::Unsupported {
                     file,
                     message: format!(
-                        "model macro `{name}` not expanded: requires distinct parameterless definitions, symbol bindings and named visibility on those definitions"
+                        "model macro `{name}` not expanded: requires distinct parameterless definitions, symbol bindings, named visibility on those definitions, and mixins whose constants name the same module from the caller"
                     ),
                 }))?;
             }
@@ -309,7 +339,7 @@ fn include_closure(app: &App, id: ClassId, included: &mut HashSet<ClassId>) {
 /// Library IR intentionally flattens some Ruby parameters. Expansion
 /// needs the original signature: destructuring and anonymous rest may
 /// otherwise disappear altogether and look like a simpler valid macro.
-pub(super) fn supported_source_signature(def: &MethodDef, sources: &[SourceFile]) -> bool {
+pub(super) fn supported_source_signature(def: &MethodDef, sources: &[SourceFile], optionals: bool, rest: bool) -> bool {
     let Some(source) = def
         .name_span
         .file
@@ -321,6 +351,8 @@ pub(super) fn supported_source_signature(def: &MethodDef, sources: &[SourceFile]
     };
     struct Signature {
         offset: usize,
+        optionals: bool,
+        rest: bool,
         valid: bool,
     }
     impl<'pr> ruby_prism::Visit<'pr> for Signature {
@@ -329,10 +361,10 @@ pub(super) fn supported_source_signature(def: &MethodDef, sources: &[SourceFile]
                 return;
             }
             self.valid = def.parameters().is_none_or(|params| {
-                params.rest().is_none()
+                params.rest().is_none_or(|r| self.rest && r.as_rest_parameter_node().is_some_and(|r| r.name().is_some()))
                     && params.keyword_rest().is_none()
                     && params.block().is_none()
-                    && params.optionals().iter().next().is_none()
+                    && (self.optionals || params.optionals().iter().next().is_none())
                     && params.posts().iter().next().is_none()
                     && params
                         .requireds()
@@ -345,9 +377,11 @@ pub(super) fn supported_source_signature(def: &MethodDef, sources: &[SourceFile]
             });
         }
     }
-    let parsed = ruby_prism::parse(source.text.as_bytes());
+    let parsed = super::prism::parse_silent(source.text.as_bytes());
     let mut signature = Signature {
         offset: def.name_span.start as usize,
+        optionals,
+        rest,
         valid: false,
     };
     ruby_prism::Visit::visit(&mut signature, &parsed.node());
@@ -373,7 +407,7 @@ fn supported_source_call(expr: &Expr, sources: &[SourceFile]) -> bool {
     else {
         return false;
     };
-    let parsed = ruby_prism::parse(bytes);
+    let parsed = super::prism::parse_silent(bytes);
     if parsed.errors().next().is_some() {
         return false;
     }
@@ -411,10 +445,74 @@ fn has_definition(body: &Expr) -> bool {
     {
         return true;
     }
+    if mixin_args(body).is_some() {
+        return true;
+    }
     let mut found = false;
     body.node
         .for_each_child(&mut |child| found |= has_definition(child));
     found
+}
+
+/// A receiverless `include`/`extend` whose arguments are all constant
+/// paths: the class-body mixin a macro runs on its caller.
+pub(super) fn mixin_args(expr: &Expr) -> Option<Vec<&[Symbol]>> {
+    let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else { return None };
+    // Not `prepend`: a model's `prepend` is neither a recorded include nor replayed in the emitted class body
+    if !matches!(method.as_str(), "include" | "extend") || args.is_empty() {
+        return None;
+    }
+    args.iter()
+        .map(|arg| match &*arg.node {
+            ExprNode::Const { path } => Some(path.as_slice()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The expansion re-reads the macro's statements in the caller's body,
+/// so a mixin constant must name the same module from there as from the
+/// macro's own nesting: a known module, with no nearer one of that name.
+fn mixins_resolve_alike(app: &App, origin: &ClassId, items: &[ModelBodyItem]) -> bool {
+    let known = |name: &str| {
+        app.library_classes.iter().any(|c| c.name.0.as_str() == name) || app.models.iter().any(|m| m.name.0.as_str() == name)
+    };
+    let scopes: Vec<&str> = {
+        let full = origin.0.as_str();
+        let mut out = vec![full];
+        let mut rest = full;
+        while let Some((outer, _)) = rest.rsplit_once("::") {
+            out.push(outer);
+            rest = outer;
+        }
+        out
+    };
+    items.iter().all(|item| {
+        let ModelBodyItem::Unknown { expr, .. } = item else { return true };
+        let Some(paths) = mixin_args(expr) else { return true };
+        paths.iter().all(|path| {
+            let rooted = path.first().is_some_and(|s| s.as_str().is_empty());
+            let written = path.iter().filter(|s| !s.as_str().is_empty()).map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+            known(&written) && (rooted || scopes.iter().all(|scope| !known(&format!("{scope}::{written}"))))
+        })
+    })
+}
+
+// A re-read statement's span points into a fragment the constant resolver never indexed, so the checked path is read as written
+fn mark_mixin_constants(items: &mut [ModelBodyItem]) {
+    for item in items {
+        let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        if mixin_args(expr).is_none() {
+            continue;
+        }
+        let ExprNode::Send { args, .. } = &mut *expr.node else { continue };
+        for arg in args {
+            if let ExprNode::Const { path } = &mut *arg.node {
+                path.retain(|s| !s.as_str().is_empty());
+            }
+            arg.decisions |= crate::expr::GENERATED_CONST_REF;
+        }
+    }
 }
 
 fn macro_calls(
@@ -463,9 +561,9 @@ fn interned_prism_name(arg: &ruby_prism::Node<'_>) -> bool {
     arg.as_symbol_node().is_some() || arg.as_string_node().is_some()
 }
 
-fn valid_def_name(name: &Symbol) -> bool {
+pub(super) fn valid_def_name(name: &Symbol) -> bool {
     let header = format!("def {name}\nend\n");
-    let parsed = ruby_prism::parse(header.as_bytes());
+    let parsed = super::prism::parse_silent(header.as_bytes());
     let node = parsed.node();
     let Some(program) = node.as_program_node() else {
         return false;
@@ -702,7 +800,7 @@ fn supported_source_statement(
     else {
         return false;
     };
-    let parsed = ruby_prism::parse(text);
+    let parsed = super::prism::parse_silent(text);
     if parsed.errors().next().is_some() {
         return false;
     }

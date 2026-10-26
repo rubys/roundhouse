@@ -340,8 +340,8 @@ fn view_prefix(controller_class: &str, action: &str) -> String {
 /// the gap only names the parent's file), any file the route's reach
 /// actually walks into (a partial or layout inlined into the view
 /// method that renders it), or the view template the action renders by
-/// convention (a template engine not ingested at all: `.css.erb`,
-/// `.xml.ruby` — these never become a method, so reach can't see them,
+/// convention (a template engine not ingested at all: `.rabl` —
+/// these never become a method, so reach can't see them,
 /// which is why the prefix check stays). Either way the lowered app
 /// cannot serve what the gap dropped, so the route it belongs to stays
 /// with Rails.
@@ -1620,7 +1620,27 @@ fn enqueue_send(
                     // decide (RTA, above).
                     summary.untyped.push(method.clone());
                 } else {
+                    // INTERIM (rubys/roundhouse#58, same re-lowering as
+                    // above): the re-lowering only seeds the *enclosing*
+                    // class's own constants, so a read of ANOTHER class's
+                    // value constant (`Gadget::DEFAULT`) or a top-level
+                    // one (`DEFAULT_GADGET`) re-types as `Ty::Class { id
+                    // }` naming a class that doesn't exist. `index.lookup`
+                    // would then find nothing and the send would
+                    // dispatch to NOTHING rather than the value it
+                    // actually holds — unlike a real unresolved type,
+                    // this id can never gain a definition, so it would
+                    // silently and permanently clear the route. A bogus
+                    // id is never mistaken for a framework one (see
+                    // `is_bogus_class_id`), so this never costs precision
+                    // on `ActionDispatch::Flash` and friends, which still
+                    // dispatch nowhere, as today.
+                    let mut any_bogus = false;
                     for c in classes {
+                        if is_bogus_class_id(index, facts, &c) {
+                            any_bogus = true;
+                            continue;
+                        }
                         // Each side on its own: a class-side hit says
                         // nothing about whether the instance side
                         // defines it too (`Ty::Class` carries both the
@@ -1637,6 +1657,9 @@ fn enqueue_send(
                                 }
                             }
                         }
+                    }
+                    if any_bogus {
+                        summary.untyped.push(method.clone());
                     }
                 }
             }
@@ -1742,6 +1765,36 @@ fn analyzer_stamps(app: &App) -> HashMap<(u32, u32, u32), Ty> {
         }
     }
     out
+}
+
+/// Is `id`, a class id `classes_of` produced, a name the re-lowering
+/// made up rather than a real class (app or framework)? (`enqueue_send`'s
+/// typed-receiver arm, rubys/roundhouse#58.) An id already in
+/// `index.classes` is real by construction, so only a name with no entry
+/// there is even a candidate; among those, two shapes are safe tells
+/// that it is a misread value constant rather than an unresolved
+/// framework class:
+///   * some proper prefix of its `::` path names an app class or module
+///     (`Gadget::DEFAULT`, under the real `Gadget`). A framework class
+///     can never be nested inside an app namespace without being an app
+///     class itself — the app would have had to declare it — so this
+///     never misfires on a framework type (`ActionDispatch::Flash`
+///     keeps dispatching nowhere, as today);
+///   * its last path segment is an app value constant
+///     (`facts.value_consts`, already collected for the `Const` receiver
+///     arm above): catches a top-level `DEFAULT_GADGET = Gadget.new`
+///     read back the same way, with no app-class prefix to catch it.
+fn is_bogus_class_id(index: &Index, facts: &Facts, id: &str) -> bool {
+    if index.classes.contains_key(id) {
+        return false;
+    }
+    let segs: Vec<&str> = id.split("::").collect();
+    for i in 1..segs.len() {
+        if index.classes.contains_key(&segs[..i].join("::")) {
+            return true;
+        }
+    }
+    segs.last().is_some_and(|last| facts.value_consts.contains(*last))
 }
 
 /// App classes a typed receiver can be. Empty means "unknown": fan out.

@@ -14,7 +14,7 @@
 //! def discarded?   = !col.nil?
 //! def undiscarded? = col.nil?
 //! def kept?        = undiscarded?
-//! def discard      # update_attribute(col, Time.current) + after_discard targets
+//! def discard      # run_callbacks(:discard) { update_attribute(col, Time.current) }
 //! def discard!     # discard || raise
 //! def undiscard / undiscard!
 //! ```
@@ -29,14 +29,10 @@
 //!   = :other` is honoured when its argument is a literal symbol. Anything
 //!   else is refused (and the include stays, so the call sites keep
 //!   failing loudly rather than dispatching on nothing).
-//! * Callbacks: `after_discard` / `after_undiscard` with bare symbol
-//!   targets are folded into the generated `discard` / `undiscard`, in
-//!   declaration order, running after the column write exactly as
-//!   `run_callbacks(:discard) { update_attribute(..) }` does. A model that
-//!   declares any other discard callback (`before_/around_*`, or an
-//!   option such as `if:`) gets the READ half only: the write methods are
-//!   not generated, because running them without the callback would be
-//!   the wrong answer; `discard!` then fails analysis, naming itself.
+//! * Callbacks are the gem's own: `define_model_callbacks :discard,
+//!   :undiscard` and `run_callbacks(:discard) { update_attribute(..) }`,
+//!   which `model_callbacks` builds into the chain every declaration of
+//!   them (`before_`/`around_`/`after_discard`, `if:`, a block) joins.
 //! * `discard_all` / `undiscard_all` are not generated.
 //! * `Discard::RecordNotDiscarded` is not a class here: `discard!` raises
 //!   `ActiveRecord::RecordNotSaved` with the gem's message instead.
@@ -94,62 +90,30 @@ fn declared_column(model: &Model) -> Option<(usize, Result<String, ()>)> {
     })
 }
 
-const HOOKS: [&str; 6] = [
-    "before_discard", "around_discard", "after_discard",
-    "before_undiscard", "around_undiscard", "after_undiscard",
-];
-
-/// A discard callback declaration: its hook and, when it is the bare
-/// symbol form, its targets.
-fn callback_decl(item: &ModelBodyItem) -> Option<(&'static str, Option<Vec<Symbol>>)> {
-    let ModelBodyItem::Unknown { expr, .. } = item else { return None };
-    let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node else { return None };
-    let hook = HOOKS.iter().find(|h| **h == method.as_str())?;
-    let targets: Option<Vec<Symbol>> = if block.is_some() {
-        None
-    } else {
-        args.iter()
-            .map(|a| match &*a.node {
-                ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
-                _ => None,
-            })
-            .collect()
-    };
-    Some((hook, targets.filter(|t| !t.is_empty())))
-}
-
 fn is_ident(s: &str) -> bool {
     let mut chars = s.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_lowercase() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-fn source(col: &str, after_discard: &[Symbol], after_undiscard: &[Symbol], write: bool) -> String {
-    let calls = |targets: &[Symbol]| -> String {
-        targets.iter().map(|t| format!("    {}\n", t.as_str())).collect()
-    };
-    let mut src = format!(
+fn source(col: &str) -> String {
+    format!(
         "class DiscardSynth < ApplicationRecord\n\
          \x20 scope :kept, -> {{ where({col}: nil) }}\n\
          \x20 scope :undiscarded, -> {{ where({col}: nil) }}\n\
          \x20 scope :discarded, -> {{ where.not({col}: nil) }}\n\
          \x20 scope :with_discarded, -> {{ unscope(where: :{col}) }}\n\
+         \x20 define_model_callbacks :discard\n\
+         \x20 define_model_callbacks :undiscard\n\
          \x20 def discarded?\n    !{col}.nil?\n  end\n\
          \x20 def undiscarded?\n    {col}.nil?\n  end\n\
-         \x20 def kept?\n    undiscarded?\n  end\n"
-    );
-    if write {
-        src.push_str(&format!(
-            "  def discard\n    return false if discarded?\n    result = update_attribute(:{col}, Time.current)\n{}    result\n  end\n\
-             \x20 def discard!\n    discard || raise(ActiveRecord::RecordNotSaved.new(\"Failed to discard the record\", self))\n  end\n\
-             \x20 def undiscard\n    return false unless discarded?\n    result = update_attribute(:{col}, nil)\n{}    result\n  end\n\
-             \x20 def undiscard!\n    undiscard || raise(ActiveRecord::RecordNotSaved.new(\"Failed to undiscard the record\", self))\n  end\n",
-            calls(after_discard),
-            calls(after_undiscard),
-        ));
-    }
-    src.push_str("end\n");
-    src
+         \x20 def kept?\n    undiscarded?\n  end\n\
+         \x20 def discard\n    return false if discarded?\n    run_callbacks(:discard) do\n      update_attribute(:{col}, Time.current)\n    end\n  end\n\
+         \x20 def discard!\n    discard || raise(ActiveRecord::RecordNotSaved.new(\"Failed to discard the record\", self))\n  end\n\
+         \x20 def undiscard\n    return false unless discarded?\n    run_callbacks(:undiscard) do\n      update_attribute(:{col}, nil)\n    end\n  end\n\
+         \x20 def undiscard!\n    undiscard || raise(ActiveRecord::RecordNotSaved.new(\"Failed to undiscard the record\", self))\n  end\n\
+         end\n"
+    )
 }
 
 pub(crate) fn expand_discard_models(app: &mut crate::App) -> IngestResult<()> {
@@ -189,27 +153,7 @@ pub(crate) fn expand_discard_models(app: &mut crate::App) -> IngestResult<()> {
             continue;
         }
 
-        // Discard callbacks the generated write methods can honour.
-        let mut after_discard: Vec<Symbol> = Vec::new();
-        let mut after_undiscard: Vec<Symbol> = Vec::new();
-        let mut write = true;
-        let mut consumed: Vec<usize> = Vec::new();
-        for (i, item) in app.models[mi].body.iter().enumerate() {
-            let Some((hook, targets)) = callback_decl(item) else { continue };
-            match (hook, targets) {
-                ("after_discard", Some(t)) => { after_discard.extend(t); consumed.push(i); }
-                ("after_undiscard", Some(t)) => { after_undiscard.extend(t); consumed.push(i); }
-                (hook, _) => {
-                    write = false;
-                    refuse(format!(
-                        "`{hook}` with options, a block, or a non-after hook is not modeled; \
-                         only the read half (kept/discarded/with_discarded/discarded?) is generated"
-                    ))?;
-                }
-            }
-        }
-
-        let src = source(&col, &after_discard, &after_undiscard, write);
+        let src = source(&col);
         let (parsed, diags) = super::prism::scope(|| {
             super::model::ingest_model(src.as_bytes(), "<discard>", &app.schema, &Default::default())
         });
@@ -237,6 +181,7 @@ pub(crate) fn expand_discard_models(app: &mut crate::App) -> IngestResult<()> {
         let additions: Vec<ModelBodyItem> = synth.body.into_iter().filter(|it| match it {
             ModelBodyItem::Scope { scope, .. } => !own.contains(&(true, scope.name.clone())),
             ModelBodyItem::Method { method, .. } => !own.contains(&(false, method.name.clone())),
+            ModelBodyItem::Unknown { expr, .. } => matches!(&*expr.node, ExprNode::Send { method, .. } if method.as_str() == "define_model_callbacks"),
             _ => false,
         }).collect();
 
@@ -244,7 +189,7 @@ pub(crate) fn expand_discard_models(app: &mut crate::App) -> IngestResult<()> {
         // (or just the `Discard::Model` argument of a list include), then
         // put the expansion where the first include stood.
         let first = includes[0];
-        let mut remove: Vec<usize> = consumed;
+        let mut remove: Vec<usize> = Vec::new();
         if let Some((i, _)) = declared_column(model) { remove.push(i); }
         for &i in &includes {
             let ModelBodyItem::Unknown { expr, .. } = &mut model.body[i] else { continue };

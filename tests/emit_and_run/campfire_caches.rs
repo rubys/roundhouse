@@ -203,6 +203,95 @@ puts [copied, store.inspect == size, store.read("default")["missing"], rejected_
     );
 }
 
+/// `read_multi` and `read` hand back a copy of each hit and leave a miss
+/// out; `retrieve_cache_key` joins a nested Array's keys with "/" in
+/// place, as Rails' `to_param` join does (an empty Array and nil each
+/// add an empty part). A cached collection takes both paths once per
+/// element, so neither builds a list per read (the `[found, value]`
+/// pair, `copy`'s `ancestors`) or per key level (`map`, then `join`).
+#[test]
+fn bounded_store_reads_and_keys_build_no_per_element_lists() {
+    let run = emit_and_run::real_blog().run_ruby(
+        r#"store = ActiveSupport::Cache::MemoryStore.new
+store.write("a", "alpha")
+store.write("b", "beta")
+got = store.read_multi("a", "missing", "b")
+got["a"] << " mutated"
+again = store.read("a")
+key = ActiveSupport::Cache.retrieve_cache_key([:views, "x", ["messages/_message", [], "m/1-2"], nil, "y"])
+names = ["a", "b"]
+parts = [:views, "x", ["p", "k"]]
+5.times { store.read_multi(*names); ActiveSupport::Cache.retrieve_cache_key(parts) }
+before = GC.stat(:total_allocated_objects)
+100.times { store.read_multi(*names) }
+per_multi = (GC.stat(:total_allocated_objects) - before) / 100.0
+before = GC.stat(:total_allocated_objects)
+100.times { ActiveSupport::Cache.retrieve_cache_key(parts) }
+per_key = (GC.stat(:total_allocated_objects) - before) / 100.0
+# read_multi: the names splat, the result Hash and one copy per hit;
+# the key: its String (and the Symbol's text, where to_s makes one).
+puts [got, again, key, per_multi.round <= 4, per_key.round <= 2].inspect
+"#,
+    );
+    run.assert_passes();
+    assert_eq!(
+        run.stdout,
+        "[{\"a\" => \"alpha mutated\", \"b\" => \"beta\"}, \"alpha\", \"views/x/messages/_message//m/1-2//y\", true, true]\n",
+        "stderr:\n{}",
+        run.stderr
+    );
+}
+
+/// A model's own `cache_version` keys its fragment, as in Rails, whose
+/// `cache_key_with_version` is `"#{cache_key}-#{cache_version}"`.
+/// Campfire's `Message#cache_version` answers a `presentation_version`
+/// its SQLite triggers move whenever anything the fragment shows changes,
+/// so an edit from outside Rails that leaves the message's `updated_at`
+/// alone still re-renders it. The emit keyed every record by `updated_at`
+/// and served the old fragment after such an edit. Here the version is
+/// the title itself, and the foreign UPDATE leaves `updated_at` alone.
+#[test]
+fn a_models_cache_version_keys_its_fragment() {
+    contract::fragments_overlay()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true\n\n  def cache_version\n    \"title-#{title}\"\n  end\n",
+        )
+        .write(
+            "test/controllers/fragments_controller_test.rb",
+            r#"require "test_helper"
+
+class FragmentsControllerTest < ActionDispatch::IntegrationTest
+  setup do
+    @article = Article.create!(title: "Original", body: "A sufficiently long article body.")
+    FragmentsController::STORE.clear
+    ActionController::Base.perform_caching = true
+  end
+
+  teardown do
+    ActionController::Base.perform_caching = false
+    FragmentsController::STORE.clear
+  end
+
+  test "an edit that moves cache_version but not updated_at re-renders" do
+    get "/fragments/#{@article.id}"
+    assert_includes response.body, "Original"
+    updated_at = ActiveRecord::Base.connection.select_value("SELECT updated_at FROM articles WHERE id = #{@article.id}")
+    ActiveRecord::Base.connection.execute("UPDATE articles SET title = 'Changed' WHERE id = #{@article.id}")
+    assert_equal updated_at, ActiveRecord::Base.connection.select_value("SELECT updated_at FROM articles WHERE id = #{@article.id}")
+    get "/fragments/#{@article.id}"
+    assert_includes response.body, "Changed"
+    assert_equal "articles/#{@article.id}-title-Changed", Article.find(@article.id).cache_key_with_version
+    assert_equal "articles/new-title-Unsaved", Article.new(title: "Unsaved").cache_key_with_version
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/fragments_controller_test.rb")
+        .assert_passes();
+}
+
 /// Rails' fragment caching through the controller, as campfire's
 /// `CachedResponses` overrides it: a view's `<% cache %>` is served only
 /// while `perform_caching`, under `combined_fragment_cache_key`, from
@@ -280,6 +369,87 @@ class FragmentsControllerTest < ActionDispatch::IntegrationTest
     get "/fragments/#{@article.id}"
     assert_includes response.body, "Changed"
     assert_includes FragmentsController::STORE.inspect, "entries=2"
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/fragments_controller_test.rb")
+        .assert_passes();
+}
+
+/// `<% cache article do %>` inside a partial that a `cached: true`
+/// collection renders, as campfire's `messages/_message` is: Rails keys
+/// both by `[template, record]` (`messages/_message`, the record), so
+/// a collection miss files ONE fragment per element, and the app's
+/// `combined_fragment_cache_key` sees the record (campfire shares a
+/// message's fragment across viewers only then). The emit used to key
+/// the collection by the render's spelling (`fragments/article`) and
+/// the block by text, so every miss filed a second copy nothing read.
+#[test]
+fn a_cached_collection_and_its_partials_cache_block_share_one_fragment() {
+    contract::fragments_overlay()
+        .edit(
+            "config/routes.rb",
+            "  get \"/fragments/:id\", to: \"fragments#show\"\n",
+            "  get \"/fragments\", to: \"fragments#index\"\n  get \"/fragments/:id\", to: \"fragments#show\"\n",
+        )
+        .edit(
+            "app/controllers/fragments_controller.rb",
+            "  EPOCH = [ 0 ]\n",
+            "  EPOCH = [ 0 ]\n  RECORD_KEYS = []\n",
+        )
+        .edit(
+            "app/controllers/fragments_controller.rb",
+            "    super([ EPOCH.length, key ])\n",
+            "    RECORD_KEYS.push(key.is_a?(Array) && key.any? { |part| part.is_a?(Article) })\n    super([ EPOCH.length, key ])\n",
+        )
+        .edit(
+            "app/controllers/fragments_controller.rb",
+            "  def show\n",
+            "  def index\n    @articles = Article.order(:id)\n  end\n\n  def show\n",
+        )
+        .write(
+            "app/views/fragments/index.html.erb",
+            "<%= render partial: \"fragments/article\", collection: @articles, cached: true %>\n",
+        )
+        .write(
+            "app/views/fragments/_article.html.erb",
+            "<% cache article do %><p><%= article.title %></p><% end %>\n",
+        )
+        .write(
+            "test/controllers/fragments_controller_test.rb",
+            r#"require "test_helper"
+
+class FragmentsControllerTest < ActionDispatch::IntegrationTest
+  setup do
+    @first = Article.create!(title: "First", body: "A sufficiently long article body.")
+    @second = Article.create!(title: "Second", body: "A sufficiently long article body.")
+    # Past the length the collection renders uncached (MAX_UNCACHED_COLLECTION_LENGTH).
+    8.times { |i| Article.create!(title: "More #{i}", body: "A sufficiently long article body.") }
+    FragmentsController::STORE.clear
+    FragmentsController::RECORD_KEYS.clear
+    @previous_collection_cache = ActionView::PartialRenderer.collection_cache
+    ActionView::PartialRenderer.collection_cache = FragmentsController::STORE
+    ActionController::Base.perform_caching = true
+  end
+
+  teardown do
+    ActionController::Base.perform_caching = false
+    ActionView::PartialRenderer.collection_cache = @previous_collection_cache
+    FragmentsController::STORE.clear
+  end
+
+  test "a collection miss files one fragment per element, keyed by the record" do
+    get "/fragments"
+    assert_includes response.body, "First"
+    assert_includes response.body, "Second"
+    assert_includes FragmentsController::STORE.inspect, "entries=#{Article.count},"
+    assert FragmentsController::RECORD_KEYS.any?
+    assert FragmentsController::RECORD_KEYS.all?
+
+    ActiveRecord::Base.connection.execute("UPDATE articles SET title = 'Changed' WHERE id = #{@first.id}")
+    get "/fragments"
+    assert_includes response.body, "First"
   end
 end
 "#,

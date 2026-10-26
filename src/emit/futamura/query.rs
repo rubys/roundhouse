@@ -32,7 +32,7 @@
 //! may have a `default_scope` is never specialized: ingest does not model
 //! it, so the generated root `where` could not be trusted to be complete.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::App;
 use crate::dialect::{Association, Model, ModelBodyItem, Scope};
@@ -138,10 +138,19 @@ impl<'a> Specializer<'a> {
     }
 
     /// Every query site in a method body: specialized, or left with a reason.
-    pub fn method_body(&self, body: &Expr, sites: &mut Vec<Site>, residue: &mut Vec<Residue>) {
+    /// `owner`: the model whose method this is, for its receiverless column reads.
+    pub fn method_body(&self, owner: Option<&str>, body: &Expr, sites: &mut Vec<Site>, residue: &mut Vec<Residue>) {
         let mut locals = HashMap::new();
         collect_locals(body, &mut locals);
-        let cx = Cx { locals: &locals, depth: Default::default(), args: HashMap::new(), self_chain: None };
+        let cx = Cx {
+            locals: &locals,
+            depth: Default::default(),
+            args: HashMap::new(),
+            arg_tys: HashMap::new(),
+            array_args: HashSet::new(),
+            self_chain: None,
+            owner,
+        };
         self.visit(body, &cx, sites, residue);
     }
 
@@ -336,7 +345,10 @@ impl<'a> Specializer<'a> {
                     if !self.has_column(&chain.model, column) {
                         return Err(format!("where on `{}`, not a column", column.as_str()));
                     }
-                    if matches!(&*v.node, ExprNode::Hash { .. } | ExprNode::Array { .. } | ExprNode::Range { .. }) {
+                    if matches!(&*v.node, ExprNode::Hash { .. } | ExprNode::Array { .. } | ExprNode::Range { .. })
+                        || cx.ty_of(v).as_ref().is_some_and(always_a_collection)
+                        || self.mentions_array_column(v, cx, 0)
+                    {
                         return Err("where value is a collection".into());
                     }
                     let value = match self.value(v, cx)? {
@@ -439,10 +451,26 @@ impl<'a> Specializer<'a> {
             _ => &scope.body,
         };
         let mut bound = HashMap::new();
+        let mut bound_tys = HashMap::new();
+        let mut array_args = HashSet::new();
         for (p, a) in scope.params.iter().zip(args) {
             bound.insert(p.name.clone(), self.value(a, cx)?);
+            bound_tys.insert(p.name.clone(), cx.ty_of(a));
+            // Read in the caller's context: inside the body a receiverless
+            // call is the relation's.
+            if self.mentions_array_column(a, cx, 0) {
+                array_args.insert(p.name.clone());
+            }
         }
-        let inner = Cx { locals: cx.locals, depth: std::cell::Cell::new(cx.depth.get()), args: bound, self_chain: Some(chain.clone()) };
+        let inner = Cx {
+            locals: cx.locals,
+            depth: std::cell::Cell::new(cx.depth.get()),
+            args: bound,
+            arg_tys: bound_tys,
+            array_args,
+            self_chain: Some(chain.clone()),
+            owner: cx.owner,
+        };
         let ExprNode::Send { recv, method, args, block: None, .. } = &*body.node else {
             return Err(format!("scope `{}` body is not a call chain", scope.name.as_str()));
         };
@@ -581,6 +609,63 @@ impl<'a> Specializer<'a> {
         }
     }
 
+    /// Whether an array-column read can reach this value: the value itself,
+    /// any part of it (`tag_ids || nil`, `tag_ids.compact`), a local assigned
+    /// once from one, or a scope parameter bound to one. Leaving such a site
+    /// to Rails is never wrong; binding an Array is.
+    fn mentions_array_column(&self, v: &Expr, cx: &Cx, depth: usize) -> bool {
+        // Past the limit the value is not proven free of one: fail closed.
+        if depth > 8 {
+            return true;
+        }
+        if self.reads_array_column(v, cx) {
+            return true;
+        }
+        if let ExprNode::Var { id, name } = &*v.node {
+            if cx.array_args.contains(name) {
+                return true;
+            }
+            if let Some(Some(value)) = cx.locals.get(&(*id, name.clone())) {
+                return self.mentions_array_column(value, cx, depth + 1);
+            }
+        }
+        let mut found = false;
+        v.node.for_each_child(&mut |c| found = found || self.mentions_array_column(c, cx, depth + 1));
+        found
+    }
+
+    /// A read of a PostgreSQL array column (`tag_ids`, `@member.tag_ids`):
+    /// an Array on every path, which the analysis still types as its
+    /// element, so the schema answers.
+    fn reads_array_column(&self, v: &Expr, cx: &Cx) -> bool {
+        let ExprNode::Send { recv, method, args, block: None, .. } = &*v.node else { return false };
+        if !args.is_empty() {
+            return false;
+        }
+        let model = match recv.as_ref().map(|r| (&*r.node, r.ty.as_ref())) {
+            // In an inlined scope a receiverless call is the relation's, not a column.
+            None | Some((ExprNode::SelfRef, _)) if cx.self_chain.is_none() => cx.owner,
+            Some((_, Some(ty))) => match ty {
+                Ty::Class { id, .. } => Some(id.0.as_str()),
+                Ty::Union { variants } => {
+                    let mut classes = variants.iter().filter(|t| !matches!(t, Ty::Nil));
+                    match (classes.next(), classes.next()) {
+                        (Some(Ty::Class { id, .. }), None) => Some(id.0.as_str()),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(m) = model.and_then(|name| self.models.get(name)) else { return false };
+        self.app
+            .schema
+            .tables
+            .get(&m.table.0)
+            .is_some_and(|t| t.columns.iter().any(|c| &c.name == method && c.array))
+    }
+
     fn has_column(&self, model: &ClassId, column: &Symbol) -> bool {
         let m = self.models[model.0.as_str()];
         self.app
@@ -599,8 +684,25 @@ struct Cx<'b> {
     depth: std::cell::Cell<usize>,
     /// Scope parameters bound to the call's argument values.
     args: HashMap<Symbol, Val>,
+    /// Each bound parameter's type at the call site: the scope body types
+    /// its parameters without the call's arguments.
+    arg_tys: HashMap<Symbol, Option<Ty>>,
+    /// The model whose method is walked, if any.
+    owner: Option<&'b str>,
+    /// Scope parameters bound to a value that reads an array column.
+    array_args: HashSet<Symbol>,
     /// The relation an inlined scope body runs against.
     self_chain: Option<Chain>,
+}
+
+impl Cx<'_> {
+    /// An expression's type, a scope parameter's being its call site's.
+    fn ty_of(&self, e: &Expr) -> Option<Ty> {
+        match &*e.node {
+            ExprNode::Var { name, .. } if self.args.contains_key(name) => self.arg_tys.get(name).cloned().flatten(),
+            _ => e.ty.clone(),
+        }
+    }
 }
 
 impl Chain {
@@ -728,4 +830,29 @@ fn collect_locals<'e>(e: &'e Expr, out: &mut HashMap<(VarId, Symbol), Option<&'e
         out.entry((*id, name.clone())).and_modify(|v| *v = None).or_insert(Some(value));
     }
     e.node.for_each_child(&mut |c| collect_locals(c, out));
+}
+
+/// A value typed as a collection on every path (an Array, a Hash, a Range,
+/// a Relation, or nil beside one of them): `ActiveRecord::StatementCache`
+/// refuses each of them as a bind (`unsupported_value?`), so a site bound
+/// to it would always run its fallback. Only a fully inferred type counts:
+/// a parameter whose type still holds a variable (`Array[T] | nil` for a
+/// value that is a String at run time) is not evidence, and stays a bind.
+fn always_a_collection(ty: &Ty) -> bool {
+    if ty.mentions_unknown() {
+        return false;
+    }
+    fn collection(ty: &Ty) -> bool {
+        match ty {
+            Ty::Array { .. } | Ty::Tuple { .. } | Ty::Hash { .. } | Ty::Relation { .. } => true,
+            Ty::Class { id, .. } => id.0.as_str() == "Range",
+            _ => false,
+        }
+    }
+    match ty {
+        Ty::Union { variants } => {
+            variants.iter().any(collection) && variants.iter().all(|v| collection(v) || matches!(v, Ty::Nil))
+        }
+        other => collection(other),
+    }
 }

@@ -230,10 +230,10 @@ end
 #[test]
 fn an_absolute_class_uses_the_same_registry_identity_as_a_bare_class() {
     let app = app_with("@a = ::Time.now");
-    assert_eq!(
-        ty_at(&app, 2, 16),
-        Some(Ty::Class { id: ClassId(Symbol::from("Time")), args: vec![].into() }),
-    );
+    let bare = app_with("@a = Time.now");
+    let absolute_type = ty_at(&app, 2, 16);
+    assert_eq!(absolute_type, Some(Ty::Time));
+    assert_eq!(absolute_type, ty_at(&bare, 2, 14));
 }
 
 #[test]

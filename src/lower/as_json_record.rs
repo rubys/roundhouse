@@ -84,7 +84,8 @@ pub(super) fn column_writer_with(
             | ColumnType::Json
             | ColumnType::Jsonb
             | ColumnType::Binary
-            | ColumnType::Reference { .. } => {
+            | ColumnType::Reference { .. }
+            | ColumnType::Interval => {
                 return Err("a column's JSON form is not the one written here");
             }
             _ => {

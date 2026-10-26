@@ -119,6 +119,75 @@ end
     );
 }
 
+/// Transaction control and the observer's `PRAGMA data_version` are
+/// compiled once per connection, not on every call (the gem's `execute`
+/// and `get_first_value` prepare and close each time): on campfire's
+/// users profile they were about 10 of the ~14 statements a request
+/// prepared. Reuse must not change what they do: a failing COMMIT still
+/// raises and the statement runs again after it, `data_version` still
+/// moves when another connection commits (the reused statement holds no
+/// snapshot), and `close` finalizes them.
+#[test]
+fn fixed_statements_compile_once_per_connection() {
+    run(
+        "fixed",
+        r#"
+module PrepareCount
+  COUNT = Hash.new(0)
+  def prepare(sql, *args, &block)
+    PrepareCount::COUNT[sql] += 1
+    super
+  end
+end
+SQLite3::Database.prepend(PrepareCount)
+
+Db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+Db.with_connection do
+  50.times do |i|
+    Db.exec("BEGIN")
+    Db.exec("INSERT INTO t VALUES (#{i})")
+    Db.exec("COMMIT")
+  end
+end
+check("every row committed", count("t") == 50)
+check("BEGIN IMMEDIATE compiled once, not per transaction", PrepareCount::COUNT["BEGIN IMMEDIATE"] == 1)
+check("COMMIT compiled once, not per transaction", PrepareCount::COUNT["COMMIT"] == 1)
+
+conn = SQLite3::Database.new(Db.database_path)
+failed = false
+begin
+  conn.execute("COMMIT")
+rescue SQLite3::Exception
+  failed = true
+end
+check("a COMMIT outside a transaction still raises", failed)
+conn.execute("BEGIN")
+conn.execute("INSERT INTO t VALUES (1000)")
+conn.execute("ROLLBACK")
+check("the statements run again after one raised", !conn.transaction_active?)
+check("the rollback rolled back", count("t") == 50)
+conn.execute("BEGIN")
+conn.execute("INSERT INTO t VALUES (1001)")
+conn.execute("COMMIT")
+check("and commit", count("t") == 51)
+
+observer = SQLite3::Database.new(Db.database_path)
+v1 = observer.get_first_value("PRAGMA data_version")
+conn.execute("INSERT INTO t VALUES (1002)")
+v2 = observer.get_first_value("PRAGMA data_version")
+v3 = observer.get_first_value("PRAGMA data_version")
+check("data_version moves when another connection commits", v2 != v1)
+check("and holds when nothing does", v3 == v2)
+check("data_version compiled once", PrepareCount::COUNT["PRAGMA data_version"] == 1)
+check("a block or binds take the gem's own path", conn.execute("SELECT 1", []).first == [1])
+
+observer.close
+conn.close
+check("close closes", conn.closed? && observer.closed?)
+"#,
+    );
+}
+
 /// Writers in one process queue on the permit rather than racing for
 /// SQLite's lock. With every connection's busy handler set to zero, a
 /// second writer reaching SQLite would fail at once; none does.
@@ -179,6 +248,91 @@ end
 writer = Thread.new { Db.with_connection { Db.exec("INSERT INTO t VALUES (2)") } }
 check("another writer got the permit", !writer.join(5).nil?)
 check("the abandoned insert rolled back", count("t") == 1)
+"#,
+    );
+}
+
+/// Writers in separate PROCESSES (Puma's forked workers) queue on the
+/// permit's flock rather than meeting at SQLite's lock. With every
+/// connection's busy handler at zero, a writer reaching SQLite while
+/// another process holds the lock would fail at once; none does.
+#[test]
+fn writers_in_separate_processes_queue_on_the_writer_flock() {
+    run(
+        "writer_flock",
+        r#"
+Db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER)")
+pids = 4.times.map do |i|
+  fork do
+    Db.adopt_after_fork
+    Db.instance_variable_get(:@pool).free.each { |c| c.busy_handler_timeout = 0 }
+    failed = 0
+    Db.with_connection do
+      40.times do
+        begin
+          Db.exec("BEGIN")
+          Db.exec("INSERT INTO t (n) VALUES (#{i})")
+          sleep 0.0005
+          Db.exec("INSERT INTO t (n) VALUES (#{i})")
+          Db.exec("COMMIT")
+        rescue => e
+          failed += 1
+          Db.exec("ROLLBACK") rescue nil
+        end
+      end
+    end
+    exit!(failed == 0 ? 0 : 1)
+  end
+end
+statuses = pids.map { |pid| Process.wait2(pid)[1].exitstatus }
+check("no process met SQLITE_BUSY (#{statuses.inspect})", statuses.all?(0))
+check("every row landed", count("t") == 4 * 40 * 2)
+"#,
+    );
+}
+
+/// The writer flock is held per open file, so a child that kept its
+/// parent's descriptor would count as the same holder and walk straight
+/// in. A forked child opens its own: while the parent holds the lock the
+/// child's wait ends at the permit's deadline without it, and once the
+/// parent lets go the child takes it. The parent opens the lock file
+/// before the fork, as a server that wrote while booting does, and takes
+/// the lock after it, as a worker does.
+#[test]
+fn a_forked_child_waits_for_its_parents_writer_flock() {
+    run(
+        "writer_flock_fork",
+        r#"
+check("the parent opens the lock file", Db.acquire_permit && Db.instance_variable_get(:@writer_lock_held))
+Db.release_permit
+go_r, go_w = IO.pipe
+report_r, report_w = IO.pipe
+freed_r, freed_w = IO.pipe
+pid = fork do
+  go_w.close; report_r.close; freed_w.close
+  go_r.gets
+  Db.write_permit_timeout = 0.2
+  Db.acquire_permit
+  waited_out = !Db.instance_variable_get(:@writer_lock_held)
+  Db.release_permit
+  report_w.puts(waited_out ? "waited" : "walked in")
+  report_w.close
+  freed_r.gets
+  Db.write_permit_timeout = 5.0
+  Db.acquire_permit
+  took = Db.instance_variable_get(:@writer_lock_held)
+  Db.release_permit
+  exit!(took ? 0 : 1)
+end
+go_r.close; report_w.close; freed_r.close
+check("parent takes the lock", Db.acquire_permit && Db.instance_variable_get(:@writer_lock_held))
+go_w.puts("go")
+check("the child's wait ended without the parent's lock", report_r.gets.to_s.strip == "waited")
+Db.release_permit
+check("the parent let go", !Db.instance_variable_get(:@writer_lock_held))
+freed_w.puts("free")
+_pid, status = Process.wait2(pid)
+check("the child took the lock once it was free", status.exitstatus == 0)
 "#,
     );
 }
@@ -554,7 +708,7 @@ fn spinel_shim_policy() {
     let dir = base.join(format!("roundhouse-db-concurrency-{}-spinel", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    for name in ["db.rb", "active_support_time_parsing.rb"] {
+    for name in ["db.rb", "active_support_time_parsing.rb", "active_support_interval.rb", "active_support_duration.rb"] {
         std::fs::copy(root.join("runtime/spinel").join(name), dir.join(name)).unwrap();
     }
     std::fs::copy(

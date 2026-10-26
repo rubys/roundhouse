@@ -53,6 +53,10 @@ pub(super) struct EmitCtx {
     /// `Rc<RefCell>` so the scope flattens — `with_rename` clones
     /// the Rc, not the contents.
     pub declared: Rc<RefCell<HashSet<String>>>,
+    // Not a type per local: only a scalar-or-nil local differs, held as `interface{}` where a narrowed read needs its value back
+    pub boxed_locals: Rc<RefCell<HashSet<String>>>,
+    // Not one representation for every nilable local: a column read is a pointer, and a String's nil (the empty string) or an index read holds no nil
+    pub optional_locals: Rc<RefCell<HashMap<String, OptionalRepr>>>,
     /// True when the enclosing method's signature returns `void`
     /// (RBS `() -> void` lowers to `Ty::Fn { ret: Ty::Nil, ... }`).
     /// emit_return_at suppresses the implicit `return X` wrap when
@@ -112,6 +116,12 @@ pub(super) struct EmitCtx {
     pub current_pkg: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionalRepr {
+    Pointer,
+    Present,
+}
+
 impl EmitCtx {
     pub fn none() -> Self {
         Self {
@@ -119,6 +129,8 @@ impl EmitCtx {
             in_class_method: false,
             var_renames: HashMap::new(),
             declared: Rc::new(RefCell::new(HashSet::new())),
+            boxed_locals: Rc::new(RefCell::new(HashSet::new())),
+            optional_locals: Rc::new(RefCell::new(HashMap::new())),
             void_method: false,
             in_module_singleton: false,
             self_methods: None,
@@ -205,10 +217,19 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
             // through the Go-keyword filter (`default` → `default_`)
             // so reads line up with the param-emit shape in
             // `library::render_params`.
-            ctx.var_renames
-                .get(name.as_str())
-                .cloned()
-                .unwrap_or_else(|| super::library::sanitize(name.as_str()))
+            if let Some(renamed) = ctx.var_renames.get(name.as_str()) {
+                return renamed.clone();
+            }
+            let n = super::library::sanitize(name.as_str());
+            if ctx.optional_locals.borrow().get(&n) == Some(&OptionalRepr::Pointer) && e.ty.as_ref().is_some_and(|t| t.is_scalar()) {
+                return format!("(*{n})");
+            }
+            match (ctx.boxed_locals.borrow().contains(&n), e.ty.as_ref()) {
+                (true, Some(Ty::Int)) => format!("{n}.(int64)"),
+                (true, Some(Ty::Float)) => format!("{n}.(float64)"),
+                (true, Some(Ty::Bool)) => format!("{n}.(bool)"),
+                _ => n,
+            }
         }
         // `@field` in instance method bodies maps to `self.Field`
         // (the Go struct field synthesized by attr_reader/writer in
@@ -470,6 +491,14 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                         emit_expr(ctx, right)
                     );
                 }
+                let left_go = super::ty::go_ty_stub(left.ty.as_ref());
+                if left_go.starts_with("map[") || left_go.starts_with("[]") {
+                    return format!(
+                        "func() {left_go} {{ if v := {}; v != nil {{ return v }}; return {} }}()",
+                        emit_expr(ctx, left),
+                        emit_expr(ctx, right)
+                    );
+                }
             }
             let op_s = match op {
                 BoolOpKind::Or => "||",
@@ -504,48 +533,54 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                 format!("fmt.Sprintf({}, {})", go_str_literal(&fmt), args.join(", "))
             }
         }
-        // Ruby `yield args` — invokes the caller-provided block.
-        // Go has no native block-yield; the idiomatic Go shape is a
-        // closure parameter the caller passes. Until that shape lands
-        // (which would change every yielding method's signature),
-        // emit as a panic so the file parses and the gap surfaces
-        // loudly at runtime. The args get `_ = ...` references so
-        // surrounding `v := self.Data[k]; yield k, v` doesn't leave
-        // `v` as an unused-local vet error.
         ExprNode::Yield { args } => {
-            let arg_uses: Vec<String> = args
-                .iter()
-                .map(|a| format!("\t_ = {}", emit_expr(ctx, a)))
-                .collect();
-            let body = if arg_uses.is_empty() {
-                String::new()
-            } else {
-                format!("{}\n", arg_uses.join("\n"))
-            };
-            format!(
-                "func() interface{{}} {{\n\
-                 {body}\
-                 \tpanic(\"yield not implemented in go2 emit\")\n\
-                 }}()",
-            )
+            let args_s: Vec<String> = args.iter().map(|a| emit_expr(ctx, a)).collect();
+            format!("block({})", args_s.join(", "))
         }
-        // A standalone zero-param lambda ARGUMENT (`-> { <expr> }` —
-        // the broadcast lowerings pass their render this way, the
-        // `ActiveJob.enqueue` contract) → a Go closure. The return
-        // type comes from the lambda's inferred `Ty::Fn` (`string` for
-        // the render wrap); an untyped or parameterized lambda keeps
-        // the unsupported report — Go param types have nowhere honest
-        // to come from at this site.
-        ExprNode::Lambda { params, body, .. }
-            if params.is_empty()
+        // A lambda whose `Ty::Fn` names a concrete parameter and return
+        // type becomes a Go function. That is where a stored lambda's
+        // `.call` sites put the parameter types. A lambda with parameters
+        // and no such type stays unsupported: Go has nowhere else to
+        // read them. Zero-parameter lambdas keep the return type alone,
+        // including the broadcast / `ActiveJob.enqueue` shape.
+        ExprNode::Lambda { params, extra_params, rest_param, block_param, body, .. }
+            if extra_params.is_empty()
+                && rest_param.is_none()
+                && block_param.is_none()
                 && matches!(e.ty.as_ref(), Some(Ty::Fn { .. })) =>
         {
-            let Some(Ty::Fn { ret, .. }) = e.ty.as_ref() else { unreachable!() };
-            let ret_s = super::ty::go_ty(ret);
-            format!(
-                "func() {ret_s} {{\n\treturn {}\n}}",
-                emit_expr(&ctx.enter_scope(), body)
-            )
+            let Some(Ty::Fn { params: sig, ret, .. }) = e.ty.as_ref() else { unreachable!() };
+            let concrete = |t: &Ty| !matches!(t, Ty::Var { .. } | Ty::Untyped);
+            let typed_params = params.len() == sig.len()
+                && sig.iter().zip(params.iter()).all(|(p, name)| p.name == *name && concrete(&p.ty))
+                && concrete(ret);
+            if params.is_empty() || typed_params {
+                let ret_s = super::ty::go_ty(ret);
+                let formals = if params.is_empty() {
+                    String::new()
+                } else {
+                    sig.iter()
+                        .map(|p| format!("{} {}", super::library::sanitize(p.name.as_str()), super::ty::go_ty(&p.ty)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                if params.is_empty() {
+                    format!(
+                        "func({formals}) {ret_s} {{\n\treturn {}\n}}",
+                        emit_expr(&ctx.enter_scope(), body)
+                    )
+                } else {
+                    let mut body_ctx = ctx.enter_scope();
+                    body_ctx.return_ty = Some((**ret).clone());
+                    for name in params {
+                        body_ctx.declare_param(name.as_str());
+                    }
+                    let body_s = emit_return_body(&body_ctx, body);
+                    format!("func({formals}) {ret_s} {{\n{body_s}}}")
+                }
+            } else {
+                crate::emit::diagnostics::report_unsupported(e.span, "go2", "Lambda", "")
+            }
         }
         ExprNode::Cast { value, target_ty } => emit_cast(ctx, value, target_ty),
         ExprNode::Case { scrutinee, arms } => emit_case(ctx, scrutinee, arms, e.ty.as_ref()),
@@ -561,8 +596,133 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                 crate::emit::diagnostics::report_unsupported(e.span, "go2", "Next", "value-carrying")
             }
         },
+        // Not `rescue` too: a Go raise of an unregistered class panics a bare string, which no typed recover can match
+        ExprNode::BeginRescue { body, rescues, else_branch: None, ensure: Some(en), .. }
+            if rescues.is_empty() && !contains_jump(body) =>
+        {
+            emit_ensure_only(ctx, body, en, e.ty.as_ref())
+        }
+        ExprNode::Let { .. } => emit_expr_as_value(ctx, e),
         other => crate::emit::diagnostics::report_unsupported(e.span, "go2", other.kind_str(), ""),
     }
+}
+
+// Not the zero value for nil, as a String's "" is: 0, 0.0 and false are values of their own, so the value travels as `interface{}`
+fn is_boxed_scalar(ty: Option<&Ty>) -> bool {
+    let Some(Ty::Union { variants }) = ty else { return false };
+    let non_nil: Vec<&Ty> = variants.iter().filter(|t| !matches!(t, Ty::Nil)).collect();
+    variants.iter().any(|t| matches!(t, Ty::Nil)) && non_nil.len() == 1 && matches!(non_nil[0], Ty::Int | Ty::Float | Ty::Bool)
+}
+
+// Not the node's own type alone: a conditional the analyzer left open still has branches that agree
+fn branch_value_ty(e: &Expr) -> Option<Ty> {
+    match (&*e.node, e.ty.as_ref()) {
+        (_, Some(t)) if !t.mentions_unknown() => Some(t.clone()),
+        // Not open when one branch is: a runtime call typed by its signature can reach here unresolved, and the other branch still names the value
+        (ExprNode::If { then_branch, else_branch, .. }, _) => match (branch_value_ty(then_branch), branch_value_ty(else_branch)) {
+            (Some(a), Some(b)) => (a == b).then_some(a),
+            (Some(a), None) | (None, Some(a)) => Some(a),
+            (None, None) => None,
+        },
+        _ => None,
+    }
+}
+
+fn block_tail(body: &Expr) -> &Expr {
+    match &*body.node {
+        ExprNode::Seq { exprs } if !exprs.is_empty() => &exprs[exprs.len() - 1],
+        _ => body,
+    }
+}
+
+fn emit_predicate_block(ctx: &EmitCtx, method: &str, recv: &Expr, elem: &Ty, param: &str, body: &Expr, result_ty: Option<&Ty>) -> String {
+    let recv_s = emit_expr(ctx, recv);
+    let body_ctx = ctx.enter_scope();
+    body_ctx.declare_param(param);
+    let var = super::library::sanitize(param);
+    let mut lines = Vec::new();
+    if let ExprNode::Seq { exprs } = &*body.node {
+        for st in &exprs[..exprs.len().saturating_sub(1)] {
+            lines.push(emit_expr(&body_ctx, st));
+        }
+    }
+    let cond = emit_expr(&body_ctx, block_tail(body));
+    let elem_go = super::ty::go_ty_stub(Some(elem));
+    let (ret, init, hit, end) = match method {
+        "find" | "detect" => {
+            let ret = super::ty::go_ty_stub(result_ty);
+            let zero = super::ty::go_zero_value(&ret).to_string();
+            (ret, String::new(), format!("return {var}"), format!("return {zero}"))
+        }
+        "select" | "filter" => (format!("[]{elem_go}"), format!("\tout := []{elem_go}{{}}\n"), format!("out = append(out, {var})"), "return out".to_string()),
+        "reject" => (format!("[]{elem_go}"), format!("\tout := []{elem_go}{{}}\n"), "continue".to_string(), "return out".to_string()),
+        "any?" => ("bool".to_string(), String::new(), "return true".to_string(), "return false".to_string()),
+        "all?" => ("bool".to_string(), String::new(), "continue".to_string(), "return true".to_string()),
+        _ => ("bool".to_string(), String::new(), "return false".to_string(), "return true".to_string()),
+    };
+    let miss = match method {
+        "reject" => format!("\t\tout = append(out, {var})\n"),
+        "all?" => "\t\treturn false\n".to_string(),
+        _ => String::new(),
+    };
+    let stmts: String = lines.iter().flat_map(|l| l.lines()).map(|l| format!("\t\t{l}\n")).collect();
+    format!(
+        "func() {ret} {{\n{init}\tfor _, {var} := range {recv_s} {{\n{stmts}\t\tif {cond} {{\n\t\t\t{hit}\n\t\t}}\n{miss}\t}}\n\t{end}\n}}()"
+    )
+}
+
+// Not declared where the body binds it: the deferred closure names the local before the body runs
+fn emit_ensure_only(ctx: &EmitCtx, body: &Expr, ensure: &Expr, ty: Option<&Ty>) -> String {
+    let void = matches!(ty, None | Some(Ty::Nil));
+    let mut inner = ctx.value_iife();
+    if void {
+        inner.void_method = true;
+        inner.return_ty = Some(Ty::Nil);
+    } else {
+        inner.return_ty = ty.cloned();
+    }
+    let mut ensure_reads = HashSet::new();
+    collect_var_reads(ensure, &mut ensure_reads);
+    let mut out = String::new();
+    let stmts: Vec<&Expr> = match &*body.node {
+        ExprNode::Seq { exprs } => exprs.iter().collect(),
+        _ => vec![body],
+    };
+    for st in &stmts {
+        if let ExprNode::Assign { target: crate::expr::LValue::Var { name, .. }, value } = &*st.node {
+            let n = super::library::sanitize(name.as_str());
+            if ensure_reads.contains(name.as_str()) && !inner.declared.borrow().contains(&n) {
+                out.push_str(&format!("\tvar {n} {}\n", super::ty::go_ty_stub(value.ty.as_ref())));
+                inner.declare_param(&n);
+            }
+        }
+    }
+    let ensure_s = emit_block_body(&inner.enter_scope(), ensure);
+    out.push_str(&format!("\tdefer func() {{\n{}\n\t}}()\n", ensure_s.lines().map(|l| format!("\t{l}")).collect::<Vec<_>>().join("\n")));
+    let body_s = if void { emit_block_body(&inner, body) } else { emit_return_body(&inner, body) };
+    out.push_str(&body_s.lines().map(|l| format!("\t{l}\n")).collect::<String>());
+    let ret = if void { String::new() } else { format!("{} ", super::ty::go_ty_stub(ty)) };
+    format!("func() {ret}{{\n{out}}}()")
+}
+
+fn collect_var_reads(e: &Expr, out: &mut HashSet<String>) {
+    if let ExprNode::Var { name, .. } = &*e.node {
+        out.insert(name.as_str().to_string());
+    }
+    e.node.for_each_child(&mut |c| collect_var_reads(c, out));
+}
+
+// Not emitted inside the closure: a `return`/`break`/`next` there would leave the closure, not the method or loop it names
+fn contains_jump(e: &Expr) -> bool {
+    if matches!(&*e.node, ExprNode::Return { .. } | ExprNode::Break { .. } | ExprNode::Next { .. }) {
+        return true;
+    }
+    if matches!(&*e.node, ExprNode::Lambda { .. }) {
+        return false;
+    }
+    let mut found = false;
+    e.node.for_each_child(&mut |c| found |= contains_jump(c));
+    found
 }
 
 /// Emit `case scrutinee; when Pat then body; …; end` as an IIFE
@@ -614,10 +774,8 @@ fn emit_case(
                 out.push_str(&format!("\tdefault:\n{body_s}"));
             }
             _ => {
-                out.push_str(&format!(
-                    "\t/* TODO: case pattern {:?} */\n",
-                    std::mem::discriminant(&arm.pattern)
-                ));
+                let stub = crate::emit::diagnostics::report_unsupported(arm.body.span, "go2", "Case", "this when pattern");
+                out.push_str(&format!("\tdefault:\n\t\t{stub}\n"));
             }
         }
     }
@@ -652,7 +810,7 @@ fn emit_case(
 /// invisible to surrounding code.
 fn try_string_builder(ctx: &EmitCtx, e: &Expr) -> Option<String> {
     use crate::expr::LValue;
-    match e.hint? {
+    match e.hint().as_ref()? {
         IrHint::MutableStringLiteral => None, // emitted as the plain literal
         IrHint::StringBuilderInit => {
             if let ExprNode::Assign {
@@ -756,6 +914,10 @@ pub(super) fn emit_send(
     block: Option<&Expr>,
     result_ty: Option<&Ty>,
 ) -> String {
+    if let Some(recv) = crate::emit::shared::fn_call::function_receiver(recv, method, block) {
+        let args_s: Vec<String> = args.iter().map(|a| emit_expr(ctx, a)).collect();
+        return format!("{}({})", emit_expr(ctx, recv), args_s.join(", "));
+    }
     // Render kwarg expansion peephole. Ruby `render body,
     // content_type: "json"` lowers to a Send with args
     // `[body, Hash{content_type: ...}]`. The promoted
@@ -877,6 +1039,9 @@ pub(super) fn emit_send(
                         return format!("panic(&{struct_name}{{Message: {msg}}})");
                     }
                 }
+                if let Some(struct_name) = raised_error_class(ctx, path) {
+                    return format!("panic(&{struct_name}{{Message: {msg}}})");
+                }
             }
         }
         return format!("panic({msg})");
@@ -988,10 +1153,7 @@ pub(super) fn emit_send(
                         format!("{k}, {v}")
                     }
                     _ => {
-                        return format!(
-                            "/* TODO: each block with {} params */",
-                            params.len(),
-                        );
+                        return crate::emit::diagnostics::report_unsupported(block_e.span, "go2", "each", "a block with more than two parameters");
                     }
                 };
                 let body_s = emit_block_body(&body_ctx, body);
@@ -1072,10 +1234,7 @@ pub(super) fn emit_send(
                         format!("{k}, {v}")
                     }
                     _ => {
-                        return format!(
-                            "/* TODO: map block with {} params */",
-                            params.len(),
-                        );
+                        return crate::emit::diagnostics::report_unsupported(block_e.span, "go2", "map", "a block with more than two parameters");
                     }
                 };
                 let body_s = emit_map_block_body(&body_ctx, body);
@@ -1099,6 +1258,28 @@ pub(super) fn emit_send(
                      \treturn out\n\
                      }}()",
                 );
+            }
+        }
+    }
+
+    if let Some(r) = recv.filter(|r| matches!(r.ty.as_ref(), Some(Ty::Array { .. })) && block.is_none()) {
+        match (method, args.len()) {
+            ("index", 1) => return format!("RhIndex({}, {})", emit_expr(ctx, r), args_s[0]),
+            ("last", 0) => return format!("RhLast({})", emit_expr(ctx, r)),
+            _ => {}
+        }
+    }
+
+    if matches!(method, "find" | "detect" | "select" | "filter" | "reject" | "any?" | "all?" | "none?") && args.is_empty() {
+        if let (Some(recv_e), Some(block_e)) = (recv, block) {
+            if let ExprNode::Lambda { params, body, .. } = &*block_e.node {
+                if let (Some(Ty::Array { elem }), [param]) = (recv_e.ty.as_ref(), params.as_slice()) {
+                    let tail_bool = block_tail(body).ty.as_ref().is_some_and(|t| matches!(t, Ty::Bool));
+                    if !tail_bool {
+                        return crate::emit::diagnostics::report_unsupported(block_e.span, "go2", method, "a block whose value is not a Boolean");
+                    }
+                    return emit_predicate_block(ctx, method, recv_e, elem, param.as_str(), body, result_ty);
+                }
             }
         }
     }
@@ -1228,6 +1409,13 @@ pub(super) fn emit_send(
             return format!("{recv_s}.OpGet({})", args_s.join(", "));
         }
         let recv_s = emit_expr(ctx, recv_e);
+        // Not Go's `s[i]`: that is a byte, where Ruby answers a one-character String, or nil past the end
+        if args.len() == 1
+            && recv_e.ty.as_ref().is_some_and(|t| matches!(t, Ty::Str))
+            && matches!(args[0].ty.as_ref(), Some(Ty::Int))
+        {
+            return format!("RhStrAt({recv_s}, {})", args_s[0]);
+        }
         // Ruby negative index (`recv[-1]`, `recv[-2]`, …) — Go has no
         // negative indexing on slices or strings; rewrite to
         // `recv[len(recv)-N]`. Gated on a literal `Int { value: < 0 }`
@@ -1270,6 +1458,9 @@ pub(super) fn emit_send(
         if args.len() == 2 {
             let start = &args_s[0];
             let length = &args_s[1];
+            if matches!(recv_e.ty.as_ref(), Some(Ty::Array { .. })) {
+                return format!("RhSlice({recv_s}, {start}, {length})");
+            }
             return format!("RhStrSlice({recv_s}, {start}, {length})");
         }
         return format!("{recv_s}[{}]", args_s.join(", "));
@@ -1279,7 +1470,19 @@ pub(super) fn emit_send(
     // `Send { recv: a, method: "==", args: [b] }`. Emit them infix.
     if let (Some(r), Some(op)) = (recv, binary_op(method)) {
         if args.len() == 1 {
-            return format!("{} {} {}", emit_expr(ctx, r), op, args_s[0]);
+            let lhs = emit_expr(ctx, r);
+            // An ordering against a nullable column reads its value
+            // (callers test nil first), and an Integer side widens to
+            // float64 against a Float literal bound: Go compares neither
+            // a pointer nor an int64 with an untyped float.
+            if matches!(op, "<" | "<=" | ">" | ">=") {
+                let lhs_v = deref_nullable(r, &lhs).unwrap_or_else(|| lhs.clone());
+                let int_lhs = nullable_field_go_ty(r).as_deref() == Some("*int64") || matches!(r.ty.as_ref(), Some(Ty::Int));
+                let float_rhs = matches!(&*args[0].node, ExprNode::Lit { value: Literal::Float { .. } });
+                let lhs_v = if int_lhs && float_rhs { format!("float64({lhs_v})") } else { lhs_v };
+                return format!("{lhs_v} {op} {}", args_s[0]);
+            }
+            return format!("{lhs} {} {}", op, args_s[0]);
         }
     }
 
@@ -1621,11 +1824,16 @@ pub(super) fn emit_send(
             } else {
                 default_s
             };
+            // Not `cmp.Or(h[k], default)`: that answers the default for a stored zero too, where Ruby's fetch answers it only for a missing key
+            let (ret, default_s) = if matches!(*args[1].node, ExprNode::Lit { value: Literal::Nil }) && matches!(v_ty.as_str(), "int64" | "float64" | "bool") {
+                ("interface{}".to_string(), "nil".to_string())
+            } else {
+                (v_ty.clone(), default_s)
+            };
             return format!(
-                "cmp.Or({}[{}], {})",
+                "func() {ret} {{ if v, ok := {}[{}]; ok {{ return v }}; return {default_s} }}()",
                 emit_expr(ctx, r),
                 args_s[0],
-                default_s
             );
         }
     }
@@ -1746,6 +1954,12 @@ pub(super) fn emit_send(
                         "NilClass" => return format!("{recv_s} == nil"),
                         _ => {}
                     }
+                    if let Some(answer) = static_is_a(r, &recv_s, class.as_str()) {
+                        return answer;
+                    }
+                    if let Some(go_ty) = ruby_class_to_go_assert_ty(class.as_str()) {
+                        return format!("func() bool {{ _, ok := any({recv_s}).({go_ty}); return ok }}()");
+                    }
                 }
             }
         }
@@ -1768,6 +1982,14 @@ pub(super) fn emit_send(
     if method == "nil?" && args.is_empty() {
         if let Some(r) = recv {
             let recv_s = emit_expr(ctx, r);
+            if let ExprNode::Var { name, .. } = &*r.node {
+                match ctx.optional_locals.borrow().get(&super::library::sanitize(name.as_str())) {
+                    Some(OptionalRepr::Pointer) => return format!("{recv_s} == nil"),
+                    // Not `== ""`: an empty String is not nil to Ruby, and a String binding cannot tell the two apart
+                    Some(OptionalRepr::Present) => return "false".to_string(),
+                    None => {}
+                }
+            }
             // A nullable COLUMN field is a real Go pointer, so the test
             // is `== nil` — NOT the empty-as-nil comparison the
             // go_ty_stub convention uses for framework `String?` slots.
@@ -2026,6 +2248,11 @@ pub(super) fn emit_send(
         if let Some(r) = recv {
             if matches!(r.ty.as_ref(), Some(Ty::Array { .. })) {
                 let recv_s = emit_expr(ctx, r);
+                // A nullable column element: nil is in no list (Ruby
+                // `[..].include?(nil)`), else compare the value.
+                if let Some(value) = deref_nullable(&args[0], &args_s[0]) {
+                    return format!("({} != nil && slices.Contains({recv_s}, {value}))", args_s[0]);
+                }
                 return format!("slices.Contains({recv_s}, {})", args_s[0]);
             }
         }
@@ -2063,11 +2290,15 @@ pub(super) fn emit_send(
                     r.ty.as_ref(),
                     Some(Ty::Class { id, .. }) if id.0.as_str() == "Regexp"
                 );
+                // A nullable column subject reads its value; the format
+                // check tests nil first.
                 if arg_is_regexp && !recv_is_regexp {
-                    return format!("{}.MatchString({})", args_s[0], recv_s);
+                    let subject = deref_nullable(r, &recv_s).unwrap_or_else(|| recv_s.clone());
+                    return format!("{}.MatchString({subject})", args_s[0]);
                 }
                 if recv_is_regexp {
-                    return format!("{recv_s}.MatchString({})", args_s[0]);
+                    let subject = deref_nullable(&args[0], &args_s[0]).unwrap_or_else(|| args_s[0].clone());
+                    return format!("{recv_s}.MatchString({subject})");
                 }
             }
             if let Some(wrapped) = map_go_str_method_1arg(method, &recv_s, &args_s[0]) {
@@ -2077,6 +2308,10 @@ pub(super) fn emit_send(
     }
 
     let go_m = go_method_ident(method);
+    // Not dropped: a call that reaches here with a block would run its method without it
+    if let Some(b) = block {
+        return crate::emit::diagnostics::report_unsupported(b.span, "go2", "block argument", format!("a block passed to `{method}`"));
+    }
     match recv {
         None => {
             // Bareword identifier in an expression context — Ruby's
@@ -2447,7 +2682,7 @@ fn self_ref_expr(ctx: &EmitCtx) -> String {
     if ctx.in_class_method {
         match ctx.class_name.as_deref() {
             Some(n) => n.to_string(),
-            None => "/* TODO: SelfRef without class context */".to_string(),
+            None => crate::emit::diagnostics::report_unsupported(crate::span::Span::synthetic(), "go2", "SelfRef", "a class method with no class"),
         }
     } else {
         // Instance method — the emitted Go has `(self *Class)` and
@@ -2716,7 +2951,9 @@ fn emit_assign(ctx: &EmitCtx, target: &crate::expr::LValue, value: &Expr) -> Str
         // above — using the narrow type lets the resulting assignment
         // typecheck against typed slots without callsite assertion.
         let ret_ty = super::ty::go_ty_stub(value.ty.as_ref());
-        let body = emit_return_body(&ctx.value_iife(), value);
+        let mut inner = ctx.value_iife();
+        inner.return_ty = value.ty.clone();
+        let body = emit_return_body(&inner, value);
         let indented = body
             .lines()
             .map(|l| format!("\t{l}"))
@@ -2785,16 +3022,40 @@ fn emit_assign(ctx: &EmitCtx, target: &crate::expr::LValue, value: &Expr) -> Str
                     // `= nil` was never valid for it (`cannot use nil as
                     // string value`); `""` is the same absent-marker the
                     // convention's `nil?` test (`s == ""`) reads back.
+                    if ty_str == "interface{}" && refined.is_some_and(|t| is_boxed_scalar(Some(t))) {
+                        ctx.boxed_locals.borrow_mut().insert(name_s.clone());
+                    } else {
+                        ctx.boxed_locals.borrow_mut().remove(&name_s);
+                    }
                     return format!(
                         "var {name_s} {ty_str} = {}",
                         super::ty::go_zero_value(&ty_str)
                     );
                 }
-                if matches!(value.ty, Some(Ty::Int)) {
+                // Not an index read: Go's `xs[i]` and `m[k]` answer the element type, never a nil
+                let plain_index = matches!(&*value.node, ExprNode::Send { method, recv: Some(r), .. }
+                    if method.as_str() == "[]" && matches!(r.ty.as_ref(), Some(Ty::Array { .. } | Ty::Hash { .. })));
+                let boxed = is_boxed_scalar(value.ty.as_ref()) && !plain_index;
+                // Not kept from a sibling block's declaration of the same name: this one is its own
+                if !boxed {
+                    ctx.boxed_locals.borrow_mut().remove(&name_s);
+                }
+                if boxed {
+                    ctx.boxed_locals.borrow_mut().insert(name_s.clone());
+                    format!("var {name_s} interface{{}} = {v}")
+                } else if matches!(value.ty, Some(Ty::Int)) {
                     format!("var {name_s} int64 = {v}")
                 } else {
                     format!("{name_s} := {v}")
                 }
+            } else if ctx.boxed_locals.borrow().contains(&name_s) {
+                // Not the bare value: an untyped Go constant boxes as `int`, which a later `x.(int64)` read panics on
+                let v = match value.ty.as_ref() {
+                    Some(Ty::Int) => format!("int64({v})"),
+                    Some(Ty::Float) => format!("float64({v})"),
+                    _ => v,
+                };
+                format!("{name_s} = {v}")
             } else {
                 format!("{name_s} = {v}")
             }
@@ -3321,6 +3582,8 @@ fn is_known_class_method(name: &str) -> bool {
 fn map_go_str_method(method: &str, recv_text: &str) -> Option<String> {
     match method {
         "strip" => Some(format!("strings.TrimSpace({recv_text})")),
+        "lstrip" => Some(format!("strings.TrimLeft({recv_text}, \" \\t\\n\\v\\f\\r\")")),
+        "rstrip" => Some(format!("strings.TrimRight({recv_text}, \" \\t\\n\\v\\f\\r\\x00\")")),
         "upcase" => Some(format!("strings.ToUpper({recv_text})")),
         "downcase" => Some(format!("strings.ToLower({recv_text})")),
         // Ruby `s.to_i` ignores leading whitespace and trailing
@@ -3421,17 +3684,45 @@ pub(super) fn emit_literal(lit: &Literal) -> String {
         Literal::Str { value } => go_str_literal(value),
         Literal::Sym { value } => go_str_literal(value.as_str()),
         Literal::Regex { pattern, flags } => {
-            // Empty flags → bare pattern (Go's `(?)` is a parse
-            // error; the `(?<flags>)` group requires at least one
-            // flag char). With flags, prepend the standard prefix.
+            // Ruby's `m` is Go `s` (dot-all); Ruby's `^`/`$` are always
+            // line anchors, so flagged `m` also needs Go `m`. Empty
+            // flags stay bare — Go's `(?)` is a parse error.
             let go_pattern = ruby_regex_to_go(pattern);
-            let full = if flags.is_empty() {
-                go_pattern
-            } else {
-                format!("(?{flags}){go_pattern}")
-            };
+            let full = crate::emit::shared::regex_literal::re2_style_regex_source(&go_pattern, flags);
             format!("regexp.MustCompile({})", go_str_literal(&full))
         }
+    }
+}
+
+#[cfg(test)]
+mod regex_flag_tests {
+    #[test]
+    fn rubys_m_keeps_line_anchors_as_well_as_dotall() {
+        assert_eq!(emit_literal(&regex("^b.c$", "m")), r#"regexp.MustCompile("(?sm)^b.c$")"#);
+    }
+
+    use super::emit_literal;
+    use crate::expr::Literal;
+
+    fn regex(pattern: &str, flags: &str) -> Literal {
+        Literal::Regex { pattern: pattern.to_string(), flags: flags.to_string() }
+    }
+
+    #[test]
+    fn empty_flags_render_a_bare_pattern_not_an_invalid_group() {
+        assert_eq!(emit_literal(&regex("a.b", "")), r#"regexp.MustCompile("a.b")"#);
+    }
+
+    #[test]
+    fn ignore_case_passes_through_as_go_i() {
+        assert_eq!(emit_literal(&regex("a.b", "i")), r#"regexp.MustCompile("(?i)a.b")"#);
+    }
+
+    #[test]
+    fn rubys_m_maps_to_gos_s_and_m() {
+        // Ruby's `m` is Go `s` (dot-all). Ruby's `^`/`$` are always
+        // line anchors, so flagged `m` also needs Go `m`.
+        assert_eq!(emit_literal(&regex("a.b", "m")), r#"regexp.MustCompile("(?sm)a.b")"#);
     }
 }
 
@@ -3526,15 +3817,49 @@ pub(super) fn emit_return_body(ctx: &EmitCtx, e: &Expr) -> String {
     out
 }
 
+/// `name := value`, recording how the value holds its nil.
+fn bind_let(ctx: &EmitCtx, name: &str, value: &Expr) -> String {
+    let name_s = super::library::sanitize(name);
+    let value_s = emit_expr_as_value(ctx, value);
+    let column = nullable_field_go_ty(value).is_some()
+        || matches!(&*value.node, ExprNode::Send { recv: Some(r), method, args, .. } if args.is_empty() && recv_column_is_nullable(r, method.as_str()));
+    // Not an index read of a concrete element: Go's `xs[i]` and `m[k]` answer the element type, which only an interface{} element holds nil in
+    let plain_index = match &*value.node {
+        ExprNode::Send { method, recv: Some(r), .. } if method.as_str() == "[]" => match r.ty.as_ref() {
+            Some(Ty::Array { elem }) => super::ty::go_ty_stub(Some(elem)) != "interface{}",
+            Some(Ty::Hash { value, .. }) => super::ty::go_ty_stub(Some(value)) != "interface{}",
+            _ => false,
+        },
+        _ => false,
+    };
+    ctx.declared.borrow_mut().insert(name_s.clone());
+    let repr = match value.ty.as_ref() {
+        _ if column => OptionalRepr::Pointer,
+        Some(t @ Ty::Union { .. }) if t.is_stringish() || plain_index => OptionalRepr::Present,
+        // Not left to `:=` when untyped: the value is Go's interface{} then too, and a narrowed read asserts its scalar back
+        t if is_boxed_scalar(t) || matches!(t, Some(Ty::Untyped)) => {
+            ctx.boxed_locals.borrow_mut().insert(name_s.clone());
+            return format!("var {name_s} interface{{}} = {value_s}");
+        }
+        _ => return format!("{name_s} := {value_s}"),
+    };
+    ctx.optional_locals.borrow_mut().insert(name_s.clone(), repr);
+    format!("{name_s} := {value_s}")
+}
+
 /// Emit `e` in expression position — wraps statement-shaped IR
 /// (If / Case) in an IIFE so it can stand in for a value (Send arg,
 /// Hash value, format arg, ...). Falls through to `emit_expr` for
 /// nodes that already produce expression-form Go. Matches the
 /// IIFE-wrap pattern the Assign emit applies for the same nodes.
 pub(super) fn emit_expr_as_value(ctx: &EmitCtx, e: &Expr) -> String {
-    if matches!(&*e.node, ExprNode::If { .. } | ExprNode::Case { .. }) {
-        let ret_ty = super::ty::go_ty_stub(e.ty.as_ref());
-        let body = emit_return_body(&ctx.value_iife(), e);
+    if matches!(&*e.node, ExprNode::If { .. } | ExprNode::Case { .. } | ExprNode::Let { .. }) {
+        let ty = if matches!(&*e.node, ExprNode::Let { .. }) { e.ty.clone() } else { branch_value_ty(e) };
+        let ret_ty = super::ty::go_ty_stub(ty.as_ref());
+        let mut inner = ctx.value_iife();
+        // Not left unset: a nil branch of a String-or-nil value must answer "", which the coercion keyed on the type supplies
+        inner.return_ty = ty;
+        let body = emit_return_body(&inner, e);
         let indented = body
             .lines()
             .map(|l| format!("\t{l}"))
@@ -3715,6 +4040,15 @@ fn coerce_return_value(ctx: &EmitCtx, v: String) -> String {
                 _ => v,
             }
         }
+        // Not the bare literal into `interface{}`: an untyped Go constant boxes as `int`, which a narrowed `x.(int64)` read panics on
+        Some(t @ Ty::Union { .. }) if is_boxed_scalar(Some(t)) => {
+            let numeric = |s: &str| !s.is_empty() && s.trim_start_matches('-').chars().all(|c| c.is_ascii_digit() || c == '.');
+            if numeric(&v) {
+                if v.contains('.') { format!("float64({v})") } else { format!("int64({v})") }
+            } else {
+                v
+            }
+        }
         _ => v,
     }
 }
@@ -3749,6 +4083,11 @@ fn emit_return_at(ctx: &EmitCtx, e: &Expr, out: &mut String, depth: usize) {
             }
             indent(out, depth);
             out.push_str("}\n");
+        }
+        ExprNode::Let { name, value, body, .. } => {
+            indent(out, depth);
+            out.push_str(&format!("{}\n", bind_let(ctx, name.as_str(), value)));
+            emit_return_at(ctx, body, out, depth);
         }
         ExprNode::Seq { exprs } => {
             // All but the last are statements (effects-only); last is
@@ -3976,6 +4315,34 @@ thread_local! {
     static ALL_NULLABLE_COLUMNS: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
 }
 
+thread_local! {
+    static ERROR_CLASSES: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+pub(super) fn reset_error_classes() {
+    ERROR_CLASSES.with(|c| c.borrow_mut().clear());
+}
+
+pub(super) fn register_error_class(go_name: String) {
+    ERROR_CLASSES.with(|c| c.borrow_mut().insert(go_name));
+}
+
+pub(super) fn is_error_class(go_name: &str) -> bool {
+    ERROR_CLASSES.with(|c| c.borrow().contains(go_name))
+}
+
+/// The emitted error struct a raised constant names: as written, or
+/// nested in the enclosing class (`raise InvalidLocale` inside `I18n`).
+fn raised_error_class(ctx: &EmitCtx, path: &[crate::ident::Symbol]) -> Option<String> {
+    let joined = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+    let plain = super::library::sanitize_type_name(&joined);
+    if is_error_class(&plain) {
+        return Some(plain);
+    }
+    let nested = format!("{}{plain}", ctx.class_name.as_deref()?);
+    is_error_class(&nested).then_some(nested)
+}
+
 pub(super) fn set_all_nullable_columns(pairs: Vec<(String, String)>) {
     ALL_NULLABLE_COLUMNS.with(|c| *c.borrow_mut() = pairs);
 }
@@ -3996,6 +4363,55 @@ fn nullable_column_go_ty(field_ruby: &str) -> Option<String> {
             .iter()
             .find(|(n, _)| n == field_ruby)
             .map(|(_, t)| t.clone())
+    })
+}
+
+/// The Go pointer type of a nullable column the expression reads as the
+/// model's own field (`@code` → `*string`).
+fn nullable_field_go_ty(e: &Expr) -> Option<String> {
+    match &*e.node {
+        ExprNode::Ivar { name } => nullable_column_go_ty(name.as_str()),
+        _ => None,
+    }
+}
+
+/// `DerefString(self.Code)` for a nullable column read where the value
+/// itself is needed (a regex subject, a list element, a comparison).
+/// Callers test nil first where nil changes the answer; the zero value
+/// stands in otherwise, as `DerefString` does for messages.
+fn deref_nullable(e: &Expr, e_s: &str) -> Option<String> {
+    let helper = match nullable_field_go_ty(e)?.as_str() {
+        "*string" => "DerefString",
+        "*int64" => "DerefInt64",
+        "*float64" => "DerefFloat64",
+        "*bool" => "DerefBool",
+        _ => return None,
+    };
+    Some(format!("{helper}({e_s})"))
+}
+
+/// `x.is_a?(Class)` on a typed column field, answered statically as
+/// rust's `static_is_a` does: the field already is (or is not) that
+/// class, so only a nullable field's nil test is left. `None` when the
+/// field's type does not decide it.
+fn static_is_a(r: &Expr, r_s: &str, class: &str) -> Option<String> {
+    let (core, nullable) = match nullable_field_go_ty(r).as_deref() {
+        Some("*string") => (Ty::Str, true),
+        Some("*int64") => (Ty::Int, true),
+        Some("*float64") => (Ty::Float, true),
+        Some(_) => return None,
+        None => match (&*r.node, r.ty.as_ref()) {
+            (ExprNode::Ivar { .. }, Some(t @ (Ty::Str | Ty::Int | Ty::Float))) => (t.clone(), false),
+            _ => return None,
+        },
+    };
+    let present = if nullable { format!("{r_s} != nil") } else { "true".to_string() };
+    Some(match (core, class) {
+        (Ty::Int, "Integer" | "Numeric") | (Ty::Float, "Float" | "Numeric") | (Ty::Str, "String") => present,
+        (Ty::Int, "Float" | "String") | (Ty::Float, "Integer" | "String") | (Ty::Str, "Integer" | "Float" | "Numeric") => {
+            "false".to_string()
+        }
+        _ => return None,
     })
 }
 

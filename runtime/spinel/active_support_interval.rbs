@@ -1,0 +1,4 @@
+module ActiveSupport
+  def self.parse_db_interval: (untyped value) -> ActiveSupport::Duration?
+  def self.format_db_interval: (untyped value) -> Integer?
+end

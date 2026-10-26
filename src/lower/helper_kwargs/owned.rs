@@ -56,6 +56,10 @@ pub(super) struct OwnerIndex {
     /// Every method a library class defines, flattened or not, with its
     /// slots when it is flattened (`None` when it cannot be respelled).
     defined: HashMap<(String, Side, Symbol), Option<Vec<Slot>>>,
+    /// Classes and modules whose body `prepend`s a module. A prepended
+    /// module sits ahead of the class itself in Ruby's lookup and is not
+    /// one of `includes`, so a lookup through such a class is not resolved.
+    prepending: HashSet<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -81,8 +85,16 @@ impl OwnerIndex {
         let mut includes: HashMap<String, Vec<String>> = HashMap::new();
         let mut children: HashMap<String, Vec<String>> = HashMap::new();
         let mut defined = HashMap::new();
+        let mut prepending = HashSet::new();
         for lc in &app.library_classes {
             let name = lc.name.0.as_str().to_string();
+            if lc.unknown_calls.iter().any(|e| matches!(&*e.node,
+                ExprNode::Send { recv, method, .. }
+                    if method.as_str() == "prepend"
+                        && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))))
+            {
+                prepending.insert(name.clone());
+            }
             if let Some(parent) = &lc.parent
                 && let Some(parent) = resolve_const(&names, &name, parent.0.as_str())
             {
@@ -110,7 +122,7 @@ impl OwnerIndex {
                 includers.entry(m.clone()).or_default().push(includer.clone());
             }
         }
-        Self { parents, includes, children, includers, defined }
+        Self { parents, includes, children, includers, defined, prepending }
     }
 
     /// `class`'s ancestors on `side`, in Ruby's method lookup order: the
@@ -159,17 +171,33 @@ impl OwnerIndex {
             return Resolved::Ambiguous;
         };
         let key = |c: &String| (c.clone(), side, method.clone());
-        let Some(first) = ancestors.iter().position(|c| self.defined.contains_key(&key(c))) else {
+        let first = ancestors.iter().position(|c| self.defined.contains_key(&key(c)));
+        // A prepended module sits right ahead of the class that prepends
+        // it (`Base` prepending `Loud`: `[Child, Loud, Base]`), so it can
+        // take the call only from a class at or before the first definer;
+        // one prepended further up is never reached. With no definer known,
+        // any prepended module might define the name.
+        if side == Side::Instance
+            && ancestors[..first.map_or(ancestors.len(), |f| f + 1)]
+                .iter()
+                .any(|c| self.prepending.contains(c))
+        {
+            return Resolved::Ambiguous;
+        }
+        let Some(first) = first else {
             return Resolved::Missing;
         };
         // A module reachable at two positions in the chain: Ruby keeps
-        // one, and which one decides the binding when it defines the name.
-        let mut seen = HashSet::new();
-        if ancestors
-            .iter()
-            .filter(|c| !seen.insert(*c))
-            .any(|c| self.defined.contains_key(&key(c)))
-        {
+        // one (a class and its superclass both including `Helper` have it
+        // once, at the superclass's place), and which one can decide the
+        // binding when it defines the name. Dropping copies never moves
+        // an entry that occurs once, so the first definer is the answer
+        // when it occurs once, or when every definer is that same module.
+        // Two different definers ordered by the kept copy stay ambiguous.
+        let definers: Vec<&String> = ancestors.iter().filter(|c| self.defined.contains_key(&key(c))).collect();
+        let first_name = &ancestors[first];
+        let occurs_once = ancestors.iter().filter(|c| *c == first_name).count() == 1;
+        if !occurs_once && definers.iter().any(|c| *c != first_name) {
             return Resolved::Ambiguous;
         }
         match self.defined.get(&key(&ancestors[first])) {
@@ -364,7 +392,7 @@ pub(super) fn rewrite_library_classes(
 
 const SEND_METHODS: &[&str] = &["send", "public_send", "__send__"];
 
-const AMBIGUOUS: &str = "the method this call reaches cannot be resolved statically (an include cycle, or a module reachable twice that defines it), so its keyword slots are not known";
+const AMBIGUOUS: &str = "the method this call reaches cannot be resolved statically (an include cycle, a prepended module, or two modules whose order depends on which copy of one Ruby keeps), so its keyword slots are not known";
 
 fn rewrite(
     e: &mut Expr,

@@ -76,7 +76,7 @@ fn file<'a>(files: &'a [(String, String)], path: &str) -> &'a str {
 
 fn assert_parses(source: &str, path: &str) {
     let result = ruby_prism::parse(source.as_bytes());
-    let errors: Vec<String> = result.errors().map(|e| e.message().to_string()).collect();
+    let errors: Vec<String> = result.errors().map(|e| String::from_utf8_lossy(e.message()).into_owned()).collect();
     assert!(errors.is_empty(), "{path} does not parse: {errors:?}\n{source}");
 }
 

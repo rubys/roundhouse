@@ -590,7 +590,7 @@ fn sunset_build(call: &str) -> (App, Vec<IngestError>) {
 
 fn assert_parses(src: &str) {
     let result = ruby_prism::parse(src.as_bytes());
-    let errors: Vec<String> = result.errors().map(|e| e.message().to_string()).collect();
+    let errors: Vec<String> = result.errors().map(|e| String::from_utf8_lossy(e.message()).into_owned()).collect();
     assert!(errors.is_empty(), "{errors:?}\n{src}");
 }
 

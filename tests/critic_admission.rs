@@ -154,6 +154,8 @@ fn identity_is_invalidated_by_reassignment_and_branch_writes() {
         "k = Probe; [Probe.new] => [k]; k.define_method(:x) { 1 }",
         "k = Probe; begin; raise StandardError; rescue => k; k.define_method(:x) { 1 }; end",
         "Probe.new.class.define_method(:x) { 1 }",
+        "k = title; k.define_method(:x) { 1 } if k.is_a?(Class)",
+        "title.to_s.constantize.define_method(:x) { 1 }",
     ] { refuses(body, "Module protocol"); }
 }
 
@@ -165,6 +167,35 @@ fn cross_date_time_comparison_requires_activesupport_runtime() {
 #[test]
 fn instance_eval_changes_self_identity_in_class_side_methods() {
     refuses_with("Probe.go", "Module protocol", &[("app/models/probe.rb", "class Probe < ApplicationRecord\n  def self.go\n    Probe.new.instance_eval { self.define_method(:x) { 1 } }\n  end\nend\n")]);
+}
+
+#[test]
+fn an_overridden_then_does_not_yield_the_class() {
+    refuses_with("Probe.go", "Module protocol", &[("app/models/probe.rb", "class Probe < ApplicationRecord\n  def self.then\n    yield 1\n  end\n\n  def self.go\n    Probe.then { |k| k.const_defined?(:X) }\n  end\nend\n")]);
+}
+
+#[test]
+fn a_held_class_answers_queries_not_writes() {
+    let holder = "class Holder\n  def initialize(klass)\n    @klass = klass\n  end\n\n  def go\n    @klass.define_method(:x) { 1 }\n  end\n\n  def self.make\n    Holder.new(Probe).go\n  end\nend\n";
+    refuses_with("Holder.make", "Module protocol", &[("app/models/holder.rb", holder)]);
+    let mixed = "class Holder\n  def initialize(klass)\n    @klass = klass\n  end\n\n  def go\n    @klass.const_defined?(:X)\n  end\n\n  def self.make\n    Holder.new(Probe).go\n    Holder.new(Probe.new).go\n  end\nend\n";
+    refuses_with("Holder.make", "Module protocol", &[("app/models/holder.rb", mixed)]);
+}
+
+#[test]
+fn ipaddr_include_takes_only_an_ipaddr() {
+    refuses("IPAddr.new(\"10.0.0.0/8\").include?(title)", "include?");
+    refuses("IPAddr.new(\"10.0.0.0/8\").include?(IPAddr)", "include?");
+}
+
+#[test]
+fn only_a_guard_on_its_own_declaration_is_read_through() {
+    for guard in ["unless defined?(::Other)", "unless defined?(::Other::Sub)"] {
+        let shelf = format!("module Shelf\n  {guard}\n    module Sub\n      X = 1\n    end\n  end\nend\n");
+        refuses_with("Shelf::Sub::X", "Shelf::Sub::X", &[("app/models/shelf.rb", &shelf)]);
+    }
+    let with_else = "module Shelf\n  unless defined?(::Shelf::Sub)\n    module Sub\n      X = 1\n    end\n  else\n    nil\n  end\nend\n";
+    refuses_with("Shelf::Sub::X", "Shelf::Sub::X", &[("app/models/shelf.rb", with_else)]);
 }
 
 #[test]

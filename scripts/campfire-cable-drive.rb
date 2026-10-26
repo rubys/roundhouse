@@ -248,6 +248,26 @@ check("the manifest parses and names the app", manifest_name.is_a?(String) && !m
 # a direct room 500'd on the deployed binary. Creating one (with user 2
 # on a seeded tree; alone, on a fresh one — the Array branch) and
 # rendering the sidebar exercises both.
+# Not skipped on a /first_run tree: the group direct room below needs three others, so they join through the invite link
+if req("GET", "/users/4").code != "200"
+  code = req("GET", "/account/edit").body.to_s[%r{id="invite_url" value="[^"]*/join/([^"]+)"}, 1]
+  check("the account page carries its invite link", code.nil?, false)
+  if code
+    walker_jar, walker_csrf = $jar, $csrf
+    3.times do |i|
+      $jar, $csrf = {}, nil
+      req("GET", "/join/#{code}")
+      joined = req("POST", "/join/#{code}", {
+        "user[name]" => "Member #{i + 2}",
+        "user[email_address]" => "member#{i + 2}@example.com",
+        "user[password]" => "secret123456",
+      })
+      check("joining through the invite link (member #{i + 2})", joined.code, "302")
+    end
+    $jar, $csrf = walker_jar, walker_csrf
+  end
+end
+
 puts "\n\e[1;34m==>\e[0m a direct room in the sidebar"
 direct = req("POST", "/rooms/directs", { "user_ids[]" => "2" })
 check("POST /rooms/directs", direct.code, "302")

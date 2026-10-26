@@ -196,6 +196,11 @@ module ROTP
       GemFacade.fail!("ROTP::TOTP#secret")
       ""
     end
+
+    def interval
+      GemFacade.fail!("ROTP::TOTP#interval")
+      30
+    end
   end
 
   module Base32

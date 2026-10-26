@@ -14,6 +14,7 @@ module ActionDispatch
       def each: () ?{ (String, untyped) -> void } -> untyped
       def map: () ?{ (String, untyped) -> untyped } -> untyped
       def self.env_name: (String | Symbol key) -> String
+      def self.env_name_from_header: (String name) -> String
       def self.authorization: (Hash[String, untyped] env) -> String?
     end
   end

@@ -277,7 +277,7 @@ fn rewrite_stdlib_const(name: &str) -> Option<&'static str> {
 /// still take the legacy `String + String` path — the hint is the
 /// signal that the lowerer guarantees Builder semantics are safe.
 fn try_string_builder(e: &Expr) -> Option<String> {
-    match e.hint? {
+    match e.hint().as_ref()? {
         IrHint::MutableStringLiteral => None, // emitted as the plain literal
         IrHint::StringBuilderInit => {
             if let ExprNode::Assign {
@@ -813,6 +813,25 @@ fn emit_bool_op(
         BoolOpKind::Or => "||",
         BoolOpKind::And => "&&",
     };
+    // Not the empty literal's own default: `x || {}` answers x's type, which a `{} of String => String` would widen
+    if matches!(op, BoolOpKind::Or) {
+        let left_ty = match &left.ty {
+            Some(Ty::Union { variants }) => variants.iter().find(|v| !matches!(v, Ty::Nil)).cloned(),
+            other => other.clone(),
+        };
+        let empty = match (&*right.node, &left_ty) {
+            (ExprNode::Hash { entries, .. }, Some(Ty::Hash { key, value })) if entries.is_empty() && !key.is_open() && !value.is_open() => {
+                Some(format!("{{}} of {} => {}", super::ty::crystal_ty(key), super::ty::crystal_ty(value)))
+            }
+            (ExprNode::Array { elements, .. }, Some(Ty::Array { elem })) if elements.is_empty() && !elem.is_open() => {
+                Some(format!("[] of {}", super::ty::crystal_ty(elem)))
+            }
+            _ => None,
+        };
+        if let Some(empty) = empty {
+            return format!("{} {op_s} {empty}", emit_or_left(left));
+        }
+    }
     // Hash#[] safety bridge for `||`-default idiom: Ruby's
     // `hash[k] || default` returns the default for missing keys
     // because Hash#[] returns nil there. Crystal's strict Hash#[]
@@ -822,18 +841,23 @@ fn emit_bool_op(
     // `||` falls through to the default. Only the read-form `[]` is
     // rewritten — `[]=` and other methods keep their shape.
     if matches!(op, BoolOpKind::Or) {
-        if let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*left.node {
-            if method.as_str() == "[]" && !args.is_empty() {
-                let recv_ty = recv.ty.as_ref().map(unwrap_nilable_union);
-                if matches!(recv_ty, Some(crate::ty::Ty::Hash { .. })) {
-                    let recv_s = emit_expr(recv);
-                    let arg_strs: Vec<String> = args.iter().map(emit_expr).collect();
-                    return format!("{}[{}]? {} {}", recv_s, arg_strs.join(", "), op_s, emit_expr(right));
-                }
+        return format!("{} {} {}", emit_or_left(left), op_s, emit_expr(right));
+    }
+    format!("{} {} {}", emit_expr(left), op_s, emit_expr(right))
+}
+
+/// The left side of `||`, a Hash read as `hash[k]?` so a missing key is nil and the default runs.
+fn emit_or_left(left: &Expr) -> String {
+    if let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*left.node {
+        if method.as_str() == "[]" && !args.is_empty() {
+            let recv_ty = recv.ty.as_ref().map(unwrap_nilable_union);
+            if matches!(recv_ty, Some(crate::ty::Ty::Hash { .. })) {
+                let arg_strs: Vec<String> = args.iter().map(emit_expr).collect();
+                return format!("{}[{}]?", emit_expr(recv), arg_strs.join(", "));
             }
         }
     }
-    format!("{} {} {}", emit_expr(left), op_s, emit_expr(right))
+    emit_expr(left)
 }
 
 fn emit_string_interp(parts: &[InterpPart]) -> String {
@@ -1869,6 +1893,11 @@ pub(super) fn emit_literal(l: &Literal) -> String {
         // also interpolates #{...}; literal data must stay literal.
         Literal::Str { value } => format!("{value:?}").replace("#{", "\\#{"),
         Literal::Sym { value } => format!(":{value}"),
+        // Crystal's `m` modifier is documented as "multiline mode (`.`
+        // will match newlines)" — unlike most PCRE-family engines
+        // (and Rust's/Go's RE2), Crystal's own `m` already means
+        // Ruby's `m` (dot-matches-newline), so the flag letter passes
+        // through verbatim correctly, same as `i`.
         Literal::Regex { pattern, flags } => format!(
             "/{}/{flags}",
             crate::emit::shared::regex_literal::escape_regex_delimiters(pattern)

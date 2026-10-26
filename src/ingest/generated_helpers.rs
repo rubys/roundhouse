@@ -41,6 +41,7 @@ use crate::vfs::Vfs;
 
 use super::util::{constant_id_str, string_value};
 
+use crate::ingest::prism_api::PrismLocation;
 /// Every `NAME = Factory.method(YAML.load_file(<path>)["key"])` at the
 /// top level of a file under `roots`, resolved to the methods the
 /// factory defines per table entry. `app.library_classes` must already

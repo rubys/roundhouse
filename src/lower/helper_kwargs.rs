@@ -181,7 +181,7 @@ fn rewrite_class_calls_node(
     diagnostics: &mut Vec<crate::diagnostic::Diagnostic>,
 ) {
     if matches!(
-        &e.diagnostic,
+        &e.diagnostic(),
         Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. })
             if construct.as_str() == crate::diagnostic::CONSTRUCTOR_KEYWORD_ARGUMENTS
     ) {

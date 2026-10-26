@@ -316,6 +316,28 @@ pub struct RuntimeUnit {
 /// to one `runtime/ruby/<x>.rb` file we want to emit as a TS file
 /// in the output project.
 const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
+    runtime_entry! {
+        stem: "active_support_inflections",
+        namespace: "",
+        out_path: "src/active_support_inflections.ts",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    runtime_entry! {
+        stem: "i18n_locale",
+        namespace: "",
+        out_path: "src/i18n_locale.ts",
+        mode: Mode::Library,
+        imports: &[
+            ("I18nHost", "./i18n_host.js"),
+            ("ViewHelpers", "./view_helpers.js"),
+            ("ActiveSupport", "./active_support_inflections.js"),
+        ],
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
     // HashWithIndifferentAccess no longer transpiled to typed targets
     // per Phase 2.5(b). @flash / @session moved to per-app
     // ActionDispatch::Flash / ActionDispatch::Session structs with
@@ -470,6 +492,24 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
 /// (Module mode, no dependencies); expanded as the Crystal target
 /// proves out additional surface area.
 const CRYSTAL_RUNTIME: &[RuntimeEntry] = &[
+    runtime_entry! {
+        stem: "active_support_inflections",
+        namespace: "",
+        out_path: "src/active_support_inflections.cr",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    runtime_entry! {
+        stem: "i18n_locale",
+        namespace: "",
+        out_path: "src/i18n_locale.cr",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
     // HWIA dropped per Phase 2.5(b); flash/session moved to typed
     // ActionDispatch structs.
     runtime_entry! {
@@ -583,6 +623,24 @@ where
 /// dependency order matching Crystal's RUNTIME_ORDER. Phase 3 layers
 /// hand-written primitive runtime (`runtime/rust/`) on top.
 const RUST_RUNTIME: &[RuntimeEntry] = &[
+    runtime_entry! {
+        stem: "active_support_inflections",
+        namespace: "",
+        out_path: "src/active_support_inflections.rs",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    runtime_entry! {
+        stem: "i18n_locale",
+        namespace: "",
+        out_path: "src/i18n_locale.rs",
+        mode: Mode::Library,
+        imports: &[("I18nHost", "i18n_host"), ("raise", "errors_ext"), ("NotImplementedError", "errors_ext"), ("ArgumentError", "errors_ext"), ("ViewHelpers", "view_helpers"), ("ActiveSupport", "active_support_inflections"), ("RubyToS", "http")],
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
     runtime_entry! {
         stem: "inflector",
         namespace: "",
@@ -772,6 +830,57 @@ where
 /// `comment_prefix` selects the target's line-comment marker (TS:
 /// `//`, Crystal: `#`). The header lines are prefixed with this so
 /// the generated file's first lines are valid in the target language.
+pub const I18N_CATALOG_METHODS: &[&str] = &[
+    "translate_runtime", "translate_tree", "opaque_fields", "translate_items", "translate_strings",
+    "translate_symbols", "translate_integer", "translate_float", "translate_boolean", "insert_empty",
+    "insert_tree", "scope_text", "html_safe_key?", "runtime_lookup", "plural_form", "plural_rule",
+    "plural_category", "plural_key", "plural_bool", "plural_num", "plural_step", "runtime_chain",
+    "interpolate_runtime", "runtime_leaves", "runtime_nodes", "runtime_order", "runtime_empties", "runtime_chains",
+    "runtime_rules", "runtime_opaque", "load_runtime_catalog",
+];
+
+// Not a target field: the runtimes that carry the catalog are the TypeScript and Crystal trees, named by what they write
+const I18N_CATALOG_OUT: &[&str] = &[".ts", ".cr"];
+
+thread_local! {
+    // Not a parameter of each `*_units`: every emitter builds its own transform, and the locales are the app's
+    static APP_LOCALES: std::cell::RefCell<Option<(String, Vec<String>)>> = const { std::cell::RefCell::new(None) };
+}
+
+pub fn with_app_locales<R>(app: &crate::App, f: impl FnOnce() -> R) -> R {
+    let catalog = app.i18n.or_rails_default();
+    let prev = APP_LOCALES.with(|l| l.replace(Some((catalog.locale.clone(), catalog.locales()))));
+    let out = f();
+    APP_LOCALES.with(|l| *l.borrow_mut() = prev);
+    out
+}
+
+// Not `project::apply_i18n_locales`' text splice: this runtime is transpiled from the parsed source, not copied
+fn splice_app_locales(classes: &mut [LibraryClass], default: &str, available: &[String]) {
+    use crate::expr::{Expr, ExprNode, Literal};
+    let sym = |name: &str| {
+        let mut e = Expr::new(crate::span::Span::synthetic(), ExprNode::Lit { value: Literal::Sym { value: crate::ident::Symbol::from(name) } });
+        e.ty = Some(crate::ty::Ty::Sym);
+        e
+    };
+    for class in classes.iter_mut().filter(|c| c.name.0.as_str() == "I18n") {
+        for method in &mut class.methods {
+            match method.name.as_str() {
+                "app_default_locale" => method.body = sym(default),
+                "app_available_locales" => {
+                    let mut list = Expr::new(
+                        crate::span::Span::synthetic(),
+                        ExprNode::Array { elements: available.iter().map(|l| sym(l)).collect(), style: Default::default() },
+                    );
+                    list.ty = Some(crate::ty::Ty::Array { elem: std::sync::Arc::new(crate::ty::Ty::Sym) });
+                    method.body = list;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 fn transpile_entry<F>(
     entry: &RuntimeEntry,
     target: &TargetEmit,
@@ -806,11 +915,31 @@ where
             (body, Vec::new(), methods)
         }
         Mode::Library => {
-            let classes = parse_library_with_rbs(
+            // Not trimmed after the transform: a functional target's transform splits a loop into helpers the trim would drop
+            let mut classes = parse_library_with_rbs(
                 entry.rb_src.as_bytes(),
                 entry.rbs_src,
                 entry.rb_path,
             )?;
+            // Not the whole file: the I18n core reaches titleize (a missing key's span) and nothing else in it
+            if entry.rb_path == "runtime/ruby/active_support_inflections.rb" && !I18N_CATALOG_OUT.iter().any(|ext| entry.out_path.ends_with(ext)) {
+                classes.retain(|c| c.name.0.as_str() == "ActiveSupport");
+                for class in classes.iter_mut() {
+                    class.methods.retain(|m| matches!(m.name.as_str(), "underscore" | "humanize" | "titleize"));
+                }
+            }
+            if entry.rb_path == "runtime/ruby/i18n_locale.rb" && !I18N_CATALOG_OUT.iter().any(|ext| entry.out_path.ends_with(ext)) {
+                for class in classes.iter_mut().filter(|c| c.name.0.as_str() == "I18n") {
+                    class.methods.retain(|m| !I18N_CATALOG_METHODS.contains(&m.name.as_str()));
+                }
+            }
+            if entry.rb_path == "runtime/ruby/i18n_locale.rb" {
+                APP_LOCALES.with(|l| {
+                    if let Some((default, available)) = &*l.borrow() {
+                        splice_app_locales(&mut classes, default, available);
+                    }
+                });
+            }
             let classes = transform(entry.out_path, classes);
             // Module-level constants (`HTML_ESCAPES = { ... }.freeze`
             // in `view_helpers.rb`, etc.) emit as top-level
@@ -936,6 +1065,24 @@ fn kotlin_wrap_namespace(_namespace: &str, body: &str) -> String {
 }
 
 const KOTLIN_RUNTIME: &[RuntimeEntry] = &[
+    runtime_entry! {
+        stem: "active_support_inflections",
+        namespace: "",
+        out_path: "src/main/kotlin/ActiveSupportInflections.kt",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    runtime_entry! {
+        stem: "i18n_locale",
+        namespace: "",
+        out_path: "src/main/kotlin/I18nLocale.kt",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
     runtime_entry! {
         stem: "inflector",
         namespace: "",
@@ -1153,6 +1300,24 @@ fn csharp_wrap_namespace(_namespace: &str, body: &str) -> String {
 
 const CSHARP_RUNTIME: &[RuntimeEntry] = &[
     runtime_entry! {
+        stem: "active_support_inflections",
+        namespace: "",
+        out_path: "app/runtime/ActiveSupportInflections.cs",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    runtime_entry! {
+        stem: "i18n_locale",
+        namespace: "",
+        out_path: "app/runtime/I18nLocale.cs",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    runtime_entry! {
         stem: "inflector",
         namespace: "",
         out_path: "app/runtime/Inflector.cs",
@@ -1301,6 +1466,24 @@ fn swift_wrap_namespace(_namespace: &str, body: &str) -> String {
 }
 
 const SWIFT_RUNTIME: &[RuntimeEntry] = &[
+    runtime_entry! {
+        stem: "active_support_inflections",
+        namespace: "",
+        out_path: "Sources/App/ActiveSupportInflections.swift",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    runtime_entry! {
+        stem: "i18n_locale",
+        namespace: "",
+        out_path: "Sources/App/I18nLocale.swift",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
     runtime_entry! {
         stem: "inflector",
         namespace: "",
@@ -1535,6 +1718,24 @@ const GO_RUNTIME: &[RuntimeEntry] = &[
         extra_roots: NO_EXTRA_ROOTS,
     },
     runtime_entry! {
+        stem: "active_support_inflections",
+        namespace: "",
+        out_path: "app/active_support_inflections.go",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: GO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    runtime_entry! {
+        stem: "i18n_locale",
+        namespace: "",
+        out_path: "app/i18n_locale.go",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: GO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    runtime_entry! {
         stem: "action_controller/base",
         namespace: "",
         out_path: "app/action_controller_base.go",
@@ -1687,6 +1888,24 @@ fn elixir_wrap_namespace(_namespace: &str, body: &str) -> String {
 /// as the body walker grows to cover while-loop→recursion and instance
 /// mutation-threading.
 const ELIXIR_RUNTIME: &[RuntimeEntry] = &[
+    runtime_entry! {
+        stem: "active_support_inflections",
+        namespace: "",
+        out_path: "lib/v2/active_support_inflections.ex",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    runtime_entry! {
+        stem: "i18n_locale",
+        namespace: "",
+        out_path: "lib/v2/i18n_locale.ex",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
     runtime_entry! {
         stem: "inflector",
         namespace: "",
@@ -1967,6 +2186,28 @@ fn split_python_constants_around_classes(constants: &str, class_names: &[String]
 /// Python has no tree-shake pass yet, so the reachability roots TS needs
 /// don't apply.
 const PYTHON_RUNTIME: &[RuntimeEntry] = &[
+    runtime_entry! {
+        stem: "active_support_inflections",
+        namespace: "",
+        out_path: "app/active_support_inflections.py",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    runtime_entry! {
+        stem: "i18n_locale",
+        namespace: "",
+        out_path: "app/i18n_locale.py",
+        mode: Mode::Library,
+        imports: &[
+            ("I18nHost", "app.i18n_host"),
+            ("ViewHelpers", "app.v2.view_helpers"),
+            ("ActiveSupport", "app.active_support_inflections"),
+        ],
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
     runtime_entry! {
         stem: "inflector",
         namespace: "",

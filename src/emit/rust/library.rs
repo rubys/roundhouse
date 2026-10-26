@@ -90,6 +90,8 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
 /// Subsequent commits drive the per-ExprNode body emit until the
 /// produced Rust is `cargo check`-clean.
 pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
+    // Not for a class: a bare constant in a module body is the module's own nested class, the shape runtime modules raise
+    super::expr::set_current_ruby_class_name(if class.is_module { class.name.0.as_str() } else { "" });
     // Strip the namespace prefix (`ActiveSupport::HashWithIndifferentAccess`
     // → `HashWithIndifferentAccess`). Rust uses file-as-module, so the
     // namespace is carried by the file path, not the struct name.
@@ -487,7 +489,12 @@ fn method_reads_self(body: &Expr) -> bool {
                 walk(scrutinee) || arms.iter().any(|a| walk(&a.body))
             }
             ExprNode::Cast { value, .. } => walk(value),
-            _ => false,
+            // Not false for the rest: a begin/rescue or any other node holding a self read still makes the method an instance one
+            _ => {
+                let mut found = false;
+                e.node.for_each_child(&mut |c| found |= walk(c));
+                found
+            }
         }
     }
     walk(body)
@@ -853,7 +860,11 @@ pub fn format_constant(name: &str, value: &Expr) -> String {
         }
         ExprNode::Hash { entries, .. } => format_hash_constant(name, entries),
         ExprNode::Array { elements, .. } => format_array_constant(name, elements),
-        _ => format!("// TODO rust2 const: {name} = {:?}", value.node),
+        _ => {
+            // Not the panic stub in place: a constant is an item, where an expression does not parse
+            let stub = crate::emit::diagnostics::report_unsupported(value.span, "rust", value.node.kind_str(), "constant value");
+            format!("// {name} = {stub}")
+        }
     }
 }
 
@@ -935,7 +946,7 @@ fn render_constant_value(e: &Expr) -> String {
         ExprNode::Lit { value: Literal::Bool { value } } => value.to_string(),
         ExprNode::Lit { value: Literal::Str { value } } => format!("{value:?}"),
         ExprNode::Lit { value: Literal::Sym { value } } => format!("{:?}", value.as_str()),
-        _ => format!("/* TODO rust2 const value: {:?} */", e.node),
+        _ => crate::emit::diagnostics::report_unsupported(e.span, "rust", e.node.kind_str(), "constant value"),
     }
 }
 
@@ -960,7 +971,7 @@ mod op_assign_tests {
             "module OpAssign\n  def self.count(n)\n    i = 0\n    s = \"\"\n    while i < n\n      s += \"x\"\n      i += 1\n    end\n    s\n  end\nend\n",
             "module OpAssign\n  def self.count: (Integer n) -> String\nend\n",
         );
-        assert!(!out.contains("TODO rust2"), "OpAssign fell through:\n{out}");
+        assert!(!out.contains("unsupported"), "OpAssign fell through:\n{out}");
         assert!(out.contains("i = i + 1_i64"), "int counter not advanced:\n{out}");
         // A `+=` is a reassignment, so its local needs `let mut` as the
         // spelled-out `s = s + "x"` gets.

@@ -117,3 +117,53 @@ fn a_class_body_state_write_is_unsupported_on_strict_targets() {
     let message = refused.downcast_ref::<String>().cloned().unwrap_or_default();
     assert!(message.contains("class-instance-variable initialization is not supported"), "{message}");
 }
+
+/// A rescue list with a splat (`rescue ArgumentError, *ERRORS => e`) in a
+/// definition's block is not an argument splat: the IR keeps it as written
+/// (a `Splat` among the rescue clause's classes), so the expansion keeps
+/// the definition instead of refusing the macro (#1044).
+#[test]
+fn a_definition_rescuing_a_splatted_error_list_is_expanded() {
+    let (_emitted, errors) = app()
+        .edit(
+            "app/models/settings_base.rb",
+            "    def keys\n",
+            "    def guarded(name)\n      define_singleton_method(name) do |hash, key|\n        begin\n          hash.fetch(key)\n        rescue ArgumentError, *LOOKUP_ERRORS => e\n          \"rescued #{e.class}\"\n        end\n      end\n    end\n\n    def keys\n",
+        )
+        .edit("app/models/settings_base.rb", "  PROTECTED_KEYS", "  LOOKUP_ERRORS = [KeyError, IndexError].freeze\n\n  PROTECTED_KEYS")
+        .edit("app/models/site_config.rb", "  setting :community_name", "  guarded :lookup\n  setting :community_name")
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(!errors.iter().any(|e| e.contains("defines methods this call does not expand")), "{errors:#?}");
+}
+
+#[test]
+fn a_definition_rescuing_a_splatted_error_list_runs() {
+    app()
+        .edit(
+            "app/models/settings_base.rb",
+            "    def keys\n",
+            "    def guarded(name)\n      define_singleton_method(name) do |hash, key|\n        begin\n          hash.fetch(key)\n        rescue ArgumentError, *LOOKUP_ERRORS => e\n          \"rescued #{e.class}\"\n        end\n      end\n    end\n\n    def keys\n",
+        )
+        .edit("app/models/settings_base.rb", "  PROTECTED_KEYS", "  LOOKUP_ERRORS = [KeyError, IndexError].freeze\n\n  PROTECTED_KEYS")
+        .edit("app/models/site_config.rb", "  setting :community_name", "  guarded :lookup\n  setting :community_name")
+        .run_ruby(
+            "got = [SiteConfig.lookup({ \"a\" => 1 }, \"a\").to_s, SiteConfig.lookup({}, \"b\")]\nraise got.inspect unless got == [\"1\", \"rescued KeyError\"]\nputs \"splat rescue passed\"\n",
+        )
+        .assert_passes();
+}
+
+/// Control: an argument splat in the same definition is still one the
+/// expansion would erase, so the macro is still refused.
+#[test]
+fn a_definition_with_an_argument_splat_is_still_refused() {
+    let (_emitted, errors) = app()
+        .edit(
+            "app/models/settings_base.rb",
+            "    def keys\n",
+            "    def guarded(name)\n      define_singleton_method(name) do |hash, key|\n        begin\n          hash.fetch(*[key])\n        rescue ArgumentError, *LOOKUP_ERRORS => e\n          \"rescued #{e.class}\"\n        end\n      end\n    end\n\n    def keys\n",
+        )
+        .edit("app/models/settings_base.rb", "  PROTECTED_KEYS", "  LOOKUP_ERRORS = [KeyError, IndexError].freeze\n\n  PROTECTED_KEYS")
+        .edit("app/models/site_config.rb", "  setting :community_name", "  guarded :lookup\n  setting :community_name")
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("`guarded` defines methods this call does not expand")), "{errors:#?}");
+}

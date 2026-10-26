@@ -132,6 +132,9 @@ async def _dispatch_request(request: web.Request) -> web.StreamResponse:
     the traceback on stderr so the compare tool sees the same message
     it would from wsgiref."""
     from .v2 import dispatch as _v2
+    from .i18n_host import I18nHost
+
+    I18nHost.reset_request()
 
     method = request.method.upper()
     # The raw path, extension included — the transpiled Router.match

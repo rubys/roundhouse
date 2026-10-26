@@ -43,6 +43,7 @@ use crate::dialect::{LibraryClass, LibraryClassOrigin};
 use super::IngestError;
 use super::survey;
 
+use crate::ingest::prism_api::PrismLocation;
 pub(super) fn lower_oj(
     app: &mut App,
     sources: &[crate::span::SourceFile],
@@ -168,7 +169,7 @@ fn unmodeled_calls(text: &str) -> Vec<String> {
             ruby_prism::visit_call_node(self, node);
         }
     }
-    let parsed = ruby_prism::parse(text.as_bytes());
+    let parsed = super::prism::parse_silent(text.as_bytes());
     let mut finder = Finder { found: Vec::new() };
     ruby_prism::Visit::visit(&mut finder, &parsed.node());
     finder.found
@@ -200,7 +201,7 @@ fn mode_calls(text: &str) -> Vec<(String, bool)> {
             ruby_prism::visit_call_node(self, node);
         }
     }
-    let parsed = ruby_prism::parse(text.as_bytes());
+    let parsed = super::prism::parse_silent(text.as_bytes());
     let root = parsed.node();
     let top: Vec<(usize, usize)> = root
         .as_program_node()

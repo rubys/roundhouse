@@ -1,0 +1,71 @@
+module ActiveRecord
+  def self.dump_schema_after_migration: () -> bool
+  def self.dump_schema_after_migration=: (bool value) -> bool
+
+  module Tasks
+    class SeedLoader
+      def load_seed: () -> nil
+    end
+
+    class SchemaMigration
+      def table_exists?: () -> bool
+    end
+
+    class ConnectionPoolView
+      def initialize: (ActiveRecord::DatabaseConfigurations::HashConfig db_config) -> void
+      def db_config: () -> ActiveRecord::DatabaseConfigurations::HashConfig
+      def with_connection: () { (ActiveRecord::Connection conn) -> nil } -> nil
+      def schema_migration: () -> SchemaMigration
+    end
+
+    module DatabaseTasks
+      def self.current_db_config: () -> ActiveRecord::DatabaseConfigurations::HashConfig?
+      def self.current_or_process_config: () -> ActiveRecord::DatabaseConfigurations::HashConfig
+      def self.process_database: () -> String
+      def self.env: () -> String
+      def self.env=: (String value) -> String
+      def self.migrations_paths: () -> Array[String]
+      def self.migrations_paths=: (Array[String] value) -> Array[String]
+      def self.seed_loader: () -> SeedLoader?
+      def self.seed_loader=: (SeedLoader loader) -> SeedLoader
+      def self.replace_configs: (Array[ActiveRecord::DatabaseConfigurations::HashConfig] configs) -> nil
+      def self.configs_for: (String env_name) -> Array[ActiveRecord::DatabaseConfigurations::HashConfig]
+      def self.configs_for_current: (String env_name) -> Array[ActiveRecord::DatabaseConfigurations::HashConfig]
+      def self.database_url_absent?: () -> bool
+      def self.skip_test_database?: () -> bool
+      def self.switch_to: (ActiveRecord::DatabaseConfigurations::HashConfig db_config) -> nil
+      def self.clear_config: () -> nil
+      def self.with_temporary_pool: (ActiveRecord::DatabaseConfigurations::HashConfig db_config) { () -> nil } -> nil
+      def self.with_temporary_connection: (ActiveRecord::DatabaseConfigurations::HashConfig db_config) { (ActiveRecord::Connection conn) -> nil } -> nil
+      def self.purge: (ActiveRecord::DatabaseConfigurations::HashConfig db_config) -> nil
+      def self.purge_test: () -> nil
+      def self.schema_dump_path: (ActiveRecord::DatabaseConfigurations::HashConfig db_config) -> String
+      def self.load_schema: (ActiveRecord::DatabaseConfigurations::HashConfig db_config, ?String format, ?String file) -> nil
+      def self.load_schema_current: (String format, String file) -> nil
+      def self.load_test_schemas: () -> nil
+      def self.initialize_database: (ActiveRecord::DatabaseConfigurations::HashConfig db_config) -> bool
+      def self.prepare_all: () -> nil
+      def self.migrate: (?String version) -> nil
+      def self.dump_schema_after_migration: () -> bool
+      def self.check_protected!: () -> nil
+      def self.protected_configs: () -> Array[ActiveRecord::DatabaseConfigurations::HashConfig]
+      def self.config_listed?: (Array[ActiveRecord::DatabaseConfigurations::HashConfig] configs, ActiveRecord::DatabaseConfigurations::HashConfig candidate) -> bool
+      def self.check_open_connection!: () -> nil
+      def self.load_seed: () -> nil
+      def self.migration_connection_pool: () -> ConnectionPoolView
+      def self.dispatch: (String kind) -> nil
+      def self.load_rake_tasks!: () -> nil
+      def self.define_framework_tasks!: () -> nil
+    end
+  end
+
+  class Connection
+    def pool: () -> Tasks::ConnectionPoolView
+  end
+end
+
+module Rails
+  class Application
+    def load_tasks: () -> nil
+  end
+end

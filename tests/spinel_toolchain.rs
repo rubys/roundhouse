@@ -116,6 +116,10 @@ mod strong_params;
 mod params_wrapper;
 #[path = "spinel_toolchain/json_request_values.rs"]
 mod json_request_values;
+#[path = "support/default_format_dispatch.rs"]
+mod default_format_dispatch;
+#[path = "spinel_toolchain/route_default_format.rs"]
+mod route_default_format;
 #[path = "support/json_params.rs"]
 mod json_params_contract;
 #[path = "spinel_toolchain/json_params.rs"]
@@ -150,6 +154,8 @@ mod api_parity_round3;
 mod api_parity_round4;
 #[path = "spinel_toolchain/server_binding.rs"]
 mod server_binding;
+#[path = "spinel_toolchain/unix_listener.rs"]
+mod unix_listener;
 #[path = "support/request_id_runtime.rs"]
 mod request_id_runtime_contract;
 #[path = "spinel_toolchain/request_id_runtime.rs"]

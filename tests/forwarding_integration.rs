@@ -195,13 +195,20 @@ fn inherited_constructor_and_reopened_descendant_mixin_refuse_unsafe_contracts()
             .write("app/lib/probe.rb", source)
             .write("app/lib/probe_reopen.rb", reopen)
             .run_ruby(script);
-        assert!(
-            run.errors.iter().any(|e| e.contains("forwarding")),
-            "errors={:?}; actual={}; stderr={}",
-            run.errors,
-            run.stdout,
-            run.stderr
-        );
+        if reopen.is_empty() {
+            // One fragment: the subclass's optional keywords are restored
+            // and `new(...)` binds them.
+            run.assert_passes();
+            assert_eq!(run.stdout, "3\n");
+        } else {
+            assert!(
+                run.errors.iter().any(|e| e.contains("forwarding")),
+                "errors={:?}; actual={}; stderr={}",
+                run.errors,
+                run.stdout,
+                run.stderr
+            );
+        }
     }
 }
 

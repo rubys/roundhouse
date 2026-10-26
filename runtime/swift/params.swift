@@ -32,4 +32,32 @@ enum Params {
         }
         return false
     }
+
+    // The scalar readers the params lowering emits, and its record of
+    // multiparameter keys. Those keys (`title(1)`) are modeled on the
+    // Ruby family only (runtime/ruby/params.rb); this target ignores
+    // them, as it always has, so these pass through.
+    static func scalarProvided(_ sub: [String: Any?], _ key: String) -> Bool {
+        return provided(sub, key)
+    }
+
+    static func scalar(_ sub: [String: Any?], _ key: String) -> String {
+        return str(sub, key, "")
+    }
+
+    static func noFields() -> [String] {
+        return []
+    }
+
+    static func multiparameterFields(_ sub: [String: Any?], _ keys: [String]) -> [String] {
+        return []
+    }
+
+    static func multiparameterUnsupported(_ sub: [String: Any?], _ keys: [String]) -> Bool {
+        return false
+    }
+
+    static func anyOf(_ list: [String], _ names: [String]) -> Bool {
+        return names.contains { list.contains($0) }
+    }
 }

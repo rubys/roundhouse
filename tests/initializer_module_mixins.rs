@@ -434,6 +434,102 @@ fn a_kept_before_action_reaches_boot_as_the_controllers_filter_seam() {
     );
 }
 
+/// campfire's `active_storage.rb`: an `after_action` inside
+/// `ActiveSupport.on_load` whose block only writes a literal header. It
+/// needs no mixin, so it survives the lowering on the seam alone.
+#[test]
+fn an_after_action_writing_a_header_is_kept_on_a_runtime_controller() {
+    let mut app = app_from(
+        "ActiveSupport.on_load(:active_storage_blob) do\n  \
+         ActiveStorage::DiskController.after_action only: :show do\n    \
+         response.set_header(\"Cache-Control\", \"max-age=3600, public\")\n  end\nend\n",
+        &[],
+    );
+    let headers: Vec<_> = app
+        .initializer_response_headers
+        .iter()
+        .map(|h| (h.target.as_str(), h.only.iter().map(|s| s.as_str()).collect::<Vec<_>>(), h.name.as_str(), h.value.as_str()))
+        .collect();
+    assert_eq!(
+        headers,
+        vec![("ActiveStorage::DiskController", vec!["show"], "Cache-Control", "max-age=3600, public")]
+    );
+    let diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert_eq!(app.initializer_response_headers.len(), 1, "{:#?}", diags.iter().map(|d| &d.message).collect::<Vec<_>>());
+}
+
+/// Anything in the block besides a literal header write, and an
+/// `on_load` that holds anything besides such filters, is not read: the
+/// rest of the block would never run.
+#[test]
+fn an_after_action_doing_more_than_a_header_is_not_recorded() {
+    for source in [
+        "ActiveStorage::DiskController.after_action do\n  response.set_header(\"X\", \"1\")\n  log_it\nend\n",
+        "ActiveStorage::DiskController.after_action do\n  response.set_header(\"X\", ENV[\"X\"])\nend\n",
+        "ActiveStorage::DiskController.after_action except: :show do\n  headers[\"X\"] = \"1\"\nend\n",
+        "ActiveSupport.on_load(:active_storage_blob) do\n  \
+         ActiveStorage::DiskController.after_action { headers[\"X\"] = \"1\" }\n  \
+         ActiveStorage::Blob.include Tracking\nend\n",
+    ] {
+        let app = app_from(source, &[]);
+        assert!(app.initializer_response_headers.is_empty(), "{source}");
+    }
+}
+
+/// A header filter onto a controller without the seam would never run,
+/// and the ledger counts the statement as read, so the drop is an error.
+#[test]
+fn an_after_action_header_without_a_seam_is_an_error() {
+    let mut app = {
+        let files = vec![
+            ("db/schema.rb", SCHEMA),
+            ("app/models/room.rb", "class Room < ApplicationRecord\nend\n"),
+            (
+                "config/initializers/headers.rb",
+                "Turbo::StreamsChannel.after_action { response.headers[\"X-Seen\"] = \"1\" }\n",
+            ),
+        ];
+        ingest_app_from_tree(tree(&files)).expect("ingest")
+    };
+    assert_eq!(app.initializer_response_headers.len(), 1);
+    let diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(app.initializer_response_headers.is_empty());
+    let d = diags
+        .iter()
+        .find(|d| d.message.contains("Turbo::StreamsChannel.after_action"))
+        .expect("the dropped header is reported");
+    assert_eq!(d.severity, roundhouse::diagnostic::Severity::Error);
+}
+
+/// The emit: the runtime controller's `initializer_after_filters` seam,
+/// redefined at the end of boot.rb with each header behind its `only:`.
+#[test]
+fn a_kept_header_reaches_boot_as_the_controllers_after_filter_seam() {
+    use roundhouse::app::InitializerResponseHeader;
+    use roundhouse::ident::Symbol;
+    use roundhouse::project::{target_files, BuildTarget};
+
+    let fixture = roundhouse::fixtures::real_blog().to_path_buf();
+    let mut app = roundhouse::ingest::ingest_app(&fixture).expect("ingest real-blog");
+    roundhouse::session::analyze_and_lower(&mut app);
+    app.initializer_response_headers.push(InitializerResponseHeader {
+        target: Symbol::from("ActiveStorage::DiskController"),
+        only: vec![Symbol::from("show")],
+        name: "Cache-Control".to_string(),
+        value: "max-age=3600, public".to_string(),
+    });
+
+    let files = target_files(&app, &fixture, BuildTarget::Ruby).expect("ruby target files");
+    let boot = files.iter().find(|(p, _)| p == "boot.rb").map(|(_, c)| c.clone()).expect("boot.rb");
+    assert!(
+        boot.contains(
+            "class ActiveStorage::DiskController\n  def initializer_after_filters(action_name)\n    \
+             headers[\"Cache-Control\"] = \"max-age=3600, public\" if [:show].include?(action_name)\n    nil\n  end\nend"
+        ),
+        "the header reopen never reached boot.rb:\n{boot}"
+    );
+}
+
 /// THE DRIFT GUARD on `RUNTIME_MIXIN_TARGETS`. That list is the one
 /// place the lowering credits a constant it cannot see — the runtime is
 /// not in `App` — so it is also the one place a rename in

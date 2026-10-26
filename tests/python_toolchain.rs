@@ -13,6 +13,13 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "support/emit_and_run.rs"]
+#[allow(dead_code)]
+mod emit_and_run;
+#[path = "support/i18n_locales_app.rs"]
+#[allow(dead_code)]
+mod i18n_locales_app;
+
 use roundhouse::emit::python;
 use roundhouse::ingest::ingest_app;
 
@@ -113,4 +120,37 @@ fn real_blog_python_unittest_passes() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
+}
+
+#[test]
+#[ignore]
+fn real_blog_i18n_locales_run() {
+    // The answers `emit_and_run::i18n_locales` checks on CRuby, but for a String
+    // locale named in an error: Python has no Symbol apart from str, so `"de"` shows as `:de`.
+    let (emitted, errors) = i18n_locales_app::probe_app()
+        .edit("app/models/article.rb", i18n_locales_app::IN_LOCALE, "")
+        .emit(roundhouse::project::BuildTarget::Python);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("probe.py"), r#"from app.v2.models import Article
+from app.i18n_locale import I18n, InvalidLocale
+
+def expect(what, got, want):
+    if got != want:
+        raise AssertionError(f"{what}: {got!r}")
+
+expect("lookups", Article.lookups(), ["Hello", "Hi <x>", "1 item", "2 items", "Translation missing: en.probe.nope", "Cześć", "fallback 3", "en"])
+expect("polish", Article.polish(), ["1 rzecz", "5 rzeczy", "English only", "Cześć", "Translation missing: pl.probe.nope", "Cześć", "Hi Ola", "pl"])
+expect("restored", I18n.locale(), "en")
+expect("named", [Article.named("pl"), Article.named("en"), Article.named(None)], ["Cześć", "Hello", "Hello"])
+expect("dynamic", [Article.probe_key("greet"), Article.only_key("xx")], ["Hello", "Translation missing: en.probe.only_xx"])
+try:
+    Article.named("de")
+    raise AssertionError("no raise")
+except InvalidLocale as e:
+    expect("named de", str(e), ":de is not a valid locale")
+print("locales passed")
+"#).expect("write probe");
+    let output = Command::new("python3").arg("probe.py").current_dir(&emitted).output().expect("run python3");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("locales passed"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
 }

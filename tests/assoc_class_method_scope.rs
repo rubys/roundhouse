@@ -111,6 +111,14 @@ end
   def self.page_around(note)
     earlier(note) + [ note ] + later(note)
   end
+
+  def self.identified(identifier)
+    if identifier.size == 3
+      find_by!(id: identifier)
+    else
+      find(identifier)
+    end
+  end
 end
 "#,
         ),
@@ -127,6 +135,7 @@ end
     @paged = @room.notes.paged?
     notes = @room.notes.ordered
     @around = notes.page_around(@note)
+    @identified = @room.notes.identified(params[:note_id])
   end
 end
 "#,
@@ -189,7 +198,7 @@ fn the_class_method_grows_a_rel_param_and_merges_its_scope_attributes() {
     );
     assert!(
         session.contains(
-            "create! __rel.scope_attributes.merge(user_agent: user_agent, ip_address: ip_address)"
+            "create!(__rel.scope_attributes.merge({ user_agent: user_agent, ip_address: ip_address }))"
         ),
         "the constructor merges the scope under its own attributes:\n{session}"
     );
@@ -319,3 +328,16 @@ fn a_relation_already_in_a_local_is_threaded_without_reseeding() {
         "the local relation is passed straight through:\n{create}"
     );
 }
+
+/// Every terminal in a threaded class method ends on the relation: the
+/// body is typed with the class as `self` (#1236), which spells a bare
+/// `find(id)` as `self.find(id)`, and Rails runs it inside the
+/// relation's `scoping` all the same.
+#[test]
+fn a_threaded_class_methods_find_ends_on_the_relation() {
+    let note = model("app/models/note.rb");
+    assert!(note.contains("def self.identified(identifier, __rel = ActiveRecord::Relation.new(self))"), "{note}");
+    assert!(note.contains("__rel.find_by!(id: identifier)"), "{note}");
+    assert!(note.contains("__rel.find(identifier)"), "{note}");
+}
+

@@ -15,6 +15,13 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "support/emit_and_run.rs"]
+#[allow(dead_code)]
+mod emit_and_run;
+#[path = "support/i18n_locales_app.rs"]
+#[allow(dead_code)]
+mod i18n_locales_app;
+
 use roundhouse::emit::crystal;
 use roundhouse::ingest::ingest_app;
 
@@ -136,4 +143,44 @@ fn real_blog_crystal_spec_passes() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
+}
+
+#[test]
+#[ignore]
+fn real_blog_i18n_locales_run() {
+    // The answers `emit_and_run::i18n_locales` checks on CRuby.
+    let (emitted, errors) = i18n_locales_app::probe_app()
+        .edit("app/models/article.rb", i18n_locales_app::IN_LOCALE, "")
+        .emit(roundhouse::project::BuildTarget::Crystal);
+    assert!(errors.is_empty(), "{errors:?}");
+    shards_install(&emitted);
+    std::fs::write(
+        emitted.join("probe.cr"),
+        r##"require "./src/app"
+def expect(what, got, want)
+  raise "#{what}: #{got.inspect}" unless got == want
+end
+expect("lookups", Article.lookups, ["Hello", "Hi <x>", "1 item", "2 items", "Translation missing: en.probe.nope", "Cześć", "fallback 3", "en"])
+expect("polish", Article.polish, ["1 rzecz", "5 rzeczy", "English only", "Cześć", "Translation missing: pl.probe.nope", "Cześć", "Hi Ola", "pl"])
+expect("restored", I18n.locale.to_s, "en")
+expect("named", [Article.named("pl"), Article.named(:en), Article.named(nil)], ["Cześć", "Hello", "Hello"])
+expect("dynamic", [Article.probe_key("greet"), Article.only_key("xx")], ["Hello", "Translation missing: en.probe.only_xx"])
+begin
+  Article.named("de")
+  raise "no raise"
+rescue e : I18n::InvalidLocale
+  expect("named de", e.message, "\"de\" is not a valid locale")
+end
+puts "locales passed"
+"##,
+    )
+    .unwrap();
+    let run = Command::new("crystal")
+        .args(["run", "probe.cr"])
+        .current_dir(&emitted)
+        .env("CRYSTAL_CACHE_DIR", emitted.join(".crystal-cache"))
+        .output()
+        .expect("run crystal");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(run.status.success() && stdout.contains("locales passed"), "{stdout}\n{}", String::from_utf8_lossy(&run.stderr));
 }

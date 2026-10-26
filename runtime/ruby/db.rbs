@@ -100,4 +100,8 @@ module Db
   # (connection.rb's `_commit_enlisted`), per thread like the depth and
   # boxed the same way. Empty outside a transaction.
   def self._txn_records: () -> Array[ActiveRecord::EnlistedRecord]
+  def self._txn_callbacks: () -> Array[^() -> nil]
+  # The tables inside a `Model.unscoped` block on this thread, innermost
+  # last (relation.rb's `Relation.unscoped_tables`).
+  def self._unscoped_tables: () -> Array[String]
 end

@@ -1,0 +1,45 @@
+# Typing contract for Tep::Response (response.rb beside this file).
+#
+# `@headers` is always a string-keyed bag from `Tep.str_hash` (`Hash.new("")`).
+# Without this sidecar, Spinel's `--rbs` ingest of the rest of the runtime
+# corpus can widen `Tep::Response#headers` to untyped; poly `[]=` then lowers
+# a CString `controller.location` through `sp_poly_as_strbuf` and the blog
+# AOT C fails to compile (`main.rb` Location assignment). Pinning the real
+# Hash[String, String] shape keeps the specialized hash write.
+module Tep
+  class Response
+    @status: Integer
+    @headers: Hash[String, String]
+    @body: String
+    @halted: bool
+    @file_path: String
+    @set_cookies: Array[String]
+    @streamer: untyped
+    @streaming: bool
+    @upgrading_ws: bool
+    @ws_accept_key: String
+    @ws_driver: untyped
+
+    def status: () -> Integer
+    def status=: (Integer s) -> Integer
+    def headers: () -> Hash[String, String]
+    def headers=: (Hash[String, String] h) -> Hash[String, String]
+    def body: () -> String
+    def body=: (untyped b) -> untyped
+    def halted: () -> bool
+    def halted=: (bool h) -> bool
+    def file_path: () -> String
+    def file_path=: (String p) -> String
+    def set_cookies: () -> Array[String]
+    def set_cookies=: (Array[String] c) -> Array[String]
+
+    def initialize: () -> void
+    def start_stream: (untyped streamer) -> untyped
+    def start_websocket: (String accept_key, untyped driver) -> untyped
+    def set_cookie: (String name, String value, Hash[String, String] opts) -> untyped
+    def send_file: (String path) -> untyped
+    def set_body_if_empty: (String s) -> untyped
+    def set_status: (Integer n) -> Integer
+    def halted_close?: () -> bool
+  end
+end

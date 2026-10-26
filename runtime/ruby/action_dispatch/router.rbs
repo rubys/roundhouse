@@ -53,12 +53,14 @@ module ActionDispatch
     # One table scan for a literal path, with the format extension the
     # request carried (`.turbo_stream` stripped off the last segment by
     # `match`) — the empty string when the path carried none. A match
-    # puts it in `path_params["format"]`.
+    # puts it in `path_params["format"]`. `unpeeled` is the literal-path
+    # retry after a registered extension matched nothing stripped.
     def self.match_path: (
       String method,
       String path,
       Array[::ActionDispatch::Router::Route] table,
-      String format
+      String format,
+      bool unpeeled
     ) -> ::ActionDispatch::Router::MatchResult?
 
     # One pass of the table for one (already upcased) verb over the
@@ -67,8 +69,13 @@ module ActionDispatch
       String method_upcase,
       Array[String] path_parts,
       Array[::ActionDispatch::Router::Route] table,
-      String format
+      String format,
+      bool unpeeled
     ) -> ::ActionDispatch::Router::MatchResult?
+
+    # Does `route` hold its `(.:format)` to a requirement and end in a
+    # param segment (which the `unpeeled` retry would bind the dot into)?
+    def self.format_held_param_tail: (::ActionDispatch::Router::Route route) -> bool
 
     # Whether a path of `count` segments whose first segment is `lead` can
     # match `route` at all (segment count, `*glob` tail, leading literal);
@@ -138,6 +145,8 @@ module ActionDispatch
     def self.segment_pattern_class_match: (String quant, String neg, String any, String set, String value, Integer start) -> Integer
     def self.segment_pattern_item_match: (String tag, String quant, String neg, String any, String text, String value, Integer start) -> Integer
     def self.segment_pattern_match: (String pattern, String value) -> bool
+    def self.segment_pattern_alt_match: (String pattern, String value) -> bool
+    def self.segment_pattern_seq_match: (String pattern, String value) -> bool
 
     # A decoded capture path-escaped again, as Rails fills a routing
     # redirect's `%{name}`; see the .rb. Byte-oriented after UTF-8 decode.

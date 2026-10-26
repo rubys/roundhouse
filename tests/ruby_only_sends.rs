@@ -1,6 +1,7 @@
 //! Sends the analyzer types for every target but only the Ruby family can
 //! run: `Array#fetch`, `each_slice`, `each_cons`, `lazy`, an enumerator's
-//! `with_object`, `Array[...]`, `Hash[...]`, `include?` on a `Class` value,
+//! `with_object`, `Array[...]`, `Hash[...]`, `Array.try_convert` (a nested
+//! splat), `include?` on a `Class` value,
 //! Kernel's `Rational(...)` (what a rational literal ingests as) and
 //! Kernel's `Integer(...)` and `Float(...)`.
 //!
@@ -65,7 +66,15 @@ const MODEL: &str = r#"class Article < ApplicationRecord
 end
 "#;
 
-const REFUSED: [&str; 11] = [
+const SERVICE: &str = r#"class RowUnpack
+  def self.rest
+    _head, (_month, *row) = [1, [2, 3]]
+    row
+  end
+end
+"#;
+
+const REFUSED: [&str; 12] = [
     "Array#fetch",
     "Array#each_slice",
     "Array#each_cons",
@@ -73,6 +82,7 @@ const REFUSED: [&str; 11] = [
     "Enumerator#with_object",
     "Array[]",
     "Hash[]",
+    "Array.try_convert",
     "Kernel#Rational",
     "Module#include?",
     "Kernel#Integer",
@@ -100,6 +110,7 @@ fn only_the_ruby_family_emits_the_ruby_only_sends() {
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
         ("app/models/tagged.rb", "module Tagged\n  def tagged = true\nend\n"),
         ("app/models/article.rb", MODEL),
+        ("app/services/row_unpack.rb", SERVICE),
     ] {
         let file = root.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();

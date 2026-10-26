@@ -18,6 +18,7 @@
 //! broadcasts orchestration, schema → DDL, and router dispatch tables.
 
 pub mod arel;
+pub mod array_columns;
 pub mod associations;
 pub mod association_new;
 pub mod blank;
@@ -27,6 +28,7 @@ pub mod broadcasts;
 pub mod chain;
 pub mod controller;
 pub mod controller_test;
+pub mod nil_operand;
 pub mod fixtures;
 pub(crate) mod forwarding;
 pub mod functionalize;
@@ -99,6 +101,8 @@ pub mod attachable;
 pub mod attachables_grep;
 pub mod errors_index;
 pub mod job_class_side;
+pub mod transaction_after_commit;
+pub mod module_mattr_storage;
 pub mod job_payload;
 pub mod mailer_class_side;
 pub mod mailer_templates;
@@ -124,11 +128,13 @@ pub mod dirty_predicate_kwargs;
 pub mod job_test_only;
 pub mod test_cookie_jar;
 pub mod sti_scope;
+pub mod default_scope;
 mod sti_subclass_callbacks;
 pub mod sum_symbol;
 pub mod values_at_splat;
 pub mod request_index;
 pub mod arel_attribute;
+pub mod relation_class_calls;
 pub mod exclude_predicate;
 pub mod in_predicate;
 pub mod including;
@@ -143,6 +149,7 @@ pub mod param_rebind;
 pub mod to_sgid;
 pub mod cable_test_case;
 pub mod view_test_case;
+pub mod controller_test_case;
 pub mod current_set;
 pub mod update_writer_check;
 pub mod unscope_check;
@@ -169,7 +176,15 @@ pub mod session_options;
 pub mod status_literal;
 pub mod to_param_residue;
 pub mod relation_residue;
+/// Host-only: the Oj emit gate reads `project::BuildTarget`, which the
+/// wasm build excludes. The playground has no emit gate to raise it for.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod oj;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod ruby_family_gems;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod gem_refusal;
+pub mod constantize;
 pub mod params_residue;
 pub mod params_permit;
 pub mod normalizes;
@@ -338,6 +353,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("params_residue", &["bool_fold"]),
     // After the ledger, which reads the calls this rewrites; before the controller lowering turns `params` into `@params`.
     ("params_permit", &["params_residue"]),
+    ("params_value_reads", &["params_permit"]),
     // Before the fused rewrites, which key on the plain Hash type this pass leaves on an indifferent hash.
     ("indifferent_access", &[]),
     // Independent send rewrites: one fused tree walk in
@@ -672,6 +688,14 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("mailer_class_side", &[]),
     ("mailer_templates", &[]),
     ("job_class_side", &[]),
+    // `….current_transaction.after_commit { … }` -> the block as a lambda
+    // argument, the shape the runtime holds for the COMMIT. Consumes a
+    // shape no pass produces or reads; no constraints.
+    ("transaction_after_commit", &[]),
+    // A module's `mattr_*` `@@x` storage -> its own `@x`, when nothing
+    // outside the module names `@@x`. Consumes ingest's mattr expansion,
+    // which no pass rewrites; no constraints.
+    ("module_mattr_storage", &[]),
     ("send_static_dispatch", &[]),
     // Grounds the plural duration-unit calls that send_static_dispatch
     // synthesizes into case arms, so it must observe that pass's output.
@@ -827,8 +851,12 @@ pub fn apply_post_analyze_lowerings(
     ran!("params_residue");
     params_permit::apply_params_permit_lowering(app);
     ran!("params_permit");
+    controller_to_library::params::lower_value_reads(app);
+    ran!("params_value_reads");
     indifferent_access::apply_indifferent_access_lowering(app);
     ran!("indifferent_access");
+    // Not fused: a local bound to `arel_table` is a whole-body fact, which a per-node rewrite cannot see
+    arel_attribute::apply_arel_attribute_lowering(app);
     crate::timings::phase("post-analyze: fused send rewrites", || {
         fused::apply_fused_independent_rewrites(app);
     });
@@ -934,6 +962,7 @@ pub fn apply_post_analyze_lowerings(
     // an `update` site.
     update_writer_check::apply_update_writer_check(app);
     ran!("update_writer_check");
+    unscope_check::rewrite_unscope_where(app);
     diags.extend(unscope_check::apply_unscope_check(app));
     ran!("unscope_check");
     inquiry::apply_inquiry_lowering(app);
@@ -964,6 +993,7 @@ pub fn apply_post_analyze_lowerings(
     ran!("send_file");
     html_safe::apply_html_safe_lowering(app);
     ran!("html_safe");
+    diags.extend(crate::ingest::rake_tasks::gap_diagnostics(app));
     diags.extend(module_mixins::apply_module_mixins_lowering(app));
     ran!("module_mixins");
     transaction_ground::apply_transaction_grounding(app);
@@ -1030,6 +1060,10 @@ pub fn apply_post_analyze_lowerings(
     ran!("mailer_templates");
     diags.extend(job_class_side::apply_job_class_side(app));
     ran!("job_class_side");
+    transaction_after_commit::apply_transaction_after_commit(app);
+    ran!("transaction_after_commit");
+    module_mattr_storage::apply_module_mattr_storage(app);
+    ran!("module_mattr_storage");
     diags.extend(crate::timings::phase("post-analyze: send_dispatch", || {
         send_dispatch::apply_send_static_dispatch(app, registry)
     }));
@@ -1240,6 +1274,18 @@ pub(crate) fn for_each_owned_hook_body(
                         f(cond);
                     }
                 }
+                // `validates :attr, …, if: -> { … }` / `unless: …` — a
+                // lambda guard is a general expression, same as a
+                // callback's, and needs the same passes (`.in?`
+                // rewriting, attribute aliasing, …) to see it.
+                crate::dialect::ModelBodyItem::Validation { validation, .. } => {
+                    if let Some(cond) = &mut validation.if_cond {
+                        f(cond);
+                    }
+                    if let Some(cond) = &mut validation.unless_cond {
+                        f(cond);
+                    }
+                }
                 // Unrecognized class-body exprs (constant procs and
                 // friends) round-trip verbatim into the emit — their
                 // sites are just as reachable.
@@ -1385,6 +1431,14 @@ pub(crate) fn for_each_hook_body_ref(
                 }
                 crate::dialect::ModelBodyItem::Callback { callback, .. } => {
                     if let Some(cond) = &callback.condition {
+                        f(cond);
+                    }
+                }
+                crate::dialect::ModelBodyItem::Validation { validation, .. } => {
+                    if let Some(cond) = &validation.if_cond {
+                        f(cond);
+                    }
+                    if let Some(cond) = &validation.unless_cond {
                         f(cond);
                     }
                 }

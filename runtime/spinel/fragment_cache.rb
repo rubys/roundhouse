@@ -120,7 +120,7 @@ module Rails
     # under the shard's lock, so two workers counting the same key do
     # not both see the same old value. The expiry is kept from the
     # first write in the window, as the shared version's note says.
-    def increment_str(key, ttl)
+    def increment_str(key, amount, ttl)
       k = key.to_s
       s = shard_of(k)
       entries = SHARD_ENTRIES[s]
@@ -130,15 +130,15 @@ module Rails
         hit = entries[k]
         due = expires[k]
         if hit.nil? || due.nil? || (due != 0 && due <= Time.now.to_i)
-          n = 1
-          entries[k] = "1"
+          n = amount
+          entries[k] = amount.to_s
           expires[k] = ttl > 0 ? Time.now.to_i + ttl : 0
           if entries.size > SHARD_MAX
             entries.clear
             expires.clear
           end
         else
-          n = hit.to_i + 1
+          n = hit.to_i + amount
           entries[k] = n.to_s
         end
       end

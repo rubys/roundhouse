@@ -193,6 +193,10 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         path: output_path(OutputKind::HandWrittenRuntime { name: "rh_datetime.ex" }).path,
         content: include_str!("../../runtime/elixir/v2/rh_datetime.ex").to_string(),
     });
+    out.push(EmittedFile {
+        path: output_path(OutputKind::HandWrittenRuntime { name: "i18n_host.ex" }).path,
+        content: include_str!("../../runtime/elixir/v2/i18n_host.ex").to_string(),
+    });
 
     // Model-support runtime: the portable prepared-cursor DB surface the
     // lowered model emit targets (`Db.prepare/step?/column_*/exec/…`),
@@ -290,6 +294,14 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
                         .as_str()
                         .to_string(),
                 );
+            }
+            // And the multiparameter record `from_params` / `update_from_*`
+            // read (`lower::controller_to_library::params`).
+            for f in [
+                crate::lower::controller_to_library::params::multiparameter_fields_field(),
+                crate::lower::controller_to_library::params::multiparameter_unsupported_field(),
+            ] {
+                field_names.push(f.as_str().to_string());
             }
             expr::register_field_names(&class_name, &field_names);
         }

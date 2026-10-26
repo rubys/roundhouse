@@ -139,13 +139,26 @@ pub fn emit_expr(e: &Expr) -> String {
     if is_locked_external_gem_constant(e) {
         return emit_node(&e.node);
     }
+    // `self.class::KINDS`, which ingest gave the analysis as `const_get`.
+    if e.decisions & crate::expr::CONST_PATH != 0
+        && let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*e.node
+        && method.as_str() == "const_get"
+        && let [arg] = args.as_slice()
+        && let Some(name) = match &*arg.node {
+            ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => Some(value.as_str().to_string()),
+            ExprNode::Lit { value: crate::expr::Literal::Str { value } } => Some(value.clone()),
+            _ => None,
+        }
+    {
+        return format!("{}::{name}", emit_postfix_recv(r));
+    }
     // A site a lowering replaced with a stub — `lower::object_extend`,
     // the arel `ColumnSpec::Named` placeholder — renders as the raise
     // the report describes, so the program fails THERE with the reason
     // rather than compiling a construct no target can run. Only the
     // `Unsupported` kind: an `IncompatibleBinop` the analyzer stamps is
     // left to Ruby itself, which raises at the same site on its own.
-    if let Some(kind @ DiagnosticKind::Unsupported { .. }) = &e.diagnostic {
+    if let Some(kind @ DiagnosticKind::Unsupported { .. }) = &e.diagnostic() {
         // This is an expression, including in a rescue list or a binary
         // operand. A bare command-style `raise` is not valid there.
         let stub = crate::emit::diagnostics::StubStyle::Raise
@@ -181,7 +194,7 @@ pub fn emit_expr(e: &Expr) -> String {
 fn is_locked_external_gem_constant(expr: &Expr) -> bool {
     let Some(DiagnosticKind::Unsupported {
         construct, detail, ..
-    }) = &expr.diagnostic
+    }) = &expr.diagnostic()
     else {
         return false;
     };
@@ -200,7 +213,7 @@ fn is_locked_external_gem_constant(expr: &Expr) -> bool {
 /// `+`: spinel freezes a bare literal, and the source made this copy
 /// because it mutates it.
 fn is_mutable_string_literal(e: &Expr) -> bool {
-    e.hint == Some(crate::expr::IrHint::MutableStringLiteral)
+    e.hint() == &Some(crate::expr::IrHint::MutableStringLiteral)
         && matches!(&*e.node, ExprNode::Lit { value: Literal::Str { .. } })
 }
 
@@ -1194,8 +1207,8 @@ fn recv_needs_parens(r: &Expr) -> bool {
 /// hash (`Hash[Symbol, _]`, e.g. a keyword-arg hash like
 /// `StoryRepository#@params`) has a different type and is left alone, as
 /// is any `untyped`/unknown receiver. A request's params value is
-/// String-keyed at run time whatever the key's static type, so it also
-/// matches (`is_indifferent_params`) and its keys are coerced in full.
+/// String-keyed when it holds a Hash, so it also matches. It can also
+/// hold an Array; its index reads coerce only String or Symbol keys.
 ///
 /// This is the type-directed emit hook (the `[]` analog of the shared
 /// `classify_add`/`_sub`/`_cmp` operator dispatch) where a future
@@ -1261,7 +1274,20 @@ fn emit_str_hash_access(recv: &Expr, method: &str, args: &[Expr]) -> Option<Stri
     let recv_s = emit_expr(recv);
     let indifferent = is_indifferent_params(recv);
     match method {
-        "[]" if args.len() == 1 => Some(format!("{recv_s}[{}]", coerce_str_key(&args[0], indifferent))),
+        "[]" if args.len() == 1 => {
+            let key = &args[0];
+            let param_value = matches!(recv.ty.as_ref(), Some(Ty::Class { id, .. })
+                if id.0.as_str() == crate::analyze::PARAM_VALUE);
+            let string_key = matches!(&*key.node,
+                ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } })
+                || key.ty.as_ref().is_some_and(Ty::is_stringish);
+            let key_s = if param_value && !string_key {
+                format!("Params.nested_key({})", emit_arg(key))
+            } else {
+                coerce_str_key(key, indifferent)
+            };
+            Some(format!("{recv_s}[{key_s}]"))
+        }
         "[]=" if args.len() == 2 => Some(format!(
             "{recv_s}[{}] = {}",
             coerce_str_key(&args[0], indifferent),
@@ -1500,10 +1526,11 @@ pub(super) fn emit_send_base(
 }
 
 /// A leading `if`/`case`/… argument must be parenthesized: paren-less,
-/// `j if c … end` reads `if` as a statement modifier of the call.
+/// `j if c … end` reads `if` as a statement modifier of the call. So
+/// must a leading Hash literal: `arrange {}, rel` reads `{}` as a block.
 fn first_arg_opens_block(args_s: &[String]) -> bool {
     args_s.first().is_some_and(|a| {
-        ["if ", "unless ", "case ", "while ", "until ", "begin"].iter().any(|k| a.starts_with(k))
+        a.starts_with('{') || ["if ", "unless ", "case ", "while ", "until ", "begin"].iter().any(|k| a.starts_with(k))
     })
 }
 

@@ -51,6 +51,114 @@ pub fn raise<T>(kind: FrameworkError, _payload: T) -> ! {
     panic!("FrameworkError::{:?}", kind);
 }
 
+impl FrameworkError {
+    fn ruby_name(self) -> &'static str {
+        match self {
+            FrameworkError::NotImplemented => "NotImplementedError",
+            FrameworkError::RecordNotFound => "ActiveRecord::RecordNotFound",
+            FrameworkError::RecordInvalid => "ActiveRecord::RecordInvalid",
+            FrameworkError::Argument => "ArgumentError",
+            FrameworkError::Runtime => "RuntimeError",
+            FrameworkError::Index => "IndexError",
+        }
+    }
+
+    fn named(name: &str) -> Option<FrameworkError> {
+        [
+            FrameworkError::NotImplemented,
+            FrameworkError::RecordNotFound,
+            FrameworkError::RecordInvalid,
+            FrameworkError::Argument,
+            FrameworkError::Runtime,
+            FrameworkError::Index,
+        ]
+        .into_iter()
+        .find(|k| format!("FrameworkError::{k:?}") == name)
+    }
+}
+
+/// What a `rescue` clause binds: the class and message of the panic it caught.
+#[derive(Debug, Clone)]
+pub struct Rescued {
+    pub class: &'static str,
+    pub message: String,
+}
+
+impl Rescued {
+    /// The exception a caught panic carries: a `Raised`, a framework kind's
+    /// `FrameworkError::Kind` text, or any other text as Ruby's RuntimeError.
+    pub fn from_panic(payload: &(dyn std::any::Any + Send)) -> Rescued {
+        if let Some(r) = payload.downcast_ref::<Raised>() {
+            return Rescued { class: r.class, message: r.message.clone() };
+        }
+        let text = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default();
+        match FrameworkError::named(&text) {
+            Some(kind) => Rescued { class: kind.ruby_name(), message: kind.ruby_name().to_string() },
+            None => Rescued { class: "RuntimeError", message: text },
+        }
+    }
+
+    /// Ruby's `is_a?` over the classes the runtime raises; an app's own
+    /// class is known only by name, and answers to StandardError as an
+    /// application error does.
+    pub fn is_a(&self, class: &str) -> bool {
+        let mut cur = self.class;
+        loop {
+            if cur == class {
+                return true;
+            }
+            cur = match cur {
+                "ActiveRecord::RecordNotFound" | "ActiveRecord::RecordInvalid" => "ActiveRecord::ActiveRecordError",
+                "KeyError" => "IndexError",
+                "NoMethodError" => "NameError",
+                "NotImplementedError" => "ScriptError",
+                "ScriptError" | "StandardError" => "Exception",
+                "Exception" => return false,
+                _ => "StandardError",
+            };
+        }
+    }
+
+    /// Rust raises carry no cause.
+    pub fn cause(&self) -> Option<Rescued> {
+        None
+    }
+
+    /// `raise e` of a rescued exception.
+    pub fn raise(&self) -> ! {
+        raise_class(self.class, self.message.clone())
+    }
+}
+
+/// A raised Ruby exception: its class and message. The panic payload of
+/// `raise_msg` / `raise_class`, so a caller can `catch_unwind` and read
+/// what Ruby's `rescue => e` would (`e.class.name`, `e.message`).
+#[derive(Debug, Clone)]
+pub struct Raised {
+    pub class: &'static str,
+    pub message: String,
+}
+
+impl std::fmt::Display for Raised {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.message, self.class)
+    }
+}
+
+/// `raise Klass, "message"` for a framework error kind.
+pub fn raise_msg(kind: FrameworkError, message: String) -> ! {
+    raise_class(kind.ruby_name(), message)
+}
+
+/// `raise Klass, "message"` for any other Ruby exception class, named as Ruby names it.
+pub fn raise_class(class: &'static str, message: String) -> ! {
+    std::panic::panic_any(Raised { class, message })
+}
+
 /// Placeholder for Ruby's `self.name` (class name) inside emitted
 /// class methods. The transpile lowers bare `name` calls to a free
 /// function reference; until the emit-side rewrites these to

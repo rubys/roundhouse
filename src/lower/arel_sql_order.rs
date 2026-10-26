@@ -3,14 +3,13 @@
 //!
 //! Rails' `order` refuses anything that is not a column name unless the
 //! caller marks it as SQL with `Arel.sql`, which returns an
-//! `Arel::Nodes::SqlLiteral`. This runtime's `Arel.sql` is the identity
-//! (a fragment IS its text), so by the time `order` sees the argument the
-//! mark is gone and the column check refuses what Rails accepts —
-//! campfire's `reorder(Arel.sql("+messages.created_at"))`, SQLite's
-//! unary plus that keeps the planner off an index. The mark survives
-//! here instead, at the call site, as the method name: the runtime's
-//! `order_sql` takes its one fragment as written, and a bare String
-//! `order` keeps its check.
+//! `Arel::Nodes::SqlLiteral`. A one-argument call is rewritten here,
+//! before that node exists, so the fragment reaches `order_sql` as the
+//! text the caller wrote — campfire's
+//! `reorder(Arel.sql("+messages.created_at"))`, SQLite's unary plus that
+//! keeps the planner off an index. A bare String `order` keeps its
+//! column check. A call with binds is not this rewrite. `Arel.sql`
+//! substitutes them, and `order_term` keeps an `Arel::Nodes::Node`.
 //!
 //! Only a call ON A RELATION (a chain, or the implicit receiver of a
 //! scope body) is renamed: a model constant's `order` is the class

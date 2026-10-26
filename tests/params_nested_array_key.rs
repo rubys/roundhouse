@@ -17,12 +17,11 @@
 //! reached Kernel's PRIVATE `require`, so the error read "private method
 //! 'require' called for an instance of Hash".
 //!
-//! So the non-scalar key is DROPPED and the rest of the list lowers.
-//! Dropping is not free — a request may send `story[tags_a][]` and the
-//! emitted app will not assign it, where Rails would — so it files a
-//! `lower_residue` warning rather than passing silently. Carrying it
-//! properly needs an `Array[String]` params field, which the record
-//! (every slot `Ty::Str`, filled by `Params.str`) has no shape for yet.
+//! So the non-scalar key no longer sinks the list. On the ruby family it
+//! is carried (#1338): `tags_a: []` as an `Array[String]` field read by
+//! `Params.scalar_list`, `settings: {}` as a `Roundhouse::ParamValue`
+//! one read by `Params.nested`. Strict targets drop it with a
+//! `lower_residue` warning (`tests/params_nested_carry.rs`).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -116,7 +115,7 @@ fn the_scalar_half_of_the_list_still_lowers() {
 }
 
 #[test]
-fn the_array_valued_key_is_dropped_from_the_record() {
+fn the_array_valued_key_is_carried() {
     let params = emitted("app/models/story_params.rb");
     for field in ["title", "url", "description", "moderation_reason"] {
         assert!(
@@ -125,21 +124,20 @@ fn the_array_valued_key_is_dropped_from_the_record() {
         );
     }
     assert!(
-        !params.contains("tags_a"),
-        "the array-valued key has no slot in a String-fielded record:\n{params}"
+        params.contains(r#"Params.scalar_list(sub, "tags_a")"#),
+        "the array-valued key is an Array of Strings:\n{params}"
     );
 }
 
 #[test]
-fn dropping_it_files_a_residue_warning() {
+fn the_carried_key_is_not_ledgered() {
     let (_files, diags) = roundhouse::emit::diagnostics::scope(|| {
         let app = lowered();
         ruby::emit_lowered_controllers(&app)
     });
     assert!(
-        diags.iter().any(|d| d.message.contains("permitted key `tags_a`")
-            && d.message.contains("non-scalar")),
-        "the dropped key is on the ledger, not silent: {:?}",
+        !diags.iter().any(|d| d.message.contains("permitted key `tags_a`")),
+        "a carried key is not ledgered as dropped: {:?}",
         diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>(),
     );
 }
@@ -202,8 +200,13 @@ fn a_hash_valued_key_does_not_sink_the_permit() {
     );
 }
 
+/// The ruby family carries `settings: {}` (#1338): a
+/// `Roundhouse::ParamValue` member read by `Params.nested`, as Rails'
+/// `permit` keeps any hash there, and no "non-scalar" ledger entry.
+/// Strict targets keep the drop and its warning
+/// (`tests/params_nested_carry.rs`).
 #[test]
-fn the_hash_valued_key_is_dropped_and_ledgered() {
+fn the_hash_valued_key_is_carried() {
     let (files, diags) = roundhouse::emit::diagnostics::scope(|| {
         let app = hash_lowered();
         ruby::emit_lowered_controllers(&app)
@@ -215,13 +218,12 @@ fn the_hash_valued_key_is_dropped_and_ledgered() {
         .expect("emitted params record");
     assert!(params.contains("def name"), "the scalar half is carried:\n{params}");
     assert!(
-        !params.contains("settings"),
-        "a nested hash has no slot in a String-fielded record:\n{params}"
+        params.contains(r#"Params.nested(sub, "settings", [], "deep")"#),
+        "the nested hash is read as submitted:\n{params}"
     );
     assert!(
-        diags.iter().any(|d| d.message.contains("permitted key `settings`")
-            && d.message.contains("non-scalar")),
-        "the dropped key is on the ledger, not silent: {:?}",
+        !diags.iter().any(|d| d.message.contains("permitted key `settings`")),
+        "a carried key is not ledgered as dropped: {:?}",
         diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>(),
     );
 }

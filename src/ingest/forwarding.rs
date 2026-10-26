@@ -16,6 +16,8 @@ use crate::dialect::UnsupportedFormal;
 
 pub(crate) use crate::dialect::AnonymousFormal;
 
+use crate::ingest::prism_api::PrismLocation;
+
 #[derive(Default)]
 pub(crate) struct Formals {
     pub anonymous: Option<AnonymousFormal>,
@@ -107,7 +109,8 @@ pub(crate) fn parse(def: &ruby_prism::DefNode<'_>) -> Formals {
     Formals {
         anonymous,
         unsupported,
-        has_anonymous_block: pn.block().is_some_and(|b| b.name().is_none()),
+        has_anonymous_block: super::prism_api::block_parameter(&pn)
+            .is_some_and(|b| b.name().is_none()),
         anonymous_rest_name: (anonymous_rest && !forwarded).then(|| anonymous_rest_name(def)),
     }
 }

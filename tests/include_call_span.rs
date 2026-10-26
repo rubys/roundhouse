@@ -31,7 +31,7 @@ fn an_unresolved_include_refusal_points_at_the_include_line_not_the_argument_lin
         .unknown_calls
         .iter()
         .find(|call| {
-            matches!(&call.diagnostic,
+            matches!(&call.diagnostic(),
                 Some(DiagnosticKind::Unsupported { construct, detail, .. })
                 if construct.as_str() == "include" && detail.contains("ExternalGem::Mixin"))
         })

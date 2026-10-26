@@ -1,7 +1,7 @@
-//! `X = Struct.new(…, keyword_init: true)` in a class or module body
-//! becomes the class `<owner>::X`. A shape the synthesis cannot write as
-//! plain Ruby stays the constant it was, so it keeps reporting instead
-//! of vanishing.
+//! `X = Struct.new(…)` in a class or module body becomes the class
+//! `<owner>::X`, positional or `keyword_init: true`. A shape the synthesis
+//! cannot write as plain Ruby stays the constant it was, so it keeps
+//! reporting instead of vanishing.
 
 use roundhouse::ingest::ingest_library_classes;
 
@@ -26,7 +26,8 @@ fn a_struct_the_synthesis_cannot_write_stays_a_constant() {
     let (names, constants) = names_and_constants(
         "class Service\n  Asked = Struct.new(:success?, keyword_init: true)\n  Reserved = Struct.new(:end, keyword_init: true)\n  Splat = Struct.new(*FIELDS, keyword_init: true)\n  Loud = Struct.new(:a, keyword_init: true) do\n    attr_accessor :b\n  end\n  Strict = Struct.new(:a, keyword_init: false)\n  Either = Struct.new(:a, :b)\nend\n",
     );
-    assert_eq!(names, ["Service"]);
-    // `Either` takes `Either.new(1, 2)` and, since Ruby 3.2, `Either.new(a: 1, b: 2)`: no one constructor answers both.
-    assert_eq!(constants, ["Asked", "Reserved", "Splat", "Loud", "Strict", "Either"]);
+    // The positional forms are classes: `Either.new(a: 1, b: 2)` (Ruby 3.2
+    // binds it by member name) is refused where it is called instead.
+    assert_eq!(names, ["Service", "Service::Strict", "Service::Either"]);
+    assert_eq!(constants, ["Asked", "Reserved", "Splat", "Loud"]);
 }

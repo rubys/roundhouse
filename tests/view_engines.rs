@@ -137,3 +137,82 @@ fn ingest_contract_name_format_and_template_spans() {
         assert!(saw_real, "{:?}: expected template-coordinate spans", c.engine);
     }
 }
+
+/// roundhouse#1048: a trailing-comma Ruby continuation (`= expr,` / next
+/// line) is joined onto the first line before compiling, but the
+/// resulting segment's `e_end` was computed from the JOINED string's
+/// length — so it could run past the first source line's end. A
+/// compiled-Ruby offset deep in the continuation (e.g. the receiver of
+/// `@post.unknown`, placed well into the joined expr) then translates,
+/// via simple `e_start + delta` arithmetic, to a template byte offset
+/// that does not correspond to real template bytes at all — it can land
+/// inside a multi-byte character on the continuation line, which panics
+/// `SourceFile::line_col`. Every compiled-Ruby offset must translate to
+/// an in-bounds, char-boundary template offset, at every continuation
+/// indent the reporter hit.
+#[test]
+fn haml_continuation_offsets_translate_to_char_boundaries() {
+    use roundhouse::erb::translate_offset;
+
+    for indent in [4, 6, 10, 12, 16] {
+        let source = format!(
+            "= select_tag :status,\n{}options_for_select(['アクティブ', @post.unknown])\n",
+            " ".repeat(indent)
+        );
+        let (ruby, map) = ViewEngine::Haml.compile_fn()(&source);
+        // Only offsets that are themselves char boundaries of the compiled
+        // Ruby are offsets a real diagnostic span could ever carry (Prism
+        // never splits a UTF-8 character); a raw mid-character byte index
+        // can validly translate to another mid-character byte index when
+        // the segment's compiled and template text happen to be identical.
+        for c_off in (0..=ruby.len() as u32).filter(|&o| ruby.is_char_boundary(o as usize)) {
+            let e_off = translate_offset(&map, c_off);
+            assert!(
+                e_off as usize <= source.len(),
+                "indent {indent}: c_off {c_off} translated to {e_off}, past template end {}",
+                source.len()
+            );
+            assert!(
+                source.is_char_boundary(e_off as usize),
+                "indent {indent}: c_off {c_off} translated to {e_off}, not a char boundary in:\n{source}"
+            );
+        }
+    }
+}
+
+/// roundhouse#1048's "Related" note: `Compiler::line` mapped an `=`/`-`
+/// line's expression with `e_start` fixed right after the marker
+/// (`e_base + 1`), but passed the FULLY TRIMMED expression (leading
+/// whitespace stripped) as the mapped text — so a line with 2+ spaces
+/// after the marker (`=  expr`) mapped every offset too early by the
+/// stripped width. That shift is constant, so it is invisible at a
+/// segment's own endpoints but splits a character at some offset in
+/// between whenever a multi-byte char sits close enough to the marker.
+#[test]
+fn extra_marker_whitespace_does_not_shift_offsets_into_a_character() {
+    use roundhouse::erb::translate_offset;
+
+    for source in ["=  'ク'.size\n", "-  'ク'.size\n"] {
+        let (ruby, map) = ViewEngine::Haml.compile_fn()(source);
+        for c_off in (0..=ruby.len() as u32).filter(|&o| ruby.is_char_boundary(o as usize)) {
+            let e_off = translate_offset(&map, c_off);
+            assert!(
+                e_off as usize <= source.len(),
+                "{source:?}: c_off {c_off} translated to {e_off}, past template end {}",
+                source.len()
+            );
+            assert!(
+                source.is_char_boundary(e_off as usize),
+                "{source:?}: c_off {c_off} translated to {e_off}, not a char boundary"
+            );
+        }
+        // The expression's first byte maps to its first character in the
+        // template (column 4, after the marker and both spaces), not to
+        // the space after the marker.
+        let expr = "'ク'.size";
+        let c_start = ruby.find(expr).unwrap_or_else(|| panic!("{source:?}: {expr} not in {ruby:?}")) as u32;
+        let e_start = translate_offset(&map, c_start) as usize;
+        let col = source[..e_start].chars().count() + 1;
+        assert_eq!((e_start, col), (3, 4), "{source:?}: expression start maps to byte {e_start}, column {col}");
+    }
+}

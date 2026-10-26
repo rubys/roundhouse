@@ -1,21 +1,16 @@
 //! `render …, status: 400` → `status: :bad_request` (and `head 404`,
 //! `redirect_to …, status: 301`).
 //!
-//! Rails takes a status as either an Integer or a Symbol. The runtime's
-//! `ActionController::Base#resolve_status` takes the Symbol only — it is
-//! monomorphic so every strict target keeps a typed parameter — and
-//! raises "Invalid HTTP status" on anything else, so an Integer literal
-//! turned a deliberate 400 into a 500. lobsters writes Integers
-//! throughout (`render plain: "can't find comment", status: 400`), and
-//! its `require_logged_in_user_or_400` guard is on the anonymous path of
-//! every logged-in-only page.
+//! Rails takes a status as either an Integer or a Symbol. This pass
+//! predates the runtime's Integer pass-through and retains the canonical
+//! Symbol shape for known literal codes. Computed codes stay Integers
+//! and are resolved by the Ruby/Spinel `ActionController::Base#resolve_status`.
 //!
 //! The literal is knowable at transpile time, so it is grounded to the
 //! Symbol Rails' own table names for it. The table is the runtime's
 //! `STATUS_CODES` (runtime/ruby/action_controller/base.rb), compiled in
 //! with `include_str!`, so the two cannot drift. A code the table does not
-//! carry is left as written and keeps raising, as a status no HTTP
-//! registry has should.
+//! carry is left as an Integer, which Rails and the Ruby/Spinel runtime accept.
 
 use std::sync::OnceLock;
 

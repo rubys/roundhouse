@@ -123,6 +123,28 @@ fn random_uuid_is_securerandom_uuid() {
     );
 }
 
+/// ActiveSupport's `Digest::UUID.uuid_v4` is `SecureRandom.uuid`.
+#[test]
+fn digest_uuid_v4_is_securerandom_uuid() {
+    for spelling in ["Digest::UUID.uuid_v4", "::Digest::UUID.uuid_v4"] {
+        let body = format!("@id = {spelling}");
+        let o = errors(&body, "UUID");
+        assert!(o.is_empty(), "{spelling} resolves: {o:?}");
+        let src = emitted(&body);
+        assert!(
+            src.contains("SecureRandom.uuid") && !src.contains("uuid_v4"),
+            "{spelling} emits the class that has a byte source:\n{src}"
+        );
+    }
+}
+
+/// `uuid_v5` hashes a namespace: not the random uuid, so still refused.
+#[test]
+fn digest_uuid_v5_stays_refused() {
+    let o = errors("@id = Digest::UUID.uuid_v5(\"ns\", \"name\")", "uuid_v5");
+    assert_eq!(o.len(), 1, "uuid_v5 is not grounded: {o:?}");
+}
+
 /// `rand` is a real method on the PRNG class with its own meaning.
 /// Redirecting it would change behavior, so the pass must leave it.
 #[test]

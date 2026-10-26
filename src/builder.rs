@@ -42,6 +42,7 @@ use ruby_prism::Node;
 
 use crate::erb::{ErbSegment, ruby_string_literal};
 
+use crate::ingest::prism_api::PrismLocation;
 /// Compile Builder template source to the `_buf`-append Ruby program.
 pub fn compile_builder(source: &str) -> String {
     compile_builder_mapped(source).0

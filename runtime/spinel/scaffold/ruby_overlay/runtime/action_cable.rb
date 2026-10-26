@@ -287,6 +287,27 @@ module ActionCable
   # that is set, as its GlobalID param when it has one, sorted and joined
   # by ":". The same text names a connection's internal channel on the
   # socket side and the selection on the broadcasting side.
+  # Rails' `ActionCable::INTERNAL`, the two tables an app reads:
+  # campfire closes a connection whose session has ended with
+  # `close reason: ActionCable::INTERNAL[:disconnect_reasons][:unauthorized]`.
+  # Rails' scalar entries (`default_mount_path`, `protocols`) are left out,
+  # so every value is a table of Strings; an app reading one is an error.
+  INTERNAL = {
+    message_types: {
+      welcome: "welcome",
+      disconnect: "disconnect",
+      ping: "ping",
+      confirmation: "confirm_subscription",
+      rejection: "reject_subscription"
+    }.freeze,
+    disconnect_reasons: {
+      unauthorized: "unauthorized",
+      invalid_request: "invalid_request",
+      server_restart: "server_restart",
+      remote: "remote"
+    }.freeze
+  }.freeze
+
   def self.connection_identifier(values)
     values.compact.map { |o| o.respond_to?(:to_gid_param) ? o.to_gid_param : o.to_s }.sort.join(":")
   end
@@ -670,6 +691,47 @@ module ActionCable
       def reject_unauthorized_connection
         raise Authorization::UnauthorizedError,
               "ActionCable::Connection: the handshake carried no identified user"
+      end
+
+      # Rails' `socket`: the live connection this one was accepted on
+      # (`Cable::Connection` sets it), or `Connection::TestCase`'s
+      # `TestSocket`. Rails 8.2 hands both `close` and `perform_work` to
+      # the socket, and so does this: what a test asserts is what the
+      # socket was told.
+      attr_accessor :transport
+
+      # Rails' `beat`, called on every server heartbeat. Rails' transmits
+      # the ping; here the server's shared heartbeat writes it, so the base
+      # does nothing else and an app's override (campfire's session check)
+      # runs after it.
+      def beat
+        nil
+      end
+
+      # Rails' `perform_work(receiver, method)`, delegated to the socket as
+      # Rails 8.2 delegates it: the live one runs it on a worker rather
+      # than the heartbeat's thread, with a database connection; a test's
+      # runs it inline. With no socket, inline. Modeled for a callable and
+      # `:call`, the one shape an app passes.
+      def perform_work(receiver, method_name)
+        unless method_name.to_s == "call"
+          raise ArgumentError, "ActionCable perform_work: only (callable, :call) is modeled"
+        end
+        live = @transport
+        if live.nil?
+          receiver.call
+        else
+          live.perform_work(receiver)
+        end
+        nil
+      end
+
+      # Rails' `close(reason:, reconnect:)`: tell the client why and whether
+      # to come back, then close the socket.
+      def close(reason: nil, reconnect: true)
+        live = @transport
+        live.close_with_reason(reason, reconnect) unless live.nil?
+        nil
       end
     end
   end

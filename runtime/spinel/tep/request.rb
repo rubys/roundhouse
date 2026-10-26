@@ -22,6 +22,7 @@ module Tep
     # (`Main.request_body_params` returns nil for it).
     attr_accessor :json_body_malformed
     attr_accessor :remote_host
+    attr_accessor :listener_transport
     attr_accessor :ivars
 
     def initialize
@@ -49,6 +50,7 @@ module Tep
       # poly-receiver dispatch. Roundhouse uses ActionDispatch::Session.
       @raw_body     = +""             # same reasoning as req_headers
       @remote_host  = +""
+      @listener_transport = ""
       @passed       = false          # `pass` flag: skip to the next matching route
       @ivars        = Tep.str_hash   # per-request bag for `@name = ...`
                                      # set by handlers and `before` filters,

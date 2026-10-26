@@ -60,6 +60,7 @@ reported, not described as passing; request [broader CI](../ci/README.md) when n
 | Run the emitted Ruby app | `bin/rh dev ruby` (also `test ruby`, `run ruby`) |
 | Compare against Rails | `bin/rh compare <target>` |
 | Benchmark / build the complete site | `bin/rh bench` / `bin/rh site` |
+| Time each route against a reference, in pairs | [`scripts/bench-paired`](benchmarking.md) |
 
 `bin/rh clean <target>` removes that emitted build; `bin/rh clean fixture`
 removes real-blog, not Store. Neither is a Cargo-cache cleanup command.

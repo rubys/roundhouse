@@ -221,16 +221,18 @@ end
 }
 
 /// `prefix: true` is a supported ActiveSupport form. `allow_nil: true`
-/// stays visible because the pass cannot model Rails' `nil.respond_to?`
-/// distinction across all targets.
+/// guards a nil target as Rails' `!_.nil?` does; a name nil itself answers
+/// (`to_s`) stays visible, because Rails calls it on nil
+/// (`nil.respond_to?(:to_s)`).
 #[test]
-fn prefix_true_is_honoured_and_allow_nil_is_declined() {
+fn prefix_true_is_honoured_and_allow_nil_guards_a_nil_target() {
     let out = emit(
         r#"class Filter
   attr_reader :request
 
   delegate :host, to: :request, prefix: true
   delegate :path, to: :request, allow_nil: true
+  delegate :to_s, to: :request, allow_nil: true
 end
 "#,
     );
@@ -239,12 +241,12 @@ end
         "prefix should be honoured:\n{out}"
     );
     assert!(
-        !out.contains("def path"),
-        "allow_nil must not be lowered unsafely:\n{out}"
+        out.contains("def path\n    __allow_nil_target__ = request\n"),
+        "allow_nil should guard a nil target:\n{out}"
     );
     assert!(
-        !out.contains("delegate"),
-        "the DSL call must not reach emitted code:\n{out}"
+        !out.contains("def to_s"),
+        "a name nil answers must not be lowered:\n{out}"
     );
 }
 
@@ -682,5 +684,59 @@ end
     assert!(
         !out.contains("def to_s"),
         "nil implements `to_s`, so a nil guard would differ from Rails:\n{out}"
+    );
+}
+
+/// forem's `User`: the target is the model's own memoizing reader, not
+/// an association, so its class is known only once analysis types it.
+#[test]
+fn a_model_delegate_to_its_own_reader_is_synthesized() {
+    let mut files = tree("");
+    files.insert(
+        PathBuf::from("app/models/account.rb"),
+        b"class Account < ApplicationRecord\n  def authorizer\n    @authorizer ||= Authorizer.new(self)\n  end\n\n  delegate(\n    :admin?,\n    :trusted?,\n    to: :authorizer,\n  )\nend\n".to_vec(),
+    );
+    files.insert(
+        PathBuf::from("app/policies/authorizer.rb"),
+        b"class Authorizer\n  def initialize(account)\n    @account = account\n  end\n\n  def admin?\n    @account.name == \"root\"\n  end\n\n  def trusted?\n    true\n  end\nend\n".to_vec(),
+    );
+    let mut app = ingest_app_from_tree(files).expect("ingest");
+    let model = emit_model(&mut app, "account.rb");
+    assert!(model.contains("def admin?"), "{model}");
+    assert!(model.contains("authorizer.admin?"), "{model}");
+    assert!(model.contains("def trusted?"), "{model}");
+}
+
+/// A reader that yields would raise from a forwarder that passes no block.
+#[test]
+fn a_model_delegate_to_a_reader_that_yields_is_left_alone() {
+    let mut files = tree("");
+    files.insert(
+        PathBuf::from("app/models/account.rb"),
+        b"class Account < ApplicationRecord\n  def authorizer\n    yield\n  end\n\n  delegate :admin?, to: :authorizer\nend\n".to_vec(),
+    );
+    let mut app = ingest_app_from_tree(files).expect("ingest");
+    let model = emit_model(&mut app, "account.rb");
+    assert!(!model.contains("def admin?"), "{model}");
+}
+
+/// A target named like the allow_nil forwarder's local is read through
+/// `self.`, as the other names the forwarder uses are, so the local does
+/// not shadow it.
+#[test]
+fn an_allow_nil_target_named_like_the_forwarders_local_is_read_through_self() {
+    let out = emit(
+        r#"class Filter
+  def __allow_nil_target__
+    "x"
+  end
+
+  delegate :upcase, to: :__allow_nil_target__, allow_nil: true
+end
+"#,
+    );
+    assert!(
+        out.contains("__allow_nil_target__ = self.__allow_nil_target__"),
+        "got:\n{out}"
     );
 }

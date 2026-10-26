@@ -4,6 +4,7 @@
 //! Roundhouse retains source-position answers and keys inferred values
 //! by Rubydex declaration IDs.
 
+use crate::ingest::prism_api::PrismLocation;
 mod hoist;
 
 use std::collections::{HashMap, HashSet, hash_map::Entry};
@@ -97,12 +98,33 @@ const CORE_VALUE_CONSTS: &[(&str, &str, fn() -> Ty)] = &[
     // `packages/openssl` (same values) on spinel.
     ("OpenSSL::SSL", "VERIFY_NONE", || Ty::Int),
     ("OpenSSL::SSL", "VERIFY_PEER", || Ty::Int),
+    // `URI::RFC2396_PARSER.escape(url)` — lobsters' webmention job. The
+    // uri library's on the ruby family, spinel's `packages/uri` on spinel;
+    // DEFAULT_PARSER is RFC 3986's, as on Ruby 3.4.
+    ("URI", "DEFAULT_PARSER", uri_rfc3986_parser),
+    ("URI", "RFC3986_PARSER", uri_rfc3986_parser),
+    ("URI", "RFC2396_PARSER", uri_rfc2396_parser),
 ];
+
+fn uri_rfc2396_parser() -> Ty {
+    Ty::Class { id: ClassId(Symbol::from("URI::RFC2396_Parser")), args: vec![].into() }
+}
+
+fn uri_rfc3986_parser() -> Ty {
+    Ty::Class { id: ClassId(Symbol::from("URI::RFC3986_Parser")), args: vec![].into() }
+}
+
+/// Owners of value Consts that Ruby defines as modules, not classes.
+const CORE_VALUE_MODULES: &[&str] = &["URI"];
 
 /// Ruby's top-level value Consts: `STDERR.puts "…"` (discourse's
 /// warnings) reads the process's own stream, which `$stderr` is only
 /// until something reassigns it.
 const CORE_TOP_CONSTS: &[&str] = &["STDIN", "STDOUT", "STDERR"];
+
+/// `if RUBY_VERSION >= "2.7.1"` (aasm, hashie): the running Ruby's own
+/// version, which a compile-time answer would freeze to the wrong one.
+const CORE_TOP_STR_CONSTS: &[&str] = &["RUBY_VERSION"];
 
 fn io_ty() -> Ty {
     Ty::Class { id: ClassId(Symbol::from("IO")), args: vec![].into() }
@@ -153,9 +175,28 @@ fn core_rbs() -> &'static str {
             }
             out.push_str("end\n");
         }
+        for module in CORE_VALUE_MODULES {
+            out.push_str("module ");
+            out.push_str(module);
+            out.push('\n');
+            for (owner, field, ty) in CORE_VALUE_CONSTS {
+                if owner == module {
+                    out.push_str("  ");
+                    out.push_str(field);
+                    out.push_str(": ");
+                    out.push_str(rbs_type_name(&ty()));
+                    out.push('\n');
+                }
+            }
+            out.push_str("end\n");
+        }
         for name in CORE_TOP_CONSTS {
             out.push_str(name);
             out.push_str(": IO\n");
+        }
+        for name in CORE_TOP_STR_CONSTS {
+            out.push_str(name);
+            out.push_str(": String\n");
         }
         out
     })
@@ -166,6 +207,9 @@ fn core_rbs() -> &'static str {
 fn core_value_type(name: &str) -> Option<Ty> {
     if CORE_TOP_CONSTS.contains(&name.trim_start_matches("Object::")) {
         return Some(io_ty());
+    }
+    if CORE_TOP_STR_CONSTS.contains(&name.trim_start_matches("Object::")) {
+        return Some(Ty::Str);
     }
     CORE_VALUE_CONSTS.iter().find_map(|(owner, field, ty)| {
         let need = owner.len() + 2 + field.len();
@@ -202,6 +246,9 @@ struct FileAnswers {
     constant_classes: IdentityHashMap<DeclarationId, ClassId>,
     namespace_definitions: HashSet<Box<str>>,
     class_definitions: HashSet<Box<str>>,
+    /// Each `class`/`module` definition as (full name, start, end): the
+    /// byte range of the whole definition, keyword through `end`.
+    class_bodies: Vec<(Box<str>, u32, u32)>,
     alias_definitions: HashSet<Box<str>>,
     runtime_namespace_aliases: HashMap<Box<str>, Box<str>>,
     /// Source-only factory admission facts; they do not alter name resolution.
@@ -418,6 +465,64 @@ fn is_assigned_value(graph: &Graph, declaration: &Declaration) -> bool {
     assigned
 }
 
+/// Where each class and module is defined, and what its ancestors are,
+/// read from Rubydex alone. A scoped fractal build asks this before it
+/// ingests anything, to decide which files to ingest.
+#[derive(Debug, Default)]
+pub struct DefinitionIndex {
+    /// Fully qualified name -> the source paths that define it
+    /// (`class`/`module` bodies, reopenings included), sorted.
+    pub files: HashMap<Box<str>, Vec<String>>,
+    /// Fully qualified name -> its resolved ancestors, nearest first,
+    /// itself excluded. A gem's ancestor that left the chain incomplete
+    /// ends it.
+    pub ancestors: HashMap<Box<str>, Vec<Box<str>>>,
+}
+
+/// Index `sources` with Rubydex and keep only [`DefinitionIndex`]'s
+/// answers. Cheaper than ingest: it parses each file once for constants
+/// and resolves names, and keeps nothing else.
+pub(crate) fn definition_index(sources: &[SourceFile]) -> DefinitionIndex {
+    let mut graph = crate::timings::phase("rubydex: index", || index_sources(sources));
+    crate::timings::phase("rubydex: resolve", || Resolver::new(&mut graph).resolve());
+    let app_paths: HashSet<&str> = sources.iter().map(|source| source.path.as_str()).collect();
+    let mut index = DefinitionIndex::default();
+    for declaration in graph.declarations().values() {
+        let Some(namespace) = declaration.as_namespace() else { continue };
+        let name: Box<str> = hoisted_name(declaration.name()).as_ref().into();
+        let mut paths: Vec<String> = declaration
+            .definitions()
+            .iter()
+            .filter_map(|id| graph.definitions().get(id))
+            .filter(|definition| matches!(definition, Definition::Class(_) | Definition::Module(_)))
+            .filter_map(|definition| graph.documents().get(definition.uri_id()))
+            .map(|document| document.uri())
+            .filter(|uri| app_paths.contains(uri))
+            .map(str::to_string)
+            .collect();
+        paths.sort();
+        paths.dedup();
+        let mut ancestors = Vec::new();
+        for ancestor in namespace.ancestors() {
+            let Ancestor::Complete(id) = ancestor else { break };
+            let Some(ancestor) = graph.declarations().get(id) else { continue };
+            let ancestor: Box<str> = hoisted_name(ancestor.name()).as_ref().into();
+            if ancestor != name && !ancestors.contains(&ancestor) {
+                ancestors.push(ancestor);
+            }
+        }
+        if !paths.is_empty() {
+            index.files.entry(name.clone()).or_default().extend(paths);
+        }
+        index.ancestors.entry(name).or_default().extend(ancestors);
+    }
+    for paths in index.files.values_mut() {
+        paths.sort();
+        paths.dedup();
+    }
+    index
+}
+
 impl ConstResolver {
     /// Index real Ruby app sources with their original 1-based file IDs.
     pub(crate) fn from_app_sources(sources: &[SourceFile]) -> Self {
@@ -462,6 +567,21 @@ impl ConstResolver {
     fn file(&self, file: FileId) -> Option<&FileAnswers> {
         let index = file.0.checked_sub(1)?;
         self.files.get(index as usize)?.as_ref()
+    }
+
+    /// Every `class`/`module` definition in the app, as (fully qualified
+    /// name, span of the whole definition), reopenings included, in file
+    /// order. A definition's span contains the definitions nested in it.
+    pub(crate) fn class_bodies(&self) -> Vec<(Box<str>, Span)> {
+        let mut out = Vec::new();
+        for (index, file) in self.files.iter().enumerate() {
+            let Some(file) = file else { continue };
+            for (name, start, end) in &file.class_bodies {
+                out.push((name.clone(), Span { file: FileId(index as u32 + 1), start: *start, end: *end }));
+            }
+        }
+        out.sort_by_key(|(_, span)| (span.file.0, span.start));
+        out
     }
 
     /// Every constant (fully qualified) `file` declares: its classes and
@@ -809,15 +929,19 @@ fn answer_file(
     } else {
         HashSet::new()
     };
+    // Positions a whole-path reference filled, which an exact one replaces.
+    let mut path_keys = HashSet::new();
     for reference_id in document.constant_references() {
         let Some(reference) = graph.constant_references().get(reference_id) else {
             continue;
         };
         let offset = reference.offset();
         // A superclass or mixin reference spans its whole `A::B` path,
-        // so it starts at the same offset as the `A` reference. Only a
-        // reference whose span is exactly its written name belongs to
-        // that offset.
+        // so it starts at the same offset as the `A` reference. Its
+        // answer belongs to where its final name starts, which is where
+        // `reference` looks for an IR span covering the whole path; a
+        // reference whose span is exactly its written name keeps its
+        // own start.
         let written = source
             .text
             .get(offset.start() as usize..offset.end() as usize);
@@ -825,10 +949,23 @@ fn answer_file(
             .names()
             .get(reference.name_id())
             .and_then(|name| graph.strings().get(name.str()));
-        if !name.is_some_and(|name| written == Some(name.as_str())) {
+        let Some((key, exact)) = name.and_then(|name| {
+            let (name, written) = (name.as_str(), written?);
+            if written == name {
+                Some((offset.start(), true))
+            } else {
+                let prefix = written.strip_suffix(name)?;
+                prefix.ends_with("::").then(|| (offset.end() - name.len() as u32, false))
+            }
+        }) else {
+            continue;
+        };
+        // A path reference only fills its final name's position; the
+        // reference that Rubydex recorded there itself, if any, wins.
+        if !exact && answers.references.contains_key(&key) {
             continue;
         }
-        if parenthesized_receivers.contains(&offset.start())
+        if exact && parenthesized_receivers.contains(&offset.start())
             && let Some(target) = resolved_namespace(graph, *reference.name_id())
                 .filter(|target| is_runtime_declaration(graph, target))
         {
@@ -839,7 +976,7 @@ fn answer_file(
             .and_then(|id| graph.declarations().get(id).map(|decl| (*id, decl)))
             .map(|(id, declaration)| {
                 if declaration.kind() == "Class" {
-                    answers.class_references.insert(offset.start());
+                    answers.class_references.insert(key);
                 }
                 if declaration.as_namespace().is_some() && !is_assigned_value(graph, declaration) {
                     let (class, runtime) = class_cache.entry(id).or_insert_with(|| {
@@ -884,12 +1021,15 @@ fn answer_file(
                     ResolvedConstant::Value { declaration: id, name: Arc::new(ClassId(Symbol::from(hoisted_name(name).as_ref()))), runtime, runtime_decl }
                 }
             });
-        match answers.references.entry(offset.start()) {
+        match answers.references.entry(key) {
             Entry::Vacant(slot) => {
+                if !exact {
+                    path_keys.insert(key);
+                }
                 slot.insert(target);
             }
             Entry::Occupied(mut slot) => {
-                if slot.get().is_none() && target.is_some() {
+                if (exact && path_keys.remove(&key)) || (slot.get().is_none() && target.is_some()) {
                     slot.insert(target);
                 }
             }
@@ -922,8 +1062,10 @@ fn answer_file(
                 let owner = parent.and_then(|id| graph.name_id_to_declaration_id(*id))
                     .and_then(|id| graph.declarations().get(id));
                 let full = owner.map_or_else(|| written.to_string(), |owner| format!("{}::{}", hoisted_name(owner.name()), written.as_str()));
-                if matches!(definition, Some(Definition::Class(_) | Definition::Module(_))) {
+                if let Some(class @ (Definition::Class(_) | Definition::Module(_))) = definition {
                     answers.class_definitions.insert(full.clone().into());
+                    let offset = class.offset();
+                    answers.class_bodies.push((full.clone().into(), offset.start(), offset.end()));
                 }
                 if let Some(Definition::ConstantAlias(alias)) = definition {
                     answers.alias_definitions.insert(full.clone().into());
@@ -1163,14 +1305,14 @@ end
             let mut expr = make(file);
             typer.analyze_expr(&mut expr, &Ctx::default());
             assert!(
-                expr.diagnostic.is_some(),
+                expr.diagnostic().is_some(),
                 "source FileId({file}) cannot use a generated fallback"
             );
         }
         let mut generated = make(99);
         generated.decisions |= crate::expr::GENERATED_CONST_REF;
         typer.analyze_expr(&mut generated, &Ctx::default());
-        assert!(generated.diagnostic.is_none());
+        assert!(generated.diagnostic().is_none());
         assert!(matches!(generated.ty, Some(crate::ty::Ty::Class { .. })));
     }
 
@@ -1209,5 +1351,25 @@ end
             }
             _ => panic!("ActiveRecord::SignedId::SALT must resolve to the runtime value"),
         }
+    }
+
+    /// A superclass or mixin path is one Rubydex reference spanning the
+    /// whole `A::B`. Its answer is where an IR span covering that path
+    /// looks, the final name, while the `A` reference keeps its own.
+    #[test]
+    fn superclass_and_mixin_paths_answer_at_their_final_name() {
+        let text = "module A\n  class B; end\n  module H; end\nend\nclass X < A::B\n  include A::H\nend\nclass Y < ::A::B; end\n";
+        let sources = vec![SourceFile { path: "x.rb".into(), text: text.into() }];
+        let resolver = ConstResolver::from_app_sources(&sources);
+        let path = |written: &str| -> Vec<Symbol> { written.split("::").filter(|s| !s.is_empty()).map(Symbol::from).collect() };
+        let at = |needle: &str, written: &str| {
+            let start = text.find(needle).unwrap() + needle.len() - written.len();
+            let span = Span { file: FileId(1), start: start as u32, end: (start + written.len()) as u32 };
+            resolver.namespace(span, &path(written)).map(|class| class.0.to_string())
+        };
+        assert_eq!(at("X < A::B", "A::B").as_deref(), Some("A::B"));
+        assert_eq!(at("include A::H", "A::H").as_deref(), Some("A::H"));
+        assert_eq!(at("Y < ::A::B", "::A::B").as_deref(), Some("A::B"));
+        assert_eq!(at("X < A", "A").as_deref(), Some("A"));
     }
 }

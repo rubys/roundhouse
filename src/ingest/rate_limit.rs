@@ -31,7 +31,7 @@
 //!
 //! ```ruby
 //! def rate_limit_create
-//!   if ActionController::RateLimiter.exceeded?("rate-limit:sessions:" + (request.remote_ip).to_s, 180, 10)
+//!   if ActionController::RateLimiter.exceeded?(self.class.cache_store, "rate-limit:sessions:" + (request.remote_ip).to_s, 180, 10)
 //!     redirect_to new_session_path, alert: "Try again later."
 //!   end
 //! end
@@ -39,8 +39,8 @@
 //!
 //! plus `before_action :rate_limit_create` with the macro's `only:` /
 //! `except:`. The counter and its window live in the shared runtime
-//! (`ActionController::RateLimiter` over `Rails::Cache#increment_str`),
-//! on the same store the fragment cache uses, as in Rails.
+//! (`ActionController::RateLimiter`, calling `increment` on the
+//! controller's class-level `cache_store`, Rails' default `store:`).
 //!
 //! WHAT IS FOLDED AT INGEST. `within:` written as `<int>.<unit>` becomes
 //! the seconds literal, so the generated method carries no Duration;
@@ -115,14 +115,14 @@ pub fn lower_rate_limit(app: &mut crate::App) {
 
 /// ```ruby
 ///   def rate_limit_create
-///     if ActionController::RateLimiter.exceeded?(<key>, <within>, <to>)
+///     if ActionController::RateLimiter.exceeded?(self.class.cache_store, <key>, <within>, <to>)
 ///       <with>
 ///     end
 ///   end
 /// ```
 fn method_source(l: &Limit) -> String {
     format!(
-        "  def {}\n    if ActionController::RateLimiter.exceeded?({}, {}, {})\n      {}\n    end\n  end\n",
+        "  def {}\n    if ActionController::RateLimiter.exceeded?(self.class.cache_store, {}, {}, {})\n      {}\n    end\n  end\n",
         l.method, l.key_src, l.within_src, l.to_src, l.with_src
     )
 }
@@ -397,7 +397,7 @@ mod tests {
         });
         assert_eq!(filter.unwrap().target.as_str(), "rate_limit_create");
         let src = method_source(l);
-        assert!(src.contains("ActionController::RateLimiter.exceeded?(\"rate-limit:sessions:\" + (request.remote_ip).to_s, 180, 10)"), "{src}");
+        assert!(src.contains("ActionController::RateLimiter.exceeded?(self.class.cache_store, \"rate-limit:sessions:\" + (request.remote_ip).to_s, 180, 10)"), "{src}");
     }
 
     #[test]

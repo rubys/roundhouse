@@ -83,7 +83,7 @@ pub fn apply_active_model_model_synthesis(app: &mut App) -> Vec<Diagnostic> {
         }
         let writers = attribute_writers(&lc.methods);
         let owner = lc.name.clone();
-        lc.methods.push(attributes_initialize(&owner, Span::synthetic(), &writers));
+        lc.methods.push(attributes_initialize(&owner, Span::synthetic(), &writers, &[], &[]));
         if !defines(lc, "valid?") {
             lc.methods.push(constant_predicate(&owner, "valid?", true));
         }
@@ -163,6 +163,8 @@ pub(crate) fn attributes_initialize(
     owner: &ClassId,
     span: Span,
     names: &[Symbol],
+    through_writers: &[Symbol],
+    only_when_given: &[Symbol],
 ) -> MethodDef {
     let attrs = Symbol::from("attrs");
     let assigns: Vec<Expr> = names
@@ -187,6 +189,39 @@ pub(crate) fn attributes_initialize(
                     parenthesized: true,
                 },
             );
+            // An `attribute :name, :type` is assigned through its writer,
+            // which casts, as Rails' `assign_attributes` does.
+            if through_writers.contains(name) {
+                let write = Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(Expr::new(span, ExprNode::SelfRef)),
+                        method: Symbol::from(format!("{}=", name.as_str())),
+                        args: vec![read],
+                        block: None,
+                        parenthesized: false,
+                    },
+                );
+                // A defaulted attribute is assigned only when the key is
+                // given: writing nil would mark its default as read.
+                if only_when_given.contains(name) {
+                    let given = Expr::new(
+                        span,
+                        ExprNode::Send {
+                            recv: Some(Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: attrs.clone() })),
+                            method: Symbol::from("key?"),
+                            args: vec![Expr::new(span, ExprNode::Lit { value: Literal::Sym { value: name.clone() } })],
+                            block: None,
+                            parenthesized: true,
+                        },
+                    );
+                    return Expr::new(
+                        span,
+                        ExprNode::If { cond: given, then_branch: write, else_branch: Expr::new(span, ExprNode::Lit { value: Literal::Nil }) },
+                    );
+                }
+                return write;
+            }
             Expr::new(
                 span,
                 ExprNode::Assign { target: LValue::Ivar { name: name.clone() }, value: read },

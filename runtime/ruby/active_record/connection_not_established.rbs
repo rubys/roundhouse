@@ -1,4 +1,10 @@
 module ActiveRecord
   class ConnectionNotEstablished < StandardError
   end
+
+  class ConnectionFailed < ConnectionNotEstablished
+  end
+
+  class ConnectionTimeoutError < ConnectionNotEstablished
+  end
 end

@@ -13,10 +13,8 @@
 //! check cannot claim the reference.
 
 use crate::App;
+use crate::build_target::BuildTarget;
 use crate::dialect::LibraryClassOrigin;
-use crate::expr::{Expr, ExprNode, Literal};
-use crate::ident::Symbol;
-use crate::project::BuildTarget;
 
 /// Targets that emit the stand-in and execute it as Ruby.
 pub fn stand_in_runs(target: BuildTarget) -> bool {
@@ -53,103 +51,17 @@ pub fn without_unrun_stand_in(app: &App, target: BuildTarget) -> Option<App> {
     // and so a later emit cannot write the class the calls no longer reach.
     app.library_classes
         .retain(|lc| !matches!(lc.origin, Some(LibraryClassOrigin::Oj)));
-    let target_name = target.as_str();
-    crate::lower::for_each_emit_body(&mut app, &mut |body| rewrite(body, target_name));
+    crate::lower::gem_refusal::refuse_references(
+        &mut app,
+        target.as_str(),
+        &crate::lower::gem_refusal::Refusal {
+            root: "Oj",
+            construct: "Oj",
+            why: "lowers to the Ruby stand-in, which this target does not emit. \
+                  The reference is refused instead of being written against a missing class",
+            raised: "oj stand-in is not emitted on this target",
+        },
+    );
     Some(app)
 }
 
-fn rewrite(expr: &mut Expr, target: &str) {
-    if let Some(method) = oj_send_method(expr) {
-        rewrite_send_args(expr, target);
-        refuse(expr, target, &format!("`Oj.{method}`"));
-        return;
-    }
-    expr.node
-        .for_each_child_mut(&mut |child| rewrite(child, target));
-    if let Some(name) = oj_const_name(expr) {
-        refuse(expr, target, &format!("`{name}`"));
-    }
-}
-
-fn rewrite_send_args(expr: &mut Expr, target: &str) {
-    let ExprNode::Send { args, block, .. } = &mut *expr.node else {
-        return;
-    };
-    for arg in args {
-        rewrite(arg, target);
-    }
-    if let Some(block) = block {
-        rewrite(block, target);
-    }
-}
-
-/// A call whose receiver is the top-level `Oj` constant (`Oj.load`, `::Oj.generate`).
-fn oj_send_method(expr: &Expr) -> Option<String> {
-    let ExprNode::Send {
-        recv: Some(recv),
-        method,
-        ..
-    } = &*expr.node
-    else {
-        return None;
-    };
-    if !is_top_level_oj(recv) {
-        return None;
-    }
-    Some(method.as_str().to_string())
-}
-
-/// `Oj`, `::Oj`, or `Oj::ParseError`. A constant nested under another class
-/// (`Foo::Oj`) is a different name.
-fn oj_const_name(expr: &Expr) -> Option<String> {
-    let ExprNode::Const { path } = &*expr.node else {
-        return None;
-    };
-    let mut parts = path.iter().filter(|seg| !seg.as_str().is_empty());
-    if parts.next().is_none_or(|seg| seg.as_str() != "Oj") {
-        return None;
-    }
-    let mut name = String::from("Oj");
-    for seg in parts {
-        name.push_str("::");
-        name.push_str(seg.as_str());
-    }
-    Some(name)
-}
-
-fn is_top_level_oj(expr: &Expr) -> bool {
-    matches!(oj_const_name(expr).as_deref(), Some("Oj"))
-}
-
-fn refuse(expr: &mut Expr, target: &str, name: &str) {
-    crate::emit::diagnostics::report_unsupported(
-        expr.span,
-        target,
-        "Oj",
-        format!(
-            "{name} lowers to the Ruby stand-in, which this target does not emit. \
-             The reference is refused instead of being written against a missing class"
-        ),
-    );
-    let span = expr.span;
-    let ty = expr.ty.clone();
-    let mut raised = Expr::new(
-        span,
-        ExprNode::Send {
-            recv: None,
-            method: Symbol::from("raise"),
-            args: vec![Expr::new(
-                span,
-                ExprNode::Lit {
-                    value: Literal::Str {
-                        value: "oj stand-in is not emitted on this target".into(),
-                    },
-                },
-            )],
-            block: None,
-            parenthesized: true,
-        },
-    );
-    raised.ty = ty;
-    *expr = raised;
-}

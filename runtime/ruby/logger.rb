@@ -111,8 +111,15 @@ module ActiveSupport
     end
 
     # The one write path. `Time.now` per line, as Ruby's does.
+    #
+    # `<<` writes the same bytes as `write` on IO and StringIO. This
+    # method returns nil either way. Spinel's poly `write` emits a
+    # default arm that initializes a `const char *` from a shared
+    # String handle (`sp_String *`), and `IO` / `File` are not types
+    # an inline RBS pin can name, so the call cannot be made
+    # monomorphic. `<<` does not build that arm.
     def write_entry(severity, message)
-      @io.write(@formatter.call(severity, Time.now, @progname, message))
+      @io << @formatter.call(severity, Time.now, @progname, message)
       nil
     end
 

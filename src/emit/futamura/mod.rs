@@ -37,20 +37,20 @@ pub fn specialize(app: &App, files: &mut Vec<(String, String)>) -> Result<Report
     for c in &app.controllers {
         for item in &c.body {
             if let ControllerBodyItem::Action { action, .. } = item {
-                spec.method_body(&action.body, &mut sites, &mut residue);
+                spec.method_body(None, &action.body, &mut sites, &mut residue);
             }
         }
     }
     for m in &app.models {
         for item in &m.body {
             if let ModelBodyItem::Method { method, .. } = item {
-                spec.method_body(&method.body, &mut sites, &mut residue);
+                spec.method_body(Some(m.name.0.as_str()), &method.body, &mut sites, &mut residue);
             }
         }
     }
     for lc in &app.library_classes {
         for method in &lc.methods {
-            spec.method_body(&method.body, &mut sites, &mut residue);
+            spec.method_body(None, &method.body, &mut sites, &mut residue);
         }
     }
 

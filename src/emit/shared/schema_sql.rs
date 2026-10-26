@@ -88,13 +88,17 @@ impl Dialect {
     /// `INSERT` — which in Rails get the DATABASE's default. (A record
     /// gets the same value from the model layer either way.) Only the
     /// unambiguous literal kinds render: a number on a numeric column, a
-    /// boolean, a string on a string column. Anything else — a date, a
-    /// JSON or binary value, a default ingest could not read — is left to
+    /// boolean, a string on a string column, or serialized JSON. Anything
+    /// else — a date or binary value, a default ingest could not read — is left to
     /// the model layer, as before.
     fn column_default(self, col: &Column) -> Option<String> {
-        let raw = col.default.as_deref()?;
+        let raw = col.stored_default()?;
         if col.generated.is_some() {
             return None;
+        }
+        if col.array_stored {
+            // `default: []`, the only array default ingest keeps.
+            return Some(format!("'{}'", raw.replace('\'', "''")));
         }
         match &col.col_type {
             ColumnType::Integer | ColumnType::BigInt => {
@@ -112,6 +116,10 @@ impl Dialect {
             },
             ColumnType::String { .. } | ColumnType::Text => {
                 Some(format!("'{}'", raw.replace('\'', "''")))
+            }
+            ColumnType::Json | ColumnType::Jsonb => {
+                serde_json::from_str::<serde_json::Value>(raw).ok()
+                    .map(|_| format!("'{}'", raw.replace('\'', "''")))
             }
             _ => None,
         }
@@ -216,11 +224,14 @@ pub fn render_schema_statements_for(schema: &Schema, dialect: Dialect) -> Result
                 lines.push(dialect.key_column(col));
                 continue;
             }
-            let mut line = format!(
-                "  {} {}",
-                dialect.ident(col.name.as_str()),
+            // A stored array column holds the Array as JSON text
+            // (`lower::array_columns`).
+            let col_type = if col.array_stored {
+                dialect.column_type(&ColumnType::Text)
+            } else {
                 dialect.column_type(&col.col_type)
-            );
+            };
+            let mut line = format!("  {} {}", dialect.ident(col.name.as_str()), col_type);
             if let Some(generated) = &col.generated {
                 line.push_str(" GENERATED ALWAYS AS (");
                 line.push_str(&generated.expression);
@@ -471,7 +482,7 @@ fn is_integer(ct: &ColumnType) -> bool {
 /// through both stacks.
 fn sqlite_type(ct: &ColumnType) -> &'static str {
     match ct {
-        ColumnType::Integer | ColumnType::BigInt => "INTEGER",
+        ColumnType::Integer | ColumnType::BigInt | ColumnType::Interval => "INTEGER",
         ColumnType::Float | ColumnType::Decimal { .. } => "REAL",
         ColumnType::Boolean => "INTEGER",
         ColumnType::Binary => "BLOB",
@@ -515,6 +526,7 @@ fn postgres_type(ct: &ColumnType) -> String {
         ColumnType::Json => "json".into(),
         ColumnType::Jsonb => "jsonb".into(),
         ColumnType::Uuid => "uuid".into(),
+        ColumnType::Interval => "interval".into(),
     }
 }
 
@@ -541,6 +553,8 @@ mod tests {
             generated: None,
             generated_text_compatible: None,
             generated_int4_compatible: None,
+            array: false,
+            array_stored: false,
         }
     }
 
@@ -864,6 +878,7 @@ end
             (ColumnType::Json, "json"),
             (ColumnType::Jsonb, "jsonb"),
             (ColumnType::Uuid, "uuid"),
+            (ColumnType::Interval, "interval"),
             // Not something Rails emits (it rejects a scale without a
             // precision): the scale is dropped rather than a precision
             // invented.

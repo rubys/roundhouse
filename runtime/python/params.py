@@ -26,3 +26,31 @@ def str_(sub: dict[str, Any], key: str, fallback: str) -> str:
 
 def provided(sub: dict[str, Any], key: str) -> bool:
     return isinstance(sub.get(key), str)
+
+
+# The scalar readers the params lowering emits, and its record of
+# multiparameter keys. Those keys (`title(1)`) are modeled on the Ruby
+# family only (runtime/ruby/params.rb); this target ignores them, as it
+# always has, so these pass through.
+def scalar_provided(sub: dict[str, Any], key: str) -> bool:
+    return provided(sub, key)
+
+
+def scalar(sub: dict[str, Any], key: str) -> str:
+    return str_(sub, key, "")
+
+
+def no_fields() -> list[str]:
+    return []
+
+
+def multiparameter_fields(sub: dict[str, Any], keys: list[str]) -> list[str]:
+    return []
+
+
+def multiparameter_unsupported(sub: dict[str, Any], keys: list[str]) -> bool:
+    return False
+
+
+def any_of(names_list: list[str], names: list[str]) -> bool:
+    return any(n in names_list for n in names)

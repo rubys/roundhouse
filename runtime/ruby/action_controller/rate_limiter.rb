@@ -5,13 +5,15 @@
 #
 #   exceeded?  =  the window's count, after this request, > to
 #
-# The count lives in `Rails.cache` under the key the lowering builds —
-# `rate-limit:<controller_path>[:<name>]:<by>`, Rails' own shape — and
-# the window is the entry's TTL: the first request in a window writes
-# it with `within` seconds to live, and every later one increments it
-# until it expires. That is what actionpack does with
-# `store.increment(key, 1, expires_in: within)`, on the same store the
-# fragment cache uses.
+# The count lives in the controller's class-level `cache_store`
+# (`Rails.cache` unless the app sets another), Rails' default `store:`,
+# under the key the lowering builds — `rate-limit:<controller_path>
+# [:<name>]:<by>`, Rails' own shape — and the window is the entry's
+# TTL: the first request in a window writes it with `within` seconds to
+# live, and every later one increments it until it expires. The call is
+# actionpack's own, `store.increment(key, 1, expires_in: within)`, so a
+# test that stubs `SomeController.cache_store.stubs(:increment)` is
+# answered by its stub.
 #
 # Called from the private method the lowering synthesizes (see
 # `ingest::rate_limit`); the `with:` block — what to do when the answer
@@ -20,8 +22,8 @@ require_relative "../rails"
 
 module ActionController
   module RateLimiter
-    def self.exceeded?(key, within, to)
-      Rails.cache.increment_str(key, within) > to
+    def self.exceeded?(store, key, within, to)
+      store.increment(key, 1, expires_in: within) > to
     end
   end
 end

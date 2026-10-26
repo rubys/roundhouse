@@ -117,6 +117,7 @@ const RT_BROADCASTS_SOURCE: &str = include_str!("../../runtime/rust/broadcasts.r
 // intrinsic target) plus the `EncodeDatetime` trait that backs the
 // generic `JsonBuilder::encode_datetime`.
 const RT_RH_DATETIME_SOURCE: &str = include_str!("../../runtime/rust/rh_datetime.rs");
+const RT_I18N_HOST_SOURCE: &str = include_str!("../../runtime/rust/i18n_host.rs");
 // Phase 6 HTTP/server/cable runtime — hand-written, shared with the
 // legacy rust emitter. `server::start` mounts axum, applies schema,
 // installs middleware (layout-wrap, method-override), and serves
@@ -144,6 +145,8 @@ const RT_TEST_SUPPORT_SOURCE: &str = include_str!("../../runtime/rust/test_suppo
 /// bare references the lowerer leaves unqualified.
 const VIEW_IMPORTS: &str = "\
 #[allow(unused_imports)]
+use crate::i18n_locale::I18n;
+#[allow(unused_imports)]
 use std::fmt::Write as _;
 #[allow(unused_imports)]
 use crate::view_helpers::{self, ViewHelpers};
@@ -170,6 +173,8 @@ use crate::views::*;
 /// (Flash/Session), and the broadcasts shim. Same `#[allow(unused_
 /// imports)]` discipline as MODEL_IMPORTS / VIEW_IMPORTS.
 const CONTROLLER_IMPORTS: &str = "\
+#[allow(unused_imports)]
+use crate::i18n_locale::I18n;
 #[allow(unused_imports)]
 use crate::action_controller_base::{self, Base};
 #[allow(unused_imports)]
@@ -205,6 +210,8 @@ use crate::errors_ext::{raise, ArgumentError, NotImplementedError, RecordNotFoun
 const MODEL_JSON_IMPORT: &str = "#[allow(unused_imports)]\nuse crate::json_builder::JsonBuilder;\n";
 
 const MODEL_IMPORTS: &str = "\
+#[allow(unused_imports)]
+use crate::i18n_locale::I18n;
 #[allow(unused_imports)]
 use crate::active_record_base::ErrorDetail;
 #[allow(unused_imports)]
@@ -331,6 +338,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         ("src/db.rs", RT_DB_SOURCE),
         ("src/broadcasts.rs", RT_BROADCASTS_SOURCE),
         ("src/rh_datetime.rs", RT_RH_DATETIME_SOURCE),
+        ("src/i18n_host.rs", RT_I18N_HOST_SOURCE),
         ("src/http.rs", RT_HTTP_SOURCE),
         ("src/server.rs", RT_SERVER_SOURCE),
         ("src/cable.rs", RT_CABLE_SOURCE),
@@ -902,7 +910,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                         pub fn destroy(&mut self) {{ {destroy_body} }}\n\
                         pub fn exists_pred(id: i64) -> bool {{ Self::_adapter_exists_by_id_pred(id) }}\n\
                         pub fn persisted_pred(&self) -> bool {{ self.id != 0 }}\n\
-                        pub fn find(id: i64) -> Self {{ Self::_adapter_find_by_id(id).expect(\"record not found\") }}\n\
+                        pub fn find(id: i64) -> Self {{ Self::_adapter_find_by_id(id).unwrap_or_else(|| crate::errors_ext::raise_msg(crate::errors_ext::RecordNotFound, format!(\"Couldn't find {name} with 'id'={{}}\", id))) }}\n\
                         pub fn count() -> i64 {{ Self::_adapter_count() }}\n\
                         pub fn all() -> Vec<{name}> {{ Self::_adapter_all() }}\n\
                         pub fn last() -> Option<{name}> {{ Self::_adapter_last() }}\n\
@@ -1616,7 +1624,6 @@ fn render_axum_handler_wrappers(
     );
     for r in routes {
         let action = r.action.as_str();
-        let method_name = if action == "new" { "new_action" } else { action };
         let path_params = &r.path_params;
         let carries_body = |method: &HttpMethod| matches!(method, HttpMethod::Post | HttpMethod::Patch | HttpMethod::Put);
         // Also a body another route to the action carries, where the controller reads `params`: `get` and `post` to one action share this wrapper, and axum's `Form` reads a GET's query string.
@@ -1702,6 +1709,8 @@ fn render_axum_handler_wrappers(
             body.push_str("    let form = form.map(|f| f.0).unwrap_or_default();\n");
         }
         body.push_str("    crate::http::response_clear();\n");
+        // Not in the layout middleware: a task resumes on any worker after its await, so a thread-local reset there can miss the handler's thread
+        body.push_str("    crate::i18n_host::I18nHost::reset_request();\n");
         body.push_str("    crate::http::request_format_set(_fmt.0);\n");
         if has_params {
             if has_body {
@@ -1750,12 +1759,11 @@ fn render_axum_handler_wrappers(
         if has_flash {
             body.push_str("    c.flash = crate::http::flash_from_request(&headers);\n");
         }
-        // The wrapper calls the action without `process_action`, so it
-        // sets `action_name` itself.
         if sets_action_name {
             body.push_str(&format!("    c.assign_action_name({action:?});\n"));
         }
-        body.push_str(&format!("    c.{method_name}();\n"));
+        // Not the action itself: Rails runs it through process_action, which carries the forgery check and the rescue_from handlers
+        body.push_str(&format!("    c.process_action({action:?});\n"));
         // Translate the thread-local response, then sweep the flash the
         // action set (FLASH_OUT) onto a Set-Cookie — empty clears it, so
         // a shown notice doesn't stick. Field-independent, so every
@@ -2446,3 +2454,4 @@ fn collect_global_class_methods(
         ..EmitCtx::default()
     }
 }
+

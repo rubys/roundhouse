@@ -28,6 +28,7 @@
 use crate::app::App;
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::Symbol;
+use crate::ty::Ty;
 
 pub fn apply_session_options_lowering(app: &mut App) {
     for controller in &mut app.controllers {
@@ -98,4 +99,9 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
         block: None,
         parenthesized: false,
     });
+    // This runs after analysis, so the String the accessor answers is
+    // set here; untyped, the read was a dispatch failure to the
+    // post-lowering diagnostics whenever `Rails.application` was itself
+    // untyped (lobsters' ApplicationController).
+    expr.ty = Some(Ty::Str);
 }

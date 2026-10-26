@@ -26,7 +26,7 @@ comments, nested routes, validations, Turbo Streams, Action Cable,
 Tailwind, JSON endpoints) is the shared DOM-equivalence fixture for
 **every server target** in scheduled full validation. Ordinary PRs run the
 Ruby floor plus selected target lanes; pushes to canonical `main` run Ruby
-plus Spinel. The extra-language matrix waits for the four-hour schedule or
+plus Spinel. The extra-language matrix waits for the three-hour schedule or
 `ci:full`. See [CI coverage](../ci/README.md).
 A passing target's comparison proves the blog's features on that target.
 
@@ -133,7 +133,7 @@ diagnostic corpus until its independent framework and Spinel gaps close.
 |---|---|---|
 | Attributes | From `db/schema.rb` (migrations as fallback), typed per column; `id`, timestamps, defaults, nullability | + `enum`, `serialize`/`has_json` columns, `has_secure_token`, `has_secure_password` (real bcrypt) |
 | Associations | `belongs_to`, `has_many` (with `dependent:`), `has_one`; association readers, builders, `<assoc>_ids` | + `has_many :through`, polymorphic, `touch:`, `has_one_attached`/`has_many_attached`, `has_rich_text` |
-| Validations | `presence`, `absence`, `length` (min/max), `numericality` (bounds, `only_integer`), `format`, `inclusion`, `uniqueness`; `errors`, `full_messages`, `valid?` | + custom `validate` methods, conditional `if:`/`unless:` |
+| Validations | `presence`, `absence`, `length` (min/max), `numericality` (bounds, `only_integer`), `format`, `inclusion`; `errors`, `full_messages`, `valid?` | + custom `validate` methods, conditional `if:`/`unless:`, `uniqueness` (`scope:`, `case_sensitive:`, `allow_nil:`/`allow_blank:`; a reported gap on the strict targets) |
 | Callbacks | `after_create_commit` and the Turbo `broadcasts_to` family | + `before_save`/`after_save`, `before_destroy`, `after_touch`, STI-aware callback inheritance |
 | Queries | `where` (hash and string), `order`, `limit`, `find`, `find_by`, `first`/`last`, `count`, `exists?`, `includes`, `pluck`, named `scope`s — folded to SQL by the Arel builder | + `joins`, `left_joins`, `group`/`count`, `select`, `distinct`, `or`, `none`, `find_or_create_by`, `insert_all`, `update_all`, `in_batches`, `sum`; a live `Relation` for chains the builder can't fold |
 | Persistence | `create`, `save`, `update`, `destroy`, `new`/`build` | + `destroy!`, `increment!`, `update_columns`, transactions, dirty tracking predicates |
@@ -171,10 +171,24 @@ not add generic class-object/Relation support to strict targets.
 |---|---|---|
 | Actions | The seven RESTful actions and any other; implicit render | + Rails 8.1.4 `head(status, options = nil)` on Ruby + Spinel (see below), `send_file`, `rescue_from`, `rate_limit` (`to:`/`within:`/`by:`/`with:`/`only:`/`except:`, counted in the app's cache as in Rails), `invisible_captcha` (`only:`/`except:`/`prepend:` → honeypot `spam?` on `subtitle` only; rotated/custom names unmodeled), pretender `impersonates :scope` when the controller defines a local `current_<scope>` (wraps it as `true_<scope>`, adds `impersonate_` / `stop_impersonating_`; inherited-only Devise helpers stay unsupported) |
 | Filters | `before_action` with `only:`/`except:`, ivar flow into views | + `around_action`, `after_action`, `if:`/`unless:` guards (symbol and lambda), `skip_before_action`, filters from concerns |
-| Params | `params.expect`, `params.require(...).permit(...)`, `params[:id]`; typed by the schema they're assigned to | + nested permits, arrays, `params.merge`, indifferent access; a missing resource answers 400; JSON bodies wrapped under the model name (`wrap_parameters`, on by default since `load_defaults 7.0`) |
+| Params | `params.expect`, `params.require(...).permit(...)`, `params[:id]`; typed by the schema they're assigned to | + nested permits, arrays, `params.merge`, indifferent access; a missing resource answers 400; JSON bodies wrapped under the model name (`wrap_parameters`, on by default since `load_defaults 7.0`); multiparameter keys (`title(1)`, `body(2i)`) on a String or Text attribute, stored as Rails stores them (see below) |
 | Responses | `render` (template, partial, `json:`, `status:`), `redirect_to` (record, path, `status:`), `respond_to` with `format.html`/`format.json`, `flash` and `flash.now` | + `expires_in`, `stale?`/`fresh_when` (answered as always fresh — a deliberate divergence), `cookies` and `cookies.signed`/`.permanent`, `session`, `helper_method`, `layout` |
 | Concerns | `include`d modules with `included do` filter blocks | + `class_methods`, concern-defined actions and helpers |
 | Auth and request | — | `Current` attributes, `authenticate_by`, signed/global ids, `has_secure_password` sessions; `request.headers` (`[]`, `fetch`, `key?`, case-insensitive HTTP and Rack names), `request.authorization` (including Rack and legacy authorization env keys), route-only `request.path_parameters`, and HTTP Token/Bearer and Basic auth helpers |
+
+**Multiparameter keys.** Rails' `permit(:title)` also keeps `title(1)`,
+`title(2i)` and `title(3f)`, the parts `date_select` submits, and
+assignment rebuilds the attribute from them. For a String or Text
+attribute (and `has_secure_password`'s password, confirmation and
+challenge), Rails assigns the text of the parts Hash, so `title(1)=T`
+stores `{1 => "T"}`. Roundhouse reproduces that text, Ruby 3.4's
+`Hash#inspect` form, for parts that are plain printable ASCII (no `"`,
+`\` or `#`) or `i` integers, with a blank part as `nil`. Validations see
+it, and a save writes it, as in Rails. Any other attribute type (a date
+column builds a Date), an `f` part, other text, or only blank parts raise
+an error naming the gap before the record changes. `date_select` itself
+is not supported. This is the Ruby family (Ruby and Spinel) only: the
+other targets ignore multiparameter keys.
 
 The Spinel dispatcher forwards incoming request headers into the request's
 Rack env (`HTTP_*`, plus unprefixed `CONTENT_TYPE` and `CONTENT_LENGTH`).
@@ -216,7 +230,7 @@ promise in the API prose.
 | | Blog tier | Campfire tier |
 |---|---|---|
 | Templates | ERB; partials (`render "form"`, `render @articles`, `render partial:` with locals and collections); layouts; `content_for`/`yield` | + HAML is read by the analyzer; emit is ERB-only today |
-| Helpers | `link_to`, `button_to`, `form_with` and the form builder (`label`, `text_field`, `text_area`, `submit`, `hidden_field`), `dom_id`, `pluralize`, `truncate`, `l`/`t` with the app's locale files, `csrf_meta_tags`, `stylesheet_link_tag`, `javascript_importmap_tags`, `turbo_stream_from`, `cache` | + `image_tag`/`asset_path` with digests, `tag.*` builders, `content_tag`, `sanitize` (safe-list sanitizer port), `turbo_frame_tag`, the rest of the form builder (`select`, `check_box`, `radio_button`, `button`, `url_field`, `email_field`, `password_field`, `file_field`, `rich_text_area`, `fields_for`), `hidden_field_tag`, `time_ago_in_words`, `number_to_human`, `url_for` |
+| Helpers | `link_to`, `button_to`, `form_with` and the form builder (`label`, `text_field`, `text_area`, `submit`, `hidden_field`), `dom_id`, `pluralize`, `truncate`, `l`/`t` with the app's locale files, `csrf_meta_tags`, `stylesheet_link_tag`, `javascript_importmap_tags`, `turbo_stream_from`, `cache` | + `image_tag`/`asset_path` with digests, `tag.*` builders, `content_tag`, `sanitize` (safe-list sanitizer port), `turbo_frame_tag`, the rest of the form builder (`select`, `check_box`, `radio_button`, `button`, `url_field`, `email_field`, `number_field`, `range_field`, `search_field`, `telephone_field`/`phone_field`, `password_field`, `file_field`, `rich_text_area`, `fields_for`; any other builder method, and the `in:`/`within:` and `autosave:`/`onsearch:` options Rails rewrites at render, is an error), `hidden_field_tag`, `time_ago_in_words`, `number_to_human`, `url_for` |
 | JSON | jbuilder views (`json.extract!`, `json.array!`, partials) | + `as_json`/`to_json` shapes on records and plain objects |
 | Turbo | Turbo Streams broadcast on model commit, `turbo_stream` responses, frames | + custom stream targets and `broadcast_*_later` |
 
@@ -225,7 +239,7 @@ promise in the API prose.
 | Component | Status |
 |---|---|
 | Action Cable | Every server target: `/cable`, `turbo_stream_from` subscriptions, model broadcasts. Campfire tier adds application channels with `subscribed`/`unsubscribed`, `stream_for`, and presence, and client actions (`subscription.perform(action, data)`) with Rails' rules for which methods are actions and which receive `data`. |
-| Active Job | Campfire tier: `perform_later` runs on an in-process queue in the app; `ActiveJob::TestHelper` assertions in the tests. On the Ruby-family lanes a job is queued as a serialized ActiveJob payload (GlobalID records, primitives, Symbols, Times and Arrays of them), honoring `queue_as`, `discard_on ActiveJob::DeserializationError` and `enqueue_after_transaction_commit`; a job with other argument types keeps a closure, with a warning. No external queue adapter. |
+| Active Job | Campfire tier: `perform_later` runs on an in-process queue in the app; `ActiveJob::TestHelper` assertions in the tests. On the Ruby-family lanes a job is queued as a serialized ActiveJob payload (GlobalID records, primitives, Symbols, Times and Arrays of them), honoring `queue_as`, `discard_on ActiveJob::DeserializationError` and `enqueue_after_transaction_commit`; a job with other argument types keeps a closure, with a warning. With `queue_adapter :sidekiq` on `ApplicationJob`, those lanes push payload jobs to Redis in Sidekiq 8's format instead, honoring literal `set(wait:, wait_until:, queue:)`; run them with a Ruby Sidekiq process. The other targets warn and run jobs in process. No other external queue adapter. |
 | Active Storage | Campfire tier: blobs and attachments, the disk service, the engine's routes (redirect and representation), variants via libvips on Spinel. No cloud services. |
 | Action Text | Campfire tier: `has_rich_text`, the safe-list sanitizer, attachment rendering. |
 | Action Mailer | Ruby tier: mailer classes, `mail(...)`, `deliver_now`/`deliver_later` — delivery appends to `ActionMailer::Base.deliveries` (Rails' `:test` method, which the emitted tests assert against). No SMTP. |

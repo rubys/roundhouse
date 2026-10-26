@@ -102,6 +102,39 @@ fn passwords_controller_test_runs() {
         .assert_passes();
 }
 
+/// Rails 7.1's `password_salt` (the digest's bcrypt salt, nil without
+/// one) and `password_challenge` (a plain virtual attribute), which
+/// `has_secure_password` defines and campfire reads: its transfer link
+/// is bound to `password_salt&.last(10)`, and its password change checks
+/// `password_challenge` itself.
+#[test]
+fn password_salt_and_challenge_are_defined() {
+    blog_with_authentication()
+        .write(
+            "test/models/user_secure_password_extras_test.rb",
+            r##"require "test_helper"
+
+class UserSecurePasswordExtrasTest < ActiveSupport::TestCase
+  test "password_salt is the digest's salt, and nil without one" do
+    user = User.create!(email_address: "salt@example.com", password: "secret123")
+    assert_equal BCrypt::Password.new(user.password_digest).salt, user.password_salt
+    assert_equal 29, user.password_salt.length
+    assert_nil User.new.password_salt
+  end
+
+  test "password_challenge is an attribute" do
+    user = User.new
+    assert_nil user.password_challenge
+    user.password_challenge = "secret123"
+    assert_equal "secret123", user.password_challenge
+  end
+end
+"##,
+        )
+        .run_test("test/models/user_secure_password_extras_test.rb")
+        .assert_passes();
+}
+
 /// `normalizes :email_address, with: ->(e) { e.strip.downcase }`.
 #[test]
 fn user_test_runs() {

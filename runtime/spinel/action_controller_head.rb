@@ -48,6 +48,14 @@ module ActionController
       @head_response
     end
 
+    # Render, redirect_to and head share Rails' Integer status pass-through.
+    # Keep the shared strict-target resolver Symbol-only: those targets do
+    # not all represent a Symbol | Integer runtime parameter.
+    def resolve_status(status)
+      return status if status.is_a?(Integer)
+      resolve_symbol_status(status)
+    end
+
     def head_status_code(status)
       return status if status.is_a?(Integer)
       unless STATUS_CODES.key?(status)

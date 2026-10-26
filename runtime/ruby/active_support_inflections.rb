@@ -38,7 +38,10 @@ module ActiveSupport
   def self.demodulize(text)
     s = text.to_s
     idx = s.rindex("::")
-    idx ? s[(idx + 2)..-1].to_s : s
+    # Not `s[(idx + 2)..-1]` or `if idx`: a strict target slices by start and length, and does not narrow a found index once tested
+    return s if idx.nil?
+    at = idx.to_i
+    s[at + 2, s.length - at - 2].to_s
   end
 
   # Regular-suffix singularize only. Analyze folds `String#singularize`
@@ -77,12 +80,52 @@ module ActiveSupport
     end
     out
   end
+
+  # The String methods over the Inflector bodies below. A nil receiver
+  # raises, as Rails' String methods do, naming the method the caller
+  # wrote (an alias included); otherwise the Inflector body answers.
+  def self.camelize(text)
+    raise NoMethodError, "undefined method 'camelize' for nil" if text.nil?
+    ActiveSupport::Inflector.camelize(text.to_s)
+  end
+
+  def self.camelcase(text)
+    raise NoMethodError, "undefined method 'camelcase' for nil" if text.nil?
+    ActiveSupport::Inflector.camelize(text.to_s)
+  end
+
+  def self.titlecase(text)
+    raise NoMethodError, "undefined method 'titlecase' for nil" if text.nil?
+    titleize(text)
+  end
+
+  def self.classify(text)
+    raise NoMethodError, "undefined method 'classify' for nil" if text.nil?
+    ActiveSupport::Inflector.classify(text.to_s)
+  end
+
+  def self.dasherize(text)
+    raise NoMethodError, "undefined method 'dasherize' for nil" if text.nil?
+    ActiveSupport::Inflector.dasherize(text.to_s)
+  end
+
+  def self.deconstantize(text)
+    raise NoMethodError, "undefined method 'deconstantize' for nil" if text.nil?
+    ActiveSupport::Inflector.deconstantize(text.to_s)
+  end
+
+  def self.foreign_key(text)
+    raise NoMethodError, "undefined method 'foreign_key' for nil" if text.nil?
+    ActiveSupport::Inflector.foreign_key(text.to_s)
+  end
 end
 
 # Rails 8.1.4 Inflector methods that do not depend on pluralization,
 # transliteration, constant lookup, or locale-specific rule catalogs. String
 # methods match default ASCII identifier behavior; configured acronym tables
-# are intentionally not modeled. `classify`/`tableize`, locale mutation,
+# are intentionally not modeled. `classify` is the one exception: it takes
+# its singular from the regular-suffix `ActiveSupport.singularize` above, the
+# rules `String#singularize` already grounds to. `tableize`, locale mutation,
 # constantization, transliteration, and parameterization remain unexposed.
 module ActiveSupport
   module Inflector
@@ -131,11 +174,28 @@ module ActiveSupport
       out
     end
 
+    # Rails' dasherize: every underscore becomes a dash.
+    def self.dasherize(text)
+      text.to_s.tr("_", "-")
+    end
+
+    # Rails' classify: drop a leading schema name ("shop.gear_boxes"),
+    # singularize, camelize. An irregular plural ("people") keeps the
+    # answer `ActiveSupport.singularize` gives it.
+    def self.classify(table_name)
+      s = table_name.to_s
+      idx = s.rindex(".")
+      # Not `s[(idx + 1)..-1]` or `idx ? … : s`: a strict target slices by start and length, and does not narrow a found index once tested
+      base = idx.nil? ? s : s[idx.to_i + 1, s.length - idx.to_i - 1].to_s
+      camelize(ActiveSupport.singularize(base))
+    end
+
     # Rails' String-based namespace removal; this does not resolve constants.
     def self.deconstantize(text)
       s = text.to_s
       idx = s.rindex("::")
-      idx ? s[0, idx].to_s : ""
+      # Not `idx ? s[0, idx] : ""`: a strict target does not narrow a found index once tested
+      idx.nil? ? "" : s[0, idx.to_i].to_s
     end
 
     # Rails assumes a top-level class name and removes its namespace before

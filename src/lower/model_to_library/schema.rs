@@ -58,12 +58,147 @@ fn push_schema_symbol_list(
     });
 }
 
+/// `def self.decode_plucked(column, value)`: a plucked stored array
+/// column's JSON text, decoded as hydration decodes it; every other value
+/// as read. Only a model with a stored array column overrides `Base`'s
+/// identity, so only its tree names `ArrayColumn`.
+fn push_decode_plucked(methods: &mut Vec<MethodDef>, owner: &ClassId, table: &Table) {
+    let stored: Vec<&Column> = table.columns.iter().filter(|c| c.array_stored).collect();
+    if stored.is_empty() {
+        return;
+    }
+    let column = Symbol::from("column");
+    let value = Symbol::from("value");
+    let mut body = with_ty(var_ref(value.clone()), Ty::Untyped);
+    for col in stored.into_iter().rev() {
+        let name = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(var_ref(column.clone())),
+                method: Symbol::from("to_s"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let cond = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(with_ty(name, Ty::Str)),
+                    method: Symbol::from("=="),
+                    args: vec![lit_str(col.name.as_str().to_string())],
+                    block: None,
+                    parenthesized: false,
+                },
+            ),
+            Ty::Bool,
+        );
+        let load = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(class_const(&ClassId(Symbol::from("ArrayColumn")))),
+                method: Symbol::from(array_load_method(col)),
+                args: vec![with_ty(var_ref(value.clone()), super::ty_of_column_stored(col))],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        body = with_ty(
+            Expr::new(Span::synthetic(), ExprNode::If { cond, then_branch: load, else_branch: body }),
+            Ty::Untyped,
+        );
+    }
+    methods.push(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: Span::synthetic(),
+        name: Symbol::from("decode_plucked"),
+        receiver: MethodReceiver::Class,
+        params: vec![Param::positional(column.clone()), Param::positional(value.clone())],
+        body,
+        signature: Some(fn_sig(
+            vec![
+                (column, Ty::Union { variants: vec![Ty::Str, Ty::Sym].into() }),
+                (value, Ty::Untyped),
+            ],
+            Ty::Untyped,
+        )),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    });
+}
+
+/// Rails' type name for a column (`type_for_attribute(name).type`).
+fn rails_type_name(col: &crate::schema::ColumnType) -> &'static str {
+    use crate::schema::ColumnType as C;
+    match col {
+        C::Integer | C::BigInt | C::Reference { .. } => "integer",
+        C::Float => "float",
+        C::Decimal { .. } => "decimal",
+        C::String { .. } => "string",
+        C::Text => "text",
+        C::Boolean => "boolean",
+        C::Date => "date",
+        C::DateTime => "datetime",
+        C::Time => "time",
+        C::Binary => "binary",
+        C::Json => "json",
+        C::Jsonb => "jsonb",
+        C::Uuid => "uuid",
+        C::Interval => "interval",
+    }
+}
+
+/// `def self.schema_column_types; { id: :integer, title: :string, ... }; end`
+fn push_schema_column_types(methods: &mut Vec<MethodDef>, owner: &ClassId, table: &Table) {
+    // Not String values: a per-model Hash of String literals is shared text Spinel's String analysis refuses `Arel.sql` over
+    let ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Sym) };
+    let body = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Hash {
+                entries: table
+                    .columns
+                    .iter()
+                    .map(|c| (lit_sym(c.name.clone()), lit_sym(Symbol::from(rails_type_name(&c.col_type)))))
+                    .collect(),
+                kwargs: false,
+            },
+        ),
+        ty.clone(),
+    );
+    methods.push(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: Span::synthetic(),
+        name: Symbol::from("schema_column_types"),
+        receiver: MethodReceiver::Class,
+        params: Vec::new(),
+        body,
+        signature: Some(fn_sig(vec![], ty)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    });
+}
+
 pub(super) fn push_schema_methods(
     methods: &mut Vec<MethodDef>,
     model: &Model,
     models: &[Model],
     table: &Table,
     through_joins: &super::associations::ThroughJoins,
+    runtime_relation: super::RuntimeRelation,
 ) {
     let owner = &model.name;
 
@@ -95,6 +230,7 @@ pub(super) fn push_schema_methods(
         methods,
         model,
         &table.columns.iter().map(|c| (c.name.clone(), super::ty_of_column_slot(c))).collect(),
+        runtime_relation == super::RuntimeRelation::Present,
     );
     let mut demanded: Option<std::rc::Rc<std::collections::HashSet<Symbol>>> = None;
     for col in &table.columns {
@@ -106,6 +242,9 @@ pub(super) fn push_schema_methods(
         methods.push(synth_attr_reader(owner, col, model));
         if model.enums.contains_key(&col.name) {
             methods.push(synth_enum_storage_writer(owner, col));
+        }
+        if col.array_stored {
+            methods.push(synth_array_storage_writer(owner, col));
         }
         if slot.is_json() {
             // Hydration writes stored JSON text without dump; the public
@@ -362,6 +501,8 @@ pub(super) fn push_schema_methods(
     // Schema column-name lists. Time vs date stay separate so JSON can
     // apply ISO8601-with-offset vs calendar-only without sniffing values.
     push_schema_symbol_list(methods, owner, "schema_columns", table, |_| true);
+    push_schema_column_types(methods, owner, table);
+    push_decode_plucked(methods, owner, table);
     push_schema_symbol_list(methods, owner, "schema_time_columns", table, |c| {
         matches!(c.col_type, crate::schema::ColumnType::DateTime | crate::schema::ColumnType::Time)
     });
@@ -423,7 +564,7 @@ pub(super) fn push_schema_methods(
     // lobsters emits.)
 
     // def initialize(attrs = {}); super(); per-column self.col = attrs[:col] [|| 0 for id]; end
-    methods.push(synth_initialize(owner, table, model, through_joins));
+    methods.push(synth_initialize(owner, table, model, through_joins, runtime_relation));
 
     // def id; @identifier; end / def id=(value); @identifier = value; end
     // — when the key column is not called `id` and the table has no
@@ -843,7 +984,9 @@ fn col_storage_setter(col: &Column) -> Symbol {
 /// Unknown stored enum values remain intact; JSON text skips dump so
 /// already-serialized DB bytes are not double-encoded.
 fn hydration_setter(model: &Model, col: &Column) -> Symbol {
-    if model.enums.contains_key(&col.name) {
+    if col.array_stored {
+        array_storage_writer(col)
+    } else if model.enums.contains_key(&col.name) {
         enum_storage_writer(col)
     } else {
         // The model's own `<col>=` is what assignment runs, not what a row loads through.
@@ -855,6 +998,12 @@ fn hydration_setter(model: &Model, col: &Column) -> Symbol {
 
 pub(crate) fn enum_storage_writer(col: &Column) -> Symbol {
     Symbol::from(format!("_write_{}_raw", col.name.as_str()))
+}
+
+/// `_write_<col>_array_raw`: a stored array column's hydration writer,
+/// which decodes the row's JSON text (`ArrayColumn.load_*`).
+fn array_storage_writer(col: &Column) -> Symbol {
+    Symbol::from(format!("_write_{}_array_raw", col.name.as_str()))
 }
 
 fn json_storage_writer(col: &Column) -> Symbol {
@@ -1327,6 +1476,57 @@ fn synth_enum_storage_writer(owner: &ClassId, col: &Column) -> MethodDef {
     }
 }
 
+/// A stored array column's hydration writer: the row's JSON text,
+/// decoded into the Array the record keeps (`ArrayColumn.load_ints` /
+/// `load_strings`).
+fn synth_array_storage_writer(owner: &ClassId, col: &Column) -> MethodDef {
+    let value = Symbol::from("value");
+    let text_ty = super::ty_of_column_stored(col);
+    let load = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(class_const(&ClassId(Symbol::from("ArrayColumn")))),
+            method: Symbol::from(array_load_method(col)),
+            args: vec![with_ty(var_ref(value.clone()), text_ty.clone())],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    let assign = Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: LValue::Ivar { name: col_storage_name(col) },
+            value: with_ty(load, super::ty_of_column_slot(col)),
+        },
+    );
+    MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: Span::synthetic(),
+        name: array_storage_writer(col),
+        receiver: MethodReceiver::Instance,
+        params: vec![Param::positional(value.clone())],
+        body: seq(vec![assign, nil_lit()]),
+        signature: Some(fn_sig(vec![(value, text_ty)], Ty::Nil)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: true,
+        block_param: None,
+    }
+}
+
+/// `ArrayColumn`'s loader for the column's element: integers or strings
+/// (`lower::array_columns::stores_element`).
+pub(crate) fn array_load_method(col: &Column) -> &'static str {
+    match ty_of_column(&col.col_type) {
+        Ty::Int => "load_ints",
+        _ => "load_strings",
+    }
+}
+
 /// Internal JSON hydration writes already-serialized DB text into the
 /// String slot without `JsonColumn.dump` (which would double-encode).
 fn synth_json_storage_writer(owner: &ClassId, col: &Column) -> MethodDef {
@@ -1496,6 +1696,7 @@ pub(super) fn push_from_params_method(
     );
 
     let mut stmts: Vec<Expr> = Vec::new();
+    stmts.push(multiparameter_guard(model, table, fields, &p, "creating"));
     stmts.push(Expr::new(
         Span::synthetic(),
         ExprNode::Assign {
@@ -1743,7 +1944,7 @@ fn synth_from_row(owner: &ClassId, table: &Table, model: &Model) -> MethodDef {
         // Slot type: for a nullable column both sides of this
         // assignment are nilable (the Row field and the model setter),
         // so casting to the bare type would unwrap on one side only.
-        let col_ty = super::ty_of_column_slot(col);
+        let col_ty = super::ty_of_column_stored(col);
         let row_field = Expr::new(
             Span::synthetic(),
             ExprNode::Send {
@@ -1973,6 +2174,9 @@ fn column_read_method(col_ty: &Ty) -> &'static str {
 /// match nothing. The primary key is never nullable in practice and is
 /// excluded by `ty_of_column_slot`.
 pub(crate) fn column_read_method_for(col: &Column) -> &'static str {
+    if col.array_stored {
+        return "column_text_opt";
+    }
     let base = ty_of_column(&col.col_type);
     if !matches!(super::ty_of_column_slot(col), Ty::Union { .. }) {
         return column_read_method(&base);
@@ -2181,7 +2385,22 @@ fn model_body_names(models: &[Model]) -> std::collections::HashSet<Symbol> {
                     out.insert(new.clone());
                     out.insert(old.clone());
                 }
-                ModelBodyItem::Association { .. } | ModelBodyItem::Validation { .. } => {}
+                ModelBodyItem::Validation { validation, .. } => {
+                    if let Some(c) = &validation.if_cond {
+                        walk(c, &mut out);
+                    }
+                    if let Some(c) = &validation.unless_cond {
+                        walk(c, &mut out);
+                    }
+                    // `validate :m, if: :will_save_change_to_<col>?` —
+                    // the Symbol guards ride on the rule itself.
+                    for rule in &validation.rules {
+                        if let crate::dialect::ValidationRule::Custom { if_method, unless_method, .. } = rule {
+                            out.extend(if_method.iter().chain(unless_method).cloned());
+                        }
+                    }
+                }
+                ModelBodyItem::Association { .. } => {}
             }
         }
     }
@@ -2324,6 +2543,9 @@ pub(super) fn model_declares_after_initialize(model: &Model) -> bool {
             ExprNode::Send { recv: None, method, block: Some(_), .. }
                 if method.as_str() == "after_initialize"
         ),
+        ModelBodyItem::Callback { callback, .. } => {
+            callback.hook == crate::dialect::CallbackHook::AfterInitialize
+        }
         _ => false,
     })
 }
@@ -2386,9 +2608,11 @@ fn synth_initialize(
     table: &Table,
     model: &Model,
     through_joins: &super::associations::ThroughJoins,
+    runtime_relation: super::RuntimeRelation,
 ) -> MethodDef {
     let attrs = Symbol::from("attrs");
 
+    let scope = crate::lower::default_scope::static_default_scope(model).unwrap_or_default();
     let mut stmts: Vec<Expr> = Vec::new();
     // Do not forward explicit attrs to a parent's possibly different enum mapping.
     stmts.push(Expr::new(
@@ -2436,11 +2660,28 @@ fn synth_initialize(
         // default therefore also takes the `||` form: its unset value
         // is the default, and only the type-zero case (no default
         // declared) leaves it NULL.
-        let col_ty = ty_of_column(&col.col_type);
+        // A stored array column starts as an Array (`lower::array_columns`).
+        let col_ty = if col.array_stored {
+            Ty::Array { elem: ty_of_column(&col.col_type).into() }
+        } else {
+            ty_of_column(&col.col_type)
+        };
         let column = ColumnSlot::classify(col, model);
-        let schema_default = column_default_literal(model, col);
+        // A `default_scope { where(col: literal) }` column starts at the
+        // scope's literal, as Rails' scope attributes seed `new` (given
+        // attributes still win). A `nil` literal is the unset value.
+        let scoped = scope.iter().find(|(c, _)| *c == col.name).map(|(_, l)| l);
+        let schema_default = match scoped {
+            Some(crate::expr::Literal::Nil) => None,
+            Some(l) => Some(with_ty(
+                Expr::new(Span::synthetic(), ExprNode::Lit { value: l.clone() }),
+                ty_of_column(&col.col_type),
+            )),
+            None => column_default_literal(model, col),
+        };
+        let has_default = schema_default.is_some();
         let nullable = matches!(super::ty_of_column_slot(col), Ty::Union { .. })
-            && schema_default.is_none();
+            && (schema_default.is_none() || matches!(scoped, Some(crate::expr::Literal::Nil)));
         let default = schema_default.unwrap_or_else(|| default_literal_for_ty(&col_ty));
         // Defaults are stored database values, not assignments through
         // the enum type. In particular, a base constructor must not
@@ -2661,7 +2902,7 @@ fn synth_initialize(
                     parenthesized: false,
                 },
             ));
-            if overrides_schema_default(model, col) && json_assign_is_none {
+            if overrides_default(model, col, has_default) && json_assign_is_none {
                 let given = Expr::new(Span::synthetic(), ExprNode::Cast {
                     value: given, target_ty: super::ty_of_column_slot(col),
                 });
@@ -2758,14 +2999,27 @@ fn synth_initialize(
         }
     }
 
+    // Only where the runtime Relation ships: `scope_attributes` lives there.
+    if let (Some(crate::lower::default_scope::DefaultScope::Dynamic(scope)), super::RuntimeRelation::Present) =
+        (crate::lower::default_scope::default_scope(model), runtime_relation)
+    {
+        stmts.push(seed_dynamic_scope(owner, table, &scope.columns, &attrs));
+    }
+
     // has_secure_password virtual attrs: `User.new(password: "...",
     // password_confirmation: "...")` is the factory/signup shape —
     // Rails routes them through the macro's plaintext writers (where
-    // digest computation lives). A supplied nil also reaches the writer;
-    // only an omitted key is skipped. The digest COLUMN was already
-    // covered by the column loop above.
+    // digest computation lives), and `<attr>_challenge` — the current
+    // password a profile form asks for — through its accessor, which
+    // the model's validation reads. A supplied nil also reaches the
+    // writer; only an omitted key is skipped. The digest COLUMN was
+    // already covered by the column loop above.
     if let Some(attr) = crate::lower::secure_password::secure_password_attr(&model.body) {
-        for key in [attr.as_str().to_string(), format!("{}_confirmation", attr.as_str())] {
+        for key in [
+            attr.as_str().to_string(),
+            format!("{}_confirmation", attr.as_str()),
+            format!("{}_challenge", attr.as_str()),
+        ] {
             let lookup = Expr::new(
                 Span::synthetic(),
                 ExprNode::Send {
@@ -2975,6 +3229,76 @@ fn synth_initialize(
                     target: LValue::Ivar { name: Symbol::from(format!("{}_loaded", name.as_str())) },
                     value: false_lit,
                 },
+            ));
+        }
+    }
+
+    // The other virtual writers `update` routes through (`attr_accessor` /
+    // `attr_writer`, `typed_store`, the Attributes API, a hand-written
+    // `def <field>=`): `Member.new(nickname: "n")` assigns `nickname` in
+    // Rails (`assign_attributes` sends each key's writer). The constructor
+    // covered only the columns and the keys above, so a virtual given to
+    // `new`/`create` was dropped. The same nil guard `update` uses; the
+    // keys the blocks above route (belongs_to, password, rich text,
+    // attachments) are skipped here.
+    {
+        let handled: std::collections::BTreeSet<Symbol> = model
+            .associations()
+            .into_iter()
+            .filter_map(|a| match a {
+                crate::dialect::Association::BelongsTo { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .chain(crate::lower::rich_text::rich_text_attrs(model).into_iter().map(|(_s, a)| a))
+            .chain(crate::lower::plain_text_attr::plain_text_attrs(model).into_iter().map(|(_s, a)| a))
+            .chain(crate::lower::attached::attached_attrs(model).into_iter().map(|(_s, a)| a))
+            .chain(crate::lower::secure_password::secure_password_attr(&model.body).into_iter().flat_map(|attr| {
+                [
+                    Symbol::from(format!("{}_confirmation", attr.as_str())),
+                    Symbol::from(format!("{}_challenge", attr.as_str())),
+                    attr,
+                ]
+            }))
+            .collect();
+        for field in virtual_writer_fields(model, table) {
+            if handled.contains(&field) {
+                continue;
+            }
+            let lookup = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(var_ref(attrs.clone())),
+                    method: Symbol::from("[]"),
+                    args: vec![lit_sym(field.clone())],
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            let assign = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(self_ref()),
+                    method: Symbol::from(format!("{}=", field.as_str())),
+                    args: vec![lookup],
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            // `attrs.key?`, not the nil guard: Rails' `new(x: nil)`
+            // calls `x=(nil)`, and an omitted key calls nothing.
+            let cond = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(var_ref(attrs.clone())),
+                    method: Symbol::from("key?"),
+                    args: vec![lit_sym(field.clone())],
+                    block: None,
+                    parenthesized: true,
+                },
+            );
+            stmts.push(Expr::new(
+                Span::synthetic(),
+                ExprNode::If { cond, then_branch: assign, else_branch: nil_lit() },
             ));
         }
     }
@@ -3272,7 +3596,8 @@ fn enum_label_read(model: &Model, col: &Column) -> Option<Expr> {
         Expr::new(Span::synthetic(), ExprNode::Ivar { name: col_storage_name(col) }),
         super::ty_of_column_slot(col),
     );
-    let (labels, values, value_ty) = enum_arrays(model, col)?;
+    let (_, _, value_ty) = enum_arrays(model, col)?;
+    let (labels, values, _) = enum_array_refs(model, col, &value_ty);
     let nil_label = enum_nil_label(model, col);
     let method = if value_ty == Ty::Int { "enum_label" } else { "enum_label_str" };
     let non_nil = with_ty(stored.clone(), value_ty);
@@ -3344,8 +3669,80 @@ fn enum_arrays(model: &Model, col: &Column) -> Option<(Expr, Expr, Ty)> {
     Some((array(labels, Ty::Str), array(values, value_ty.clone()), value_ty))
 }
 
+/// An Integer mapping's stored values as their text (`"0"`, `"1"`), the
+/// third array `enum_int` matches a String it is handed against.
+fn enum_texts(values: &Expr) -> Option<Expr> {
+    let ExprNode::Array { elements, .. } = &*values.node else { return None };
+    let texts = elements
+        .iter()
+        .map(|e| match &*e.node {
+            ExprNode::Lit { value: Literal::Int { value } } => Some(lit_str(value.to_string())),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(with_ty(
+        Expr::new(Span::synthetic(), ExprNode::Array { elements: texts, style: Default::default() }),
+        Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
+    ))
+}
+
+/// The names the mapping's arrays are defined under on the model:
+/// `STATUS_ENUM_LABELS`, `STATUS_ENUM_VALUES` and, for an Integer
+/// mapping, `STATUS_ENUM_TEXTS`.
+fn enum_const_name(col: &Column, part: &str) -> Symbol {
+    Symbol::from(format!("{}_ENUM_{part}", col.name.as_str().to_uppercase()))
+}
+
+/// The mapping's arrays as references to the model's constants
+/// (`enum_constants` defines them). Literal arrays at each read built
+/// fresh Arrays, and on CRuby fresh label Strings, on every call: three
+/// to eight objects per enum per `attributes`, which hydration takes once
+/// per row (campfire's room page: 815 of its 8,819).
+fn enum_array_refs(model: &Model, col: &Column, value_ty: &Ty) -> (Expr, Expr, Option<Expr>) {
+    let path = |part: &str| {
+        let mut path: Vec<Symbol> = model.name.0.as_str().split("::").map(Symbol::from).collect();
+        path.push(enum_const_name(col, part));
+        path
+    };
+    let reference = |part: &str, elem: Ty| {
+        with_ty(
+            Expr::new(Span::synthetic(), ExprNode::Const { path: path(part) }),
+            Ty::Array { elem: std::sync::Arc::new(elem) },
+        )
+    };
+    let texts = (*value_ty == Ty::Int).then(|| reference("TEXTS", Ty::Str));
+    (reference("LABELS", Ty::Str), reference("VALUES", value_ty.clone()), texts)
+}
+
+/// Each enum column's mapping as model constants, for the reads and
+/// writes `enum_array_refs` points at them. A mapping `enum_arrays`
+/// cannot express defines nothing, and nothing refers to it.
+pub(super) fn enum_constants(model: &Model, table: &Table) -> Vec<(Symbol, Expr)> {
+    let mut out = Vec::new();
+    for col in &table.columns {
+        if !model.enums.contains_key(&col.name) {
+            continue;
+        }
+        let Some((labels, values, value_ty)) = enum_arrays(model, col) else { continue };
+        let texts = if value_ty == Ty::Int {
+            match enum_texts(&values) {
+                Some(texts) => Some(texts),
+                None => continue,
+            }
+        } else {
+            None
+        };
+        out.push((enum_const_name(col, "LABELS"), labels));
+        out.push((enum_const_name(col, "VALUES"), values));
+        if let Some(texts) = texts {
+            out.push((enum_const_name(col, "TEXTS"), texts));
+        }
+    }
+    out
+}
+
 fn enum_int_call(model: &Model, col: &Column, text: Expr) -> Option<Expr> {
-    let (labels, values, value_ty) = enum_arrays(model, col)?;
+    let (_, values, value_ty) = enum_arrays(model, col)?;
     let text_for_nil = text.clone();
     let nullable = matches!(super::ty_of_column_slot(col), Ty::Union { .. });
     let method = match (&value_ty, nullable) {
@@ -3358,20 +3755,14 @@ fn enum_int_call(model: &Model, col: &Column, text: Expr) -> Option<Expr> {
         Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Str { value: col.name.as_str().to_string() } }),
         Ty::Str,
     );
-    let mut args = vec![text, labels, values.clone()];
-    if value_ty == Ty::Int {
-        let ExprNode::Array { elements, .. } = &*values.node else { return None };
-        let texts = elements
-            .iter()
-            .map(|e| match &*e.node {
-                ExprNode::Lit { value: Literal::Int { value } } => Some(lit_str(value.to_string())),
-                _ => None,
-            })
-            .collect::<Option<Vec<_>>>()?;
-        args.push(with_ty(
-            Expr::new(Span::synthetic(), ExprNode::Array { elements: texts, style: Default::default() }),
-            Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
-        ));
+    // Derived here only to refuse a mapping `enum_texts` cannot spell.
+    if value_ty == Ty::Int && enum_texts(&values).is_none() {
+        return None;
+    }
+    let (labels, values, texts) = enum_array_refs(model, col, &value_ty);
+    let mut args = vec![text, labels, values];
+    if let Some(texts) = texts {
+        args.push(texts);
     }
     args.push(attr);
     let ret = if nullable { Ty::Union { variants: vec![value_ty, Ty::Nil].into() } } else { value_ty };
@@ -3581,11 +3972,84 @@ fn synth_index_write(owner: &ClassId, table: &Table, model: &Model) -> MethodDef
 /// Widening the ingest is its own change with its own measurement —
 /// it moves those columns' emitted constructors in a second app.
 // Not the `||` alone: `new(flag: false)` under `default: true` and `new(n: nil)` under `default: 7` would read back the default.
-fn overrides_schema_default(model: &Model, col: &Column) -> bool {
-    column_default_literal(model, col).is_some()
+// `has_default` is the column's starting value, a `default_scope` literal included: `new(active: false)` under `where(active: true)` keeps `false`.
+fn overrides_default(model: &Model, col: &Column, has_default: bool) -> bool {
+    has_default
         && !ColumnSlot::classify(col, model).is_temporal()
         && (matches!(col.col_type, crate::schema::ColumnType::Boolean)
             || matches!(super::ty_of_column_slot(col), Ty::Union { .. }))
+}
+
+/// A default scope read when the relation is built seeds `new` the same
+/// way, as Rails' scope attributes do (`all.scope_for_create`): the
+/// scope's values now, and a given attribute (nil included) still wins.
+/// Reading them off a fresh relation reuses the runtime Relation's own
+/// rules: inside `unscoped { }` it carries no scope, and only equality
+/// values seed (`merge_seedable_scope`), so an array, range or nested
+/// hash filters the query and leaves the column unset (Rails 8.1.4).
+///
+/// ```ruby
+/// __rh_scope = Project.all.scope_attributes
+/// self.account_id = __rh_scope[:account_id] if __rh_scope.key?(:account_id) && !attrs.key?(:account_id)
+/// ```
+fn seed_dynamic_scope(owner: &ClassId, table: &Table, columns: &[Symbol], attrs: &Symbol) -> Expr {
+    let scope_var = Symbol::from("__rh_scope");
+    let send = |recv: Expr, method: &str, args: Vec<Expr>| {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send { recv: Some(recv), method: Symbol::from(method), args, block: None, parenthesized: true },
+        )
+    };
+    let mut stmts = vec![Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: scope_var.clone() },
+            value: send(send(class_const(owner), "all", Vec::new()), "scope_attributes", Vec::new()),
+        },
+    )];
+    for col in &table.columns {
+        if !columns.contains(&col.name) {
+            continue;
+        }
+        let has = send(var_ref(scope_var.clone()), "key?", vec![lit_sym(col.name.clone())]);
+        let given = send(var_ref(attrs.clone()), "key?", vec![lit_sym(col.name.clone())]);
+        let not_given = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send { recv: Some(given), method: Symbol::from("!"), args: vec![], block: None, parenthesized: false },
+            ),
+            Ty::Bool,
+        );
+        let cond = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::BoolOp { op: BoolOpKind::And, surface: BoolOpSurface::default(), left: has, right: not_given },
+            ),
+            Ty::Bool,
+        );
+        let value = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(var_ref(scope_var.clone())),
+                method: Symbol::from("[]"),
+                args: vec![lit_sym(col.name.clone())],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let assign = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(self_ref()),
+                method: col_storage_setter(col),
+                args: vec![value],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        stmts.push(Expr::new(Span::synthetic(), ExprNode::If { cond, then_branch: assign, else_branch: nil_lit() }));
+    }
+    seq(stmts)
 }
 
 // Not a new shape: the same `attrs.key?` guarded write `synth_update_hash` emits, which every target already compiles.
@@ -3624,7 +4088,16 @@ fn column_default_literal(model: &Model, col: &Column) -> Option<Expr> {
 
 fn schema_default_literal(col: &Column) -> Option<Expr> {
     use crate::schema::ColumnType;
-    let raw = col.default.as_ref()?;
+    let raw = col.stored_default()?;
+    if col.array_stored {
+        // `default: []`, the only array default ingest keeps: a fresh
+        // empty Array of the column's element type.
+        return Some(with_ty(
+            Expr::new(Span::synthetic(), ExprNode::Array { elements: vec![], style: ArrayStyle::Brackets }),
+            super::ty_of_column_slot(col),
+        ));
+    }
+    let raw = &raw.to_string();
     match &col.col_type {
         ColumnType::String { .. } | ColumnType::Text => Some(lit_str(raw.clone())),
         ColumnType::Integer | ColumnType::BigInt => raw.parse::<i64>().ok().map(lit_int),
@@ -3740,6 +4213,116 @@ fn column_union_ty(table: &Table) -> Ty {
 ///     (`record.update(title: "Renamed")` doesn't clobber body).
 ///
 /// Save, return Bool.
+/// `raise … if p.rh_multiparameter_unsupported ||
+/// Params.any_of(p.rh_multiparameter_fields, [<uncastable fields>])`,
+/// first, before anything is assigned.
+///
+/// A multiparameter key (`name(1)`) reaches the params object as Rails'
+/// own value for a String or Text attribute — the text of its parts
+/// Hash, `runtime/ruby/params.rb` — so validations see and a save writes
+/// what Rails' would. Any other attribute casts that Hash its own way (a
+/// date column builds a Date), and some shapes are not reproduced at
+/// all; for those the record is refused before it changes.
+fn multiparameter_guard(
+    model: &crate::dialect::Model,
+    table: &Table,
+    fields: &[Symbol],
+    p: &Symbol,
+    doing: &str,
+) -> Expr {
+    use crate::lower::controller_to_library::params::{
+        multiparameter_fields_field, multiparameter_unsupported_field,
+    };
+    let secure = crate::lower::secure_password::secure_password_attr(&model.body);
+    let castable = |field: &Symbol| {
+        if let Some(attr) = &secure {
+            let a = attr.as_str();
+            let f = field.as_str();
+            if f == a || f == format!("{a}_confirmation") || f == format!("{a}_challenge") {
+                return true;
+            }
+        }
+        table.columns.iter().any(|c| {
+            c.name == *field
+                && matches!(c.col_type, crate::schema::ColumnType::String { .. } | crate::schema::ColumnType::Text)
+        })
+    };
+    let read = |field: Symbol, ty: Ty| {
+        with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(var_ref(p.clone())),
+                    method: field,
+                    args: Vec::new(),
+                    block: None,
+                    parenthesized: false,
+                },
+            ),
+            ty,
+        )
+    };
+    let mut cond = read(multiparameter_unsupported_field(), Ty::Bool);
+    let uncastable: Vec<Expr> = fields
+        .iter()
+        .filter(|f| !castable(f))
+        .map(|f| with_ty(lit_str(f.as_str().to_string()), Ty::Str))
+        .collect();
+    if !uncastable.is_empty() {
+        let strs = Ty::Array { elem: std::sync::Arc::new(Ty::Str) };
+        let any = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("Params")] })),
+                    method: Symbol::from("any_of"),
+                    args: vec![
+                        read(multiparameter_fields_field(), strs.clone()),
+                        with_ty(
+                            Expr::new(Span::synthetic(), ExprNode::Array { elements: uncastable, style: Default::default() }),
+                            strs,
+                        ),
+                    ],
+                    block: None,
+                    parenthesized: true,
+                },
+            ),
+            Ty::Bool,
+        );
+        cond = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::BoolOp { op: crate::expr::BoolOpKind::Or, surface: Default::default(), left: cond, right: any },
+            ),
+            Ty::Bool,
+        );
+    }
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::If { cond, then_branch: multiparameter_refusal(&model.name, doing), else_branch: nil_lit() },
+    )
+}
+
+/// `raise("…")` for a record built from a multiparameter key whose
+/// Rails value is not reproduced. A message raise (`RuntimeError`), the
+/// one form every target's emitter renders.
+fn multiparameter_refusal(owner: &ClassId, doing: &str) -> Expr {
+    let text = format!(
+        "{} {doing} from a multiparameter key (`attr(N)`) is not modeled for this attribute or value: roundhouse reproduces Rails' value only for a String or Text attribute whose parts are plain text or integers",
+        owner.0.as_str()
+    );
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: None,
+            method: Symbol::from("raise"),
+            args: vec![with_ty(lit_str(text), Ty::Str)],
+            block: None,
+            parenthesized: true,
+        },
+    )
+}
+
 fn synth_update_typed(
     model: &crate::dialect::Model,
     fields: &[Symbol],
@@ -3810,6 +4393,8 @@ fn synth_update_typed(
         ));
     }
 
+    stmts.insert(0, multiparameter_guard(model, table, fields, &p, "updating"));
+
     stmts.push(Expr::new(
         Span::synthetic(),
         ExprNode::Send {
@@ -3875,6 +4460,42 @@ fn synth_update_typed(
 /// `update!` differs only in the tail: `save!` (Base raises on invalid)
 /// and an explicit `self` read, so the call's value keeps the concrete
 /// model type instead of `save!`'s Base-typed return.
+/// Every name the model is assigned through other than a column: the
+/// `writable_field_set` virtuals (`attr_accessor` / `attr_writer`,
+/// `typed_store` attrs, the Attributes API, `has_secure_password`'s
+/// plaintext keys, `has_rich_text` attrs) and each public hand-written
+/// `def <field>=`. `writable_field_set` deliberately leaves the
+/// hand-written writers out (its callers hold a field name and ask
+/// `model_defines_writer` per field), but mass assignment has to
+/// ENUMERATE, and a user-defined writer is exactly as assignable as a
+/// synthesized one (lobsters' `def category_name=`; `permit_writer_filter`
+/// holds the pair together). A `belongs_to` name is in the set too; the
+/// callers that route it differently skip it themselves.
+fn virtual_writer_fields(model: &Model, table: &Table) -> std::collections::BTreeSet<Symbol> {
+    let mut virtuals = super::writable_field_set(model, table);
+    for item in &model.body {
+        let crate::dialect::ModelBodyItem::Method { method, .. } = item else { continue };
+        // Rails assigns through `public_send`: a private or protected
+        // writer is not a mass-assignment key.
+        if method.receiver != MethodReceiver::Instance
+            || method.visibility != crate::dialect::MethodVisibility::Public
+        {
+            continue;
+        }
+        // An identifier writer only: `==`, `!=`, `[]=` and `<=` end in
+        // `=` too, and name no attribute.
+        let Some(base) = method.name.as_str().strip_suffix('=') else { continue };
+        let mut chars = base.chars();
+        if chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            virtuals.insert(Symbol::from(base));
+        }
+    }
+    virtuals.retain(|field| !table.columns.iter().any(|c| c.name == *field));
+    virtuals
+}
+
 fn synth_update_hash(
     owner: &ClassId,
     model: &Model,
@@ -4058,24 +4679,8 @@ fn synth_update_hash(
     .map(|(_s, a)| a)
     .collect();
     let secure_password = crate::lower::secure_password::secure_password_attr(&model.body);
-    let mut virtuals = super::writable_field_set(model, table);
-    // Hand-written `def <field>=` in the model body. `writable_field_set`
-    // deliberately leaves these out — its callers hold a field name and
-    // ask `model_defines_writer` per-field — but `update` has to
-    // ENUMERATE, and a user-defined writer is exactly as assignable as a
-    // synthesized one. lobsters' `def category_name=` is the shape, and
-    // `permit_writer_filter` is the test that holds this pair together.
-    for item in &model.body {
-        let crate::dialect::ModelBodyItem::Method { method, .. } = item else { continue };
-        if method.receiver != MethodReceiver::Instance {
-            continue;
-        }
-        if let Some(base) = method.name.as_str().strip_suffix('=') {
-            virtuals.insert(Symbol::from(base));
-        }
-    }
-    for field in virtuals {
-        if table.columns.iter().any(|c| c.name == field) || assoc_names.contains(&field) {
+    for field in virtual_writer_fields(model, table) {
+        if assoc_names.contains(&field) {
             continue;
         }
         // `Cast` to `Str` bridges the untyped attrs value into the

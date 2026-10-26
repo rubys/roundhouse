@@ -11,6 +11,7 @@
 # Same contract as runtime/gem_facades.rb: everything compiles, every
 # runtime hit raises loudly, returns carry the real shapes consumers
 # chain on.
+require "securerandom"
 require_relative "../../runtime/gem_facades"
 
 class Sponge
@@ -78,9 +79,8 @@ end
 # OpenSSL::Random — entropy for Utils.random_str (short-ids, session
 # and reset tokens; short-id generation runs on the replay's story
 # and comment submits, so this façade is REAL, not raising).
-# Kernel#rand is a PRNG, not a CSPRNG — adequate for the benchmark
-# lane; the honest fate is a spinel entropy primitive (or the
-# spinel-openssl package) before any security-sensitive use. The
+# SecureRandom.random_bytes draws from spinel's native CSPRNG,
+# backed by OS entropy rather than Kernel#rand's seedable PRNG. The
 # implementation module is `RandomSource` with a constant alias
 # because a module literally named Random collides with the builtin
 # PRNG's C typedef (spinel#2455). The CRuby tree restores the real
@@ -88,13 +88,8 @@ end
 module OpenSSL
   module RandomSource
     def self.random_bytes(n)
-      out = +""
-      i = 0
-      while i < n
-        out = out + rand(256).chr
-        i += 1
-      end
-      out
+      # Multi-draw SDK buffers can be UTF-8; OpenSSL always returns binary bytes.
+      SecureRandom.random_bytes(n).b
     end
   end
 

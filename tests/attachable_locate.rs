@@ -2,9 +2,7 @@
 //! `ActionText::Attachable.locate`, which is GENERATED per app: one
 //! `when "<Model>"` per model that mixes `ActionText::Attachable` in,
 //! written into the emitted tree's `global_id_locator.rb` between its
-//! markers. And `obj.extend Mod` on an instance — what campfire's test
-//! does to make a `Room` attachable for one assertion — is a raise stub
-//! naming the construct, so the file it sits in still links on spinel.
+//! markers.
 
 use roundhouse::ingest::ingest_app_from_tree;
 
@@ -36,7 +34,8 @@ fn the_locator_is_a_case_over_the_attachable_models() {
         ("app/models/room.rb", "class Room < ApplicationRecord\nend\n"),
     ]);
     let _ = roundhouse::session::analyze_and_lower(&mut app);
-    let files = roundhouse::project::spinel_base_files(&app, roundhouse::fixtures::real_blog()).expect("spinel tree");
+    let files = roundhouse::project::spinel_base_files(&app, roundhouse::fixtures::real_blog())
+        .expect("spinel tree");
     let locator = files
         .iter()
         .find(|(p, _)| p.ends_with("global_id_locator.rb"))
@@ -50,48 +49,9 @@ fn the_locator_is_a_case_over_the_attachable_models() {
         ),
         "generated locate:\n{locator}"
     );
-    assert!(!locator.contains("when \"Room\""), "Room is not attachable:\n{locator}");
-}
-
-#[test]
-fn an_instance_extend_stubs_the_test_that_reaches_for_it() {
-    let mut app = app_with(vec![
-        ("db/schema.rb", SCHEMA),
-        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
-        ("app/models/room.rb", "class Room < ApplicationRecord\nend\n"),
-        ("test/fixtures/rooms.yml", "pets:\n  name: Pets\n"),
-        (
-            "test/models/room_test.rb",
-            "require \"test_helper\"\nclass RoomTest < ActiveSupport::TestCase\n  test \"dynamic\" do\n    room = rooms(:pets).tap { |r| r.extend ActionText::Attachable }\n    assert_equal \"Pets\", room.name\n  end\n\n  test \"static\" do\n    assert_equal \"Pets\", rooms(:pets).name\n  end\nend\n",
-        ),
-    ]);
-    let diags = roundhouse::session::analyze_and_lower(&mut app);
-    let report = diags
-        .iter()
-        .find(|d| d.message.contains("Object#extend"))
-        .expect("the extend is reported");
-    assert_eq!(
-        report.severity,
-        roundhouse::diagnostic::Severity::Warning,
-        "a warning, so the strict archive build still writes the tree"
-    );
-    let files = roundhouse::emit::ruby::emit_spinel(&app);
-    let test = files
-        .iter()
-        .find(|f| f.path.to_string_lossy().ends_with("room_test.rb"))
-        .map(|f| f.content.clone())
-        .expect("the emitted test");
-    // The WHOLE test is the stub — what followed the extend was
-    // written against the object it produced — and the test beside
-    // it is untouched.
     assert!(
-        test.contains("  def test_dynamic\n    (raise \"roundhouse: Object#extend not supported (all targets)\")\n  end\n"),
-        "the dynamic test should be the raise:\n{test}"
-    );
-    assert!(!test.contains(".extend"), "no extend survives into the emit:\n{test}");
-    assert!(
-        test.contains("  def test_static\n    raise \"assert_equal failed\" if \"Pets\" != RoomsFixtures.pets.name\n  end\n"),
-        "the static test keeps its body:\n{test}"
+        !locator.contains("when \"Room\""),
+        "Room is not attachable:\n{locator}"
     );
 }
 
@@ -123,13 +83,21 @@ fn to_sgid_for_the_attachable_locator_is_the_runtime_mint() {
         .map(|f| f.content.clone())
         .expect("the emitted test");
     assert!(
-        test.contains("ActionText::SignedGlobalId.generate(\"Room\", RoomsFixtures.pets.id).split(\"--\")"),
+        test.contains(
+            "ActionText::SignedGlobalId.generate(\"Room\", RoomsFixtures.pets.id).split(\"--\")"
+        ),
         "the attachable sgid is the runtime mint:\n{test}"
     );
     // Another purpose is nothing this runtime verifies: reported, left.
-    let report = diags.iter().find(|d| d.message.contains("not the attachable locator")).expect("the other purpose is reported");
+    let report = diags
+        .iter()
+        .find(|d| d.message.contains("not the attachable locator"))
+        .expect("the other purpose is reported");
     assert_eq!(report.severity, roundhouse::diagnostic::Severity::Warning);
-    assert!(test.contains("to_sgid(for: :transfer)"), "the declined site is left as written:\n{test}");
+    assert!(
+        test.contains("to_sgid(for: :transfer)"),
+        "the declined site is left as written:\n{test}"
+    );
 }
 
 // campfire's `lib/rails_ext/action_text_attachables.rb`, verbatim: the
@@ -177,7 +145,8 @@ end
 "#;
 
 fn locator_of(app: &roundhouse::App) -> String {
-    let files = roundhouse::project::spinel_base_files(app, roundhouse::fixtures::real_blog()).expect("spinel tree");
+    let files = roundhouse::project::spinel_base_files(app, roundhouse::fixtures::real_blog())
+        .expect("spinel tree");
     files
         .iter()
         .find(|(p, _)| p.ends_with("global_id_locator.rb"))
@@ -189,19 +158,30 @@ fn locator_of(app: &roundhouse::App) -> String {
 fn the_tolerant_from_node_reopen_becomes_the_permitted_list() {
     let mut app = app_with(vec![
         ("db/schema.rb", SCHEMA),
-        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
-        ("app/models/user.rb", "class User < ApplicationRecord\n  include ActionText::Attachable\nend\n"),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\nend\n",
+        ),
+        (
+            "app/models/user.rb",
+            "class User < ApplicationRecord\n  include ActionText::Attachable\nend\n",
+        ),
         ("lib/rails_ext/action_text_attachables.rb", TOLERANT_REOPEN),
     ]);
     assert_eq!(
-        app.attachable_unsigned_models.iter().map(|m| m.as_str().to_string()).collect::<Vec<_>>(),
+        app.attachable_unsigned_models
+            .iter()
+            .map(|m| m.as_str().to_string())
+            .collect::<Vec<_>>(),
         vec!["User".to_string()],
         "the %w[] list is the fact the reopen holds"
     );
     // Nothing of the reopen's body becomes a library class: the
     // decode lives in the runtime, once.
     assert!(
-        !app.library_classes.iter().any(|c| c.name.0.as_str() == "ActionText::Attachment"),
+        !app.library_classes
+            .iter()
+            .any(|c| c.name.0.as_str() == "ActionText::Attachment"),
         "the reopen is read, not carried as a class"
     );
     let _ = roundhouse::session::analyze_and_lower(&mut app);
@@ -222,24 +202,45 @@ fn a_recognized_reopen_does_not_hide_an_unsupported_include_in_the_same_hook() {
     roundhouse::ingest::survey::activate();
     let app = app_with(vec![
         ("db/schema.rb", SCHEMA),
-        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\nend\n",
+        ),
         ("lib/rails_ext/action_text_attachables.rb", &source),
     ]);
     let gaps = roundhouse::ingest::survey::drain();
-    assert_eq!(app.attachable_unsigned_models, vec![roundhouse::Symbol::from("User")]);
+    assert_eq!(
+        app.attachable_unsigned_models,
+        vec![roundhouse::Symbol::from("User")]
+    );
     assert_eq!(gaps.len(), 1, "only the include is unsupported: {gaps:?}");
     let message = gaps[0].to_string();
-    assert!(message.contains("on_load(:action_text_content)"), "{message}");
-    assert!(message.contains("include ActionText::HasMarkdown"), "{message}");
-    assert!(message.contains("mixin installation is unsupported"), "{message}");
+    assert!(
+        message.contains("on_load(:action_text_content)"),
+        "{message}"
+    );
+    assert!(
+        message.contains("include ActionText::HasMarkdown"),
+        "{message}"
+    );
+    assert!(
+        message.contains("mixin installation is unsupported"),
+        "{message}"
+    );
 }
 
 #[test]
 fn an_app_without_the_reopen_keeps_the_empty_default() {
     let mut app = app_with(vec![
         ("db/schema.rb", SCHEMA),
-        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
-        ("app/models/user.rb", "class User < ApplicationRecord\n  include ActionText::Attachable\nend\n"),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\nend\n",
+        ),
+        (
+            "app/models/user.rb",
+            "class User < ApplicationRecord\n  include ActionText::Attachable\nend\n",
+        ),
     ]);
     assert!(app.attachable_unsigned_models.is_empty());
     let _ = roundhouse::session::analyze_and_lower(&mut app);
@@ -271,11 +272,17 @@ fn another_on_load_reopen_is_reported_not_dropped() {
     assert!(app.attachable_unsigned_models.is_empty());
     let messages: Vec<String> = gaps.iter().map(|g| format!("{g:?}")).collect();
     assert!(
-        messages.iter().any(|m| m.contains("on_load(:active_storage_blob)") && m.contains("ActiveStorage::Blob")),
+        messages
+            .iter()
+            .any(|m| m.contains("on_load(:active_storage_blob)")
+                && m.contains("ActiveStorage::Blob")),
         "the blob reopen is named: {messages:?}"
     );
     assert!(
-        messages.iter().any(|m| m.contains("on_load(:action_text_content)") && m.contains("ActionText::Attachment")),
+        messages
+            .iter()
+            .any(|m| m.contains("on_load(:action_text_content)")
+                && m.contains("ActionText::Attachment")),
         "the unfingerprinted from_node reopen is named: {messages:?}"
     );
 }
@@ -300,7 +307,9 @@ fn the_attachment_render_is_a_case_over_the_attachables_with_a_partial() {
         ("app/views/layouts/action_text/contents/_content.html.erb", "<div class=\"trix-content\"><%= yield %></div>\n"),
     ]);
     let _ = roundhouse::session::analyze_and_lower(&mut app);
-    let files = roundhouse::project::spinel_base_files(&app, std::path::Path::new("fixtures/real-blog")).expect("spinel tree");
+    let files =
+        roundhouse::project::spinel_base_files(&app, std::path::Path::new("fixtures/real-blog"))
+            .expect("spinel tree");
     let runtime = files
         .iter()
         .find(|(p, _)| p.ends_with("runtime/action_text.rb"))
@@ -312,11 +321,16 @@ fn the_attachment_render_is_a_case_over_the_attachables_with_a_partial() {
         ),
         "generated render:\n{runtime}"
     );
-    assert!(!runtime.contains("when \"Room\""), "Room names no partial:\n{runtime}");
+    assert!(
+        !runtime.contains("when \"Room\""),
+        "Room names no partial:\n{runtime}"
+    );
     assert!(
         // Plus the newline ending Action Text's `_content` partial, which
         // is what the layout yields.
-        runtime.contains("Views::Layouts::ActionText::Contents.content(render_action_text_content + \"\\n\")"),
+        runtime.contains(
+            "Views::Layouts::ActionText::Contents.content(render_action_text_content + \"\\n\")"
+        ),
         "the layout wraps the rendered nodes:\n{runtime}"
     );
 }
@@ -342,7 +356,9 @@ fn a_content_type_attachable_renders_through_its_own_from_node() {
         ("app/views/layouts/action_text/contents/_content.html.erb", "<div class=\"trix-content\"><%= yield %></div>\n"),
     ]);
     let _ = roundhouse::session::analyze_and_lower(&mut app);
-    let files = roundhouse::project::spinel_base_files(&app, std::path::Path::new("fixtures/real-blog")).expect("spinel tree");
+    let files =
+        roundhouse::project::spinel_base_files(&app, std::path::Path::new("fixtures/real-blog"))
+            .expect("spinel tree");
     let text = |suffix: &str| {
         files
             .iter()
@@ -368,9 +384,21 @@ fn a_content_type_attachable_renders_through_its_own_from_node() {
         partial.contains("if ! (opengraph_embed.href || \"\").empty?"),
         "{partial}"
     );
-    assert!(partial.contains("ActionView::ViewHelpers.link_to(ActionView::ViewHelpers.truncate("), "{partial}");
-    assert!(!partial.contains("html_escape(ActionView::ViewHelpers.link_to"), "the link is not escaped:\n{partial}");
+    assert!(
+        partial.contains("ActionView::ViewHelpers.link_to(ActionView::ViewHelpers.truncate("),
+        "{partial}"
+    );
+    assert!(
+        !partial.contains("html_escape(ActionView::ViewHelpers.link_to"),
+        "the link is not escaped:\n{partial}"
+    );
     let class = text("app/models/action_text/attachment/opengraph_embed.rb");
-    assert!(class.contains("  def attachment=(value)\n    @attachment = value\n  end\n"), "{class}");
-    assert!(class.contains("  def caption\n    a = @attachment\n"), "{class}");
+    assert!(
+        class.contains("  def attachment=(value)\n    @attachment = value\n  end\n"),
+        "{class}"
+    );
+    assert!(
+        class.contains("  def caption\n    a = @attachment\n"),
+        "{class}"
+    );
 }

@@ -125,6 +125,7 @@ enum Server {
         _ layout: (String, String?, String?) -> String
     ) -> DispatchResult {
         ViewHelpers.resetSlotsBang()
+        I18nHost.resetRequest()
 
         // Compiled assets (/assets/tailwind.css, …) — before route
         // dispatch so the greedy router doesn't 404 them.

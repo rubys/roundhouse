@@ -36,6 +36,16 @@
 //! the constructor only reads `attrs`, and frozen means a write would
 //! raise rather than corrupt every later record.
 //!
+//! The same Hash came back one level up: the model's `initialize` calls
+//! `super()`, and `ActiveRecord::Base#initialize(_attrs = {})` evaluated
+//! its own `{}` default per record (one `Hash` per `Message.new`, about
+//! 250 per room render). Base ignores the argument, so where nothing
+//! between the model and Base defines `initialize`, `super()` becomes
+//! `super(attrs)`: Base receives the model's own `attrs` (EMPTY_ATTRS, or
+//! the caller's Hash) and builds nothing. A model whose parent defines
+//! `initialize` (an STI parent model) keeps `super()` as written, since
+//! that parent would read the argument.
+//!
 //! Ruby-family only, applied at emit like `view_buffer_passing`: the
 //! shared IR keeps the eager init the strict targets' typing wants.
 
@@ -173,6 +183,87 @@ fn share_empty_attrs_default(m: &mut MethodDef) {
     }
 }
 
+/// `attrs[:col] || ""` → `attrs[:col] || "".freeze` in a model's
+/// `initialize`: the blank a column starts as when `attrs` does not name
+/// it. Every hydration path constructs the record bare and then writes
+/// each column, so these Strings were made per column per loaded record
+/// and replaced before anything read them (three per `Message`, 120 per
+/// room render). A frozen literal is one shared String on CRuby. An
+/// unsaved record's blank is frozen as a result; Rails starts that
+/// attribute as `nil`, so code that appends to it in place fails there
+/// too.
+fn share_blank_column_defaults(m: &mut MethodDef) {
+    if m.name.as_str() != "initialize" {
+        return;
+    }
+    fn reads_attrs(e: &Expr) -> bool {
+        let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node else { return false };
+        if method.as_str() != "[]" || args.len() != 1 {
+            return false;
+        }
+        matches!(&*recv.node, ExprNode::Var { name, .. } if name.as_str() == "attrs")
+    }
+    fn walk(e: &mut Expr) {
+        if let ExprNode::BoolOp { op: crate::expr::BoolOpKind::Or, left, right, .. } = &mut *e.node {
+            if reads_attrs(left) && matches!(&*right.node, ExprNode::Lit { value: Literal::Str { value } } if value.is_empty()) {
+                let (span, ty) = (right.span, right.ty.clone());
+                let mut frozen = Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(right.clone()),
+                        method: Symbol::from("freeze"),
+                        args: vec![],
+                        block: None,
+                        parenthesized: false,
+                    },
+                );
+                frozen.ty = ty;
+                *right = frozen;
+                return;
+            }
+        }
+        e.node.for_each_child_mut(&mut |c| walk(c));
+    }
+    walk(&mut m.body);
+}
+
+/// `super()` → `super(attrs)` in a model's `initialize`, when the only
+/// `initialize` above it is Base's, which ignores its argument.
+fn forward_attrs_to_base(m: &mut MethodDef) {
+    if m.name.as_str() != "initialize" || !m.params.iter().any(|p| p.name.as_str() == "attrs") {
+        return;
+    }
+    fn walk(e: &mut Expr) {
+        if let ExprNode::Super { args: Some(args) } = &mut *e.node {
+            if args.is_empty() {
+                args.push(var("attrs"));
+                return;
+            }
+        }
+        e.node.for_each_child_mut(&mut |c| walk(c));
+    }
+    walk(&mut m.body);
+}
+
+/// Whether some class between `lc` and ActiveRecord::Base defines its
+/// own `initialize`, following `parent` through the program's classes.
+fn ancestor_defines_initialize(lcs: &[LibraryClass], lc: &LibraryClass) -> bool {
+    let mut parent = lc.parent.clone();
+    let mut hops = 0;
+    while let Some(p) = parent {
+        let Some(up) = lcs.iter().find(|c| c.name == p) else { return false };
+        if up.methods.iter().any(|m| m.name.as_str() == "initialize") {
+            return true;
+        }
+        parent = up.parent.clone();
+        hops += 1;
+        if hops > 32 {
+            return true;
+        }
+    }
+    false
+}
+
 /// A class that `include ActiveModel::Model` is in `app.models` too, and
 /// it gets the same `initialize(attrs = {})`; it is not an
 /// `ActiveRecord::Base` and its file need not load one, so the shared
@@ -192,11 +283,16 @@ fn includes_active_model_model(model: &crate::dialect::Model) -> bool {
 }
 
 pub fn apply(lcs: &mut [LibraryClass], app: &App) {
-    for lc in lcs.iter_mut() {
+    let forwards: Vec<bool> = lcs.iter().map(|lc| !ancestor_defines_initialize(lcs, lc)).collect();
+    for (lc, forward) in lcs.iter_mut().zip(forwards) {
         let Some(model) = app.models.iter().find(|m| m.name == lc.name) else { continue };
         if !includes_active_model_model(model) {
             for m in lc.methods.iter_mut() {
                 share_empty_attrs_default(m);
+                share_blank_column_defaults(m);
+                if forward {
+                    forward_attrs_to_base(m);
+                }
             }
         }
         let names: Vec<Symbol> = model

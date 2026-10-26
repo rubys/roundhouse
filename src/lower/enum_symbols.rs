@@ -39,6 +39,7 @@ const ATTR_METHODS: &[&str] = &[
     "new", "create", "create!", "build", "first_or_create", "first_or_create!",
     "first_or_initialize", "where", "not", "rewhere", "find_by", "find_by!",
     "find_or_create_by", "find_or_create_by!", "find_or_initialize_by",
+    "create_or_find_by", "create_or_find_by!",
     "exists?", "update", "update!", "update_all", "update_attribute",
     "update_columns", "assign_attributes", "where_scope",
     // `user_params.merge(role: :administrator)` — campfire builds the

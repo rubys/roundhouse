@@ -16,6 +16,13 @@
 //!
 //!     cargo test --test kotlin_toolchain -- --ignored --nocapture
 
+#[path = "support/emit_and_run.rs"]
+#[allow(dead_code)]
+mod emit_and_run;
+#[path = "support/i18n_locales_app.rs"]
+#[allow(dead_code)]
+mod i18n_locales_app;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -158,4 +165,46 @@ fn parse_testsuite_count(xml: &str) -> usize {
     let rest = &tail[attr_idx + "tests=\"".len()..];
     let end = rest.find('"').unwrap_or(0);
     rest[..end].parse::<usize>().unwrap_or(0)
+}
+
+#[test]
+#[ignore]
+fn real_blog_i18n_locales_run() {
+    // The answers `emit_and_run::i18n_locales` checks on CRuby, but for a String
+    // locale named in an error: Kotlin has no Symbol apart from String, so `"de"` shows as `:de`.
+    let (emitted, errors) = i18n_locales_app::probe_app()
+        .edit("app/models/article.rb", i18n_locales_app::IN_LOCALE, "")
+        .emit(roundhouse::project::BuildTarget::Kotlin);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("src/test/kotlin/I18nProbeTest.kt"), r#"package roundhouse
+
+class I18nProbeTest {
+    private fun expect(what: String, got: Any?, want: Any?) {
+        if (got != want) throw AssertionError("$what: $got")
+    }
+
+    @org.junit.jupiter.api.Test
+    fun localesAnswerAsRails() {
+        expect("lookups", Article.lookups(), listOf("Hello", "Hi <x>", "1 item", "2 items", "Translation missing: en.probe.nope", "Cześć", "fallback 3", "en"))
+        expect("polish", Article.polish(), listOf("1 rzecz", "5 rzeczy", "English only", "Cześć", "Translation missing: pl.probe.nope", "Cześć", "Hi Ola", "pl"))
+        expect("restored", I18n.locale(), "en")
+        expect("named", listOf(Article.named("pl"), Article.named("en"), Article.named(null)), listOf("Cześć", "Hello", "Hello"))
+        expect("dynamic", listOf(Article.probeKey("greet"), Article.onlyKey("xx")), listOf("Hello", "Translation missing: en.probe.only_xx"))
+        val e = org.junit.jupiter.api.assertThrows<InvalidLocale> { Article.named("de") }
+        expect("named de", e.message, ":de is not a valid locale")
+    }
+}
+"#).expect("write probe test");
+    let mut cmd = Command::new("gradle");
+    cmd.args(["test", "--tests", "roundhouse.I18nProbeTest", "--console=plain", "--no-daemon", "-q"]).current_dir(&emitted);
+    if let Ok(jh) = std::env::var("KOTLIN_JAVA_HOME").or_else(|_| std::env::var("JAVA_HOME")) {
+        cmd.env("JAVA_HOME", jh);
+    }
+    let output = cmd.output().expect("run gradle test");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

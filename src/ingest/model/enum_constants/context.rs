@@ -9,6 +9,7 @@ use super::super::super::expr;
 use super::super::super::util::constant_id_str;
 use super::{EnumConstants, ValueContext};
 
+use crate::ingest::prism_api::PrismLocation;
 /// Class/module-body self is known. Method bodies and potentially rebound
 /// blocks do not acquire that identity merely from lexical nesting.
 pub(super) fn namespace_body(ancestors: &[Node<'_>]) -> bool {

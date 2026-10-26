@@ -190,8 +190,11 @@ module ActionDispatch
       @env["rack.url_scheme"].to_s.downcase == "https"
     end
 
+    # Memoized, as Rails' `ActionDispatch::Request#protocol` is: the env
+    # does not change under a request, and a page asks for the scheme
+    # once per absolute URL.
     def protocol
-      ssl? ? "https://" : "http://"
+      @protocol ||= ssl? ? "https://" : "http://"
     end
 
     # Twin of the shared class's: the port from the Host header, nil at
@@ -224,11 +227,17 @@ module ActionDispatch
     # Without the scheme's standard port, as the shared twin's: Rails'
     # `host_with_port` writes no `:443`/`:80`, and the CSRF check
     # compares this with an Origin a browser serializes the same way.
+    #
+    # Memoized like `protocol`: campfire's fragment keys name the base URL,
+    # once per message on a page, and each answer re-read the scheme and
+    # re-split X-Forwarded-Host from the env.
     def base_url
-      h = host
-      default = ssl? ? ":443" : ":80"
-      h = h[0, h.length - default.length] if h.end_with?(default)
-      "#{protocol}#{h}"
+      @base_url ||= begin
+        h = host
+        default = ssl? ? ":443" : ":80"
+        h = h[0, h.length - default.length] if h.end_with?(default)
+        "#{protocol}#{h}"
+      end
     end
 
     # Twin of the shared Request: scheme stripped, standard port already

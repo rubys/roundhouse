@@ -2,7 +2,7 @@
 //! checks clean when its value is discarded and its records are one
 //! model's (it lowers to that model's `preload_associations`) or several
 //! models' (`ActiveRecord::Preloading.records`), and keeps its refusal for any other
-//! option, since no target ships the class.
+//! option. `scope:` stays a `Preloader` call; MRI raises unknown-keyword.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -44,15 +44,14 @@ fn one_models_records_check_clean() {
     assert!(errors.is_empty(), "{errors:#?}");
 }
 
-/// Rails' `call` answers the loaders; `preload_associations` answers nil,
-/// so a call whose value is used (a condition, a method's tail) keeps
-/// the refusal.
+/// `call` answers nil, including when the value is used. The class
+/// exists, so neither call is an unsupported-constant error.
 #[test]
-fn a_used_value_keeps_the_refusal() {
+fn a_used_value_checks_clean() {
     let errors = constant_errors(
         "    if ActiveRecord::Associations::Preloader.new(records: Comment.all.to_a, associations: :article).call\n      1\n    end\n    ActiveRecord::Associations::Preloader.new(records: Comment.all.to_a, associations: :article).call\n",
     );
-    assert_eq!(errors.len(), 2, "{errors:#?}");
+    assert!(errors.is_empty(), "{errors:#?}");
 }
 
 /// Several models' records, or records of a type analysis does not know, are grouped by class at run time (`ActiveRecord::Preloading.records`), as Rails' preloader groups them.
@@ -73,23 +72,31 @@ fn a_dropped_block_or_branch_value_checks_clean() {
     assert!(errors.is_empty(), "{errors:#?}");
 }
 
-/// An application `tap` may answer its block's value, so the call stays a value.
+/// An application `tap` may answer its block's value. `call` is still
+/// nil, and the class exists, so check stays clean.
 #[test]
-fn an_app_defined_tap_keeps_the_refusal() {
+fn an_app_defined_tap_checks_clean() {
     let errors = constant_errors_with(
         "    Basket.new.tap { ActiveRecord::Associations::Preloader.new(records: Comment.all.to_a, associations: :article).call }\n    nil\n",
         &[("app/models/basket.rb", "class Basket\n  def tap\n    yield\n  end\nend\n")],
     );
-    assert_eq!(errors.len(), 1, "{errors:#?}");
+    assert!(errors.is_empty(), "{errors:#?}");
 }
 
-/// Any option beside `records:` and `associations:` (`scope:`) keeps the refusal.
+/// `scope:` is not a batch load. The class exists, so check is clean,
+/// and the call stays `Preloader.new`. MRI raises unknown-keyword
+/// `ArgumentError` (message includes "scope").
 #[test]
-fn a_scope_option_keeps_the_refusal() {
+fn a_scope_option_is_not_rewritten() {
     let errors = constant_errors(
         "    ActiveRecord::Associations::Preloader.new(records: Comment.all.to_a, associations: :article, scope: Article.where(id: 1)).call\n    nil\n",
     );
-    assert_eq!(errors.len(), 1, "{errors:#?}");
+    assert!(errors.is_empty(), "{errors:#?}");
+    let sends = lowered_sends(
+        "    ActiveRecord::Associations::Preloader.new(records: Comment.all.to_a, associations: :article, scope: Comment.where(id: 1)).call\n    nil\n",
+    );
+    assert!(!sends.iter().any(|m| m == "preload_associations"), "{sends:?}");
+    assert!(sends.iter().any(|m| m == "new"), "{sends:?}");
 }
 
 fn lowered_sends(body: &str) -> Vec<String> {

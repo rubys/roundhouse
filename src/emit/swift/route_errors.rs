@@ -1,5 +1,5 @@
 //! Bridge the shared router's invalid-capture exception to Swift's HTTP
-//! boundary. Application `ArgumentError` behavior is deliberately unchanged.
+//! boundary, as an `ArgumentError` subclass so a rescue of the Ruby class still catches it.
 
 use crate::dialect::{LibraryClass, MethodReceiver};
 use crate::expr::{Expr, ExprNode};
@@ -11,7 +11,7 @@ const ERROR_CLASS: &str = "RoutePathEncodingError";
 /// Register a catchable error only for the packaged Router entry. The normal
 /// throwing-method fixpoint then propagates it through the shared match chain.
 pub(super) fn prepare(classes: &mut [LibraryClass]) {
-    super::expr::register_error_class(ERROR_CLASS.to_string());
+    super::expr::register_class_parent(ERROR_CLASS.to_string(), "ArgumentError".to_string());
     for class in classes {
         if !class.is_module || class.name.0.as_str() != "ActionDispatch::Router" {
             continue;
@@ -35,7 +35,7 @@ pub(super) fn prepare(classes: &mut [LibraryClass]) {
 /// Module declarations do not carry a class emission context. Qualifying this
 /// closed Router's own calls lets the existing exception analysis resolve the
 /// registered callee without changing general Swift module-throws semantics.
-fn qualify_siblings(expr: &mut Expr, owner: &ClassId, methods: &HashSet<Symbol>) {
+pub(super) fn qualify_siblings(expr: &mut Expr, owner: &ClassId, methods: &HashSet<Symbol>) {
     if let ExprNode::Send { recv, method, .. } = expr.node.as_mut() {
         let implicit_self = recv
             .as_ref()
@@ -187,13 +187,17 @@ end
                 let throws = super::super::expr::body_throws(&actual.body, "Router");
                 assert_eq!(
                     throws,
-                    matches!(actual.name.as_str(), "guarded" | "constructed")
+                    matches!(actual.name.as_str(), "guarded" | "constructed" | "other" | "overridden")
                 );
             }
         }
+        // The core errors throw on their own now; the bridge only renames the Router's
         for class in &original {
             for method in &class.methods {
-                assert!(!super::super::expr::body_throws(&method.body, "Unrelated"));
+                assert_eq!(
+                    super::super::expr::body_throws(&method.body, "Unrelated"),
+                    matches!(method.name.as_str(), "guarded" | "constructed" | "other" | "overridden")
+                );
             }
         }
     }
@@ -266,7 +270,7 @@ end
                 assert_eq!(actual.body.span, original.body.span);
                 assert_eq!(actual.body.ty, original.body.ty);
                 assert_eq!(actual.body.effects, original.body.effects);
-                assert_eq!(actual.body.diagnostic, original.body.diagnostic);
+                assert_eq!(actual.body.diagnostic(), original.body.diagnostic());
             }
         }
     }

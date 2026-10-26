@@ -23,6 +23,7 @@ use super::util::{
 };
 use super::{IngestError, IngestResult};
 
+use crate::ingest::prism_api::PrismLocation;
 mod enum_constants;
 pub(in crate::ingest) use enum_constants::EnumConstants;
 
@@ -33,7 +34,8 @@ pub use table_prefix::{
 };
 
 mod validations;
-use validations::{parse_validates_call, validation_items, ParsedValidates, ValidatesKind};
+mod with_options;
+use validations::{and_guard, context_guard, parse_validates_call, validation_items, ParsedValidates, ValidatesKind};
 
 /// Parse a single model file. The first class definition is treated as the
 /// model; any schema-derived attributes are filled in from `schema`.
@@ -144,7 +146,13 @@ pub(super) fn ingest_model_with_enum_constants(
         // Constants the class body assigns, for `enum :x, CONST` and for
         // labels spelled with a constant (`NAME => NAME`).
         let stmts = flatten_statements(class_body);
-        let class_consts = ClassConsts::collect(&stmts, file);
+        let mut class_consts = ClassConsts::collect(&stmts, file);
+        class_consts.set_lexical_scope(
+            name_path.len() == 1,
+            enum_constants.nested_names(),
+            enum_constants.top_level_names(),
+        );
+        class_consts.import(&stmts, enum_constants, &enum_owners);
         let resolve_constant = |node: &Node<'_>| enum_constants.resolve(node, &enum_owners);
         for statement in stmts {
             let definition = visibility::definition(&statement).map(|d| d.as_node());
@@ -204,6 +212,15 @@ pub(super) fn ingest_model_with_enum_constants(
                             enum_defaults.insert(expanded.column.clone(), d);
                         }
                         if let Some(mapping) = expanded.mapping {
+                            if mapping
+                                .iter()
+                                .all(|(label, stored)| matches!(stored, Literal::Str { value } if value == label))
+                            {
+                                class_consts.note_enum_labels(
+                                    expanded.column.as_str(),
+                                    mapping.iter().map(|(label, _)| label.clone()).collect(),
+                                );
+                            }
                             enums.insert(expanded.column, mapping);
                         }
                         let mut blank = leading_blank;
@@ -378,6 +395,7 @@ pub(super) fn ingest_model_with_enum_constants(
                 file,
                 leading,
                 Some(&mut class_attr_defaults),
+                &class_consts,
             ) {
                 Ok(items) => items,
                 Err(err) if super::survey::is_active() => {
@@ -494,6 +512,7 @@ pub(super) fn ingest_model_body_items(
     file: &str,
     leading_comments: Vec<Comment>,
     class_attr_defaults: Option<&mut IndexMap<Symbol, Expr>>,
+    class_consts: &ClassConsts,
 ) -> IngestResult<Vec<ModelBodyItem>> {
     use crate::dialect::{Validation, ValidationRule};
     let span = Span {
@@ -502,20 +521,47 @@ pub(super) fn ingest_model_body_items(
         end: stmt.location().end_offset() as u32,
     };
     if let Some(call) = stmt.as_call_node() {
+        if with_options::is_with_options(&call) {
+            return match with_options::expand(&call, &[], owner, file, class_consts) {
+                Ok(items) => Ok(items),
+                // Declined: reported with what blocked it, and dropped like
+                // any unlowered model DSL (none of its calls is kept).
+                Err(IngestError::Unsupported { message, .. }) => {
+                    let mut diagnostic =
+                        crate::diagnostic::Diagnostic::unsupported(span, None, "with_options", message.clone());
+                    diagnostic.severity = crate::diagnostic::Severity::Warning;
+                    super::prism::push(diagnostic);
+                    super::survey::record(&IngestError::Unsupported { file: file.into(), message });
+                    Ok(Vec::new())
+                }
+                Err(err) => Err(err),
+            };
+        }
         if call.receiver().is_none() {
             let name = constant_id_str(&call.name()).to_string();
             let of_kind = match name.as_str() {
                 "validates_numericality_of" => Some(ValidatesKind::Numericality),
                 "validates_inclusion_of" => Some(ValidatesKind::Inclusion),
+                "validates_exclusion_of" => Some(ValidatesKind::Exclusion),
                 "validates_format_of" => Some(ValidatesKind::Format),
                 _ => None,
             };
             if name == "validates" || of_kind.is_some() {
                 let kind = of_kind.unwrap_or(ValidatesKind::Map);
-                match parse_validates_call(&call, file, kind) {
+                match parse_validates_call(&call, file, kind, class_consts) {
                     ParsedValidates::Gap => return Ok(Vec::new()),
                     ParsedValidates::Modeled(parsed) if !parsed.is_empty() => {
                         return Ok(validation_items(parsed, leading_comments, span));
+                    }
+                    // The lowered rules, and the call itself for its custom
+                    // keys (`ingest::each_validator` lowers or reports them).
+                    ParsedValidates::Custom(parsed, keys) => {
+                        let mut items = validation_items(parsed, leading_comments, span);
+                        let expr = ingest_expr(stmt, file)?;
+                        let text = String::from_utf8_lossy(call.location().as_slice()).into_owned();
+                        super::each_validator::note(expr.span, text, keys);
+                        items.push(ModelBodyItem::Unknown { expr, leading_comments: Vec::new(), leading_blank_line: false });
+                        return Ok(items);
                     }
                     ParsedValidates::Decline | ParsedValidates::Modeled(_) => {}
                 }
@@ -540,8 +586,9 @@ pub(super) fn ingest_model_body_items(
                         .map(|attribute| Validation {
                             attribute,
                             rules: vec![rule.clone()],
-                            if_method: None,
-                            unless_method: None,
+                            if_cond: None,
+                            unless_cond: None,
+                            message: None,
                         })
                         .collect()
                 } else {
@@ -882,11 +929,18 @@ pub(super) fn ingest_model_body_item(
                 .arguments()
                 .map(|args| args.arguments().iter().count())
                 .unwrap_or(0);
-            // `if: :pred` / `unless: :pred` (Symbol conditions only) ride
-            // along on the rule; any other option — `on:`, a lambda —
-            // keeps the call out, as before.
+            // `if: :pred` / `unless: :pred` ride along on the rule; a
+            // zero-arity lambda/proc condition is the guard expression
+            // `callback_condition` builds, carried on the Validation the
+            // way `validates` carries one, and `on: :create`/`:update`
+            // joins `if:` as the `persisted?` test `validates` uses. Any
+            // other option — `on: :custom`, a lambda that takes the
+            // record — keeps the call out.
             let mut if_method: Option<Symbol> = None;
             let mut unless_method: Option<Symbol> = None;
+            let mut if_cond: Option<Expr> = None;
+            let mut unless_cond: Option<Expr> = None;
+            let mut on_guard: Option<Expr> = None;
             let mut options_ok = true;
             let mut option_args = 0usize;
             if let Some(args) = call.arguments() {
@@ -903,6 +957,18 @@ pub(super) fn ingest_model_body_item(
                         match (key.as_deref(), value) {
                             (Some("if"), Some(v)) => if_method = Some(v),
                             (Some("unless"), Some(v)) => unless_method = Some(v),
+                            (Some("if"), None) => match callback_condition(&assoc.value(), file) {
+                                Some(c) => if_cond = Some(c),
+                                None => options_ok = false,
+                            },
+                            (Some("unless"), None) => match callback_condition(&assoc.value(), file) {
+                                Some(c) => unless_cond = Some(c),
+                                None => options_ok = false,
+                            },
+                            (Some("on"), _) => match context_guard(&assoc.value()) {
+                                Some(g) => on_guard = g,
+                                None => options_ok = false,
+                            },
                             _ => options_ok = false,
                         }
                     }
@@ -928,8 +994,9 @@ pub(super) fn ingest_model_body_item(
                                 unless_method: unless_method.clone(),
                             })
                             .collect(),
-                        if_method: None,
-                        unless_method: None,
+                        if_cond: and_guard(on_guard, if_cond),
+                        unless_cond,
+                        message: None,
                     },
                     leading_comments,
                     leading_blank_line: false,
@@ -1145,7 +1212,7 @@ fn validate_sorbet_enum_mappings(
 ) -> IngestResult<()> {
     // This source was already parsed by ingest. Do not duplicate parse or
     // unrelated model diagnostics, or rebuild the model to check one mapping.
-    let result = ruby_prism::parse(source.text.as_bytes());
+    let result = super::prism::parse_silent(source.text.as_bytes());
     let root = result.node();
     let Some((_, class)) = super::util::find_all_classes_with_scope(&root).into_iter()
         .find(|(_, class)| class.location().start_offset() == model.span.start as usize)
@@ -1162,6 +1229,10 @@ fn validate_sorbet_enum_mappings(
                     &source.path, &declaration.column,
                 )))?;
             }
+        } else if model.enums.contains_key(&Symbol::from(declaration.column.as_str()))
+            && constants.enum_method_read_refused(&declaration.mapping, &owners)
+        {
+            super::survey::unwrap_or_record::<()>(Err(enum_mapping_error(&source.path, &declaration.column)))?;
         }
     }
     Ok(())
@@ -1440,6 +1511,468 @@ enum EnumStored {
     Expr(Expr),
 }
 
+/// Methods a class body may call on a folded constant without changing
+/// it. Any other call (`<<`, `push`, `concat`, `replace`, `[]=`, a
+/// bang method, or one this list doesn't know) counts as a mutation.
+const READ_ONLY_CONST_METHODS: &[&str] = &[
+    "freeze", "frozen?", "include?", "member?", "key?", "has_key?", "value?", "cover?", "each", "each_with_index",
+    "each_with_object", "map", "collect", "flat_map", "select", "filter", "reject", "find", "detect", "find_index",
+    "index", "any?", "all?", "none?", "one?", "empty?", "size", "length", "count", "first", "last", "min", "max",
+    "sum", "sort", "sort_by", "to_a", "to_h", "to_s", "to_sym", "to_set", "inspect", "dup", "keys", "values",
+    "fetch", "dig", "[]", "join", "entries", "zip", "index_by", "index_with", "group_by", "partition", "tally",
+    "filter_map", "each_slice", "each_key", "each_value", "each_pair", "values_at", "slice", "except", "take",
+    "drop", "uniq", "compact", "reverse", "flatten", "invert", "transform_values", "transform_keys", "minmax",
+    "intersection", "union", "difference", "excluding", "including", "&", "|", "+", "-", "*", "**", "-@", "source", "options",
+    "match", "match?", "=~", "===", "==", "!=", "eql?", "hash", "is_a?", "nil?", "present?", "blank?",
+];
+
+/// The names a class body writes, or may mutate, anywhere other than
+/// one plain top-level `NAME = …` (see [`ClassConsts::collect`]).
+struct ConstTaint {
+    top_level: std::collections::HashSet<usize>,
+    top_writes: std::collections::HashMap<String, usize>,
+    tainted: std::collections::HashSet<String>,
+    /// `ALIAS = MODES` / `ALIAS = MODES.freeze` (any constant the
+    /// right-hand side reads): the two may be one object, so a mutation
+    /// through either taints both.
+    aliases: Vec<(String, String)>,
+    /// The constants a [`REFLECTION_METHODS`] call's receiver chain is
+    /// rooted at (`Rule.const_set`): owners whose constants it may replace.
+    reflected: std::collections::HashSet<String>,
+    /// The constant a `const_set(:NAME, …)` / `remove_const(:NAME)` call
+    /// names, whatever its receiver.
+    named_writes: std::collections::HashSet<String>,
+    /// For a boot source: the qualified classes and modules the inputs
+    /// define. A call on one, or a variable holding one, is not a change
+    /// to a constant (`Gadget.count`); see [`ConstTaint::names_boot_namespace`].
+    boot_namespaces: Option<std::collections::HashSet<String>>,
+}
+
+/// Calls on an owner that can write or remove its constants, run code in
+/// its scope that does, or hand out a constant to mutate where this pass
+/// cannot follow it (`Kinds.const_get(:ALL) << "c"`). On `Object` (or
+/// receiverless outside any body) they can reach every owner.
+const REFLECTION_METHODS: &[&str] = &[
+    "const_set", "remove_const", "const_get", "send", "__send__", "public_send", "class_eval", "module_eval",
+    "class_exec", "module_exec", "instance_eval", "instance_exec",
+];
+
+/// Methods whose result is a new object, never the receiver or one of its
+/// elements: a mutation of the result cannot reach the constant, so a
+/// receiver chain through one of them is no longer rooted at it
+/// (`(LIMIT - used).times`, `MODES.map(&:upcase) << "x"`). A method not
+/// listed may return the receiver itself (`to_a`, `tap`) or an element
+/// (`first`, `fetch`), and keeps the chain.
+const FRESH_RESULT_METHODS: &[&str] = &[
+    "+", "-", "*", "/", "%", "**", "<=>", "==", "!=", "<", "<=", ">", ">=", "&", "|", "^", "<<<", "~", "-@", "+@",
+    "map", "collect", "flat_map", "select", "filter", "reject", "filter_map", "sort", "sort_by", "uniq", "compact",
+    "reverse", "flatten", "dup", "clone", "size", "length", "count", "sum", "keys", "values", "join", "to_s",
+    "to_sym", "to_i", "to_f", "inspect", "index_by", "index_with", "group_by", "partition", "tally", "zip",
+    "include?", "member?", "key?", "any?", "all?", "none?", "empty?", "nil?", "frozen?", "is_a?",
+];
+
+/// The constant a `const_set(:Name, …)` / `remove_const(:Name)` names with a
+/// literal, which is all it can write.
+fn named_constant_write(call: &ruby_prism::CallNode<'_>) -> Option<String> {
+    if !matches!(constant_id_str(&call.name()).as_ref(), "const_set" | "remove_const") {
+        return None;
+    }
+    let first = call.arguments()?.arguments().iter().next()?;
+    symbol_value(&first).or_else(|| string_value(&first))
+}
+
+/// The constant a receiver chain is rooted at: `MODES`, `MODES.to_a`,
+/// `Widget::MODES.first` (the last segment of a path), unless the chain
+/// passes through a [`FRESH_RESULT_METHODS`] call.
+fn chain_root(node: &Node<'_>) -> Option<String> {
+    if let Some(paren) = node.as_parentheses_node() {
+        return chain_root(&paren.body()?);
+    }
+    if let Some(stmts) = node.as_statements_node() {
+        let body: Vec<Node<'_>> = stmts.body().iter().collect();
+        let [only] = body.as_slice() else { return None };
+        return chain_root(only);
+    }
+    if let Some(call) = node.as_call_node() {
+        if FRESH_RESULT_METHODS.contains(&constant_id_str(&call.name()).as_ref()) {
+            return None;
+        }
+        return chain_root(&call.receiver()?);
+    }
+    if let Some(cr) = node.as_constant_read_node() {
+        return Some(constant_id_str(&cr.name()).to_string());
+    }
+    node.as_constant_path_node()?.name().map(|n| constant_id_str(&n).to_string())
+}
+
+/// [`chain_root`]'s constant as written: `Gadget`, `Vendor::Gadget`,
+/// `::Catalog::KINDS`.
+fn chain_root_path(node: &Node<'_>) -> Option<String> {
+    fn path(node: &Node<'_>) -> Option<String> {
+        if let Some(cr) = node.as_constant_read_node() {
+            return Some(constant_id_str(&cr.name()).to_string());
+        }
+        let cp = node.as_constant_path_node()?;
+        let name = constant_id_str(&cp.name()?).to_string();
+        match cp.parent() {
+            Some(parent) => Some(format!("{}::{name}", path(&parent)?)),
+            None => Some(format!("::{name}")),
+        }
+    }
+    if let Some(paren) = node.as_parentheses_node() {
+        return chain_root_path(&paren.body()?);
+    }
+    if let Some(stmts) = node.as_statements_node() {
+        let body: Vec<Node<'_>> = stmts.body().iter().collect();
+        let [only] = body.as_slice() else { return None };
+        return chain_root_path(only);
+    }
+    if let Some(call) = node.as_call_node() {
+        if FRESH_RESULT_METHODS.contains(&constant_id_str(&call.name()).as_ref()) {
+            return None;
+        }
+        return chain_root_path(&call.receiver()?);
+    }
+    path(node)
+}
+
+/// `send(:const_set, :NAME, …)` / `public_send(:remove_const, :NAME)`:
+/// the constant a literal dispatch to a named write names.
+fn dispatched_named_constant_write(call: &ruby_prism::CallNode<'_>) -> Option<String> {
+    if !matches!(constant_id_str(&call.name()).as_ref(), "send" | "__send__" | "public_send") {
+        return None;
+    }
+    let arguments: Vec<Node<'_>> = call.arguments()?.arguments().iter().collect();
+    let [method, name, ..] = arguments.as_slice() else { return None };
+    if !matches!(symbol_value(method).as_deref(), Some("const_set" | "remove_const")) {
+        return None;
+    }
+    symbol_value(name).or_else(|| string_value(name))
+}
+
+/// Every constant a node reads, at any depth.
+fn constant_reads(node: &Node<'_>) -> Vec<String> {
+    struct Reads(Vec<String>);
+    impl<'pr> ruby_prism::Visit<'pr> for Reads {
+        fn visit_constant_read_node(&mut self, node: &ruby_prism::ConstantReadNode<'pr>) {
+            self.0.push(constant_id_str(&node.name()).to_string());
+        }
+        fn visit_constant_path_node(&mut self, node: &ruby_prism::ConstantPathNode<'pr>) {
+            if let Some(name) = node.name() {
+                self.0.push(constant_id_str(&name).to_string());
+            }
+            ruby_prism::visit_constant_path_node(self, node);
+        }
+    }
+    let mut reads = Reads(Vec::new());
+    ruby_prism::Visit::visit(&mut reads, node);
+    reads.0
+}
+
+impl ConstTaint {
+    fn scan(stmts: &[Node<'_>]) -> std::collections::HashSet<String> {
+        let mut scan = ConstTaint {
+            top_level: stmts
+                .iter()
+                .filter(|s| s.as_constant_write_node().is_some())
+                .map(|s| s.location().start_offset())
+                .collect(),
+            top_writes: Default::default(),
+            tainted: Default::default(),
+            aliases: Vec::new(),
+            reflected: Default::default(),
+            named_writes: Default::default(),
+            boot_namespaces: None,
+        };
+        for stmt in stmts {
+            ruby_prism::Visit::visit(&mut scan, stmt);
+        }
+        let ConstTaint { top_writes, mut tainted, aliases, .. } = scan;
+        tainted.extend(top_writes.into_iter().filter(|(_, n)| *n > 1).map(|(name, _)| name));
+        Self::alias_closure(&mut tainted, &aliases);
+        tainted
+    }
+
+    /// A whole file, for constants other bodies read: every write but the
+    /// plain top-level ones at `direct_writes` taints its name, as do the
+    /// mutations and escapes [`ConstTaint::scan`] finds. A name written
+    /// once in each of two owners is two constants, so no write count
+    /// here: an owner declared twice is refused by its table instead.
+    /// Returns the tainted names and the [`REFLECTION_METHODS`] receivers.
+    fn scan_tree(
+        root: &Node<'_>,
+        direct_writes: std::collections::HashSet<usize>,
+    ) -> (std::collections::HashSet<String>, std::collections::HashSet<String>) {
+        let mut scan = ConstTaint {
+            top_level: direct_writes,
+            top_writes: Default::default(),
+            tainted: Default::default(),
+            aliases: Vec::new(),
+            reflected: Default::default(),
+            named_writes: Default::default(),
+            boot_namespaces: None,
+        };
+        ruby_prism::Visit::visit(&mut scan, root);
+        let ConstTaint { mut tainted, aliases, reflected, .. } = scan;
+        Self::alias_closure(&mut tainted, &aliases);
+        (tainted, reflected)
+    }
+
+    /// The names a source that runs at boot may leave with another value:
+    /// the constants it writes outside `direct_writes`, mutates or lets a
+    /// variable hold, and each constant a `const_set` / `remove_const`
+    /// names; with its alias edges (`ALIAS = KINDS`), left unclosed. A call on an owner (`Gadget.count`, `Vendor::Gadget.class_eval`)
+    /// is not a write to one of its constants: a mutation inside the
+    /// block is scanned on its own.
+    pub(super) fn scan_boot(
+        root: &Node<'_>,
+        direct_writes: std::collections::HashSet<usize>,
+        namespaces: std::collections::HashSet<String>,
+    ) -> (std::collections::HashSet<String>, Vec<(String, String)>) {
+        let mut scan = ConstTaint {
+            top_level: direct_writes,
+            top_writes: Default::default(),
+            tainted: Default::default(),
+            aliases: Vec::new(),
+            reflected: Default::default(),
+            named_writes: Default::default(),
+            boot_namespaces: Some(namespaces),
+        };
+        ruby_prism::Visit::visit(&mut scan, root);
+        let ConstTaint { mut tainted, aliases, named_writes, .. } = scan;
+        tainted.extend(named_writes);
+        // Unclosed: an alias one boot source writes and another mutates
+        // through is one object, so the caller closes over every boot
+        // source's edges together (`EnumConstants::finish`).
+        (tainted, aliases)
+    }
+
+    /// [`Self::alias_closure`] for a caller that collects taints and alias
+    /// edges from several sources before closing them.
+    pub(super) fn close_aliases(tainted: &mut std::collections::HashSet<String>, aliases: &[(String, String)]) {
+        Self::alias_closure(tainted, aliases);
+    }
+
+    /// Whether a boot source's receiver chain (`Gadget.count`,
+    /// `Vendor::Gadget.class_eval`) is rooted at a class or module rather
+    /// than at a constant it could change: a bare name an input namespace
+    /// has, a path an input defines as a namespace, or a path rooted
+    /// outside the inputs (a library class). `Catalog::KINDS` is rooted in
+    /// an input namespace and is not one, so it is a constant, whatever
+    /// else is named `KINDS`.
+    fn names_boot_namespace(&self, node: &Node<'_>) -> bool {
+        let Some(namespaces) = &self.boot_namespaces else { return false };
+        let Some(path) = chain_root_path(node) else { return false };
+        let path = path.trim_start_matches("::");
+        match path.split_once("::") {
+            None => namespaces.iter().any(|ns| ns.rsplit("::").next() == Some(path)),
+            Some((first, _)) => {
+                namespaces.contains(path) || !namespaces.iter().any(|ns| ns.split("::").next() == Some(first))
+            }
+        }
+    }
+
+    fn alias_closure(tainted: &mut std::collections::HashSet<String>, aliases: &[(String, String)]) {
+        // Across alias edges, both ways, until nothing changes.
+        loop {
+            let before = tainted.len();
+            for (a, b) in aliases {
+                if tainted.contains(a) || tainted.contains(b) {
+                    tainted.insert(a.clone());
+                    tainted.insert(b.clone());
+                }
+            }
+            if tainted.len() == before {
+                break;
+            }
+        }
+    }
+
+    /// `x = MODES` (or `@x`, `@@x`, `$x`, or `MODES.to_a`): the variable
+    /// may mutate the constant later, out of this pass's sight.
+    fn escape(&mut self, value: &Node<'_>) {
+        if self.names_boot_namespace(value) {
+            return;
+        }
+        if let Some(root) = chain_root(value) {
+            self.tainted.insert(root);
+        }
+    }
+
+    fn taint(&mut self, name: Option<ruby_prism::ConstantId<'_>>) {
+        if let Some(name) = name {
+            self.tainted.insert(constant_id_str(&name).to_string());
+        }
+    }
+}
+
+impl<'pr> ruby_prism::Visit<'pr> for ConstTaint {
+    fn visit_constant_write_node(&mut self, node: &ruby_prism::ConstantWriteNode<'pr>) {
+        let name = constant_id_str(&node.name()).to_string();
+        if self.top_level.contains(&node.location().start_offset()) {
+            for read in constant_reads(&node.value()) {
+                self.aliases.push((name.clone(), read));
+            }
+            *self.top_writes.entry(name).or_default() += 1;
+        } else {
+            self.tainted.insert(name);
+        }
+        ruby_prism::visit_constant_write_node(self, node);
+    }
+    fn visit_constant_operator_write_node(&mut self, node: &ruby_prism::ConstantOperatorWriteNode<'pr>) {
+        self.taint(Some(node.name()));
+        ruby_prism::visit_constant_operator_write_node(self, node);
+    }
+    fn visit_constant_or_write_node(&mut self, node: &ruby_prism::ConstantOrWriteNode<'pr>) {
+        self.taint(Some(node.name()));
+        ruby_prism::visit_constant_or_write_node(self, node);
+    }
+    fn visit_constant_and_write_node(&mut self, node: &ruby_prism::ConstantAndWriteNode<'pr>) {
+        self.taint(Some(node.name()));
+        ruby_prism::visit_constant_and_write_node(self, node);
+    }
+    // `A, B = …` and `rescue => A` write through a target node.
+    fn visit_constant_target_node(&mut self, node: &ruby_prism::ConstantTargetNode<'pr>) {
+        self.taint(Some(node.name()));
+    }
+    // `self::NAME = …`, `Widget::NAME << …` and the like: tainted by
+    // their last segment, whatever the scope names.
+    fn visit_constant_path_write_node(&mut self, node: &ruby_prism::ConstantPathWriteNode<'pr>) {
+        self.taint(node.target().name());
+        ruby_prism::visit_constant_path_write_node(self, node);
+    }
+    fn visit_constant_path_operator_write_node(&mut self, node: &ruby_prism::ConstantPathOperatorWriteNode<'pr>) {
+        self.taint(node.target().name());
+        ruby_prism::visit_constant_path_operator_write_node(self, node);
+    }
+    fn visit_constant_path_or_write_node(&mut self, node: &ruby_prism::ConstantPathOrWriteNode<'pr>) {
+        self.taint(node.target().name());
+        ruby_prism::visit_constant_path_or_write_node(self, node);
+    }
+    fn visit_constant_path_and_write_node(&mut self, node: &ruby_prism::ConstantPathAndWriteNode<'pr>) {
+        self.taint(node.target().name());
+        ruby_prism::visit_constant_path_and_write_node(self, node);
+    }
+    fn visit_constant_path_target_node(&mut self, node: &ruby_prism::ConstantPathTargetNode<'pr>) {
+        self.taint(node.name());
+        ruby_prism::visit_constant_path_target_node(self, node);
+    }
+    // A call outside the read-only set taints the constant its receiver
+    // chain is rooted at: `MODES << "c"`, and `MODES.to_a << "c"` or
+    // `MODES.first << "x"`, whose receivers may be the constant itself
+    // or one of its elements.
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        // `Catalog.const_set(:KINDS, …)`, or a receiverless one in the
+        // owner's body: either replaces that name.
+        if let Some(name) = named_constant_write(node).or_else(|| dispatched_named_constant_write(node)) {
+            self.named_writes.insert(name);
+        }
+        if let Some(recv) = node.receiver() {
+            let method = constant_id_str(&node.name());
+            if !READ_ONLY_CONST_METHODS.contains(&method.as_ref()) && !self.names_boot_namespace(&recv) {
+                if let Some(root) = chain_root(&recv) {
+                    self.tainted.insert(root);
+                }
+            }
+            if REFLECTION_METHODS.contains(&method.as_ref()) {
+                if let Some(root) = chain_root(&recv) {
+                    // `Object.const_set(:Name, …)` defines or replaces the
+                    // one top-level `Name`, not every owner.
+                    match named_constant_write(node) {
+                        Some(name) if root == "Object" => self.reflected.insert(name),
+                        _ => self.reflected.insert(root),
+                    };
+                }
+            }
+            // `"Kinds".constantize` is the owner itself. A computed name
+            // (`model_name.constantize`) is not followed.
+            if matches!(method.as_ref(), "constantize" | "safe_constantize")
+                && let Some(name) = string_value(&recv)
+            {
+                self.reflected.extend(name.trim_start_matches("::").split("::").map(str::to_string));
+            }
+        }
+        ruby_prism::visit_call_node(self, node);
+    }
+    fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
+        self.escape(&node.value());
+        ruby_prism::visit_local_variable_write_node(self, node);
+    }
+    fn visit_local_variable_or_write_node(&mut self, node: &ruby_prism::LocalVariableOrWriteNode<'pr>) {
+        self.escape(&node.value());
+        ruby_prism::visit_local_variable_or_write_node(self, node);
+    }
+    fn visit_instance_variable_write_node(&mut self, node: &ruby_prism::InstanceVariableWriteNode<'pr>) {
+        self.escape(&node.value());
+        ruby_prism::visit_instance_variable_write_node(self, node);
+    }
+    fn visit_instance_variable_or_write_node(&mut self, node: &ruby_prism::InstanceVariableOrWriteNode<'pr>) {
+        self.escape(&node.value());
+        ruby_prism::visit_instance_variable_or_write_node(self, node);
+    }
+    fn visit_class_variable_write_node(&mut self, node: &ruby_prism::ClassVariableWriteNode<'pr>) {
+        self.escape(&node.value());
+        ruby_prism::visit_class_variable_write_node(self, node);
+    }
+    fn visit_global_variable_write_node(&mut self, node: &ruby_prism::GlobalVariableWriteNode<'pr>) {
+        self.escape(&node.value());
+        ruby_prism::visit_global_variable_write_node(self, node);
+    }
+    // `a, b = MODES, OTHER`: each right-hand element escapes.
+    fn visit_multi_write_node(&mut self, node: &ruby_prism::MultiWriteNode<'pr>) {
+        let value = node.value();
+        match value.as_array_node() {
+            Some(array) => array.elements().iter().for_each(|el| self.escape(&el)),
+            None => self.escape(&value),
+        }
+        ruby_prism::visit_multi_write_node(self, node);
+    }
+}
+
+/// The one expression inside `( … )`: `inclusion: (Kinds::ALL)` reads
+/// what `inclusion: Kinds::ALL` does. `None` for anything else, including
+/// `(a; b)`.
+pub(super) fn single_parenthesized<'pr>(node: &Node<'pr>) -> Option<Node<'pr>> {
+    let body = node.as_parentheses_node()?.body()?;
+    let mut stmts = flatten_statements(body);
+    (stmts.len() == 1).then(|| stmts.pop().unwrap())
+}
+
+/// The key a constant read is folded under: its name, or for a path
+/// (`Rule::LIMIT`, `::Rule::LIMIT`) the path as written, which
+/// [`ClassConsts::import`] fills from the owner's table.
+fn const_key(node: &Node<'_>) -> Option<String> {
+    if let Some(cr) = node.as_constant_read_node() {
+        return Some(constant_id_str(&cr.name()).to_string());
+    }
+    node.as_constant_path_node()?;
+    enum_constants::EnumConstants::path(node)
+}
+
+/// `Regexp.escape` for the pattern `Regexp.union` builds: a backslash
+/// before each character a pattern reads as an operator, and the escape
+/// sequence for a control character. Ruby also escapes a space, `#` and
+/// `-`, which mean themselves outside a character class and without the
+/// `x` flag, so they are left as they are.
+fn regexp_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\\' | '.' | '^' | '$' | '|' | '?' | '*' | '+' | '(' | ')' | '[' | ']' | '{' | '}' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            '\u{c}' => out.push_str("\\f"),
+            '\u{b}' => out.push_str("\\v"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Constants a class body assigns that an `enum` declaration below them
 /// may name: the mapping itself (`enum :status, STATUSES`), a label
 /// (`NAME => NAME`, `"#{PENDING}": 1`) or a stored value
@@ -1454,36 +1987,492 @@ pub(super) struct ClassConsts {
     /// `NAME = %i[…]` / `%w[…]` — the bare labels, for the idioms that
     /// derive a mapping from them (`NAME.index_by(&:to_s)`).
     labels: std::collections::HashMap<String, Vec<String>>,
+    /// `NAME = /pattern/flags`, `.freeze`d, aliased, or an interpolation
+    /// of one other folded regex constant — `(pattern, flags)`. Used to
+    /// resolve `validates …, format: { with: NAME }` (#985 follow-up).
+    regexes: std::collections::HashMap<String, (String, String)>,
+    /// `NAME = %w[…]` / `%i[…]` / `[…]` of literals, `.freeze`d or an
+    /// alias of another folded list: the literals with their kind kept
+    /// (a Symbol is not a String), for `inclusion: { in: NAME }`.
+    lists: std::collections::HashMap<String, Vec<Literal>>,
+    /// Every constant, module, or class name the body itself defines,
+    /// folded or not — anything an unqualified constant path's first
+    /// segment could resolve to before Ruby reaches the top level.
+    defined_names: std::collections::HashSet<String>,
+    /// The class sits directly at the top level (`class User`, not
+    /// `module Admin; class User` nor `class Admin::User`), so its
+    /// lexical scope is only its own body. Set by `ingest_model`;
+    /// `false` everywhere else, which is the conservative answer.
+    top_level: bool,
+    /// Names any app source defines below the top level
+    /// (`EnumConstants::nested_names`): what an ancestor of the class
+    /// (its superclass chain, an included module) could define.
+    app_nested_names: std::collections::HashSet<String>,
+    /// First segments of every name the app defines or reopens
+    /// (`EnumConstants::top_level_names`): a top-level namespace the app
+    /// touches, whose standard-library contents it may have replaced.
+    app_top_level_names: std::collections::HashSet<String>,
+    /// `NAME = 3`, `NAME = (2**31) - 1`, `NAME = 4 * (OTHER + 1)`: every
+    /// Integer the class body folds, at the width Ruby computes it (an
+    /// `i128`, so `2**63` is kept exactly; `scalars` holds the ones that
+    /// fit an `i64`).
+    integers: std::collections::HashMap<String, i128>,
+    /// The `regexes` built with `Regexp.union` (directly, or reading one
+    /// that was), which only hold while `Regexp` is Ruby's own.
+    from_union: std::collections::HashSet<String>,
+    /// The app defines a constant named `Regexp` somewhere, which a
+    /// body's `Regexp.union` may resolve to: no union folds. Set by
+    /// [`ClassConsts::import`].
+    regexp_shadowed: bool,
+    /// `NAME = { "a" => …, b: … }`, `.freeze`d or an alias of another:
+    /// the keys, each a literal kept with its kind, in order. The values
+    /// are never read. For `inclusion: { in: NAME.keys }` and
+    /// `inclusion: { in: NAME }` (`Hash#include?` is `key?`).
+    hash_keys: std::collections::HashMap<String, Vec<Literal>>,
+    /// An enum the class body declared so far, by the class method Rails
+    /// names after it (`enum :status` → `statuses`): its labels, which
+    /// `statuses.keys` answers. Only an enum whose every label is also the
+    /// String it stores (`{ password: "password" }`): a lowered check
+    /// reads the stored value, and only there do the two agree.
+    enum_labels: std::collections::HashMap<String, Vec<String>>,
 }
+
+/// The operators [`ClassConsts::int_expr`] folds.
+const INTEGER_OPERATORS: &[&str] = &["+", "-", "*", "**", "-@"];
 
 impl ClassConsts {
     pub(super) fn collect(stmts: &[Node<'_>], file: &str) -> Self {
         let mut out = ClassConsts::default();
+        // A constant folds only when its one write is a plain top-level
+        // `NAME = …` and nothing else in the body, at any depth (method
+        // bodies included), writes it or calls a method on it that may
+        // mutate it. Rails reads the constant as it stands when the macro
+        // naming it runs, and this pass folds the whole body before any
+        // macro is read, so a second write, a write under `if`, or an
+        // `NAME << x` leaves no value it could trust. Refusing beats a
+        // wrong one: the validation stays the reported gap.
+        let tainted = ConstTaint::scan(stmts);
         for stmt in stmts {
+            let defined = if let Some(m) = stmt.as_module_node() {
+                Some(m.constant_path())
+            } else {
+                stmt.as_class_node().map(|c| c.constant_path())
+            };
+            if let Some(path) = defined
+                && let Some(first) = constant_path_of(&path).and_then(|p| p.into_iter().next())
+            {
+                out.defined_names.insert(first);
+            }
             let Some(cw) = stmt.as_constant_write_node() else { continue };
+            out.defined_names.insert(constant_id_str(&cw.name()).to_string());
             let name = constant_id_str(&cw.name()).to_string();
-            let value = cw.value();
-            if let Some(lit) = out.scalar(&value) {
-                out.scalars.insert(name, lit);
+            if tainted.contains(&name) {
                 continue;
             }
-            if let Some(labels) = label_list(&value) {
-                out.labels.insert(name.clone(), labels);
-            }
+            let value = cw.value();
+            // The right-hand side reads the constants as they stand
+            // before this write (Ruby evaluates it first). A tainted one
+            // is in no map, so nothing derived from it folds either.
+            let regex = out.regex(&value);
+            let list = out.list(&value);
+            let keys = out.hash_keys_of(&value);
+            let scalar = out.scalar(&value);
+            let integer = out.int_expr(&value);
+            let labels = if scalar.is_none() { label_list(&value) } else { None };
             // A failure to ingest a value is not this pass's to report:
             // the constant is simply not usable as a mapping, and the
             // enum that names it says so.
-            if let Ok(Some(mapping)) = enum_label_values(&value, file, &out, &|_| None) {
+            let mapping = if scalar.is_none() {
+                enum_label_values(&value, file, &out, &|_| None).ok().flatten()
+            } else {
+                None
+            };
+            if let Some(n) = integer {
+                out.integers.insert(name.clone(), n);
+            }
+            if let Some(re) = regex {
+                if out.reads_union(&value) {
+                    out.from_union.insert(name.clone());
+                }
+                out.regexes.insert(name.clone(), re);
+            }
+            if let Some(list) = list {
+                out.lists.insert(name.clone(), list);
+            }
+            if let Some(keys) = keys {
+                out.hash_keys.insert(name.clone(), keys);
+            }
+            if let Some(lit) = scalar {
+                out.scalars.insert(name.clone(), lit);
+            }
+            if let Some(labels) = labels {
+                out.labels.insert(name.clone(), labels);
+            }
+            if let Some(mapping) = mapping {
                 out.mappings.insert(name, mapping);
             }
         }
         out
     }
 
+    /// A list of literals the class body can fold: an array literal
+    /// (`%w[…]`, `%i[…]`, `[…]`) whose every element is a String, Symbol,
+    /// Integer, Float, `true`/`false` or `nil` literal, or a Duration
+    /// literal (`1.week.seconds`, folded to its Integer seconds), `.freeze`d
+    /// or not, or another folded list constant.
+    pub(super) fn list(&self, node: &Node<'_>) -> Option<Vec<Literal>> {
+        if let Some(inner) = single_parenthesized(node) {
+            return self.list(&inner);
+        }
+        if let Some(call) = node.as_call_node() {
+            if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() {
+                return self.list(&call.receiver()?);
+            }
+            // `NAME.keys` of a folded Hash constant.
+            if constant_id_str(&call.name()) == "keys" && call.arguments().is_none() && call.block().is_none() {
+                return self.hash_keys_of(&call.receiver()?);
+            }
+            return None;
+        }
+        if let Some(key) = const_key(node) {
+            return self.lists.get(&key).cloned();
+        }
+        node.as_array_node()?
+            .elements()
+            .iter()
+            .map(|el| {
+                list_atom(&el).or_else(|| super::util::duration_seconds(&el).map(|value| Literal::Int { value }))
+            })
+            .collect()
+    }
+
+    /// The keys of a Hash the class body can fold: a Hash literal whose
+    /// every key is a literal [`list_atom`] (no `**splat`), `.freeze`d or
+    /// not, or another folded Hash constant. Each key keeps its kind, in
+    /// the order `Hash#keys` gives (a repeated key keeps its first
+    /// place).
+    /// Record an enum the class body declares, for `<plural>.keys` below.
+    pub(super) fn note_enum_labels(&mut self, column: &str, labels: Vec<String>) {
+        self.enum_labels.insert(crate::naming::pluralize_snake(column), labels);
+    }
+
+    pub(super) fn hash_keys_of(&self, node: &Node<'_>) -> Option<Vec<Literal>> {
+        if let Some(inner) = single_parenthesized(node) {
+            return self.hash_keys_of(&inner);
+        }
+        if let Some(call) = node.as_call_node() {
+            if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() && call.block().is_none() {
+                return self.hash_keys_of(&call.receiver()?);
+            }
+            // `statuses` (or `self.statuses`): an enum this body declared
+            // above, whose mapping's keys are its labels as Strings.
+            if call.arguments().is_none()
+                && call.block().is_none()
+                && call.receiver().is_none_or(|r| r.as_self_node().is_some())
+            {
+                let labels = self.enum_labels.get(constant_id_str(&call.name()))?;
+                return Some(labels.iter().map(|l| Literal::Str { value: l.clone() }).collect());
+            }
+            return None;
+        }
+        if let Some(key) = const_key(node) {
+            return self.hash_keys.get(&key).cloned();
+        }
+        let mut keys: Vec<Literal> = Vec::new();
+        for element in node.as_hash_node()?.elements().iter() {
+            let key = list_atom(&element.as_assoc_node()?.key())?;
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+        Some(keys)
+    }
+
+    /// Record whether the class sits directly at the top level, the
+    /// names the app defines below the top level anywhere, and the
+    /// top-level namespaces the app defines or reopens.
+    pub(super) fn set_lexical_scope(
+        &mut self,
+        top_level: bool,
+        app_nested_names: std::collections::HashSet<String>,
+        app_top_level_names: std::collections::HashSet<String>,
+    ) {
+        self.top_level = top_level;
+        self.app_nested_names = app_nested_names;
+        self.app_top_level_names = app_top_level_names;
+    }
+
+    /// Whether the app itself defines or reopens the top-level constant
+    /// `first` (`URI = …`, `module URI`, `URI::MailTo::X = …`), so a
+    /// standard-library constant under it, rooted or not, may not hold
+    /// its standard value.
+    pub(super) fn app_defines_top_level(&self, first: &str) -> bool {
+        self.app_top_level_names.contains(first)
+    }
+
+    /// Whether an unrooted constant path starting with `first` (the
+    /// `URI` of `URI::MailTo::EMAIL_REGEXP`) can only mean the top-level
+    /// constant. Ruby searches the lexical scope, then the class's
+    /// ancestors, then `Object`. So: the class is not nested in a module
+    /// or class, its own body defines nothing by that name, and no app
+    /// class or module defines it either (which covers every app
+    /// superclass and included module, however deep).
+    pub(super) fn resolves_at_top_level(&self, first: &str) -> bool {
+        self.top_level && !self.defined_names.contains(first) && !self.app_nested_names.contains(first)
+    }
+
+    /// A regex literal the class body can fold: a bare `/pattern/flags`
+    /// literal (`.freeze`d or not), a reference to another folded regex
+    /// constant (`OTHER_RE = NAME_RE`), or an interpolation of exactly
+    /// one other folded regex constant whose flags agree with the
+    /// outer literal's. Ruby embeds a nested `Regexp` in an
+    /// interpolated one as `(?flags-off:…)`; that group is only
+    /// equivalent to a plain substitution when the inner and outer
+    /// flags are identical, so a mismatch (or any other interpolated
+    /// shape) resolves to `None` rather than a wrong pattern.
+    pub(super) fn regex(&self, node: &Node<'_>) -> Option<(String, String)> {
+        if let Some(inner) = single_parenthesized(node) {
+            return self.regex(&inner);
+        }
+        if let Some(call) = node.as_call_node() {
+            if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() {
+                return self.regex(&call.receiver()?);
+            }
+            return self.regexp_union(&call).map(|pattern| (pattern, String::new()));
+        }
+        if let Some(key) = const_key(node) {
+            return self.regexes.get(&key).cloned();
+        }
+        if node.as_regular_expression_node().is_some() {
+            return super::util::regexp_literal_flags(node);
+        }
+        self.interpolated_regex(node)
+    }
+
+    /// `Regexp.union("a", "b")`, `Regexp.union(LIST)` or `Regexp.union(%w[…])`
+    /// of Strings: the alternation of each String escaped, as Ruby builds
+    /// it. No String at all (`Regexp.union`, `Regexp.union([])`) is Ruby's
+    /// `/(?!)/`, which matches nothing; it is spelled `[^\s\S]` here, which
+    /// also matches nothing and which every target's engine compiles (go's
+    /// RE2 and Rust's regex crate reject a lookahead). A Regexp or Symbol argument, or one
+    /// this table cannot fold, leaves the call unresolved.
+    fn regexp_union(&self, call: &ruby_prism::CallNode<'_>) -> Option<String> {
+        if constant_id_str(&call.name()) != "union" || call.block().is_some() || self.regexp_shadowed {
+            return None;
+        }
+        let receiver = call.receiver()?;
+        if !matches!(enum_constants::EnumConstants::path(&receiver).as_deref(), Some("Regexp" | "::Regexp")) {
+            return None;
+        }
+        let args: Vec<Node<'_>> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+        let strings: Vec<String> = match args.as_slice() {
+            [only] if only.as_string_node().is_none() && only.as_interpolated_string_node().is_none() => self
+                .list(only)?
+                .into_iter()
+                .map(|lit| match lit {
+                    Literal::Str { value } => Some(value),
+                    _ => None,
+                })
+                .collect::<Option<_>>()?,
+            _ => args.iter().map(|arg| self.text(arg)).collect::<Option<_>>()?,
+        };
+        if strings.is_empty() {
+            return Some(r"[^\s\S]".to_string());
+        }
+        Some(strings.iter().map(|s| regexp_escape(s)).collect::<Vec<_>>().join("|"))
+    }
+
+    /// Whether a constant's value calls `Regexp.union` or reads a constant
+    /// whose regex did.
+    fn reads_union(&self, value: &Node<'_>) -> bool {
+        struct Union<'a>(&'a ClassConsts, bool);
+        impl<'pr> ruby_prism::Visit<'pr> for Union<'_> {
+            fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+                self.1 |= constant_id_str(&node.name()) == "union";
+                ruby_prism::visit_call_node(self, node);
+            }
+            fn visit_constant_read_node(&mut self, node: &ruby_prism::ConstantReadNode<'pr>) {
+                self.1 |= self.0.from_union.contains::<str>(constant_id_str(&node.name()).as_ref());
+            }
+        }
+        let mut union = Union(self, false);
+        ruby_prism::Visit::visit(&mut union, value);
+        union.1
+    }
+
+    /// Another body of the same owner (a reopened class or module): its
+    /// folded constants join this table's. A name both bodies write is
+    /// refused by [`enum_constants::EnumConstants::owner_constant`]'s
+    /// write count, whichever value this keeps.
+    fn merge(&mut self, other: ClassConsts) {
+        self.scalars.extend(other.scalars);
+        self.mappings.extend(other.mappings);
+        self.labels.extend(other.labels);
+        self.regexes.extend(other.regexes);
+        self.lists.extend(other.lists);
+        self.hash_keys.extend(other.hash_keys);
+        self.integers.extend(other.integers);
+        self.from_union.extend(other.from_union);
+    }
+
+    /// Copy into this table the folded values of the constants the body
+    /// reads through another owner (`Rule::TEXT_SIZE_LIMIT`, or a bare
+    /// name Ruby finds in an enclosing module), keyed as the body spells
+    /// them, so every lookup above finds them like its own.
+    /// [`enum_constants::EnumConstants::owner_constant`] decides what
+    /// may fold. A name the body itself writes resolves to the body's own
+    /// owner, which this skips: its own table already answers.
+    pub(super) fn import(&mut self, stmts: &[Node<'_>], constants: &enum_constants::EnumConstants, owners: &[String]) {
+        struct Reads(Vec<String>);
+        impl<'pr> ruby_prism::Visit<'pr> for Reads {
+            fn visit_constant_read_node(&mut self, node: &ruby_prism::ConstantReadNode<'pr>) {
+                self.0.push(constant_id_str(&node.name()).to_string());
+            }
+            fn visit_constant_path_node(&mut self, node: &ruby_prism::ConstantPathNode<'pr>) {
+                // The whole path is the read; its parent is only a scope.
+                if let Some(path) = enum_constants::EnumConstants::path(&node.as_node()) {
+                    self.0.push(path);
+                }
+            }
+        }
+        if constants.defines_name("Regexp") {
+            self.regexp_shadowed = true;
+            for key in std::mem::take(&mut self.from_union) {
+                self.regexes.remove(&key);
+            }
+        }
+        let mut reads = Reads(Vec::new());
+        for stmt in stmts {
+            ruby_prism::Visit::visit(&mut reads, stmt);
+        }
+        let own = owners.first().map(String::as_str);
+        for key in reads.0 {
+            if self.scalars.contains_key(&key)
+                || self.lists.contains_key(&key)
+                || self.hash_keys.contains_key(&key)
+                || self.regexes.contains_key(&key)
+                || self.integers.contains_key(&key)
+            {
+                continue;
+            }
+            let Some((owner, member, table)) = constants.owner_constant(&key, owners) else { continue };
+            if Some(owner.as_str()) == own {
+                continue;
+            }
+            if let Some(value) = table.scalars.get(&member) {
+                self.scalars.insert(key.clone(), value.clone());
+            }
+            if let Some(value) = table.lists.get(&member) {
+                self.lists.insert(key.clone(), value.clone());
+            }
+            if let Some(value) = table.hash_keys.get(&member) {
+                self.hash_keys.insert(key.clone(), value.clone());
+            }
+            if let Some(value) = table.integers.get(&member) {
+                self.integers.insert(key.clone(), *value);
+            }
+            if let Some(value) = table.regexes.get(&member)
+                && !(self.regexp_shadowed && table.from_union.contains(&member))
+            {
+                self.regexes.insert(key.clone(), value.clone());
+            }
+        }
+    }
+
+    /// `/pattern#{CONST}pattern/flags` — folds when the embedded part
+    /// is itself a single expression this table can resolve to a regex
+    /// whose flags match the outer literal's, wrapping its source in a
+    /// non-capturing group (`(?:…)`), which is then exactly equivalent
+    /// on every target this build emits to. Any other embedded shape
+    /// (a different flag set, a non-regex constant, a method call)
+    /// leaves the whole constant unresolved.
+    fn interpolated_regex(&self, node: &Node<'_>) -> Option<(String, String)> {
+        let ir = node.as_interpolated_regular_expression_node()?;
+        if ir.is_once()
+            || ir.is_euc_jp()
+            || ir.is_windows_31j()
+            || ir.is_utf_8()
+            || ir.is_ascii_8bit()
+        {
+            return None;
+        }
+        let mut flags = String::new();
+        if ir.is_ignore_case() {
+            flags.push('i');
+        }
+        if ir.is_multi_line() {
+            flags.push('m');
+        }
+        if ir.is_extended() {
+            flags.push('x');
+        }
+        let mut pattern = String::new();
+        for part in ir.parts().iter() {
+            if let Some(sn) = part.as_string_node() {
+                pattern.push_str(&String::from_utf8_lossy(sn.unescaped()));
+                continue;
+            }
+            let es = part.as_embedded_statements_node()?;
+            let stmts = es.statements()?;
+            let body: Vec<Node<'_>> = stmts.body().iter().collect();
+            let [only] = body.as_slice() else { return None };
+            // A folded String (or Integer) constant is spliced in as raw
+            // pattern source, as Ruby does (`/\A#{FRAGMENT}\z/.source ==
+            // "\\A" + FRAGMENT + "\\z"`), under the outer literal's flags.
+            if let Some(text) = self.text(only) {
+                pattern.push_str(&text);
+                continue;
+            }
+            let (inner_pattern, inner_flags) = self.regex(only)?;
+            if inner_flags != flags {
+                return None;
+            }
+            pattern.push_str("(?:");
+            pattern.push_str(&inner_pattern);
+            pattern.push(')');
+        }
+        Some((pattern, flags))
+    }
+
+    /// The text an interpolated String or Integer piece contributes: a
+    /// folded String scalar as it is, an Integer as its digits (Ruby's
+    /// `to_s`). A Symbol constant folds as a String scalar too, and
+    /// interpolates as its name, as in Ruby.
+    fn text(&self, node: &Node<'_>) -> Option<String> {
+        if node.as_regular_expression_node().is_some() || node.as_interpolated_regular_expression_node().is_some() {
+            return None;
+        }
+        match self.scalar(node)? {
+            Literal::Str { value } => Some(value),
+            Literal::Int { value } => Some(value.to_string()),
+            _ => None,
+        }
+    }
+
     /// A scalar the class body can fold: a string, a symbol (stored as
     /// its string, which is what a string column holds), an integer,
-    /// or a constant already folded. `.freeze` is transparent.
+    /// a constant already folded, or a double-quoted interpolation whose
+    /// every piece is literal text or one of those (`"x[#{SEPARATORS}]"`).
+    /// `.freeze` is transparent.
     fn scalar(&self, node: &Node<'_>) -> Option<Literal> {
+        if let Some(interp) = node.as_interpolated_string_node() {
+            let mut value = String::new();
+            for part in interp.parts().iter() {
+                if let Some(sn) = part.as_string_node() {
+                    value.push_str(&String::from_utf8_lossy(sn.unescaped()));
+                    continue;
+                }
+                let es = part.as_embedded_statements_node()?;
+                let stmts = es.statements()?;
+                let body: Vec<Node<'_>> = stmts.body().iter().collect();
+                let [only] = body.as_slice() else { return None };
+                value.push_str(&self.text(only)?);
+            }
+            return Some(Literal::Str { value });
+        }
+        if node.as_parentheses_node().is_some() || node.as_call_node().is_some_and(|c| INTEGER_OPERATORS.contains(&constant_id_str(&c.name()).as_ref())) {
+            return i64::try_from(self.int_expr(node)?).ok().map(|value| Literal::Int { value });
+        }
         if let Some(call) = node.as_call_node() {
             if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() {
                 return self.scalar(&call.receiver()?);
@@ -1496,10 +2485,57 @@ impl ClassConsts {
         if let Some(i) = node.as_integer_node() {
             return Some(Literal::Int { value: super::util::integer_i64(&i.value())? });
         }
-        if let Some(cr) = node.as_constant_read_node() {
-            return self.scalars.get(constant_id_str(&cr.name())).cloned();
+        if let Some(key) = const_key(node) {
+            return self.scalars.get(&key).cloned();
         }
         None
+    }
+
+
+    /// Integer arithmetic the class body can fold, as Ruby computes it:
+    /// an Integer literal, a folded Integer constant, a parenthesized
+    /// expression, unary minus, or `+`, `-`, `*`, `**` of two of those.
+    /// Overflow past `i128` (or a negative or huge exponent) does not
+    /// fold, nor does any other operator or call (`/` truncates in
+    /// Ruby, and a method's result is not this pass's to compute).
+    pub(super) fn int_expr(&self, node: &Node<'_>) -> Option<i128> {
+        if let Some(paren) = node.as_parentheses_node() {
+            let body = paren.body()?;
+            let stmts = body.as_statements_node()?;
+            let parts: Vec<Node<'_>> = stmts.body().iter().collect();
+            let [only] = parts.as_slice() else { return None };
+            return self.int_expr(only);
+        }
+        if node.as_integer_node().is_some() {
+            return super::util::integer_value(node).map(i128::from);
+        }
+        if let Some(key) = const_key(node) {
+            return self.integers.get(&key).copied();
+        }
+        let call = node.as_call_node()?;
+        if call.block().is_some() {
+            return None;
+        }
+        let lhs = self.int_expr(&call.receiver()?)?;
+        let args: Vec<Node<'_>> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+        match (constant_id_str(&call.name()).as_ref(), args.as_slice()) {
+            ("-@", []) => lhs.checked_neg(),
+            ("+", [rhs]) => lhs.checked_add(self.int_expr(rhs)?),
+            ("-", [rhs]) => lhs.checked_sub(self.int_expr(rhs)?),
+            ("*", [rhs]) => lhs.checked_mul(self.int_expr(rhs)?),
+            ("**", [rhs]) => lhs.checked_pow(u32::try_from(self.int_expr(rhs)?).ok().filter(|e| *e <= 127)?),
+            _ => None,
+        }
+    }
+
+    /// An integer the class body can fold: a literal, `.freeze`d or not,
+    /// or one of the class's own integer constants (`maximum:
+    /// NAME_LIMIT`), whose value Rails reads when the class body runs.
+    pub(super) fn integer(&self, node: &Node<'_>) -> Option<i64> {
+        match self.scalar(node)? {
+            Literal::Int { value } => Some(value),
+            _ => None,
+        }
     }
 
     /// A label spelled as a symbol, a string, a folded constant, or an
@@ -1536,6 +2572,29 @@ impl ClassConsts {
 }
 
 /// The bare labels of a `%i[…]` / `%w[…]` array (optionally `.freeze`d).
+/// One literal element of a folded list, kind kept.
+fn list_atom(node: &Node<'_>) -> Option<Literal> {
+    if let Some(text) = string_value(node) {
+        return Some(Literal::Str { value: text });
+    }
+    if let Some(text) = symbol_value(node) {
+        return Some(Literal::Sym { value: Symbol::from(text.as_str()) });
+    }
+    if let Some(i) = node.as_integer_node() {
+        return Some(Literal::Int { value: super::util::integer_i64(&i.value())? });
+    }
+    if let Some(f) = node.as_float_node() {
+        return Some(Literal::Float { value: f.value() });
+    }
+    if node.as_true_node().is_some() {
+        return Some(Literal::Bool { value: true });
+    }
+    if node.as_false_node().is_some() {
+        return Some(Literal::Bool { value: false });
+    }
+    node.as_nil_node().is_some().then_some(Literal::Nil)
+}
+
 fn label_list(node: &Node<'_>) -> Option<Vec<String>> {
     if let Some(call) = node.as_call_node() {
         if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() {
@@ -1635,7 +2694,8 @@ fn enum_label_values(
             };
             Ok(labels.map(identity))
         }
-        _ => Ok(None),
+        // Another owner's mapping: `Gadget.statuses`, `.keys`, `.merge`.
+        _ => Ok(resolve_constant(node).map(|pairs| pairs.into_iter().map(|(label, value)| (label, EnumStored::Lit(value))).collect())),
     }
 }
 
@@ -2025,13 +3085,16 @@ pub(super) fn ingest_method(
     // body that passes it on (`each(&blk)`) still binds the name.
     // Ruby 3.4's anonymous `&` gets the same synthesized name the
     // library-class path gives it, so bare-`&` forwarding binds.
-    let block_param = def.parameters().and_then(|pn| pn.block()).map(|block| {
-        let name = block
-            .name()
-            .and_then(|loc| std::str::from_utf8(loc.as_slice()).ok())
-            .unwrap_or("__blk");
-        crate::dialect::Param::positional(Symbol::from(name))
-    });
+    let block_param = def
+        .parameters()
+        .and_then(|pn| super::prism_api::block_parameter(&pn))
+        .map(|block| {
+            let name = block
+                .name()
+                .and_then(|loc| std::str::from_utf8(loc.as_slice()).ok())
+                .unwrap_or("__blk");
+            crate::dialect::Param::positional(Symbol::from(name))
+        });
 
     // Only full `...` or nameless `**` enters this canonical seam.
     // Named rest/keyword-rest above and the separate block slot stay
@@ -2101,6 +3164,9 @@ fn parse_callback(
         "after_destroy_commit" => CallbackHook::AfterCommit,
         "after_save_commit" => CallbackHook::AfterSaveCommit,
         "after_rollback" => CallbackHook::AfterRollback,
+        // Only the block form was recognized; the symbol form fell
+        // through to a "not lowered" Unknown and the method never ran.
+        "after_initialize" => CallbackHook::AfterInitialize,
         _ => return None,
     };
     // The lifecycle the sugar spelling pins, which `push_symbol_callback`
@@ -2201,6 +3267,10 @@ fn parse_callback(
 /// record. Anything else (a lambda with parameters, an array of
 /// conditions) is unmodeled and declines.
 fn callback_condition(value: &ruby_prism::Node<'_>, file: &str) -> Option<Expr> {
+    // `if: (:a?)`: the parentheses only group.
+    if let Some(inner) = single_parenthesized(value) {
+        return callback_condition(&inner, file);
+    }
     if let Some(lambda) = value.as_lambda_node() {
         let body = simple_condition_body(lambda.parameters(), lambda.body())?;
         return ingest_expr(&body, file).ok();
@@ -2215,7 +3285,11 @@ fn callback_condition(value: &ruby_prism::Node<'_>, file: &str) -> Option<Expr> 
             }
         }
     }
-    let sym = symbol_value(value)?;
+    // `if: :a? || :b?` / `if: :a? && :b?`: Ruby evaluates the operator
+    // before the macro runs, and a Symbol is truthy, so the option is
+    // `:a?` and `:b?` respectively. Rails stores that one Symbol and
+    // calls only that predicate.
+    let sym = symbol_operator_value(value)?;
     Some(Expr::new(
         Span::synthetic(),
         ExprNode::Send {
@@ -2228,6 +3302,26 @@ fn callback_condition(value: &ruby_prism::Node<'_>, file: &str) -> Option<Expr> 
     ))
 }
 
+/// The name of the Symbol a Symbol literal, or an `||` / `&&` chain of
+/// them, evaluates to in Ruby: a Symbol is truthy, so `a || b` is `a`
+/// and `a && b` is `b` once `a` is known to be a Symbol
+/// (`:a? || :b? || :c?` is `:a?`, `:a? && :b? && :c?` is `:c?`). `None`
+/// when an operand Ruby would evaluate is not itself such a Symbol.
+fn symbol_operator_value(node: &ruby_prism::Node<'_>) -> Option<String> {
+    if let Some(name) = symbol_value(node) {
+        return Some(name);
+    }
+    if let Some(inner) = single_parenthesized(node) {
+        return symbol_operator_value(&inner);
+    }
+    if let Some(or) = node.as_or_node() {
+        return symbol_operator_value(&or.left());
+    }
+    let and = node.as_and_node()?;
+    symbol_operator_value(&and.left())?;
+    symbol_operator_value(&and.right())
+}
+
 /// The one expression a lambda/proc callback condition may splice into the
 /// hook as its guard. The guard runs inline in the callback, with `self`
 /// as the record and no frame of its own, so only a body that is the same
@@ -2238,10 +3332,18 @@ fn callback_condition(value: &ruby_prism::Node<'_>, file: &str) -> Option<Expr> 
 ///   `it` are parameters too);
 /// * exactly one statement, with no `return`/`next`/`break`/`redo`/
 ///   `retry` — inside the hook a `return` exits the whole callback chain;
-/// * no local writes — they would leak into the hook's scope. That
-///   includes a local bound through a target: a multi-write
-///   `(a, b = …)`, a `=> t` match-write, a `rescue => e`; and any
-///   multi-write declines, its targets being locals or not.
+/// * no local reads or writes of a name bound outside the expression.
+///   A read of a local captured from the class body
+///   (`flag = true; if: -> { flag }`) becomes a bare name inside
+///   `def validate` / the hook and raises `NameError`. A name bound by
+///   a nested block or lambda (`tags.any? { |tag| tag.blank? }`,
+///   `{ _1 }`, `{ it }`) stays: that binding is still in the spliced
+///   expression. A block local (`{ |; tmp| tmp }`) is not — the
+///   lowered block drops that declaration, so the read would be a
+///   bare name. A write would leak into the
+///   hook's scope. That includes a local bound through a target: a
+///   multi-write `(a, b = …)`, a `=> t` match-write, a `rescue => e`;
+///   and any multi-write declines, its targets being locals or not.
 ///
 /// Anything else declines (`None`), and the callback falls back to the
 /// unsupported-DSL warning, as it did before conditions were modelled.
@@ -2262,38 +3364,124 @@ fn simple_condition_body<'pr>(
         return None;
     }
 
-    struct Escapes(bool);
+    struct Escapes {
+        bad: bool,
+        /// Names bound by nested blocks and lambdas still in scope.
+        bound: Vec<String>,
+    }
+    impl<'pr> Escapes {
+        fn push_binding(&mut self, name: &str) {
+            self.bound.push(name.to_string());
+        }
+
+        fn bind_parameters(&mut self, params: Option<ruby_prism::Node<'pr>>) {
+            let Some(params) = params else { return };
+            if params.as_it_parameters_node().is_some() {
+                self.push_binding("it");
+                return;
+            }
+            if let Some(numbered) = params.as_numbered_parameters_node() {
+                for n in 1..=numbered.maximum() {
+                    self.push_binding(&format!("_{n}"));
+                }
+                return;
+            }
+            let Some(block_params) = params.as_block_parameters_node() else { return };
+            // `|; tmp|` declares a local the lowered block does not
+            // keep. A read of that name would emit as a bare `tmp`.
+            let Some(pn) = block_params.parameters() else { return };
+            let bind_list = |this: &mut Self, list: ruby_prism::NodeList<'pr>| {
+                for node in list.iter() {
+                    this.bind_parameter(&node);
+                }
+            };
+            bind_list(self, pn.requireds());
+            bind_list(self, pn.optionals());
+            bind_list(self, pn.posts());
+            bind_list(self, pn.keywords());
+            if let Some(rest) = pn.rest() {
+                self.bind_parameter(&rest);
+            }
+            if let Some(rest) = pn.keyword_rest() {
+                self.bind_parameter(&rest);
+            }
+            if let Some(block) = super::prism_api::block_parameter(&pn) {
+                if let Some(name) = block.name() {
+                    self.push_binding(&constant_id_str(&name));
+                }
+            }
+        }
+
+        fn bind_parameter(&mut self, node: &ruby_prism::Node<'pr>) {
+            let name = if let Some(param) = node.as_required_parameter_node() {
+                Some(constant_id_str(&param.name()))
+            } else if let Some(param) = node.as_optional_parameter_node() {
+                Some(constant_id_str(&param.name()))
+            } else if let Some(param) = node.as_rest_parameter_node() {
+                param.name().as_ref().map(constant_id_str)
+            } else if let Some(param) = node.as_required_keyword_parameter_node() {
+                Some(constant_id_str(&param.name()))
+            } else if let Some(param) = node.as_optional_keyword_parameter_node() {
+                Some(constant_id_str(&param.name()))
+            } else if let Some(param) = node.as_keyword_rest_parameter_node() {
+                param.name().as_ref().map(constant_id_str)
+            } else {
+                None
+            };
+            if let Some(name) = name {
+                self.push_binding(&name);
+            }
+        }
+    }
     impl<'pr> ruby_prism::Visit<'pr> for Escapes {
-        fn visit_return_node(&mut self, _: &ruby_prism::ReturnNode<'pr>) { self.0 = true; }
-        fn visit_next_node(&mut self, _: &ruby_prism::NextNode<'pr>) { self.0 = true; }
-        fn visit_break_node(&mut self, _: &ruby_prism::BreakNode<'pr>) { self.0 = true; }
-        fn visit_redo_node(&mut self, _: &ruby_prism::RedoNode<'pr>) { self.0 = true; }
-        fn visit_retry_node(&mut self, _: &ruby_prism::RetryNode<'pr>) { self.0 = true; }
+        fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
+            let mark = self.bound.len();
+            self.bind_parameters(node.parameters());
+            ruby_prism::visit_block_node(self, node);
+            self.bound.truncate(mark);
+        }
+        fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
+            let mark = self.bound.len();
+            self.bind_parameters(node.parameters());
+            ruby_prism::visit_lambda_node(self, node);
+            self.bound.truncate(mark);
+        }
+        fn visit_local_variable_read_node(&mut self, node: &ruby_prism::LocalVariableReadNode<'pr>) {
+            let name = constant_id_str(&node.name());
+            if !self.bound.iter().any(|bound| bound == name) {
+                self.bad = true;
+            }
+        }
+        fn visit_return_node(&mut self, _: &ruby_prism::ReturnNode<'pr>) { self.bad = true; }
+        fn visit_next_node(&mut self, _: &ruby_prism::NextNode<'pr>) { self.bad = true; }
+        fn visit_break_node(&mut self, _: &ruby_prism::BreakNode<'pr>) { self.bad = true; }
+        fn visit_redo_node(&mut self, _: &ruby_prism::RedoNode<'pr>) { self.bad = true; }
+        fn visit_retry_node(&mut self, _: &ruby_prism::RetryNode<'pr>) { self.bad = true; }
         fn visit_local_variable_write_node(&mut self, _: &ruby_prism::LocalVariableWriteNode<'pr>) {
-            self.0 = true;
+            self.bad = true;
         }
         fn visit_local_variable_operator_write_node(
             &mut self,
             _: &ruby_prism::LocalVariableOperatorWriteNode<'pr>,
         ) {
-            self.0 = true;
+            self.bad = true;
         }
         fn visit_local_variable_or_write_node(&mut self, _: &ruby_prism::LocalVariableOrWriteNode<'pr>) {
-            self.0 = true;
+            self.bad = true;
         }
         fn visit_local_variable_and_write_node(&mut self, _: &ruby_prism::LocalVariableAndWriteNode<'pr>) {
-            self.0 = true;
+            self.bad = true;
         }
         fn visit_local_variable_target_node(&mut self, _: &ruby_prism::LocalVariableTargetNode<'pr>) {
-            self.0 = true;
+            self.bad = true;
         }
         fn visit_multi_write_node(&mut self, _: &ruby_prism::MultiWriteNode<'pr>) {
-            self.0 = true;
+            self.bad = true;
         }
     }
-    let mut v = Escapes(false);
+    let mut v = Escapes { bad: false, bound: Vec::new() };
     ruby_prism::Visit::visit(&mut v, &only);
-    if v.0 { None } else { Some(only) }
+    if v.bad { None } else { Some(only) }
 }
 
 fn negate_condition(cond: Expr) -> Expr {
@@ -2573,7 +3761,14 @@ fn parse_association(
                 "dependent" => {
                     dependent = symbol_value(&value).and_then(|s| dependent_from_sym(&s))
                 }
-                "optional" => optional = bool_value(&value),
+                // Rails reads `optional:` for its truth: a lambda or a
+                // Symbol is optional, whatever it would return. Only a
+                // `false` or `nil` literal, parenthesized or not, keeps
+                // the association required.
+                "optional" => {
+                    let value = single_parenthesized(&value).unwrap_or(value);
+                    optional = Some(bool_value(&value).unwrap_or_else(|| value.as_nil_node().is_none()))
+                }
                 // `touch: true` / `touch: :last_message_at`. A `false`
                 // is Rails' explicit opt-out and reads as no touch,
                 // which is what `None` already means.
@@ -2605,6 +3800,24 @@ fn parse_association(
                         })
                         .and_then(|l| l.body())
                         .and_then(|b| ingest_expr(&b, file).ok());
+                }
+                // Options that change what Rails does and that nothing here
+                // models: reported rather than dropped silently.
+                "index_errors" | "counter_cache" | "validate" | "required" | "before_add" | "after_add"
+                | "before_remove" | "after_remove" | "ensuring_owner_was" => {
+                    let span = Span {
+                        file: super::sources::file_id(file),
+                        start: el.location().start_offset() as u32,
+                        end: el.location().end_offset() as u32,
+                    };
+                    let mut diagnostic = crate::diagnostic::Diagnostic::unsupported(
+                        span,
+                        None,
+                        format!("{method} :{name_str}, {key}:"),
+                        "this association option is not modelled and is ignored",
+                    );
+                    diagnostic.severity = crate::diagnostic::Severity::Warning;
+                    super::prism::push(diagnostic);
                 }
                 _ => {}
             }
@@ -2932,9 +4145,17 @@ pub(crate) fn row_from_table(table: &Table) -> Row {
 /// — validations and analysis both need to see that. The primary key
 /// is excluded (the INSERT assigns it and every hydration path treats
 /// it as present). Twin of `lower::model_to_library::ty_of_column_slot`;
-/// keep them in sync, same as the `ty_of_column` pair below.
-fn ty_of_column_slot(col: &crate::schema::Column) -> Ty {
-    let base = ty_of_column(&col.col_type);
+/// keep them in sync, same as the `ty_of_column` pair below. A
+/// PostgreSQL array column (`array: true`) is typed `Array[<element>]`
+/// only where the target stores the Array (`Column::array_stored`, set by
+/// `lower::array_columns`). Elsewhere it stays its element: the analysis
+/// feeds the lowered targets' method dispatch, and their storage holds one
+/// element (`project::report_array_columns`).
+pub(crate) fn ty_of_column_slot(col: &crate::schema::Column) -> Ty {
+    let mut base = ty_of_column(&col.col_type);
+    if col.array_stored {
+        base = Ty::Array { elem: base.into() };
+    }
     if col.nullable && !col.primary_key {
         Ty::Union { variants: vec![base, Ty::Nil].into() }
     } else {
@@ -2969,6 +4190,12 @@ fn ty_of_column(t: &ColumnType) -> Ty {
         // separately in `lower::has_json`.
         ColumnType::Json | ColumnType::Jsonb => Ty::Untyped,
         ColumnType::Uuid => Ty::Str,
+        // Rails casts a PostgreSQL interval to ActiveSupport::Duration.
+        // Storage stays text (`lower::model_to_library::ty_of_column`).
+        ColumnType::Interval => Ty::Class {
+            id: crate::ident::ClassId(crate::ident::Symbol::from("ActiveSupport::Duration")),
+            args: vec![].into(),
+        },
         ColumnType::Reference { .. } => Ty::Int,
     }
 }

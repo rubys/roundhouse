@@ -162,7 +162,7 @@ fn view<'a>(files: &'a [(String, String)], suffix: &str) -> &'a str {
 fn every_emitted_view_parses() {
     for (path, source) in emitted().iter().filter(|(p, _)| p.ends_with(".rb")) {
         let result = ruby_prism::parse(source.as_bytes());
-        let errors: Vec<String> = result.errors().map(|e| e.message().to_string()).collect();
+        let errors: Vec<String> = result.errors().map(|e| String::from_utf8_lossy(e.message()).into_owned()).collect();
         assert!(errors.is_empty(), "{path} does not parse: {errors:?}\n{source}");
     }
 }

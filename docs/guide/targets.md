@@ -42,7 +42,7 @@ additions for the files they change. After Full goes red, maintainers can
 narrow fix rounds with focus labels (`ci:swift`, `ci:extras`, …) — see
 [CI coverage](../ci/README.md). Pushes to canonical `main` run that Ruby
 floor plus the full Spinel suite; extra-language SDKs wait for the
-four-hour schedule. Maintainers can request full PR coverage with `ci:full`. The lanes use the blog fixture
+three-hour schedule. Maintainers can request full PR coverage with `ci:full`. The lanes use the blog fixture
 (`fixtures/real-blog`: articles, comments,
 nested routes, validations, Turbo Streams over Action Cable, Tailwind)
 unless another app is named. A target's row in

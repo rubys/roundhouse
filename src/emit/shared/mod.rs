@@ -13,6 +13,7 @@ pub mod args;
 pub mod cmp;
 pub mod div_pow;
 pub mod eq;
+pub mod fn_call;
 pub mod hoist;
 pub mod interp;
 pub mod modulo;

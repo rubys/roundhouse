@@ -1,0 +1,28 @@
+module ActiveSupport
+  module Notifications
+    SUBSCRIBERS: Array[Array[untyped]]
+
+    def self.subscribe: (String | Regexp pattern, ?untyped? callback, ?monotonic: bool) ?{ () -> untyped } -> Array[untyped]
+    def self.unsubscribe: (Array[untyped] subscriber) -> nil
+    def self.instrument: (String name, ?untyped? payload) ?{ () -> untyped } -> untyped
+    def self.sql: (String statement) -> nil
+    def self.subscribed: (untyped callback, String name, ?monotonic: bool) { () -> untyped } -> untyped
+
+    class Event
+      @name: String
+      @time: Time
+      @end: Time
+      @transaction_id: String?
+      @payload: Hash[Symbol, untyped]
+      @span: Float
+
+      def name: () -> String
+      def time: () -> Time
+      def end: () -> Time
+      def transaction_id: () -> String?
+      def payload: () -> Hash[Symbol, untyped]
+      def duration: () -> Float
+      def initialize: (String name, untyped start, untyped ending, String? transaction_id, Hash[Symbol, untyped] payload, ?Float? span) -> void
+    end
+  end
+end

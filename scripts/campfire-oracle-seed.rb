@@ -39,6 +39,15 @@ users    = Integer(ENV.fetch("CF_USERS", 50))
 rooms    = Integer(ENV.fetch("CF_ROOMS", 5))
 messages = Integer(ENV.fetch("CF_MESSAGES", 100))
 
+# CF_MEMBERSHIP=skewed is the many-viewer population (bench-campfire's users
+# profile): room 1 stays Rooms::Open, so everyone is in it, and every other
+# room is Rooms::Closed with a membership that falls off as a power law, so
+# a few rooms are busy and most are quiet. Users then differ in which rooms
+# they see, which is what makes a viewer's pages their own and gives a
+# cross-viewer leak something to show. Seeded from a fixed Random so every
+# lane and every run reads the same rows.
+skewed = ENV["CF_MEMBERSHIP"] == "skewed"
+
 Account.create!(name: "Campfire") if Account.none?
 
 if User.none?
@@ -63,11 +72,20 @@ if Room.none?
   # page for any seeded session — a closed room would make the result
   # depend on which user the load generator picked.
   Room.insert_all((1..rooms).map { |i|
-    { name: "Room #{i}", creator_id: creator, type: "Rooms::Open" }
+    { name: "Room #{i}", creator_id: creator,
+      type: skewed && i > 1 ? "Rooms::Closed" : "Rooms::Open" }
   })
   ids = User.pluck(:id)
-  Room.pluck(:id).each do |room_id|
-    Membership.insert_all(ids.map { |uid| { room_id: room_id, user_id: uid } })
+  random = Random.new(42)
+  Room.order(:id).pluck(:id).each_with_index do |room_id, r|
+    members = ids
+    if skewed && r > 0
+      # Room 2 holds 60% of the users, room k about 60% / (k-1)^0.9, and
+      # never fewer than 3. The creator is always a member.
+      size = [ (ids.size * 0.6 / r**0.9).round, 3 ].max.clamp(1, ids.size)
+      members = ([ creator ] + ids.shuffle(random: random)).uniq.first(size)
+    end
+    Membership.insert_all(members.map { |uid| { room_id: room_id, user_id: uid } })
   end
 end
 
@@ -104,11 +122,14 @@ if Message.none? && messages > 0
   # the sort happened to surface, and two runtimes sorting the same rows
   # were not guaranteed to agree. One second apart, oldest first.
   base = Time.now - (rooms * messages)
-  Room.pluck(:id).each_with_index do |room_id, r|
+  members = Membership.pluck(:room_id, :user_id).group_by(&:first).transform_values { |rows| rows.map(&:last).sort }
+  Room.order(:id).pluck(:id).each_with_index do |room_id, r|
+    # A closed room's messages are written by its members.
+    authors = skewed ? members.fetch(room_id) : ids
     Message.insert_all((1..messages).map { |i|
       t = base + (r * messages) + i
       { room_id: room_id,
-        creator_id: ids[i % ids.size],
+        creator_id: authors[i % authors.size],
         client_message_id: "seed-#{room_id}-#{i}",
         created_at: t, updated_at: t }
     })

@@ -39,6 +39,7 @@ module Sock
   ffi_func :sp_net_poll_ready,            [:int],             :int
   ffi_func :sp_net_shell_capture,         [:str, :int],       :binstr
   ffi_func :sp_net_listen_host,           [:str, :int, :int], :int
+  ffi_func :sp_net_unix_listen,           [:str, :int],       :int
 
   # Delegators: keep the existing `Sock.sphttp_*` call sites unchanged
   # while routing them through sp_net (Stage 1 of retiring sphttp.c).

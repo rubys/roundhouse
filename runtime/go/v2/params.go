@@ -39,3 +39,38 @@ func Params_provided(sub map[string]RoundhouseParamValue, key string) bool {
 	_, isString := value.(string)
 	return isString
 }
+
+// The scalar readers the params lowering emits, and its record of
+// multiparameter keys. Those keys (`title(1)`) are modeled on the Ruby
+// family only (runtime/ruby/params.rb); this target ignores them, as it
+// always has, so these pass through.
+func Params_scalar_provided(sub map[string]RoundhouseParamValue, key string) bool {
+	return Params_provided(sub, key)
+}
+
+func Params_scalar(sub map[string]RoundhouseParamValue, key string) string {
+	return Params_str(sub, key, "")
+}
+
+func Params_no_fields() []string {
+	return []string{}
+}
+
+func Params_multiparameter_fields(sub map[string]RoundhouseParamValue, keys []string) []string {
+	return []string{}
+}
+
+func Params_multiparameter_unsupported(sub map[string]RoundhouseParamValue, keys []string) bool {
+	return false
+}
+
+func Params_any_of(list []string, names []string) bool {
+	for _, n := range names {
+		for _, l := range list {
+			if l == n {
+				return true
+			}
+		}
+	}
+	return false
+}

@@ -326,6 +326,12 @@ pub(super) fn apply_narrowing(ctx: &Ctx, pred: &NarrowPred, then_branch: bool) -
     narrowings(pred, then_branch, &mut |key, narrow| {
         narrow_binding(&mut new_ctx, key, |current| narrow(current))
     });
+    if let NarrowPred::IsA(VarKey::Local(name), Ty::Class { id, .. }) | NarrowPred::IsNotA(VarKey::Local(name), Ty::Class { id, .. }) = pred
+        && matches!(pred, NarrowPred::IsA(..)) == then_branch
+        && matches!(id.0.as_str(), "Class" | "Module")
+    {
+        new_ctx.query_class_objects.insert(name.clone());
+    }
     new_ctx
 }
 
@@ -549,6 +555,8 @@ fn ty_compatible(a: &Ty, b: &Ty) -> bool {
             (a, b),
             (Ty::Array { .. }, Ty::Array { .. }) | (Ty::Hash { .. }, Ty::Hash { .. })
         )
+        || matches!((a, b), (Ty::Fn { .. }, Ty::Class { id, .. }) if id.0.as_str() == "Proc")
+        || matches!((a, b), (Ty::Class { id: x, .. }, Ty::Class { id: y, args }) if x == y && args.is_empty())
 }
 
 /// Forget every narrowed `x.attr` read whose local `x` the given expressions

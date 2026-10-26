@@ -36,5 +36,10 @@ module BCrypt
       GemFacade.fail!("BCrypt::Password#to_s")
       ""
     end
+
+    def salt
+      GemFacade.fail!("BCrypt::Password#salt")
+      ""
+    end
   end
 end

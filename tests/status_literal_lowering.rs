@@ -1,10 +1,8 @@
 //! `render …, status: 400` reaches the runtime as `status: :bad_request`.
 //!
-//! `ActionController::Base#resolve_status` is monomorphic on Symbol and
-//! raises "Invalid HTTP status" on anything else, so an Integer literal —
-//! lobsters writes them throughout — turned its own 400 into a 500.
-//! `lower::status_literal` grounds the literal to the name Rails' table
-//! gives it; a JSON payload's `status:` key is data and stays an Integer.
+//! `lower::status_literal` retains the canonical Symbol shape for known
+//! literal codes; computed Integers pass through the Ruby/Spinel runtime resolver.
+//! A JSON payload's `status:` key is data and stays an Integer.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

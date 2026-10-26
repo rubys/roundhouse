@@ -318,7 +318,7 @@ fn ac_message_verifier_test_passes_under_cruby() {
 }
 
 /// `rate_limit`'s counter (`ActionController::RateLimiter` over
-/// `Rails::Cache#increment_str`). Ruby-family lanes only: the store is
+/// `Rails::Cache#increment`). Ruby-family lanes only: the store is
 /// the shared runtime's, which the strict-target runtimes do not stage.
 #[test]
 #[ignore]

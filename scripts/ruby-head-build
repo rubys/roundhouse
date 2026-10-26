@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# scripts/ruby-head-build — build ruby/ruby master, once per commit.
+#
+# Usage:  scripts/ruby-head-build [--src DIR] [--root DIR] [--keep N]
+#
+# Prints the install prefix of the newest COMPLETE build on its last
+# line, so a caller can write
+#
+#     RUBY_HEAD="$(scripts/ruby-head-build | tail -1)"
+#     scripts/bench-campfire --ruby "$RUBY_HEAD" ...
+#
+# WHY HEAD. Shopify's Ruby team works from master: its Ractor, YJIT and
+# ZJIT changes land there first, and a number taken on a release is a
+# number about code they have already moved past. The campfire benchmark
+# runs on head so that a Ractor that still does not scale is a finding
+# about today's Ruby, with a commit to file it against.
+#
+# ONE PREFIX PER COMMIT: <root>/ruby-head-<sha>. `ruby -v` names the
+# same commit, so env.json records exactly which head a run measured.
+# A prefix is used only once `make install` finished and wrote
+# .complete; `<root>/head` then points at it. A master that does not
+# build leaves `head` on the last good build and exits nonzero, so a
+# nightly measures yesterday's head (and its env.json says so) instead
+# of nothing.
+#
+# A fresh prefix has an empty gem directory; the bundles that run on it
+# are installed there by their own `bundle install`. Every C extension
+# is therefore compiled by the Ruby that loads it.
+#
+# YJIT and ZJIT are both required (--enable-yjit --enable-zjit), so a
+# box whose rustc went missing fails the build rather than quietly
+# producing a Ruby without either JIT.
+#
+#   --src DIR    the ruby/ruby clone (default ~/src/ruby; cloned if absent)
+#   --root DIR   where prefixes go (default ~/.rubies)
+#   --keep N     complete builds to keep, newest first (default 3)
+
+set -euo pipefail
+
+SRC="$HOME/src/ruby"
+ROOT="$HOME/.rubies"
+KEEP=3
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --src)  SRC="$2"; shift 2 ;;
+        --root) ROOT="$2"; shift 2 ;;
+        --keep) KEEP="$2"; shift 2 ;;
+        -h|--help) sed -n '2,/^set -euo pipefail$/p' "$0" | sed '$d;s/^# \{0,1\}//'; exit 0 ;;
+        *) echo "ruby-head-build: unknown argument $1" >&2; exit 2 ;;
+    esac
+done
+
+# cron's PATH has no cargo; YJIT and ZJIT need rustc, and master's JIT
+# crates are edition 2024 (rustc >= 1.85). The newest versioned rustup
+# toolchain wins: the box's ~/.cargo/bin default was 1.83 (10-22).
+[[ -d "$HOME/.cargo/bin" ]] && PATH="$HOME/.cargo/bin:$PATH"
+TOOLCHAIN="$(ls -d "$HOME"/.rustup/toolchains/[0-9]*/bin 2>/dev/null | sort -V | tail -1 || true)"
+[[ -n "$TOOLCHAIN" ]] && PATH="$TOOLCHAIN:$PATH"
+command -v rustc >/dev/null || { echo "ruby-head-build: no rustc on PATH" >&2; exit 1; }
+RUSTC_MINOR="$(rustc --version | sed -E 's/^rustc 1\.([0-9]+).*/\1/')"
+(( RUSTC_MINOR >= 85 )) || { echo "ruby-head-build: $(rustc --version) predates edition 2024 (need 1.85+)" >&2; exit 1; }
+
+# A released Ruby runs the build's own Ruby scripts (BASERUBY).
+BASERUBY="$(find "$HOME/.local/share/mise/installs/ruby" -mindepth 2 -maxdepth 2 -type d -name bin 2>/dev/null \
+    | grep -E '/[0-9][0-9.]*/bin$' | sort -V | tail -1 || true)"
+BASERUBY="${BASERUBY:+$BASERUBY/ruby}"
+[[ -x "${BASERUBY:-}" ]] || BASERUBY="$(command -v ruby || true)"
+[[ -x "${BASERUBY:-}" ]] || { echo "ruby-head-build: no released ruby for BASERUBY" >&2; exit 1; }
+
+mkdir -p "$ROOT"
+if [[ ! -d "$SRC/.git" ]]; then
+    git clone --quiet --filter=blob:none https://github.com/ruby/ruby.git "$SRC"
+fi
+git -C "$SRC" fetch --quiet origin master
+# A local `master` branch, so `ruby -v` reads "master <sha>", not FETCH_HEAD.
+git -C "$SRC" checkout --quiet -B master FETCH_HEAD
+SHA="$(git -C "$SRC" rev-parse --short=10 HEAD)"
+PREFIX="$ROOT/ruby-head-$SHA"
+
+if [[ ! -f "$PREFIX/.complete" ]]; then
+    BUILD="$ROOT/build-$SHA"
+    LOG="$ROOT/build-$SHA.log"
+    echo "ruby-head-build: building $SHA into $PREFIX (log $LOG)" >&2
+    rm -rf "$BUILD" "$PREFIX"
+    mkdir -p "$BUILD"
+    # The build writes revision.h into the SOURCE tree and only rewrites it
+    # when it is missing, so yesterday's copy would name yesterday's commit
+    # in `ruby -v` (and so in env.json): 10-23 ran 50f1aca061 as "8ff4ae135d".
+    rm -f "$SRC/revision.h"
+    if ! {
+        ( cd "$SRC" && ./autogen.sh ) &&
+        ( cd "$BUILD" && "$SRC/configure" --prefix="$PREFIX" --disable-install-doc \
+              --enable-yjit --enable-zjit --with-baseruby="$BASERUBY" ) &&
+        make -C "$BUILD" -j"$(nproc)" &&
+        make -C "$BUILD" install
+    } > "$LOG" 2>&1; then
+        echo "ruby-head-build: master $SHA did not build (tail of $LOG):" >&2
+        tail -20 "$LOG" >&2
+        rm -rf "$BUILD" "$PREFIX"
+        [[ -L "$ROOT/head" ]] && echo "ruby-head-build: head stays at $(readlink "$ROOT/head")" >&2
+        exit 1
+    fi
+    "$PREFIX/bin/ruby" -e 'exit(defined?(RubyVM::YJIT) && defined?(RubyVM::ZJIT) ? 0 : 1)' \
+        || { echo "ruby-head-build: $SHA built without YJIT or ZJIT" >&2; exit 1; }
+    touch "$PREFIX/.complete"
+    rm -rf "$BUILD"
+fi
+ln -sfn "$(basename "$PREFIX")" "$ROOT/head"
+
+# Prune: keep the newest $KEEP complete builds (by build time) and whatever head names.
+ls -1dt "$ROOT"/ruby-head-*/.complete 2>/dev/null | tail -n +"$((KEEP + 1))" | while read -r done_file; do
+    old="$(dirname "$done_file")"
+    [[ "$old" == "$PREFIX" ]] || rm -rf "$old" "$ROOT/build-${old##*ruby-head-}.log"
+done
+
+"$PREFIX/bin/ruby" -v >&2
+echo "$PREFIX"

@@ -123,7 +123,7 @@ fn rt_emit_body(body: &Expr) -> String {
 fn rt_emit_expr(e: &Expr) -> String {
     // Analyzer-set diagnostic annotations short-circuit to a target
     // raise-equivalent (preserves Ruby's runtime-raise semantics).
-    if let Some(kind) = &e.diagnostic {
+    if let Some(kind) = &e.diagnostic() {
         return crate::emit::diagnostics::StubStyle::GoPanic
             .render(&crate::diagnostic::Diagnostic::stub_text(kind));
     }
@@ -403,7 +403,8 @@ fn rt_emit_literal(lit: &Literal) -> String {
         Literal::Str { value } => format!("{value:?}"),
         Literal::Sym { value } => format!("{:?}", value.as_str()),
         Literal::Regex { pattern, flags } => {
-            format!("regexp.MustCompile({:?})", format!("(?{flags}){pattern}"))
+            let source = crate::emit::shared::regex_literal::re2_style_regex_source(pattern, flags);
+            format!("regexp.MustCompile({source:?})")
         }
     }
 }

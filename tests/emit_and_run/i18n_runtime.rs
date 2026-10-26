@@ -4,7 +4,7 @@
 //! translations and calls on CRuby 3.4.
 
 use super::emit_and_run;
-use super::i18n_locales::locales_app;
+use super::i18n_locales_app::locales_app;
 
 const RUNTIME: &str = "  def self.full_key(key)
     I18n.t(key)
@@ -89,25 +89,5 @@ fn a_template_key_from_the_request_is_looked_up_and_escaped() {
 #[test]
 fn a_translation_known_only_when_it_runs_is_unsupported_on_strict_targets() {
     let (_emitted, errors) = runtime_app().emit(roundhouse::project::BuildTarget::Rust);
-    assert!(errors.iter().any(|e| e.contains("only the Ruby-family runtime carries")), "{errors:#?}");
-}
-
-/// Reading or switching the locale lowers to the Ruby-family runtime's
-/// `I18n`, which a strict target lacks: each call is reported there
-/// rather than emitted as a call to nothing.
-#[test]
-fn the_locale_s_runtime_is_unsupported_on_strict_targets() {
-    use roundhouse::project::BuildTarget::*;
-    for target in [Rust, Typescript, Go, Python, CSharp, Kotlin, Swift, Elixir, Crystal] {
-        let (_emitted, errors) = emit_and_run::real_blog()
-            .edit(
-                "app/models/article.rb",
-                "  validates :title, presence: true\n",
-                "  validates :title, presence: true\n\n  def self.probe_locale\n    [I18n.locale.to_s, I18n.with_locale(:en) { Article.count }]\n  end\n",
-            )
-            .emit(target);
-        for method in ["locale", "enter_locale", "leave_locale"] {
-            assert!(errors.iter().any(|e| e.contains(&format!("`I18n.{method}` is the Ruby-family runtime's"))), "{target:?}: {errors:#?}");
-        }
-    }
+    assert!(errors.iter().any(|e| e.contains("this target's runtime carries the locale-chosen table, not the catalog")), "{errors:#?}");
 }

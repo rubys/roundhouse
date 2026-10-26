@@ -48,6 +48,14 @@ const DEPENDENCY_RBS: &[&str] = &[
     "runtime/ruby/active_support_ext.rbs",
     // `Inflector.pluralize_word`, for the multi-id RecordNotFound message.
     "runtime/ruby/inflector_ext.rbs",
+    // File, Dir, and ENV are not part of the active_record sidecars.
+    // Declaring them there fails the runtime gate (a signature must
+    // match a method in the paired .rb). This probe does not load the
+    // stdlib registry, so the calls in tasks.rb need a sidecar.
+    "tests/fixtures/task_stdlib.rbs",
+    // `Rake::Task` lives beside ActiveRecord, not in this directory.
+    // `define_framework_tasks!` calls it.
+    "runtime/ruby/rake/task.rbs",
 ];
 
 /// Walk a typed expression tree, collecting every node whose `ty` is

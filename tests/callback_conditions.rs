@@ -83,12 +83,14 @@ fn a_symbol_unless_condition_negates_the_predicate() {
 }
 
 /// A lambda/proc condition with parameters, several statements, a
-/// control-flow escape or a local write is NOT spliced: inline in the
-/// hook it would read an unbound `r`/`p`, `return` out of the whole
-/// callback chain, or leak a local. Those decline to the
-/// unsupported-DSL warning, as before conditions were modelled — the
-/// callback is dropped, never emitted with a broken guard.
+/// control-flow escape, a local write, or a read of a captured local
+/// is NOT spliced: inline in the hook it would read an unbound
+/// `r`/`p`/`flag`, `return` out of the whole callback chain, or leak
+/// a local. Those decline to the unsupported-DSL warning, as before
+/// conditions were modelled — the callback is dropped, never emitted
+/// with a broken guard.
 const DECLINED: &str = r##"class Widget < ApplicationRecord
+  flag = true
   before_save :a1, if: ->(r) { r.name.present? }
   before_save :a2, if: proc { |p| p.name.present? }
   before_save :a3, if: -> { return false if name.nil?; true }
@@ -97,6 +99,7 @@ const DECLINED: &str = r##"class Widget < ApplicationRecord
   before_save :a7, if: -> { name in String => t }
   before_save :a8, if: -> { begin; name.present?; rescue => e; false; end }
   before_save :a9, if: -> { (@a, @b = name, 1) && @a }
+  before_save :cap, if: -> { flag }
   before_save :a5, if: -> { name.present? }
 
   private
@@ -108,6 +111,7 @@ const DECLINED: &str = r##"class Widget < ApplicationRecord
     def a7; self.color = "7"; end
     def a8; self.color = "8"; end
     def a9; self.color = "9"; end
+    def cap; self.color = "10"; end
     def a5; self.color = "5"; end
 end
 "##;
@@ -141,7 +145,7 @@ fn only_a_zero_parameter_single_expression_condition_is_spliced() {
     assert!(!src.contains("r.name") && !src.contains("p.name"), "unbound param spliced:\n{src}");
     // The declined callbacks are dropped (defined, never called from the hook).
     let hook = src.split("def before_save").nth(1).expect("before_save hook").split("\n  end").next().unwrap();
-    for m in ["a1", "a2", "a3", "a4", "a6", "a7", "a8", "a9"] {
+    for m in ["a1", "a2", "a3", "a4", "a6", "a7", "a8", "a9", "cap"] {
         assert!(!hook.contains(m), "{m} must decline, not run with a broken guard:\n{hook}");
     }
     // The zero-parameter, single-expression one is guarded.

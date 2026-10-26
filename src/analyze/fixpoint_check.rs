@@ -251,7 +251,7 @@ type IrRow = (u32, u32, u32, u64, u64);
 
 fn ir_rows(e: &Expr, out: &mut Vec<IrRow>) {
     let ty = e.ty.as_ref().map_or(0, type_hash);
-    let note = hash_of((e.decisions, e.diagnostic.as_ref().map(annotation_hash)));
+    let note = hash_of((e.decisions, e.diagnostic().as_ref().map(annotation_hash)));
     out.push((e.span.file.0, e.span.start, e.span.end, ty, note));
     e.node.for_each_child(&mut |c| ir_rows(c, out));
 }

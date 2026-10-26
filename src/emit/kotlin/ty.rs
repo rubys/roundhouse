@@ -106,6 +106,9 @@ fn render_class(full: &str, args: &[Ty]) -> String {
             return "String".to_string();
         }
         "Regexp" => return "Regex".to_string(),
+        "StandardError" | "RuntimeError" | "ArgumentError" | "IndexError" => {
+            return super::expr::kotlin_exception_class(full);
+        }
         // The untyped-params value type. The from_raw lowering (and any
         // `@params[...]` access) treats a params value as a bare nested
         // Hash / String — `raw.is_a?(Hash) ? raw : {}`, `raw.is_a?(String)

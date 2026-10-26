@@ -56,10 +56,16 @@ pub struct SourceFile {
 
 impl SourceFile {
     /// 1-based (line, column) of a byte offset, by newline count.
-    /// Offsets past the end clamp to the last position — a span from
-    /// a stale registration shouldn't panic a diagnostics printer.
+    /// Offsets past the end clamp to the last position, and an offset
+    /// that lands mid-character (a mistranslated span — roundhouse#1048)
+    /// snaps back to that character's start — a bad offset shouldn't
+    /// panic a diagnostics printer. (Not `str::floor_char_boundary`:
+    /// MSRV is 1.89, which predates its stabilization.)
     pub fn line_col(&self, offset: u32) -> (u32, u32) {
-        let offset = (offset as usize).min(self.text.len());
+        let mut offset = (offset as usize).min(self.text.len());
+        while offset > 0 && !self.text.is_char_boundary(offset) {
+            offset -= 1;
+        }
         let before = &self.text.as_bytes()[..offset];
         let line = before.iter().filter(|&&b| b == b'\n').count() as u32 + 1;
         let line_start = before
@@ -98,5 +104,17 @@ mod tests {
         let f = SourceFile { path: "a.rb".into(), text: "é = 1".into() };
         // "é" is two bytes; the `=` at byte offset 3 is character column 3.
         assert_eq!(f.line_col(3), (1, 3));
+    }
+
+    /// roundhouse#1048: a diagnostic span can carry an offset that lands
+    /// mid-character (e.g. a mistranslated template offset from a HAML
+    /// continuation). One bad offset must snap back to its char's start
+    /// rather than panicking the whole run on `text[..offset]`.
+    #[test]
+    fn line_col_snaps_a_mid_character_offset_back_to_its_char_boundary() {
+        // "é" is a 2-byte char at bytes 0..2; byte 1 lands inside it.
+        let f = SourceFile { path: "a.rb".into(), text: "é = 1".into() };
+        assert!(!f.text.is_char_boundary(1), "test setup: byte 1 must be mid-character");
+        assert_eq!(f.line_col(1), f.line_col(0));
     }
 }

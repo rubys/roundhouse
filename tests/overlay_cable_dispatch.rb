@@ -23,6 +23,7 @@ root = ARGV[0] or abort "usage: overlay_cable_dispatch.rb <repo-root>"
 root = File.expand_path(root)
 
 require "json"
+require "stringio"
 
 # --- what boot.rb has standing before cable.rb loads -----------------
 load "#{root}/runtime/spinel/base64.rb"
@@ -445,6 +446,70 @@ check("disconnect broadcasts Rails' internal message",
 check("only the selected user's socket is told, then closed",
       [sent[7], sent[8], closed],
       [[{ "type" => "disconnect", "reason" => "remote", "reconnect" => true }], [], [7]])
+
+# --- the heartbeat's `beat`, and `close(reason:)` ---------------------
+#
+# Rails' heartbeat calls every connection's `beat`; campfire's override
+# looks its session up again now and then (through `perform_work`) and
+# closes the socket once the session is gone, telling the client why.
+# The reactor's posts run in line here, as the worker pool's already do.
+Cable::Reactor.define_singleton_method(:post) { |&block| block.call }
+class SessionCheckingConnection < ActionCable::Connection::Base
+  attr_reader :beats
+  attr_accessor :gone, :explode
+  def beat
+    super
+    @beats = (@beats || 0) + 1
+    raise "beat failed" if @explode
+    perform_work -> { close(reason: ActionCable::INTERNAL[:disconnect_reasons][:unauthorized]) if @gone }, :call
+  end
+end
+
+def beating_socket(identity, frames, shut)
+  socket = Cable::Connection.allocate
+  socket.instance_variable_set(:@identity, identity)
+  socket.instance_variable_set(:@closed, false)
+  identity.transport = socket    # what Connection#initialize does
+  socket.define_singleton_method(:send_json) { |value| frames << value }
+  socket.define_singleton_method(:on_writable) { nil }
+  socket.define_singleton_method(:close) { shut << :closed; @closed = true }
+  socket
+end
+
+kept_frames, kept_shut = [], []
+kept = SessionCheckingConnection.new(nil)
+kept_socket = beating_socket(kept, kept_frames, kept_shut)
+ended_frames, ended_shut = [], []
+ended = SessionCheckingConnection.new(nil)
+ended.gone = true
+ended_socket = beating_socket(ended, ended_frames, ended_shut)
+
+kept_socket.app_beat
+ended_socket.app_beat
+check("the heartbeat calls the app connection's beat", [kept.beats, ended.beats], [1, 1])
+check("a connection whose session remains is left open", [kept_frames, kept_shut], [[], []])
+check("one whose session is gone is told why, then closed",
+      [ended_frames, ended_shut],
+      [[{ "type" => "disconnect", "reason" => "unauthorized", "reconnect" => true }], [:closed]])
+ended_socket.app_beat
+check("a closed socket's connection is not beaten again", ended.beats, 1)
+
+broken = SessionCheckingConnection.new(nil)
+broken.explode = true
+broken_socket = beating_socket(broken, [], [])
+$stderr = StringIO.new
+contained = begin
+  broken_socket.app_beat
+  true
+rescue StandardError
+  false
+end
+$stderr = STDERR
+check("a beat that raises is contained", contained, true)
+check("perform_work runs only a callable's call",
+      (begin; kept.perform_work(-> { 1 }, :run); :ran; rescue ArgumentError; :refused; end), :refused)
+check("ActionCable::INTERNAL carries Rails' disconnect reasons",
+      ActionCable::INTERNAL[:disconnect_reasons][:unauthorized], "unauthorized")
 
 if FAILURES.empty?
   puts "ALL OK"

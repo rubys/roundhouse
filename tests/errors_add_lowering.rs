@@ -240,3 +240,21 @@ end
     assert!(out.contains("errors.add(:body, next_message)"), "{out}");
     assert_eq!(diags.len(), 2, "{diags:?}");
 }
+
+// Review of #1381 (4372485562): an app built outside ingest has no
+// catalog of its own, and a run-time `errors.add` bakes Rails' English
+// messages for the kind, as the literal path does, rather than none
+// ("translation missing: errors.messages.blank" at run time).
+#[test]
+fn a_runtime_errors_add_bakes_rails_english_without_an_app_catalog() {
+    let (out, _diags) = lower_and_emit(
+        r#"
+class BlankChecker
+  def self.check(record, attribute)
+    record.errors.add(attribute, :blank)
+  end
+end
+"#,
+    );
+    assert!(out.contains("can't be blank"), "Rails' message for :blank is baked:\n{out}");
+}

@@ -115,26 +115,70 @@ module ActiveJob
     SidekiqPush.drop_held
   end
 
+  # What `perform_parsed` answers. An Integer rather than a raise, so
+  # the worker's loop needs no rescue for an app's exceptions: the job's
+  # error is caught here, and its class and message are kept for the
+  # thread that ran it (`failure_class`, `failure_message`).
+  PERFORM_RAN = 0
+  PERFORM_DISCARDED = 1
+  PERFORM_UNKNOWN_CLASS = 2
+  PERFORM_FAILED = 3
+
+  # Run one parsed ActiveJob payload. A record that is gone is
+  # DeserializationError: DISCARDED when the job says `discard_on
+  # ActiveJob::DeserializationError`, FAILED otherwise. Any other
+  # StandardError is FAILED with its own class.
+  def self.perform_parsed(job)
+    name = job["job_class"].to_s
+    begin
+      if JobRegistry.perform(name, job["arguments"])
+        PERFORM_RAN
+      else
+        PERFORM_UNKNOWN_CLASS
+      end
+    rescue ActiveJob::DeserializationError => e
+      if JobRegistry.discards_deserialization_error(name)
+        PERFORM_DISCARDED
+      else
+        note_failure("ActiveJob::DeserializationError", e.message)
+      end
+    rescue StandardError => e
+      note_failure(e.class.name.to_s, e.message)
+    end
+  end
+
+  def self.note_failure(error_class, message)
+    Thread.current[:aj_failure_class] = error_class
+    Thread.current[:aj_failure_message] = message
+    PERFORM_FAILED
+  end
+
+  def self.failure_class
+    Thread.current[:aj_failure_class].to_s
+  end
+
+  def self.failure_message
+    Thread.current[:aj_failure_message].to_s
+  end
+
   # The drain's payload arm (`ActiveJob.drain` in the shared runtime and
   # its locked twin in thread_state.rb). REPLACES the shared default,
   # which knows no jobs: a later definition wins, on spinel as on CRuby.
   #
-  # Answers whether a job ran. A record that is gone is
-  # DeserializationError: dropped quietly when the job says
-  # `discard_on ActiveJob::DeserializationError`, reported otherwise.
-  # Any other error propagates to the drain, which reports it and moves
-  # on, as it does for a Proc.
+  # Answers whether a job ran. A record that is gone is reported unless
+  # the job discards it. Any other error is raised again for the drain,
+  # which reports its message and moves on, as it does for a Proc.
   def self.perform_payload(json)
     job = JSON.parse(json)
     name = job["job_class"].to_s
-    begin
-      ran = JobRegistry.perform(name, job["arguments"])
-      warn "[job] no job class " + name + " for a queued payload" unless ran
-      ran
-    rescue ActiveJob::DeserializationError => e
-      warn "[job] " + name + ": " + e.message unless JobRegistry.discards_deserialization_error(name)
-      false
+    outcome = perform_parsed(job)
+    if outcome == PERFORM_UNKNOWN_CLASS
+      warn "[job] no job class " + name + " for a queued payload"
+    elsif outcome == PERFORM_FAILED
+      raise failure_message unless failure_class == "ActiveJob::DeserializationError"
+      warn "[job] " + name + ": " + failure_message
     end
+    outcome == PERFORM_RAN
   end
 end
 

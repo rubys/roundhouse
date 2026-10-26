@@ -457,7 +457,23 @@ fn render_class(lc: &LibraryClass) -> String {
                 wrote_header_lines = true;
                 continue;
             }
-            let (k_ty, v_ty) = classvar_index_types.get(name).cloned().unwrap_or_else(|| {
+            // Not only `@@var[k] = v`: a module that assigns a whole Array or Hash it built (`@@table = table`) types it there
+            if let crate::ty::Ty::Array { elem } = ty
+                && !elem.is_open()
+            {
+                let e_s = super::ty::crystal_ty(elem);
+                writeln!(s, "{body_pad}@@{name} : Array({e_s}) = [] of {e_s}").unwrap();
+                wrote_header_lines = true;
+                continue;
+            }
+            // An open key keeps the String the empty-literal default already gives it
+            let assigned = match ty {
+                crate::ty::Ty::Hash { key, value } if !value.is_open() => {
+                    Some((if key.is_open() { crate::ty::Ty::Str } else { (**key).clone() }, (**value).clone()))
+                }
+                _ => None,
+            };
+            let (k_ty, v_ty) = classvar_index_types.get(name).cloned().or(assigned).unwrap_or_else(|| {
                 (crate::ty::Ty::Str, crate::ty::Ty::Str)
             });
             let k_s = super::ty::crystal_ty(&k_ty);

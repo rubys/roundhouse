@@ -53,6 +53,10 @@ pub enum ViewEngine {
     /// (campfire's `pwa/service_worker.js`) renders through it; ingest
     /// spells such a file `<name>.<format>.raw`, as Rails would.
     Raw,
+    /// `.ruby` — Rails' `register_template_handler :ruby, :source.to_proc`:
+    /// the file is Ruby, and its value is the rendered body, unescaped
+    /// (`feeds/show.xml.ruby` building an XML document).
+    Ruby,
 }
 
 impl ViewEngine {
@@ -66,6 +70,7 @@ impl ViewEngine {
             "slim" => Some(ViewEngine::Slim),
             "builder" => Some(ViewEngine::Builder),
             "raw" => Some(ViewEngine::Raw),
+            "ruby" => Some(ViewEngine::Ruby),
             _ => None,
         }
     }
@@ -78,6 +83,7 @@ impl ViewEngine {
             ViewEngine::Slim => crate::slim::compile_slim_mapped,
             ViewEngine::Builder => crate::builder::compile_builder_mapped,
             ViewEngine::Raw => erb::compile_raw_mapped,
+            ViewEngine::Ruby => erb::compile_ruby_mapped,
         }
     }
 }

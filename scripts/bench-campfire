@@ -44,7 +44,10 @@
 #                    adds it in a `Gemfile.falcon` beside the emit, at the
 #                    version tobi's lock pins, so the two lanes run the
 #                    same server.
-#     spinel         the roundhouse spinel BINARY, workers autodetected
+#     spinel         the roundhouse spinel BINARY, workers autodetected,
+#                    with Thruster's response cache in process
+#                    (runtime/spinel/tep/thruster_cache.rb), as the
+#                    CRuby lanes carry it and the rails lane has Thruster
 #     jruby          the roundhouse emit for the JVM (`--target jruby`:
 #                    the same tree over JDBC), ONE process, one Puma
 #                    thread per hardware thread — JRuby has no GVL, so
@@ -201,8 +204,28 @@
 #   --socket-per-room N     subscribers per room (default 50, which is
 #                     the shape the runtime ledger's tiers were measured
 #                     at; the sweep derives the room count from it)
+#   --ruby DIR        the CRuby every Ruby lane runs (rails, ruby,
+#                     ruby-falcon, tobi, the oracle's bundle, the socket
+#                     phase): an install prefix or its bin/. Default: the
+#                     newest plain mise MRI. The box's nightly passes the
+#                     build of ruby/ruby master that scripts/ruby-head-build
+#                     made, because Ruby head is the number Shopify's Ruby
+#                     team works from; env.json's `ruby -v` names its commit.
+#   --users-profile   also run the users phase (below): many distinct
+#                     people browsing and posting, each with a socket
+#   --users-only      ONLY the users phase: no wrk cells, cold start or
+#                     socket phase
+#   --users-people L  population steps (default 500,1000,2000,3000,4000,5000)
+#   --users-think S   mean seconds between one person's navigations (default 10)
+#   --users-post S    mean seconds between one person's posts (default 300)
+#   --users-step S    seconds measured per step (default 30)
+#   --users-warmup S  unrecorded seconds before the first step (default 10)
+#   --server-cpus C   cpus each users-phase server is pinned to (default
+#                     0-3,8-11: four cores with their SMT siblings)
+#   --client-cpus C   cpus the load generator is pinned to (default 4-7,12-15)
 #   --skip-prepare    reuse the oracle tree, emit and spinel binary
-#                     already on disk
+#                     already on disk (not across a change of --ruby: the
+#                     bundles belong to the Ruby that installed them)
 #   --keep            leave servers running on exit
 #
 # --http-suite: signed-in HTTP, optional gzip, 16 concurrent clients, the
@@ -313,6 +336,16 @@ APP="$HOME/git/once-campfire"
 GZIP=0
 HTTP_SUITE=0
 USER_ENDPOINTS=0
+USERS_PROFILE=0
+USERS_ONLY=0
+USERS_PEOPLE="500,1000,2000,3000,4000,5000"
+USERS_THINK=10
+USERS_POST=300
+USERS_STEP=30
+USERS_WARMUP=10
+SERVER_CPUS="0-3,8-11"
+CLIENT_CPUS="4-7,12-15"
+VERIFICATION_ROOT="${VERIFICATION_ROOT:-$HOME/git/once-campfire-verification}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -339,15 +372,31 @@ while [[ $# -gt 0 ]]; do
         --socket-db)    SOCKET_DB="$2"; shift 2 ;;
         --socket-cookies) SOCKET_COOKIES="$2"; shift 2 ;;
         --socket-per-room) SOCKET_PER_ROOM="$2"; shift 2 ;;
+        --ruby)        RUBY_DIR="$2"; shift 2 ;;
         --skip-prepare) SKIP_PREPARE=1; shift ;;
         --keep)        KEEP=1; shift ;;
+        --users-profile) USERS_PROFILE=1; shift ;;
+        --users-only)  USERS_PROFILE=1; USERS_ONLY=1; shift ;;
+        --users-people) USERS_PEOPLE="$2"; shift 2 ;;
+        --users-think) USERS_THINK="$2"; shift 2 ;;
+        --users-post)  USERS_POST="$2"; shift 2 ;;
+        --users-step)  USERS_STEP="$2"; shift 2 ;;
+        --users-warmup) USERS_WARMUP="$2"; shift 2 ;;
+        --server-cpus) SERVER_CPUS="$2"; shift 2 ;;
+        --client-cpus) CLIENT_CPUS="$2"; shift 2 ;;
         -h|--help)     sed -n '2,/^set -euo pipefail$/p' "$0" | sed '$d;s/^# \{0,1\}//'; exit 0 ;;
-        rails|rails-nocache|ruby|ruby-falcon|spinel|tobi|rust|go|elixir|rails-1p|rails-nocache-1p|ruby-1p|spinel-1p|jruby|truffleruby|rails-truffleruby) LANES+=("$1"); shift ;;
+        rails|rails-nocache|ruby|ruby-falcon|ruby-falcon-1p|spinel|tobi|rust|go|elixir|rails-1p|rails-nocache-1p|ruby-1p|spinel-1p|jruby|truffleruby|rails-truffleruby) LANES+=("$1"); shift ;;
         *) echo "bench-campfire: unknown argument $1" >&2; exit 2 ;;
     esac
 done
 
 (( ${#LANES[@]} )) || LANES=(rails ruby spinel)
+if [[ -n "${RUBY_DIR:-}" ]]; then
+    [[ -x "$RUBY_DIR/bin/ruby" ]] && RUBY_DIR="$RUBY_DIR/bin"
+    [[ -x "$RUBY_DIR/ruby" ]] || { echo "bench-campfire: no ruby in --ruby $RUBY_DIR" >&2; exit 2; }
+    PATH="$(cd "$RUBY_DIR" && pwd -P):$PATH"
+    export PATH
+fi
 GET_LUA="$REPO_ROOT/scripts/bench-campfire-wrk-get.lua"
 POST_LUA="$REPO_ROOT/scripts/bench-campfire-wrk-post.lua"
 [[ -n "$OUT_DIR" ]] || OUT_DIR="$REPO_ROOT/bench/results/campfire-$(date +%Y%m%d-%H%M%S)"
@@ -501,6 +550,27 @@ sum_pss_kb() {
     echo "$total"
 }
 
+# CPU time (user + system clock ticks, USER_HZ) across a PID and its
+# descendants: the users phase reports cores used per step from it.
+sum_cpu_ticks() {
+    local pids="$1" stack="$1"
+    while [[ -n "$stack" ]]; do
+        local next=""
+        for p in $stack; do
+            for k in $(pgrep -P "$p" 2>/dev/null || true); do
+                pids="$pids $k"; next="$next $k"
+            done
+        done
+        stack="$next"
+    done
+    local total=0 v
+    for p in $pids; do
+        v="$(awk '{ sub(/.*\) /, ""); print $12 + $13 }' "/proc/$p/stat" 2>/dev/null || echo 0)"
+        total=$(( total + ${v:-0} ))
+    done
+    echo "$total"
+}
+
 # Sum RSS across a PID and its descendants (KB). Puma's master carries
 # almost nothing; the workers are the measurement.
 sum_rss_kb() {
@@ -548,7 +618,9 @@ find_jemalloc() {
 # count again.
 deployed_worker_count() {
     local n
-    n="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)"
+    # nproc first: it honours the affinity the users phase pins a lane
+    # to, as Rails' own Concurrent.processor_count does.
+    n="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)"
     ruby -e 'print (ARGV[0].to_i * 0.666).ceil' "$n"
 }
 
@@ -649,9 +721,11 @@ build_spinel_binary() {
     [[ -x "$SP_EMIT/build/bin/blog" ]] \
         || { fail "spinel build produced no binary"; return 1; }
     # The binary serves static/assets, which only `make assets` fills:
-    # without it every stylesheet the room page links is a 404.
+    # without it every stylesheet the room page links is a 404. Its gem
+    # copies run `bundle exec`, so the tree's own lock (native-platform
+    # sqlite3 only) must be installed first, as the CRuby emit's is.
     step "staging the spinel tree's assets"
-    ( cd "$SP_EMIT" && make assets ) > "$LOG_DIR/assets-spinel.log" 2>&1 \
+    ( cd "$SP_EMIT" && bundle install && make assets ) > "$LOG_DIR/assets-spinel.log" 2>&1 \
         || fail "spinel make assets failed (see $LOG_DIR/assets-spinel.log)"
     ok "spinel binary at $SP_EMIT/build/bin/blog"
 }
@@ -756,7 +830,7 @@ fi
 # falcon, at the version tobi's lock pins (0.57.0 when there is no tobi
 # checkout to read). Resolved again every run — cheap when the gems are
 # already installed — because `prepare` writes a fresh Gemfile.
-if wants_lane ruby-falcon; then
+if wants_lane ruby-falcon || wants_lane ruby-falcon-1p; then
     FALCON_VERSION="$(sed -n 's/^    falcon (\([^)]*\))$/\1/p' "$TOBI_ROOT/Gemfile.lock" 2>/dev/null | head -1)"
     FALCON_VERSION="${FALCON_VERSION:-0.57.0}"
     { cp "$EMIT/Gemfile" "$EMIT/Gemfile.falcon" &&
@@ -768,6 +842,7 @@ if wants_lane ruby-falcon; then
        BUNDLE_GEMFILE="$EMIT/Gemfile.falcon" bundle check >> "$LOG_DIR/bundle-ruby-falcon.log" 2>&1); } || {
         fail "the emit's falcon bundle failed (see $LOG_DIR/bundle-ruby-falcon.log) — dropping the ruby-falcon lane"
         drop_lane ruby-falcon build "the emit's falcon bundle failed" "$LOG_DIR/bundle-ruby-falcon.log"
+        drop_lane ruby-falcon-1p build "the emit's falcon bundle failed" "$LOG_DIR/bundle-ruby-falcon.log"
     }
 fi
 if wants_lane tobi && ! ( cd "$TOBI_ROOT" 2>/dev/null && bundle check >/dev/null 2>&1 &&
@@ -1015,14 +1090,18 @@ start_lane() {
                 config.ru ) > "$log" 2>&1 &
             SERVER_PID=$!
             ;;
-        ruby-falcon)
+        ruby-falcon|ruby-falcon-1p)
             # The `ruby` lane's process, env and allocator, with the
             # emit's falcon.rb forking the workers instead of Puma. Each
             # forked child loads config.ru itself, so each opens its own
             # SQLite handle — the job puma.rb's before_worker_boot does
             # for the `ruby` lane — and cache hits are answered ahead of
             # Falcon's Rack adapter (falcon.rb's header says why).
+            # `-1p` is ONE worker: the emitted cable registry and job
+            # queue are per process, so that is the Falcon shape that
+            # delivers every broadcast (the `ruby-1p` argument).
             local jem w; jem="$(find_jemalloc || true)"; w="$(deployed_worker_count)"
+            [[ "$lane" == ruby-falcon-1p ]] && w=1
             printf 'server=falcon %s via falcon.rb (forked)\njemalloc=%s\nworkers=%s\n' \
                 "$FALCON_VERSION" "${jem:-ABSENT}" "$w" > "$shape"
             ( cd "$EMIT" && exec env RAILS_ENV=production RUBY_YJIT_ENABLE=1 \
@@ -1223,7 +1302,7 @@ login_cookie() {
             scripts/campfire-oracle login --out "$ORACLE" --port "$port" --jar "$jar" >/dev/null \
                 || { dump_login_failure "sign-in failed"; return 1; }
             ;;
-        ruby|ruby-1p|ruby-falcon|spinel|spinel-1p|jruby|truffleruby|elixir)
+        ruby|ruby-1p|ruby-falcon|ruby-falcon-1p|spinel|spinel-1p|jruby|truffleruby|elixir)
             # The emitted tree verifies what the pinned campfire asks
             # for. Since the edbc779 pin that is `protect_from_forgery
             # using: :header_only` with a `token_tag` of "" (e7e5f86b):
@@ -1409,7 +1488,9 @@ stop_lane() {   # $1 = the port it was serving (optional, but pass it)
 }
 
 port="$BASE_PORT"
-for lane in "${LANES[@]}"; do
+HTTP_LANES=("${LANES[@]}")
+(( USERS_ONLY )) && HTTP_LANES=()
+for lane in "${HTTP_LANES[@]}"; do
     # Say what THIS lane will actually run. The old banner printed
     # `$WORKERS` for every lane, so a deployed Rails booting eight
     # workers and a binary autodetecting twelve both announced
@@ -1419,6 +1500,7 @@ for lane in "${LANES[@]}"; do
         rails|rails-nocache) shape_note="campfire's own worker formula x $THREADS threads, thruster, jemalloc, resque-pool" ;;
         ruby)                shape_note="$(deployed_worker_count) worker(s) x $THREADS threads, jemalloc" ;;
         ruby-falcon)         shape_note="the ruby emit under Falcon $FALCON_VERSION, $(deployed_worker_count) forked workers, jemalloc" ;;
+        ruby-falcon-1p)      shape_note="the ruby emit under Falcon $FALCON_VERSION, one worker, jemalloc" ;;
         spinel)              shape_note="one process, workers autodetected" ;;
         spinel-1p)           shape_note="one process, SPINEL_WORKERS=1" ;;
         rust)                shape_note="once-campfire-rust, one process, own front server" ;;
@@ -1701,14 +1783,48 @@ run_socket_phase() {
             || fail "the ruby socket lane failed (see $LOG_DIR/sockets-ruby.log)"
     fi
 
-    # One file for the renderer, lanes labelled the way the HTTP rows are.
+    # TOBI IN ITS DEPLOYED SHAPE: one process, $tier_cpus worker Ractors
+    # and as many job Ractors, with the cable fan-out on an in-process
+    # Bus Ractor. Unlike the `ruby` row, that is a shape it can ship at
+    # the tier's full core count, so against `ruby` this row is "what
+    # one deployable process does with four cores" vs "what ours does
+    # with one". The sweep copies the socket seed over tobi's database;
+    # the HTTP seed is put back afterwards so nothing that reads tobi's
+    # tree later in this run (or a rerun of one lane) sees 1,000 users.
+    local tobi_socket_workers=""
+    if wants_lane tobi && [[ -d "$TOBI_ROOT" ]]; then
+        tobi_socket_workers="$tier_cpus"
+        local tobi_db="$TOBI_ROOT/storage/db/production.sqlite3"
+        [[ -f "$tobi_db" ]] && cp "$tobi_db" "$tobi_db.http-seed"
+        step "socket phase: tobi, $SOCKET_SIZES sockets on cpus $SOCKET_CPUS ($tier_cpus worker Ractors)"
+        "$sweep" --lane tobi --tobi "$TOBI_ROOT" \
+            --db "$db" --cookies "$cookies" --cpus "$SOCKET_CPUS" \
+            --workers "$tier_cpus" --sizes "$SOCKET_SIZES" --per-room "$per_room" \
+            --secret "$SPINEL_SECRET" --out "$OUT_DIR/sockets-tobi" \
+            > "$LOG_DIR/sockets-tobi.log" 2>&1 \
+            || fail "the tobi socket lane failed (see $LOG_DIR/sockets-tobi.log)"
+        if [[ -f "$tobi_db.http-seed" ]]; then
+            mv "$tobi_db.http-seed" "$tobi_db"
+            rm -f "$tobi_db-wal" "$tobi_db-shm"
+        fi
+    fi
+
+    # One file for the renderer, lanes labelled the way the HTTP rows are,
+    # each with the shape it ran: the rows are different worker counts on
+    # the same four cores, and the table has to say so beside the numbers.
+    SOCKET_SHAPES="spinel=$tier_cpus workers, one process
+ruby=1 Puma worker x $THREADS threads
+tobi=$tobi_socket_workers worker Ractors, one process
+rails=$rails_workers Puma workers x $THREADS threads" \
     ruby - "$OUT_DIR/sockets-binary/results.jsonl" "$OUT_DIR/sockets-rails/results.jsonl" \
-           "$OUT_DIR/sockets-ruby/results.jsonl" "$OUT_DIR/sockets.json" <<'RUBY'
+           "$OUT_DIR/sockets-ruby/results.jsonl" "$OUT_DIR/sockets-tobi/results.jsonl" \
+           "$OUT_DIR/sockets.json" <<'RUBY'
 require "json"
-binary, rails, emit_ruby, out = ARGV
+binary, rails, emit_ruby, tobi, out = ARGV
+shapes = ENV.fetch("SOCKET_SHAPES", "").lines(chomp: true).to_h { |l| l.split("=", 2) }
 rows = []
 # Order is the page's: our two lanes, then theirs.
-{ "spinel" => binary, "ruby" => emit_ruby, "rails" => rails }.each do |lane, path|
+{ "spinel" => binary, "ruby" => emit_ruby, "tobi" => tobi, "rails" => rails }.each do |lane, path|
   next unless File.exist?(path)
   File.readlines(path, chomp: true).reject(&:empty?).each do |line|
     d = JSON.parse(line) rescue next
@@ -1726,6 +1842,7 @@ rows = []
       "driver_max_pass_ms" => d.dig("chat", "driver_max_pass_ms"),
       "teardown_cpu_s" => d.dig("teardown", "cpu_seconds"),
       "server" => d["server"],
+      "shape" => shapes[lane],
     }
   end
 end
@@ -1734,7 +1851,120 @@ RUBY
     [[ -f "$OUT_DIR/sockets.json" ]] && ok "socket phase -> $OUT_DIR/sockets.json"
     return 0
 }
-(( SOCKETS )) && run_socket_phase
+(( SOCKETS && ! USERS_ONLY )) && run_socket_phase
+
+# ── the users phase ──────────────────────────────────────────────────
+#
+# Many distinct people instead of one viewer. A single signed-in client
+# re-requesting one page measures what a whole-page cache hit costs, and
+# every implementation has such a cache (blog 3483). Here each person
+# holds a socket with the page's subscriptions and navigates on an open
+# loop — visiting rooms (whose PresenceChannel subscription writes the
+# membership), scrolling back, searching, returning to a hidden tab —
+# while posts land in the rooms people are reading, and every response
+# and delivery is checked: see `loadgen users` in the shared verification
+# harness ($VERIFICATION_ROOT: a checkout of roundhouse-rb/once-campfire-
+# verification, branch users-profile until that is merged upstream). The
+# population steps up until the p99 of
+# a navigation passes the target; the result is how many people a lane
+# serves, with per-route latency, socket delivery and memory per step.
+#
+# Each lane runs on its own copy of the users seed (5,000 users, 30 rooms,
+# skewed closed-room memberships; `campfire-oracle users-seed`), pinned
+# to --server-cpus with the load generator on --client-cpus, so the
+# worker formulas see the pinned core count. Lanes it cannot drive are
+# skipped with the reason.
+users_lane_db() {
+    case "$1" in
+        rails|rails-1p)   echo "$ORACLE/storage/db/production.sqlite3" ;;
+        ruby|ruby-1p|ruby-falcon|ruby-falcon-1p) echo "$EMIT/storage/development.sqlite3" ;;
+        tobi)             echo "$TOBI_ROOT/storage/db/production.sqlite3" ;;
+        *)                echo "" ;;
+    esac
+}
+
+run_users_phase() {
+    local loadgen="$VERIFICATION_ROOT/loadgen/target/release/loadgen"
+    step "users phase: building the load generator in $VERIFICATION_ROOT"
+    cargo build --quiet --release --locked --manifest-path "$VERIFICATION_ROOT/loadgen/Cargo.toml" \
+        > "$LOG_DIR/users-loadgen-build.log" 2>&1 \
+        || { fail "loadgen build failed (see $LOG_DIR/users-loadgen-build.log) — skipping the users phase"; return 0; }
+    local seed_db="$REPO_ROOT/build/campfire-users-seed.sqlite3"
+    local seed_cookies="$REPO_ROOT/build/campfire-users-cookies.txt"
+    local plan="$OUT_DIR/users-plan.json"
+    scripts/campfire-oracle users-seed --out "$ORACLE" --seed-db "$seed_db" --seed-cookies "$seed_cookies" \
+        > "$LOG_DIR/users-seed.log" 2>&1 \
+        || { fail "users seed failed (see $LOG_DIR/users-seed.log) — skipping the users phase"; return 0; }
+    ruby "$REPO_ROOT/scripts/campfire-users-plan.rb" "$seed_db" "$seed_cookies" "$plan" 2>> "$LOG_DIR/users-seed.log" \
+        || { fail "users plan failed — skipping the users phase"; return 0; }
+    local all_cpus; all_cpus="0-$(( $(getconf _NPROCESSORS_ONLN) - 1 ))"
+    local port=$(( BASE_PORT + 50 ))
+    for lane in "${LANES[@]}"; do
+        local db; db="$(users_lane_db "$lane")"
+        if [[ -z "$db" ]]; then
+            skip_lane "$lane" "users" "the users phase drives the rails, ruby, ruby-falcon and tobi lanes only" ""
+            continue
+        fi
+        mkdir -p "$(dirname "$db")"
+        [[ -f "$db" ]] && cp "$db" "$db.users-phase-bak"
+        cp "$seed_db" "$db"; rm -f "$db-wal" "$db-shm"
+        # The lane inherits the shell's affinity; the shell gets it back.
+        # Every lane verifies the minted cookies, so every lane gets the
+        # fixture secret (the HTTP phase signs the emit in through its form
+        # instead, and leaves it on its own default).
+        taskset -p -c "$SERVER_CPUS" $$ > /dev/null
+        step "users phase: start $lane on :$port pinned to $SERVER_CPUS ($(nproc) cpus)"
+        local started=1
+        # ROUNDHOUSE_CABLE_STATS: the Ruby lanes' cable logs where each subscribe's
+        # time goes every 5 s (cable.rb's Cable::Stats); the fold adds it up per step.
+        SECRET_KEY_BASE="$SPINEL_SECRET" LOG_OVERRIDE="$LOG_DIR/users-$lane.log" SHAPE_OVERRIDE="$LOG_DIR/users-shape-$lane.txt" \
+            ROUNDHOUSE_CABLE_STATS=5 start_lane "$lane" "$port" || started=0
+        taskset -p -c "$all_cpus" $$ > /dev/null
+        [[ -f "$LOG_DIR/users-shape-$lane.txt" ]] && sed 's/^/    /' "$LOG_DIR/users-shape-$lane.txt"
+        if (( started == 0 )); then
+            skip_lane "$lane" "users" "did not answer on :$port" "$LOG_DIR/users-$lane.log"
+            stop_lane "$port"
+        else
+            # Memory and CPU of the server's process tree every 2 s, sampled
+            # from the generator's cores so the sampling stays off the server's.
+            local mem="$OUT_DIR/users-memory-$lane.tsv"
+            ( taskset -p -c "$CLIENT_CPUS" $BASHPID > /dev/null
+              while kill -0 "$SERVER_PID" 2>/dev/null; do
+                  printf '%s\t%s\t%s\t%s\n' "$(date +%s%3N)" "$(sum_pss_kb "$SERVER_PID")" "$(sum_rss_kb "$SERVER_PID")" "$(sum_cpu_ticks "$SERVER_PID")"
+                  sleep 2
+              done ) > "$mem" 2>/dev/null &
+            local sampler=$!
+            # And each thread's CPU, to say which process and thread the cores went to.
+            taskset -c "$CLIENT_CPUS" ruby "$REPO_ROOT/scripts/campfire-users-threads.rb" "$SERVER_PID" 2 \
+                > "$OUT_DIR/users-threads-$lane.tsv" 2>/dev/null &
+            local thread_sampler=$!
+            step "users phase: $lane, people $USERS_PEOPLE, a navigation every ${USERS_THINK}s and a post every ${USERS_POST}s per person"
+            local rc=0
+            taskset -c "$CLIENT_CPUS" "$loadgen" users --base "http://127.0.0.1:$port" --plan "$plan" \
+                --people "$USERS_PEOPLE" --think-secs "$USERS_THINK" --post-secs "$USERS_POST" \
+                --step-secs "$USERS_STEP" --warmup-secs "$USERS_WARMUP" --gzip 1 \
+                --db "$db" --audit "$OUT_DIR/users-audit-$lane.jsonl" \
+                > "$OUT_DIR/users-$lane.json" 2> "$LOG_DIR/users-loadgen-$lane.log" || rc=$?
+            kill "$sampler" "$thread_sampler" 2>/dev/null || true
+            if (( rc != 0 )); then
+                fail "users phase: loadgen exited $rc on $lane (see $LOG_DIR/users-loadgen-$lane.log)"
+            elif ruby -rjson -e 'exit JSON.parse(File.read(ARGV[0]))["valid"] ? 0 : 1' "$OUT_DIR/users-$lane.json"; then
+                ok "users phase: $lane valid, capacity $(ruby -rjson -e 'print JSON.parse(File.read(ARGV[0]))["capacity_people"].inspect' "$OUT_DIR/users-$lane.json") people"
+            else
+                fail "users phase: $lane FAILED its checks — see invalid_samples in $OUT_DIR/users-$lane.json"
+            fi
+            stop_lane "$port"
+        fi
+        if [[ -f "$db.users-phase-bak" ]]; then mv "$db.users-phase-bak" "$db"; else rm -f "$db"; fi
+        rm -f "$db-wal" "$db-shm"
+        port=$(( port + 1 ))
+    done
+    # Fold: each lane's result plus its peak memory in each step's window.
+    ruby "$REPO_ROOT/scripts/campfire-users-fold.rb" "$OUT_DIR" "${LANES[@]}"
+    [[ -f "$OUT_DIR/users.json" ]] && ok "users phase -> $OUT_DIR/users.json"
+    return 0
+}
+(( USERS_PROFILE )) && run_users_phase
 
 # ── collector, per spinel lane ───────────────────────────────────────
 #
@@ -1878,6 +2108,7 @@ jvm_ran     = (targets_ran & %w[jruby truffleruby]).any?
 tr_ran      = targets_ran.include?("truffleruby")
 rails_tr_ran = targets_ran.include?("rails-truffleruby")
 one_p_ran   = targets_ran.any? { |t| t.end_with?("-1p") }
+ruby_1p_ran = targets_ran.include?("ruby-1p")
 tobi_ran    = targets_ran.include?("tobi")
 falcon_ran  = targets_ran.include?("ruby-falcon")
 
@@ -1908,7 +2139,8 @@ env["notes"] = [
   "queue are both in-process: at more than one worker a broadcast reaches " \
   "only the subscribers sharing a process with the poster, so campfire " \
   "could not actually run this shape. Its deployable CRuby shape today is " \
-  "one worker; one process serving every core (Falcon on Ractors, the " \
+  "one worker#{ruby_1p_ran ? ' — the <code>ruby-1p</code> row, read it against <code>tobi</code> for the deployable comparison' : ''}; " \
+  "one process serving every core (Falcon on Ractors, the " \
   "shape <code>spinel</code> already has) is the planned replacement. " \
   "<code>spinel</code> needs none of this: " \
   "one process, green threads, one shared registry — which is why it is " \
@@ -1930,7 +2162,8 @@ env["notes"] = [
   "them fewer cores\". Read them per lane-family: <code>ruby</code> and " \
   "<code>spinel</code> differ from their <code>-1p</code> twins in worker " \
   "count and NOTHING else, but <code>rails-1p</code> also sheds Thruster " \
-  "and resque-pool, so its delta is not attributable to cores alone." if one_p_ran),
+  "and resque-pool, so its delta is not attributable to cores alone." \
+  "#{ruby_1p_ran ? ' <code>ruby-1p</code> is ALSO the emit\'s deployable CRuby shape: one Puma worker, so one cable registry and one job queue, the shape the WebSocket tier runs it in.' : ''}" if one_p_ran),
   "Known omissions, stated rather than discovered: the WebSocket phase's " \
   "rails lane runs Puma with campfire's worker count and its allocator but " \
   "WITHOUT Thruster and resque-pool, and no lane terminates TLS.",
@@ -2021,6 +2254,8 @@ rm -f "$OUT_DIR/env.base.json"
 # ── summarize ────────────────────────────────────────────────────────
 # Same shape scripts/bench writes, so bench-report renders either.
 
+# A users-only run has no wrk cells to summarize.
+if [[ -s "$PER_RUN" ]]; then
 ruby - "$PER_RUN" "$OUT_DIR/summary.json" "$OUT_DIR/summary.md" "$OUT_DIR/parity.txt" <<'RUBY'
 require "json"
 per_run, sj, sm, parity = ARGV
@@ -2102,6 +2337,7 @@ if File.exist?(parity) && !File.read(parity).empty?
 end
 File.write(sm, md)
 RUBY
+fi
 
 # ---------------------------------------------------------------------
 # Publish the emitted SPINEL tree alongside the run. Campfire has no
@@ -2235,5 +2471,8 @@ REPRO
 pack_spinel_tree
 
 ok "results in $OUT_DIR"
-echo
-cat "$OUT_DIR/summary.md"
+# A users-only run has no wrk table; its results are users.json.
+if [[ -f "$OUT_DIR/summary.md" ]]; then
+    echo
+    cat "$OUT_DIR/summary.md"
+fi

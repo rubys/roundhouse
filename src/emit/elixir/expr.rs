@@ -134,6 +134,22 @@ thread_local! {
     static CURRENT_CLASS_NAME: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
+thread_local! {
+    /// The current module's ivars a load-once method fills (`library::load_once_ivars`).
+    static PROCESS_WIDE_IVARS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
+}
+
+pub(super) fn set_process_wide_ivars(names: std::collections::HashSet<String>) {
+    PROCESS_WIDE_IVARS.with(|n| *n.borrow_mut() = names);
+}
+
+/// Where a module-singleton's `@ivar` lives: the request's process, or,
+/// for what a load-once method fills, every process.
+// Not the process dictionary for a load-once table: Plug serves each request in a process of its own, so each would load it again
+fn ivar_store(name: &str) -> &'static str {
+    if PROCESS_WIDE_IVARS.with(|n| n.borrow().contains(name)) { ":persistent_term" } else { "Process" }
+}
+
 /// Set the Ruby name of the class currently being emitted. Called by
 /// `emit_library_class`.
 pub(super) fn set_current_class_name(name: &str) {
@@ -268,6 +284,36 @@ fn threads_record(name: &str) -> bool {
 pub(super) fn clear_modules() {
     MODULE_NAMES.with(|m| m.borrow_mut().clear());
     MODULE_METHOD_PARAMS.with(|m| m.borrow_mut().clear());
+    ERROR_MODULES.with(|m| m.borrow_mut().clear());
+}
+
+thread_local! {
+    /// Outer locals the statement being emitted assigns inside its block and a later statement reads.
+    static LIVE_OUT: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+thread_local! {
+    /// Ruby error class name → the `defexception` module it emits as.
+    static ERROR_MODULES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+}
+
+pub(super) fn register_error_module(ruby_name: &str, module: &str) {
+    ERROR_MODULES.with(|m| m.borrow_mut().insert(ruby_name.to_string(), module.to_string()));
+}
+
+pub(super) fn is_error_module(ruby_name: &str) -> bool {
+    ERROR_MODULES.with(|m| m.borrow().contains_key(ruby_name))
+}
+
+/// The `defexception` module a raised constant names: as written, or
+/// nested in the class being emitted (`raise InvalidLocale` inside `I18n`).
+fn raised_error_module(path: &[crate::ident::Symbol]) -> Option<String> {
+    let joined = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+    let class = CURRENT_CLASS_NAME.with(|n| n.borrow().clone());
+    ERROR_MODULES.with(|m| {
+        let m = m.borrow();
+        m.get(&joined).or_else(|| m.get(&format!("{class}::{joined}"))).cloned()
+    })
 }
 
 /// Register the `*` names of `classes` into the registry, accumulating
@@ -395,6 +441,37 @@ fn emit_stmts(stmts: &[Expr]) -> String {
             let lifted = format!("{v} = {}", render_chain(cond, then_branch, else_branch, &v));
             return format!("{lifted}\n{}", emit_stmts(rest));
         }
+
+        // Several locals, or one some branch leaves unrebound mid-way: the
+        // branches hand back every local they rebind that a later statement
+        // reads, as one tuple.
+        let mut vars = Vec::new();
+        branch_rebinds(then_branch, &mut vars);
+        branch_rebinds(else_branch, &mut vars);
+        vars.retain(|v| rest.iter().any(|r| reads_local(r, v)));
+        if !vars.is_empty() {
+            let tuple = if vars.len() == 1 { vars[0].clone() } else { format!("{{{}}}", vars.join(", ")) };
+            let tail = Expr::new(crate::span::Span::synthetic(), ExprNode::Var {
+                id: crate::ident::VarId(0),
+                name: crate::ident::Symbol::from(tuple.as_str()),
+            });
+            let branch = |b: &Expr| {
+                let mut stmts: Vec<Expr> = match &*b.node {
+                    _ if is_empty(b) => Vec::new(),
+                    ExprNode::Seq { exprs } => exprs.clone(),
+                    _ => vec![b.clone()],
+                };
+                stmts.push(tail.clone());
+                emit_stmts(&stmts)
+            };
+            return format!(
+                "{tuple} = if {} do\n{}\nelse\n{}\nend\n{}",
+                emit_expr(cond),
+                indent(&branch(then_branch), 1),
+                indent(&branch(else_branch), 1),
+                emit_stmts(rest),
+            );
+        }
     }
 
     // The final threaded record update can be discarded by a later Ruby
@@ -410,7 +487,35 @@ fn emit_stmts(stmts: &[Expr]) -> String {
         {
             format!("_record = {}", emit_expr(value))
         }
-        _ => emit_stmt(head),
+        // Not bound by name: every path rebinds it before reading it, and Elixir warns on a binding nothing reads
+        ExprNode::Assign { target: LValue::Var { name, .. }, value }
+            if matches!(&*value.node, ExprNode::Var { .. } | ExprNode::Lit { .. })
+                && overwritten_before_read(rest, name.as_str()) =>
+        {
+            format!("_ = {}", emit_expr(value))
+        }
+        _ => {
+            // Not only self-referential rebinds: a block's `size = v` writes the outer local a later statement reads
+            let block = match &*head.node {
+                ExprNode::Send { block: Some(b), .. } => Some(b),
+                ExprNode::Assign { value, .. } => match &*value.node {
+                    ExprNode::Send { block: Some(b), .. } => Some(b),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let mut live = Vec::new();
+            if let Some(b) = block {
+                if let ExprNode::Lambda { params, body, .. } = &*b.node {
+                    assigned_locals(body, &mut live);
+                    live.retain(|v| !params.iter().any(|p| p.as_str() == v) && rest.iter().any(|r| reads_local(r, v)));
+                }
+            }
+            LIVE_OUT.with(|l| *l.borrow_mut() = live);
+            let out = emit_stmt(head);
+            LIVE_OUT.with(|l| l.borrow_mut().clear());
+            out
+        }
     };
     format!("{}\n{}", head, emit_stmts(rest))
 }
@@ -455,7 +560,7 @@ fn implicit_record_send(e: &Expr) -> bool {
 /// Safe-by-construction: every `io` reference flows through one of the
 /// three tagged sites, so nothing else observes its iolist shape.
 fn try_string_builder(e: &Expr) -> Option<String> {
-    match e.hint? {
+    match e.hint().as_ref()? {
         IrHint::MutableStringLiteral => None, // emitted as the plain literal
         IrHint::StringBuilderInit => match &*e.node {
             ExprNode::Assign { target: LValue::Var { name, .. }, .. } => Some(format!("{name} = []")),
@@ -487,7 +592,7 @@ fn try_string_builder(e: &Expr) -> Option<String> {
 /// `if` branch thread `io` through `Enum.reduce` / `io = if … end`
 /// rather than emit a dead, unused-variable rebind.
 fn string_builder_append_local(e: &Expr) -> Option<&str> {
-    if e.hint != Some(IrHint::StringBuilderAppend) {
+    if e.hint() != &Some(IrHint::StringBuilderAppend) {
         return None;
     }
     match &*e.node {
@@ -527,7 +632,7 @@ fn emit_stmt(e: &Expr) -> String {
         // threaded to struct fields by the functionalize passes, so an
         // Ivar target here is always module-singleton state).
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
-            format!("Process.put({}, {})", ivar_pd_key(name.as_str()), emit_expr(value))
+            format!("{}.put({}, {})", ivar_store(name.as_str()), ivar_pd_key(name.as_str()), emit_expr(value))
         }
         ExprNode::MultiAssign { targets, value } => emit_multi_assign(targets, value),
         _ => emit_expr(e),
@@ -559,6 +664,149 @@ fn emit_tail(e: &Expr) -> String {
     }
 }
 
+// Not read straight in `after`: Elixir scopes a `try` body's bindings to it, so a local the ensure reads travels through the process dictionary, unset (nil) when the body raised first, as in Ruby
+fn emit_ensure_only(whole: &Expr, body: &Expr, ensure: &Expr) -> String {
+    let stmts: Vec<Expr> = match &*body.node {
+        ExprNode::Seq { exprs } => exprs.clone(),
+        _ => vec![body.clone()],
+    };
+    let mut shared: Vec<String> = Vec::new();
+    for st in &stmts {
+        if let ExprNode::Assign { target: LValue::Var { name, .. }, .. } = &*st.node {
+            if reads_local(ensure, name.as_str()) && !shared.iter().any(|v| v == name.as_str()) {
+                shared.push(name.as_str().to_string());
+            }
+        }
+    }
+    let mut nested = Vec::new();
+    for st in &stmts {
+        if !matches!(&*st.node, ExprNode::Assign { target: LValue::Var { .. }, .. }) {
+            branch_rebinds(st, &mut nested);
+        }
+    }
+    if nested.iter().any(|v| reads_local(ensure, v)) {
+        return crate::emit::diagnostics::report_unsupported(whole.span, "elixir2", "BeginRescue", "an ensure reading a local the body binds inside a branch");
+    }
+    let syn = |text: String| Expr::new(crate::span::Span::synthetic(), ExprNode::Var { id: crate::ident::VarId(0), name: crate::ident::Symbol::from(text.as_str()) });
+    let key = |v: &str| format!("{{ensure_ref, :{v}}}");
+    let mut body_stmts = Vec::new();
+    let count = stmts.len();
+    for (i, st) in stmts.into_iter().enumerate() {
+        let saved = match &*st.node {
+            ExprNode::Assign { target: LValue::Var { name, .. }, .. } if shared.iter().any(|v| v == name.as_str()) => Some(name.as_str().to_string()),
+            _ => None,
+        };
+        body_stmts.push(st);
+        if let Some(v) = saved {
+            body_stmts.push(syn(format!("Process.put({}, {v})", key(&v))));
+            if i + 1 == count {
+                body_stmts.push(syn(v));
+            }
+        }
+    }
+    let body_s = emit_stmts(&body_stmts);
+    let mut after = String::new();
+    for v in &shared {
+        after.push_str(&format!("{v} = Process.delete({})\n", key(v)));
+    }
+    after.push_str(&emit_method_body(ensure));
+    let attempt = format!("try do\n{}\nafter\n{}\nend", indent(&body_s, 1), indent(&after, 1));
+    if shared.is_empty() {
+        attempt
+    } else {
+        format!("(\n{}\n)", indent(&format!("ensure_ref = make_ref()\n{attempt}"), 1))
+    }
+}
+
+/// Locals a branch rebinds when emitted, nested conditionals included.
+fn branch_rebinds(e: &Expr, out: &mut Vec<String>) {
+    let mut add = |v: String| {
+        if !out.contains(&v) {
+            out.push(v);
+        }
+    };
+    match &*e.node {
+        ExprNode::Seq { exprs } => exprs.iter().for_each(|x| branch_rebinds(x, out)),
+        ExprNode::If { then_branch, else_branch, .. } => {
+            branch_rebinds(then_branch, out);
+            branch_rebinds(else_branch, out);
+        }
+        ExprNode::Send { block: Some(blk), .. } => {
+            if let ExprNode::Lambda { params, body, .. } = &*blk.node {
+                block_accumulators(body, params).into_iter().for_each(add);
+            }
+        }
+        _ => {
+            if let Some(v) = rebound_local(e) {
+                add(v);
+            }
+        }
+    }
+}
+
+/// Whether every path through `stmts` assigns `v` before anything reads it.
+fn overwritten_before_read(stmts: &[Expr], v: &str) -> bool {
+    for st in stmts {
+        match writes_first(st, v) {
+            Some(answer) => return answer,
+            None => continue,
+        }
+    }
+    false
+}
+
+/// `Some(true)` when `st` assigns `v` on every path before reading it,
+/// `Some(false)` when it may read it first, `None` when it does neither.
+fn writes_first(st: &Expr, v: &str) -> Option<bool> {
+    match &*st.node {
+        ExprNode::Assign { target: LValue::Var { name, .. }, value } if name.as_str() == v => Some(!reads_local(value, v)),
+        ExprNode::Seq { exprs } => exprs.iter().find_map(|x| writes_first(x, v)),
+        ExprNode::If { cond, then_branch, else_branch } => {
+            if reads_local(cond, v) {
+                return Some(false);
+            }
+            let path = |b: &Expr| writes_first(b, v).or_else(|| ends_in_return(b).then_some(true));
+            // A path that neither writes nor reads goes on to the statements after the `if`.
+            match (path(then_branch), path(else_branch)) {
+                (Some(false), _) | (_, Some(false)) => Some(false),
+                (Some(true), Some(true)) => Some(true),
+                _ => None,
+            }
+        }
+        _ => reads_local(st, v).then_some(false),
+    }
+}
+
+/// Locals a statement list assigns, through conditionals but not into nested blocks.
+fn assigned_locals(e: &Expr, out: &mut Vec<String>) {
+    match &*e.node {
+        ExprNode::Assign { target: LValue::Var { name, .. }, .. } => {
+            if !out.iter().any(|v| v == name.as_str()) {
+                out.push(name.as_str().to_string());
+            }
+        }
+        ExprNode::Seq { exprs } => exprs.iter().for_each(|x| assigned_locals(x, out)),
+        ExprNode::If { then_branch, else_branch, .. } => {
+            assigned_locals(then_branch, out);
+            assigned_locals(else_branch, out);
+        }
+        _ => {}
+    }
+}
+
+/// Whether `e` reads local `v`, a tuple tail (`{a, b}`) reading each of its names.
+fn reads_local(e: &Expr, v: &str) -> bool {
+    if let ExprNode::Var { name, .. } = &*e.node {
+        let n = name.as_str();
+        if n == v || (n.starts_with('{') && n.trim_matches(|c| c == '{' || c == '}').split(", ").any(|p| p == v)) {
+            return true;
+        }
+    }
+    let mut found = false;
+    e.node.for_each_child(&mut |c| found |= reads_local(c, v));
+    found
+}
+
 /// True when `e` is an empty/absent branch (modifier-`if` has no else).
 fn is_empty(e: &Expr) -> bool {
     matches!(&*e.node, ExprNode::Lit { value: Literal::Nil })
@@ -574,10 +822,12 @@ fn rebound_local(e: &Expr) -> Option<String> {
         ExprNode::Assign { target: LValue::Var { name, .. }, .. } => {
             Some(name.as_str().to_string())
         }
+        // Not the first of several: a block threading a tuple rebinds them all, which the tuple lift handles
         ExprNode::Send { block: Some(blk), .. } => match &*blk.node {
-            ExprNode::Lambda { params, body, .. } => {
-                block_accumulators(body, params).into_iter().next()
-            }
+            ExprNode::Lambda { params, body, .. } => match block_accumulators(body, params).as_slice() {
+                [one] => Some(one.clone()),
+                _ => None,
+            },
             _ => None,
         },
         _ => string_builder_append_local(e).map(|s| s.to_string()),
@@ -768,6 +1018,10 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             None => current_fold_acc().unwrap_or_else(|| "nil".to_string()),
         },
         ExprNode::Raise { value } => format!("raise {}", emit_expr(value)),
+        ExprNode::Let { name, value, body, .. } => format!("(\n{name} = {}\n{}\n)", emit_expr(value), emit_expr(body)),
+        ExprNode::BeginRescue { body, rescues, else_branch: None, ensure: Some(en), .. } if rescues.is_empty() => {
+            emit_ensure_only(e, body, en)
+        }
         // `yield a, b` → call the block passed as the trailing `block_fn`
         // param (added by emit_fn when the body yields).
         ExprNode::Yield { args } => format!("block_fn.({})", emit_args(args)),
@@ -1047,6 +1301,9 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             [msg] => return format!("raise {}", emit_expr(msg)),
             [class, msg] => {
                 if let ExprNode::Const { path } = &*class.node {
+                    if let Some(module) = raised_error_module(path) {
+                        return format!("raise {module}, {}", emit_expr(msg));
+                    }
                     if let Some(name) = path.last().map(|s| s.to_string()) {
                         if is_elixir_exception(&name) {
                             return format!("raise {name}, {}", emit_expr(msg));
@@ -1088,6 +1345,8 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                     "String" => Some(format!("is_binary({r_s})")),
                     "Array" => Some(format!("is_list({r_s})")),
                     "Hash" => Some(format!("is_map({r_s})")),
+                    // Not `is_atom` alone: nil, true and false are atoms in Elixir and no Symbol in Ruby
+                    "Symbol" => Some(format!("(is_atom({r_s}) and {r_s} not in [nil, true, false])")),
                     _ => None,
                 };
                 if let Some(s) = mapped {
@@ -1128,6 +1387,21 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     // 0). Elixir's `String.to_integer/1` raises on anything non-numeric,
     // so route through `Integer.parse/1` with a `0` fallback to preserve
     // the Ruby semantics the params code relies on (`params["id"].to_i`).
+    // Not a parse: a number's to_i / to_f converts it, and Integer.parse / Float.parse take only a String
+    if matches!(method, "to_i" | "to_f") && args.is_empty() {
+        if let Some(r) = recv {
+            let numeric = |t: &crate::ty::Ty| matches!(t, crate::ty::Ty::Int | crate::ty::Ty::Float);
+            let is_number = match effective_recv_ty(r) {
+                Some(t) if numeric(&t) => true,
+                Some(crate::ty::Ty::Union { variants }) => variants.iter().all(|v| numeric(v)),
+                _ => false,
+            };
+            if is_number {
+                let f = if method == "to_i" { "trunc" } else { ":erlang.float" };
+                return format!("{f}({})", emit_expr(r));
+            }
+        }
+    }
     if method == "to_i" && args.is_empty() {
         if let Some(r) = recv {
             return format!(
@@ -1202,6 +1476,16 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             if recv_is_string(r) {
                 return format!("{} == \"\"", emit_expr(r));
             }
+            // Not `== ""`: that answers false for nil, where Ruby's nil.empty? raises, as byte_size does
+            if recv_is_nilable_string(r) {
+                return format!("byte_size({}) == 0", emit_expr(r));
+            }
+        }
+    }
+
+    if method == "index" && args.len() == 1 {
+        if let Some(r) = recv.filter(|r| recv_is_array(r)) {
+            return format!("Enum.find_index({}, &(&1 == {}))", emit_expr(r), emit_expr(&args[0]));
         }
     }
 
@@ -1481,6 +1765,16 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                     }
                     Some(e) => format!("String.slice({r_s}, {b}..{})", emit_expr(e)),
                 };
+            }
+            // Not Access: a String is no map, and `s[i]` is its character at i, or nil past the end
+            let int_index = |a: &Expr| {
+                matches!(a.ty.as_ref(), Some(crate::ty::Ty::Int))
+                    || matches!(&*a.node, ExprNode::Lit { value: Literal::Int { .. } })
+                    || matches!(&*a.node, ExprNode::Send { method, args, .. }
+                        if matches!(method.as_str(), "+" | "-") && args.iter().any(|x| matches!(&*x.node, ExprNode::Lit { value: Literal::Int { .. } })))
+            };
+            if (recv_is_string(r) || is_string_rooted(r)) && int_index(&args[0]) {
+                return format!("String.at({r_s}, {})", emit_expr(&args[0]));
             }
             // Otherwise a map/keyword access: `map[key]`.
             return format!("{r_s}[{}]", emit_expr(&args[0]));
@@ -1826,8 +2120,10 @@ fn unpack_kwargs_with(params: Option<&[crate::dialect::Param]>, args: &[Expr]) -
 /// that local as the accumulator and rebinding it at the call site —
 /// the Elixir answer to block-local mutation not leaking. A
 /// non-accumulating block uses the directly-mapped `Enum.*` (each/map/
-/// filter/…). Multi-accumulator blocks (tuple reduce) aren't covered.
+/// filter/…).
 fn emit_block_call(recv: Option<&Expr>, method: &str, args: &[Expr], block: &Expr) -> String {
+    // Not read after emitting the body: a nested statement list there sets its own live-out locals
+    let live_out = LIVE_OUT.with(|l| std::mem::take(&mut *l.borrow_mut()));
     let ExprNode::Lambda { params, body, .. } = &*block.node else {
         return crate::emit::diagnostics::report_unsupported(
             block.span,
@@ -1848,18 +2144,17 @@ fn emit_block_call(recv: Option<&Expr>, method: &str, args: &[Expr], block: &Exp
         _ => format!("{{{}}}", block_params.join(", ")),
     };
 
-    let accs = block_accumulators(body, params);
-    if accs.len() > 1 {
-        return crate::emit::diagnostics::report_unsupported(
-            block.span,
-            "elixir2",
-            "block",
-            "block reassigns multiple outer locals (tuple reduce)",
-        );
+    let mut accs = block_accumulators(body, params);
+    for v in live_out {
+        if !accs.contains(&v) {
+            accs.push(v);
+        }
     }
-    if let Some(acc) = accs.first() {
-        // Accumulating block → reduce, rebinding the acc at the call site.
-        return format!("{acc} = {}", emit_reduce(&recv_s, &element, body, acc));
+    if !accs.is_empty() {
+        // Accumulating block → reduce, rebinding the acc at the call site;
+        // several accumulators travel as one tuple.
+        let acc = if accs.len() == 1 { accs[0].clone() } else { format!("{{{}}}", accs.join(", ")) };
+        return format!("{acc} = {}", emit_reduce(&recv_s, &element, body, &acc));
     }
 
     // Non-accumulating: directly-mapped Enum.* with the block as a fn.
@@ -1906,7 +2201,10 @@ fn emit_reduce(recv_s: &str, element: &str, body: &Expr, acc: &str) -> String {
 fn try_reduce_value(e: &Expr) -> Option<String> {
     let ExprNode::Send { recv, block: Some(blk), .. } = &*e.node else { return None };
     let ExprNode::Lambda { params, body, .. } = &*blk.node else { return None };
-    let acc = block_accumulators(body, params).into_iter().next()?;
+    let accs = block_accumulators(body, params);
+    // Not a tuple fold: the branch's value would be the tuple, not the one result a single accumulator stands for
+    let [acc] = accs.as_slice() else { return None };
+    let acc = acc.clone();
     let recv_s = recv.as_ref().map(emit_expr).unwrap_or_default();
     let element = match params.len() {
         0 => "_".to_string(),
@@ -2089,6 +2387,8 @@ fn field_bridge_name(e: &Expr) -> Option<String> {
 
 fn recv_is_array(e: &Expr) -> bool {
     matches!(effective_recv_ty(e), Some(crate::ty::Ty::Array { .. }))
+        // Not the node's type alone: a functionalized body rebuilds nodes without it, and a `split` answers an Array whatever it was stamped
+        || matches!(&*e.node, ExprNode::Send { recv: Some(r), method, .. } if method.as_str() == "split" && recv_is_string(r))
 }
 
 /// True when `e` is a `String` (or a string literal) — its `empty?`
@@ -2139,7 +2439,7 @@ fn ivar_pd_key(name: &str) -> String {
 /// defaulting to an empty map (the hash-store shape most of these
 /// runtime modules use).
 fn ivar_pd_get(name: &str) -> String {
-    format!("Process.get({}, %{{}})", ivar_pd_key(name))
+    format!("{}.get({}, %{{}})", ivar_store(name), ivar_pd_key(name))
 }
 
 /// Type-aware variant: a SCALAR module var takes its scalar zero as
@@ -2155,7 +2455,7 @@ fn ivar_pd_get_typed(name: &str, ty: Option<&crate::ty::Ty>) -> String {
         Some(Ty::Str) => "\"\"",
         _ => "%{}",
     };
-    format!("Process.get({}, {default})", ivar_pd_key(name))
+    format!("{}.get({}, {default})", ivar_store(name), ivar_pd_key(name))
 }
 
 /// Ruby stdlib module calls → Elixir equivalents. `Base64.strict_encode64`
@@ -2188,7 +2488,8 @@ fn emit_ivar_state_send(name: &str, method: &str, args: &[Expr]) -> Option<Strin
     match (method, args.len()) {
         // `@h[k] = v` → put back the updated map.
         ("[]=", 2) => Some(format!(
-            "Process.put({key}, Map.put({get}, {}, {}))",
+            "{}.put({key}, Map.put({get}, {}, {}))",
+            ivar_store(name),
             emit_expr(&args[0]),
             emit_expr(&args[1])
         )),
@@ -2258,6 +2559,7 @@ fn is_string_rooted(e: &Expr) -> bool {
         ExprNode::Send { recv: Some(r), method, .. } if method.as_str() == "+" => {
             is_string_rooted(r)
         }
+        ExprNode::Send { recv: Some(_), method, args, .. } if args.is_empty() && matches!(method.as_str(), "to_s" | "inspect") => true,
         _ => false,
     }
 }
@@ -2421,7 +2723,7 @@ mod tests {
             block: None,
             parenthesized: false,
         });
-        append.hint = Some(IrHint::StringBuilderAppend);
+        append.set_hint(Some(IrHint::StringBuilderAppend));
         let e = block_send("articles", "each", &["a"], append);
         let out = emit_expr(&e);
         assert_eq!(
@@ -2446,7 +2748,7 @@ mod tests {
             block: None,
             parenthesized: false,
         });
-        append.hint = Some(IrHint::StringBuilderAppend);
+        append.set_hint(Some(IrHint::StringBuilderAppend));
         let if_stmt = Expr::new(crate::span::Span::synthetic(), ExprNode::If {
             cond: var_t("cond", Ty::Bool),
             then_branch: append,
@@ -3412,21 +3714,37 @@ fn emit_str_literal(value: &str) -> String {
 }
 
 /// Ruby `/pat/flags` → Elixir `~r/pat/flags`. `pattern` is the regex
-/// source text (backslash escapes preserved). Ruby's `m` flag (dotall)
-/// maps to Elixir's `s`; `i`/`x` carry over.
+/// source text (backslash escapes preserved). Ruby's `m` (dotall) is
+/// Elixir/Oniguruma `s`; Ruby's always-on line anchors need Elixir
+/// `m` as well, so a flagged Ruby `m` becomes `sm`. `i`/`x` carry over.
 fn emit_regex(pattern: &str, flags: &str) -> String {
     // Escape-aware: a source `\/` must not become `\\/`.
     let escaped = crate::emit::shared::regex_literal::escape_regex_delimiters(pattern);
-    let ex_flags: String = flags
-        .chars()
-        .filter_map(|f| match f {
-            'i' => Some('i'),
-            'm' => Some('s'),
-            'x' => Some('x'),
-            _ => None,
-        })
-        .collect();
+    let bits = crate::emit::shared::regex_literal::parse_ruby_regex_flags(flags);
+    let mut ex_flags = String::new();
+    if bits.ignore_case {
+        ex_flags.push('i');
+    }
+    if bits.dot_matches_newline {
+        ex_flags.push('s');
+        ex_flags.push('m');
+    }
+    if bits.extended {
+        ex_flags.push('x');
+    }
     format!("~r/{escaped}/{ex_flags}")
+}
+
+#[cfg(test)]
+mod regex_flag_tests {
+    use super::emit_regex;
+
+    #[test]
+    fn rubys_m_maps_to_elixir_s_and_m() {
+        assert_eq!(emit_regex("^b.c$", "m"), "~r/^b.c$/sm");
+        assert_eq!(emit_regex("a.b", "im"), "~r/a.b/ism");
+        assert_eq!(emit_regex("a.b", "i"), "~r/a.b/i");
+    }
 }
 
 fn is_screaming_snake(s: &str) -> bool {

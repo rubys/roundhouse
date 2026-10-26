@@ -1,0 +1,11 @@
+module ActiveRecord
+  module Encryption
+    module Errors
+      class Decryption < StandardError
+      end
+
+      class Configuration < StandardError
+      end
+    end
+  end
+end

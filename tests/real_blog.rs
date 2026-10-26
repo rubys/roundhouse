@@ -243,6 +243,9 @@ fn diagnostic_signature(d: &roundhouse::analyze::Diagnostic) -> (String, String)
         DiagnosticKind::UnconsumedInitializer { statement, .. } => {
             ("UnconsumedInitializer".into(), statement.as_str().to_string())
         }
+        DiagnosticKind::IgnoredValidatorOption { validator, option, .. } => {
+            ("IgnoredValidatorOption".into(), format!("{}:{}", validator.as_str(), option.as_str()))
+        }
     }
 }
 

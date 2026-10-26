@@ -55,7 +55,7 @@ pub fn gem_locale_files<V: Vfs + ?Sized>(vfs: &V, app_dir: &Path, lock: &Lockfil
 }
 
 /// Where Bundler installs gems for this app, most specific first.
-fn gem_roots<V: Vfs + ?Sized>(vfs: &V, app_dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn gem_roots<V: Vfs + ?Sized>(vfs: &V, app_dir: &Path) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     let configured = vfs
         .read_to_string(&app_dir.join(".bundle/config"))
@@ -78,7 +78,7 @@ fn gem_roots<V: Vfs + ?Sized>(vfs: &V, app_dir: &Path) -> Vec<PathBuf> {
 }
 
 /// `<root>/gems/<name>-<version>`, or a platform build of it (`-x86_64-linux`).
-fn installed_gem<V: Vfs + ?Sized>(vfs: &V, roots: &[PathBuf], name: &str, version: &str) -> Option<PathBuf> {
+pub(crate) fn installed_gem<V: Vfs + ?Sized>(vfs: &V, roots: &[PathBuf], name: &str, version: &str) -> Option<PathBuf> {
     let exact = format!("{name}-{version}");
     roots.iter().find_map(|root| {
         let gems = root.join("gems");

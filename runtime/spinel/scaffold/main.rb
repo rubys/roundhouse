@@ -28,6 +28,8 @@
 require_relative "boot"
 
 module Main
+  # Spinel's class reflection needs a lexical class receiver.
+  FrameworkParseError = ActionDispatch::Http::Parameters::ParseError
 
   # Maps the routes-table controller symbol to a literal `.new`
   # constructor call. Spinel's hash specializations don't accept class
@@ -447,27 +449,34 @@ module Main
     request_format = :xml if path_format == "xml"
     # `/service-worker.js`: campfire's raw service-worker template.
     request_format = :js if path_format == "js"
-    # A route-forced format (`get "/rss" => "home#index", :format => "rss"`)
-    # overrides the path-suffix sniff above — the URL carries no extension
-    # but the route pins the response format. Without it every route-pinned
-    # entry fell through to :html and lobsters' /rss and /hottest served the
-    # HTML home page.
+    # A route's default format (`get "/rss" => "home#index", :format =>
+    # "rss"`, `defaults: { format: :json }`) fills in what the request
+    # left out, as in Rails: only when the path carried no extension, and
+    # it is then written to `params[:format]` too. Without it every
+    # route-pinned entry fell through to :html and lobsters' /rss and
+    # /hottest served the HTML home page; with it unconditional,
+    # `/widgets/1.html` on a json-defaulted route was answered as json.
     #
-    # The CRuby overlay writes this as a one-line `request_format =
-    # matched.req_format unless matched.req_format.nil?`. That shape does
-    # not compile here, and neither does binding the read to a guarded
-    # local: `req_format` is `Symbol?`, which spinel stores as a poly
-    # RbVal, while a local seeded from a Symbol literal is a bare `sp_sym`
-    # — the assignment is a type error whatever the nil guard looks like.
-    # COMPARING the poly against literals never materializes a nilable
-    # Symbol, so the supported formats are named here instead. The set
-    # matches the response types the tail of this method can stamp.
-    if matched.req_format == :rss
-      request_format = :rss
-    elsif matched.req_format == :json
-      request_format = :json
-    elsif matched.req_format == :xml
-      request_format = :xml
+    # The CRuby overlay writes this generically (`request_format =
+    # matched.req_format`). That shape does not compile here, and neither
+    # does binding the read to a guarded local: `req_format` is
+    # `Symbol?`, which spinel stores as a poly RbVal, while a local
+    # seeded from a Symbol literal is a bare `sp_sym` - the assignment is
+    # a type error whatever the nil guard looks like. COMPARING the poly
+    # against literals never materializes a nilable Symbol, so the
+    # supported formats are named here instead. The set matches the
+    # response types the tail of this method can stamp.
+    if path_format.empty?
+      if matched.req_format == :rss
+        request_format = :rss
+        matched.path_params["format"] = "rss"
+      elsif matched.req_format == :json
+        request_format = :json
+        matched.path_params["format"] = "json"
+      elsif matched.req_format == :xml
+        request_format = :xml
+        matched.path_params["format"] = "xml"
+      end
     end
 
     controller = Main.instantiate_controller(matched.controller)
@@ -522,8 +531,9 @@ module Main
     # includes `X-Forwarded-Proto`, CSRF/origin/fetch metadata, auth, and
     # content type; keeping one mapping avoids a drifting header allowlist.
     req.req_headers.each do |name, value|
-      request_obj.env[ActionDispatch::Http::Headers.env_name(name)] = value
+      request_obj.env[ActionDispatch::Http::Headers.env_name_from_header(name)] = value
     end
+    request_obj.env["roundhouse.listener"] = req.listener_transport
     # config.assume_ssl: TLS ends at a proxy that forwards plain http.
     # Rails' AssumeSSL marks the request https before the action, so
     # secure cookies and absolute redirects use https.
@@ -618,9 +628,14 @@ module Main
       format_param = request_format == :html ? req.req_params.fetch("format", "") : fmt_name
       Main.render_not_found(res, format_param, request_path, req)
       return
-    rescue ActionController::ParameterMissing, ActionController::BadRequest
-      # `params.expect` / `params.require` refused the request and the app
-      # did not rescue it: Rails' rescue_responses answer :bad_request.
+    rescue ActionController::ParameterMissing, ActionController::BadRequest,
+           ActionDispatch::Http::Parameters::ParseError => error
+      # The app's handlers have already run. Rails' rescue_responses map
+      # an unhandled ParseError to :bad_request by its exact class name;
+      # an application subclass has no default mapping.
+      # Spinel has no built-in method binding: compare nominal classes,
+      # without consulting any application's subclass matcher.
+      raise if FrameworkParseError === error && error.class != FrameworkParseError
       res.status = 400
       res.body = "<h1>400 Bad Request</h1>"
       return
@@ -683,7 +698,7 @@ module Main
     while i < n
       k = controller.headers.key_at(i)
       v = controller.headers.val_at(i)
-      res.headers[k] = v unless v.nil?
+      res.headers[Tep.header_name(k)] = v unless v.nil?
       i += 1
     end
 
@@ -806,9 +821,22 @@ end
 # CLI surface. Flags override the PORT/WORKERS env vars; --help exits
 # before any DB or server setup runs. Parsed with a plain while loop
 # (no OptionParser — stdlib optparse isn't in the spinel subset).
+# `./app sidekiq [options]`: the worker role instead of the server. It
+# pulls jobs from Redis and runs them until TERM, and never returns (see
+# runtime/sidekiq_worker.rb). No socket is served, so no Cable
+# transport and no in-process drain thread; jobs a job enqueues still
+# push to Redis.
+if ARGV.length > 0 && ARGV[0] == "sidekiq"
+  SidekiqWorker.prepare_pool(ARGV)
+  Main.configure_default_adapter!
+  Db.checkpoint_in_background!
+  ActiveJob.register_drain
+  SidekiqWorker.cli(ARGV)
+end
 port = (ENV["PORT"] || "3000").to_i
 workers = (ENV["WORKERS"] || "1").to_i
 binding_arg = ""
+unix_bind = ENV["UNIX_BIND"].to_s
 i = 0
 while i < ARGV.length
   arg = ARGV[i]
@@ -818,7 +846,9 @@ while i < ARGV.length
     puts "  -p, --port N     listen port (default 3000; PORT env)"
     puts "  -w, --workers N  prefork N processes (default 1; WORKERS env)"
     puts "  -b, --binding IP bind to IP (BINDING env; default localhost in development, 0.0.0.0 otherwise)"
+    puts "      --unix-bind URL add unix:///absolute/path?mode=600 (UNIX_BIND env; default disabled)"
     puts "  -h, --help       show this help and exit"
+    puts "  sidekiq [options]  run jobs from Redis instead of serving HTTP (sidekiq --help)"
     puts ""
     puts "  OS workers per process: one per core; SPINEL_WORKERS=N caps it"
     puts "  TEP_SERVER=fiber runs the fiber-per-connection server instead"
@@ -833,6 +863,9 @@ while i < ARGV.length
     i += 2
   elsif (arg == "--binding" || arg == "-b") && i + 1 < ARGV.length
     binding_arg = ARGV[i + 1]
+    i += 2
+  elsif arg == "--unix-bind" && i + 1 < ARGV.length
+    unix_bind = ARGV[i + 1]
     i += 2
   else
     $stderr.puts "unknown option: " + arg + " (try --help)"
@@ -863,6 +896,10 @@ if workers > 1 && binding_arg != "0.0.0.0"
   exit(1)
 end
 Tep::APP.bind_host = binding_arg
+Sock.sphttp_install_term_handlers
+unix_listener = Tep::UnixListener.new(unix_bind)
+unix_listener.open
+begin
 Main.configure_default_adapter!
 # Serving, so WAL checkpoints move off the request path: a background
 # thread runs them instead of some request's COMMIT
@@ -878,12 +915,14 @@ Broadcasts.set_transport(Cable::Transport.new)
 # reaches this line keeps the inline behaviour rather than dropping work
 # into an Array nobody reads.
 ActiveJob.register_drain
+# Under queue_adapter :sidekiq jobs go to Redis instead; say where.
+SidekiqPush.announce if JobRegistry.sidekiq?
 Thread.new do
   Main.job_loop
 end
-# The server announces itself by the app's own name (the underscored
-# module wrapping its Rails::Application, which ingest writes into
-# config/application.rb), not by the binary's file name.
+# The server announces itself by the app's own name (its GlobalID app
+# name, which ingest writes into config/application.rb), not by the
+# binary's file name.
 Tep::APP.name = Rails.application.global_id_app
 # Tep::Server::Threaded is the thread-per-connection server: a green
 # thread per connection, every wait a park (recv, write, sleep, and the
@@ -897,7 +936,10 @@ Tep::APP.name = Rails.application.global_id_app
 # the environment differing (matz/spinel#4306). HTTP only; see the note
 # at the top of tep/server_scheduled.rb.
 if (ENV["TEP_SERVER"] || "thread") == "fiber"
-  Tep::Server::Scheduled.new(MainApp.new).run(port, workers, false)
+  Tep::Server::Scheduled.new(MainApp.new).run(port, workers, false, unix_listener)
 else
-  Tep::Server::Threaded.new(MainApp.new).run(port, workers, false)
+  Tep::Server::Threaded.new(MainApp.new).run(port, workers, false, unix_listener)
+end
+ensure
+  unix_listener.close
 end

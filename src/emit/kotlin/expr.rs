@@ -25,6 +25,8 @@ thread_local! {
     /// Local names already declared in the current method body (so the
     /// first `Assign` emits `val`/`var` and later ones emit bare `=`).
     static DECLARED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    // Not a `next` read as the lambda's return: inside a `for` it is `continue`, and only there
+    static LOOP_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Local names assigned more than once → declared `var` (else `val`).
     static REASSIGNED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
     /// For locals first assigned `nil`, the nullable Kotlin type taken
@@ -747,6 +749,15 @@ fn count_assigns(
     if let ExprNode::OpAssign { target: LValue::Var { name, .. }, .. } = &*e.node {
         *counts.entry(camel(name.as_str())).or_insert(0) += 2;
     }
+    // `buf << x` on a String local rebinds it (`buf += x`), so it is a `var` too
+    if let ExprNode::Send { recv: Some(r), method, args, .. } = &*e.node
+        && method.as_str() == "<<"
+        && args.len() == 1
+        && let ExprNode::Var { name, .. } = &*r.node
+        && matches!(r.ty.as_ref().map(|t| t.peel_nilable()), Some(crate::ty::Ty::Str))
+    {
+        *counts.entry(camel(name.as_str())).or_insert(0) += 2;
+    }
     if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*e.node {
         let cn = camel(name.as_str());
         *counts.entry(cn.clone()).or_insert(0) += 1;
@@ -805,6 +816,12 @@ fn children(e: &Expr) -> Vec<&Expr> {
         }
         ExprNode::Return { value } | ExprNode::Raise { value } => v.push(value),
         ExprNode::Lambda { body, .. } => v.push(body),
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            v.push(body);
+            v.extend(rescues.iter().map(|r| &r.body));
+            v.extend(else_branch.iter());
+            v.extend(ensure.iter());
+        }
         _ => {}
     }
     v
@@ -833,7 +850,7 @@ pub fn emit_expr(e: &Expr) -> String {
 /// Mirrors `crystal::expr::try_string_builder`. Non-hinted sites fall
 /// through to the normal node emit.
 fn try_string_builder(e: &Expr) -> Option<String> {
-    match e.hint? {
+    match e.hint().as_ref()? {
         IrHint::MutableStringLiteral => None, // emitted as the plain literal
         IrHint::StringBuilderInit => {
             if let ExprNode::Assign { target: LValue::Var { name, .. }, .. } = &*e.node {
@@ -992,8 +1009,95 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
             emit_expr(expr),
             emit_expr(fallback)
         ),
-        other => format!("/* TODO {} */", other.kind_str()),
+        ExprNode::Let { name, value, body, .. } => {
+            format!("run {{\n{}\n}}", indent(&format!("val {} = {}\n{}", camel(name.as_str()), emit_expr(value), emit_expr(body))))
+        }
+        ExprNode::Next { .. } if LOOP_DEPTH.with(|l| l.get()) > 0 => "continue".to_string(),
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            emit_begin_rescue(body, rescues, else_branch.as_ref(), ensure.as_ref())
+        }
+        other => crate::emit::diagnostics::report_unsupported(e.span, "kotlin", other.kind_str(), "no Kotlin form for this construct here"),
     }
+}
+
+// Not declared inside `try`: Kotlin scopes a try block's locals to it, and rescue and ensure read what the body bound
+fn emit_begin_rescue(
+    body: &Expr,
+    rescues: &[crate::expr::RescueClause],
+    else_branch: Option<&Expr>,
+    ensure: Option<&Expr>,
+) -> String {
+    fn assigned(e: &Expr, out: &mut Vec<(String, Option<crate::ty::Ty>)>) {
+        if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*e.node {
+            let n = camel(name.as_str());
+            if !out.iter().any(|(m, _)| *m == n) {
+                out.push((n, value.ty.clone()));
+            }
+        }
+        if !matches!(&*e.node, ExprNode::Lambda { .. }) {
+            for c in children(e) {
+                assigned(c, out);
+            }
+        }
+    }
+    let mut locals = Vec::new();
+    assigned(body, &mut locals);
+    let declared = DECLARED.with(|d| d.borrow().clone());
+    let mut prelude = String::new();
+    for (n, ty) in locals.iter().filter(|(n, _)| !declared.contains(n)) {
+        let kt = match ty {
+            Some(t) if !matches!(t, crate::ty::Ty::Nil) => {
+                let k = kotlin_ty(t);
+                if k.ends_with('?') { k } else { format!("{k}?") }
+            }
+            _ => "Any?".to_string(),
+        };
+        prelude.push_str(&format!("var {n}: {kt} = null\n"));
+        DECLARED.with(|d| d.borrow_mut().insert(n.clone()));
+    }
+    let mut try_body = emit_expr(body);
+    if let Some(eb) = else_branch {
+        try_body.push('\n');
+        try_body.push_str(&emit_expr(eb));
+    }
+    // Not a `try` with neither handler: Kotlin requires a catch or a finally, and a bare `begin … end` has none
+    if rescues.is_empty() && ensure.is_none() {
+        return if prelude.is_empty() { try_body } else { format!("run {{\n{}\n}}", indent(&format!("{prelude}{try_body}"))) };
+    }
+    let mut out = format!("try {{\n{}\n}}", indent(&try_body));
+    if !rescues.is_empty() {
+        let mut chain = String::new();
+        for (i, r) in rescues.iter().enumerate() {
+            let test = if r.classes.is_empty() {
+                "__rescued is RuntimeException".to_string()
+            } else {
+                r.classes
+                    .iter()
+                    .map(|c| match &*c.node {
+                        ExprNode::Const { path } => {
+                            let joined = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+                            format!("__rescued is {}", kotlin_exception_class(&joined))
+                        }
+                        _ => "__rescued is Exception".to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" || ")
+            };
+            let bind = r.binding.as_ref().map(|b| format!("val {} = __rescued\n", camel(b.as_str()))).unwrap_or_default();
+            chain.push_str(&format!(
+                "{}if ({test}) {{\n{}\n}}",
+                if i == 0 { "" } else { " else " },
+                indent(&format!("{bind}{}", emit_expr(&r.body)))
+            ));
+        }
+        chain.push_str(" else {\n    throw __rescued\n}");
+        // Not `Exception`: Kotlin's NotImplementedError is an Error, as Ruby's is no StandardError, and `rescue NotImplementedError` still names it
+        out.push_str(&format!(" catch (__rescued: Throwable) {{\n{}\n}}", indent(&chain)));
+    }
+    if let Some(en) = ensure {
+        out.push_str(&format!(" finally {{\n{}\n}}", indent(&emit_expr(en))));
+    }
+    if prelude.is_empty() { out } else { format!("run {{\n{}\n}}", indent(&format!("{prelude}{out}"))) }
 }
 
 fn emit_literal(lit: &Literal) -> String {
@@ -1015,13 +1119,68 @@ fn emit_literal(lit: &Literal) -> String {
         Literal::Str { value } => format!("\"{}\"", escape_str(value)),
         // No symbol type in Kotlin → string.
         Literal::Sym { value } => format!("\"{}\"", escape_str(value.as_str())),
-        Literal::Regex { pattern, .. } => {
+        Literal::Regex { pattern, flags } => {
             // Ruby `/[\r\n\0\t]/` carries a backslash-zero NUL escape.
             // Java `Pattern` rejects `\0` (octal needs more digits); use
             // `\u0000` which both Kotlin's string literal and Pattern accept.
             let normalized = normalize_java_regex_nul(pattern);
-            format!("Regex(\"{}\")", escape_str(&normalized))
+            let options = kotlin_regex_options(flags);
+            if options.is_empty() {
+                format!("Regex(\"{}\")", escape_str(&normalized))
+            } else {
+                format!("Regex(\"{}\", setOf({options}))", escape_str(&normalized))
+            }
         }
+    }
+}
+
+/// Ruby regex flags this build can reproduce exactly: `i` →
+/// `RegexOption.IGNORE_CASE`. Ruby's `m` (dot-matches-newline) is
+/// `RegexOption.DOT_MATCHES_ALL`. Ruby's `^`/`$` are always line
+/// anchors, so a flagged `m` also adds `RegexOption.MULTILINE`.
+/// Any other flag character stays an ingest-time gap, so none
+/// reaches here.
+fn kotlin_regex_options(flags: &str) -> String {
+    let bits = crate::emit::shared::regex_literal::parse_ruby_regex_flags(flags);
+    let mut parts: Vec<&str> = Vec::new();
+    if bits.ignore_case {
+        parts.push("RegexOption.IGNORE_CASE");
+    }
+    if bits.dot_matches_newline {
+        parts.push("RegexOption.DOT_MATCHES_ALL");
+        parts.push("RegexOption.MULTILINE");
+    }
+    parts.join(", ")
+}
+
+#[cfg(test)]
+mod regex_flag_tests {
+    #[test]
+    fn rubys_m_keeps_line_anchors_as_well_as_dotall() {
+        assert_eq!(kotlin_regex_options("m"), "RegexOption.DOT_MATCHES_ALL, RegexOption.MULTILINE");
+    }
+
+    use super::{emit_literal, kotlin_regex_options};
+    use crate::expr::Literal;
+
+    #[test]
+    fn no_flags_drop_the_options_set() {
+        let lit = Literal::Regex { pattern: "a.b".into(), flags: "".into() };
+        assert_eq!(emit_literal(&lit), r#"Regex("a.b")"#);
+    }
+
+    #[test]
+    fn ignore_case_maps_to_regexoption_ignore_case() {
+        assert_eq!(kotlin_regex_options("i"), "RegexOption.IGNORE_CASE");
+    }
+
+    #[test]
+    fn ignore_case_and_dot_matches_newline_combine_in_a_set() {
+        let lit = Literal::Regex { pattern: "a.b".into(), flags: "im".into() };
+        assert_eq!(
+            emit_literal(&lit),
+            r#"Regex("a.b", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL, RegexOption.MULTILINE))"#
+        );
     }
 }
 
@@ -1277,7 +1436,8 @@ fn emit_case(scrutinee: &Expr, arms: &[Arm]) -> String {
                 lines.push(format!("    {} -> {body_block}", emit_literal(value)));
             }
             other => {
-                lines.push(format!("    /* TODO pattern {other:?} */ else -> {body_block}"));
+                let stub = crate::emit::diagnostics::report_unsupported(arm.body.span, "kotlin", "case pattern", format!("{other:?}").split([' ', '(', '{']).next().unwrap_or("").to_string());
+                lines.push(format!("    else -> {{ {stub} }}"));
                 has_else = true;
             }
         }
@@ -1392,7 +1552,7 @@ fn emit_op_assign(target: &LValue, op: OpAssignOp, value: &Expr) -> String {
         OpAssignOp::Mul => format!("{lhs} *= {v}"),
         OpAssignOp::Div => format!("{lhs} /= {v}"),
         OpAssignOp::Mod => format!("{lhs} %= {v}"),
-        _ => format!("{lhs} = {lhs} /* TODO op-assign */ {v}"),
+        other => crate::emit::diagnostics::report_unsupported(value.span, "kotlin", "OpAssign", format!("{other:?}")),
     }
 }
 
@@ -1513,7 +1673,9 @@ fn emit_lambda(params: &[crate::ident::Symbol], body: &Expr, destructure: bool) 
     // same way), so a sibling block assigning the same name declares its
     // own too. See `emit::shared::hoist`.
     let outer = DECLARED.with(|d| d.borrow().clone());
+    let loops = LOOP_DEPTH.with(|l| l.replace(0));
     let body_s = emit_expr(body);
+    LOOP_DEPTH.with(|l| l.set(loops));
     DECLARED.with(|d| *d.borrow_mut() = outer);
     if params.is_empty() {
         format!("{{ {body_s} }}")
@@ -1559,6 +1721,10 @@ fn emit_send(
     args: &[Expr],
     block: Option<&Expr>,
 ) -> String {
+    if let Some(recv) = crate::emit::shared::fn_call::function_receiver(recv, method, block) {
+        let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+        return format!("{}({})", emit_expr(recv), args_s.join(", "));
+    }
     // A bare implicit-self zero-arg send that names a parameter is a
     // reference to that local, not a method call — emit the identifier
     // without `()`. (See `PARAM_NAMES`: the view lowerer renders a partial
@@ -1573,7 +1739,11 @@ fn emit_send(
         return format!("!({})", emit_expr(&args[0]));
     }
 
-    let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+    // Not each argument rendered as it is: a Range has no Kotlin value here, and the slice paths below read its bounds instead
+    let args_s: Vec<String> = args
+        .iter()
+        .map(|a| if matches!(&*a.node, ExprNode::Range { .. }) { String::new() } else { emit_expr(a) })
+        .collect();
 
     // `self.class.METHOD(...)` → unqualified `METHOD(...)`. Ruby's
     // `self.class` reflection has no Kotlin analog, but a per-model class
@@ -1676,10 +1846,8 @@ fn emit_send(
             let joined = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
             // Not `ArgumentError(...)`: Kotlin has no such class, and its stdlib spelling is IllegalArgumentException.
             let cls = match joined.as_str() {
-                "" | "RuntimeError" => "RuntimeException".to_string(),
-                "ArgumentError" => "IllegalArgumentException".to_string(),
-                "IndexError" => "IndexOutOfBoundsException".to_string(),
-                _ => type_name(&joined),
+                "" => "RuntimeException".to_string(),
+                other => kotlin_exception_class(other),
             };
             return format!("throw {cls}({})", args_s[1..].join(", "));
         }
@@ -1740,6 +1908,8 @@ fn emit_send(
                 "Integer" => format!("{rs} is Long"),
                 "Float" => format!("{rs} is Double"),
                 "String" => format!("{rs} is String"),
+                // Not `is Symbol`: a Symbol is emitted as a String, so the two read alike here
+                "Symbol" => format!("{rs} is String"),
                 "Numeric" => format!("{rs} is Number"),
                 "Hash" => format!("{rs} is Map<*, *>"),
                 "Array" => format!("{rs} is List<*>"),
@@ -1766,6 +1936,13 @@ fn emit_send(
             "start_with?" => return format!("{}.startsWith({})", emit_expr(r), args_s[0]),
             "end_with?" => return format!("{}.endsWith({})", emit_expr(r), args_s[0]),
             "include?" => return format!("{}.contains({})", emit_expr(r), args_s[0]),
+            // Not indexOf as it is: Ruby answers nil, not -1, for a miss
+            "index" if recv_is_array(r) => {
+                return format!("{}.indexOf({}).let {{ __at -> if (__at < 0) null else __at.toLong() }}", emit_expr(r), args_s[0]);
+            }
+            "rindex" if !recv_is_array(r) && !recv_is_hash(r) => {
+                return format!("{}.lastIndexOf({}).let {{ __at -> if (__at < 0) null else __at.toLong() }}", emit_expr(r), args_s[0]);
+            }
             // `String#match?(re)` → `re.containsMatchIn(s)`. Kotlin's
             // `Regex` is the receiver; a bare `matchPred` on String
             // does not exist (same flip TypeScript/`re.test` uses).
@@ -1815,6 +1992,10 @@ fn emit_send(
                 if recv_is_array(r) {
                     return format!("{rs}[({}).toInt()]", args_s[0]);
                 }
+                // Not `s[i]`, a Char at an Int: Ruby answers a one-character String, or nil past the end
+                if matches!(r.ty.as_ref().map(|t| t.peel_nilable()), Some(crate::ty::Ty::Str)) {
+                    return format!("rhStrAt({rs}, ({}).toLong())", args_s[0]);
+                }
                 return format!("{rs}[{}]", args_s[0]);
             }
             if args.len() == 2 {
@@ -1823,6 +2004,10 @@ fn emit_send(
                 // it (`"abc"[1, 10]` is `"bc"`; `substring` throws).
                 let start = &args_s[0];
                 let len = &args_s[1];
+                // Ruby's Array#[](start, length): nil past the end, clamped otherwise
+                if recv_is_array(r) {
+                    return format!("rhListSlice({rs}, ({start}).toLong(), ({len}).toLong())");
+                }
                 return format!(
                     "{rs}.let {{ __s -> __s.substring(minOf(({start}).toInt(), __s.length), minOf((({start}) + ({len})).toInt(), __s.length)) }}"
                 );
@@ -1838,6 +2023,12 @@ fn emit_send(
         match crate::emit::shared::ops::classify_binop(method) {
             crate::emit::shared::ops::BinopCase::NativeInfix(op) => {
                 return format!("{} {} {}", emit_expr(r), op, args_s[0]);
+            }
+            // Not `.add` on a String: Kotlin strings are immutable, so `buf << x` rebinds the buffer
+            crate::emit::shared::ops::BinopCase::Append
+                if matches!(r.ty.as_ref().map(|t| t.peel_nilable()), Some(crate::ty::Ty::Str)) =>
+            {
+                return format!("{} += {}", emit_expr(r), args_s[0]);
             }
             // `<<` / `push` → MutableList.add.
             crate::emit::shared::ops::BinopCase::Append => {
@@ -1948,6 +2139,12 @@ fn emit_send(
             "upcase" => return format!("{rs}.uppercase()"),
             "downcase" => return format!("{rs}.lowercase()"),
             "strip" => return format!("{rs}.trim()"),
+            "lstrip" => return format!("{rs}.trimStart()"),
+            "rstrip" => return format!("{rs}.trimEnd()"),
+            "abs" => return format!("kotlin.math.abs({rs})"),
+            // Not `.first` / `.last` properties: Ruby answers nil on an empty Array
+            "first" if recv_is_array(r) => return format!("{rs}.firstOrNull()"),
+            "last" if recv_is_array(r) => return format!("{rs}.lastOrNull()"),
             // `Array#join` with no separator → `joinToString("")`.
             "join" => return format!("{rs}.joinToString(\"\")"),
             // `.length`/`.size`: collections use `.size`, strings `.length`.
@@ -2027,6 +2224,21 @@ fn emit_send(
     if let Some(b) = block {
         let recv_arr = recv.is_some_and(|r| ty_is(r.ty.as_ref(), |t| matches!(t, crate::ty::Ty::Array { .. })));
         let recv_hash = recv.is_some_and(|r| ty_is(r.ty.as_ref(), |t| matches!(t, crate::ty::Ty::Hash { .. })));
+        // Not `forEach`: the JVM backend's inliner crashes on a loop nested in a large inlined lambda, and `next` needs a loop to continue
+        if method == "each"
+            && args_s.is_empty()
+            && let (Some(r), ExprNode::Lambda { params, body, .. }) = (recv, &*b.node)
+            && ((recv_arr && params.len() == 1) || (recv_hash && params.len() == 2))
+        {
+            let ps: Vec<String> = params.iter().map(|p| camel(p.as_str())).collect();
+            let head = if recv_hash { format!("({})", ps.join(", ")) } else { ps[0].clone() };
+            let outer = DECLARED.with(|d| d.borrow().clone());
+            LOOP_DEPTH.with(|l| l.set(l.get() + 1));
+            let body_s = emit_expr(body);
+            LOOP_DEPTH.with(|l| l.set(l.get() - 1));
+            DECLARED.with(|d| *d.borrow_mut() = outer);
+            return format!("for ({head} in {}) {{\n{}\n}}", emit_expr(r), indent(&body_s));
+        }
         let kt_method = if method == "each" && (recv_arr || recv_hash) {
             "forEach".to_string()
         } else {
@@ -2307,5 +2519,15 @@ mod equal_and_hash_pin_tests {
         let out = emit_expr(&send(var("headers"), "merge!", vec![quota_hash()]));
         assert!(out.contains("mutableMapOf<String, Any?>("), "{out}");
         assert!(!out.contains(".also"), "{out}");
+    }
+}
+
+/// The Kotlin class a Ruby core exception raises and is subclassed as.
+pub(super) fn kotlin_exception_class(name: &str) -> String {
+    match name {
+        "StandardError" | "RuntimeError" => "RuntimeException".to_string(),
+        "ArgumentError" => "IllegalArgumentException".to_string(),
+        "IndexError" => "IndexOutOfBoundsException".to_string(),
+        other => type_name(other),
     }
 }

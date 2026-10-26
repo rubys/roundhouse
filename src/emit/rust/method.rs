@@ -83,10 +83,7 @@ pub(super) fn emit_module_method(m: &MethodDef) -> Result<String, String> {
     let ret_clause = render_return(m);
     let fn_name = super::expr::sanitize_ident(m.name.as_str());
     writeln!(out, "pub fn {fn_name}{params}{ret_clause} {{").unwrap();
-    let return_ty = match m.signature.as_ref() {
-        Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
-        _ => None,
-    };
+    let return_ty = effective_return_ty(m);
     let param_types = collect_param_types(m);
     let body = super::expr::with_param_types(param_types, || super::expr::with_current_return_ty(return_ty.clone(), || super::expr::with_class_method_scope(|| {
         super::expr::with_method_scope(&m.body, || {
@@ -112,8 +109,16 @@ pub(super) fn emit_module_method(m: &MethodDef) -> Result<String, String> {
     // `_adapter_insert; end` in active_record/base.rb (load-bearing
     // empty per the spinel-AOT comment) take this path.
     let body = synthesize_default_body_if_empty(body, return_ty.as_ref());
-    for line in body.lines() {
-        writeln!(out, "    {line}").unwrap();
+    // A writer is emitted void (`render_return`), so a tail that is a value is a statement there, as in emit_instance_method
+    let is_setter = is_writer_name(m.name.as_str());
+    let lines: Vec<&str> = body.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim_end();
+        if is_setter && i + 1 == lines.len() && !t.ends_with(';') && !t.ends_with('{') && !t.is_empty() {
+            writeln!(out, "    {line};").unwrap();
+        } else {
+            writeln!(out, "    {line}").unwrap();
+        }
     }
     out.push_str("}\n");
     Ok(out)
@@ -257,15 +262,21 @@ fn render_return(m: &MethodDef) -> String {
     if is_writer_name(m.name.as_str()) {
         return String::new();
     }
-    match m.signature.as_ref() {
-        Some(Ty::Fn { ret, .. }) => {
-            if matches!(&**ret, Ty::Nil) {
-                String::new()
-            } else {
-                format!(" -> {}", rust_ty(ret))
-            }
-        }
+    match effective_return_ty(m) {
+        Some(ret) if !matches!(ret, Ty::Nil) => format!(" -> {}", rust_ty(&ret)),
         _ => String::new(),
+    }
+}
+
+/// The declared return type, or for a method without a signature its
+/// body's type when the typer settled one: an app method answers its
+/// body's value as Ruby's does.
+fn effective_return_ty(m: &MethodDef) -> Option<Ty> {
+    match m.signature.as_ref() {
+        Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
+        Some(_) => None,
+        None if m.name.as_str() == "initialize" || is_writer_name(m.name.as_str()) => None,
+        None => m.body.ty.clone().filter(|t| !t.mentions_unknown() && !matches!(t, Ty::Bottom | Ty::Nil)),
     }
 }
 
@@ -495,10 +506,7 @@ pub(super) fn emit_instance_method(
     // Return arm in `emit_expr` so `return nil` in a method typed
     // `-> T?` emits as `return None` instead of bare `return` (the
     // latter is E0069 in non-Unit-returning functions).
-    let return_ty = match m.signature.as_ref() {
-        Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
-        _ => None,
-    };
+    let return_ty = effective_return_ty(m);
     // Build the param-name → declared-Ty map for the String coercion
     // logic in `emit_assign`. The body-typer doesn't always propagate
     // Option-ness from RBS to Var reads inside the body, so this is

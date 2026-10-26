@@ -99,6 +99,25 @@ fn rewrite_body(body: &mut Expr, secure: &HashMap<ClassId, Vec<Symbol>>) {
 
 fn rewrite(expr: &mut Expr, secure: &HashMap<ClassId, Vec<Symbol>>) {
     expr.node.for_each_child_mut(&mut |c| rewrite(c, secure));
+    // A `begin`'s body, each `rescue` clause's, its `else` and its
+    // `ensure` are statement lists as a method body is, so a slot holding
+    // one statement can become the Seq the prelude goes into. A method
+    // with a trailing `rescue` (campfire's `SessionsController#create`,
+    // `rescue ActiveRecord::RecordInvalid`) puts its whole body here.
+    if let ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } = &mut *expr.node {
+        let slots = std::iter::once(body)
+            .chain(rescues.iter_mut().map(|clause| &mut clause.body))
+            .chain(else_branch.iter_mut())
+            .chain(ensure.iter_mut());
+        for slot in slots {
+            if !matches!(&*slot.node, ExprNode::Seq { .. }) {
+                if let Some(prelude) = take_claim(slot, secure) {
+                    hoist(slot, prelude);
+                }
+            }
+        }
+        return;
+    }
     let ExprNode::Seq { exprs } = &mut *expr.node else { return };
     for e in exprs {
         if let Some(prelude) = take_claim(e, secure) {

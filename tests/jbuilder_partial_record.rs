@@ -39,6 +39,7 @@ const ROUTES: &str = r#"Rails.application.routes.draw do
   get "widgets/:id/entry", to: "widgets#entry", defaults: { format: :json }
   get "widgets/:id/cached", to: "widgets#cached", defaults: { format: :json }
   get "widgets/:id/aliased_cached", to: "widgets#aliased_cached", defaults: { format: :json }
+  get "widgets/:id/unknown", to: "widgets#unknown", defaults: { format: :json }
   namespace :admin do
     get "widgets/:id", to: "widgets#show", defaults: { format: :json }
   end
@@ -85,6 +86,11 @@ const CONTROLLER: &str = r#"class WidgetsController < ApplicationController
     @widget = Widget.find(params[:id])
     render :aliased_cached
   end
+
+  def unknown
+    @thing = params[:id]
+    render :unknown
+  end
 end
 "#;
 
@@ -110,8 +116,11 @@ const CACHED: &str = "json.partial!(@widget, cached: true)\n";
 const ALIASED_CACHED: &str =
     "json.partial!(@widget, partial: \"widgets/widget\", as: :widget, cached: true)\n";
 
-/// A local that names no model of the app.
+/// A local that names no model of the app, holding a `Widget`.
 const STRAY: &str = "json.partial! @gadget\n";
+
+/// A value of no model: its partial cannot be named.
+const UNKNOWN: &str = "json.partial!(@thing)\n";
 
 /// A local for the partial besides the record.
 const EXTRA: &str = "json.partial! @widget, as: :widget, label: \"x\"\n";
@@ -156,6 +165,7 @@ fn emitted() -> Vec<(String, String)> {
         ("app/views/widgets/aliased_cached.json.jbuilder", ALIASED_CACHED),
         ("app/views/widgets/stray.json.jbuilder", STRAY),
         ("app/views/widgets/extra.json.jbuilder", EXTRA),
+        ("app/views/widgets/unknown.json.jbuilder", UNKNOWN),
         ("app/views/widgets/entry.json.jbuilder", ENTRY),
         ("app/views/widgets/entry_string.json.jbuilder", ENTRY_STRING),
         ("app/views/widgets/widget_string.json.jbuilder", WIDGET_STRING),
@@ -192,7 +202,7 @@ fn view<'a>(files: &'a [(String, String)], suffix: &str) -> &'a str {
 fn every_emitted_view_parses() {
     for (path, source) in emitted().iter().filter(|(p, _)| p.ends_with(".rb")) {
         let result = ruby_prism::parse(source.as_bytes());
-        let errors: Vec<String> = result.errors().map(|e| e.message().to_string()).collect();
+        let errors: Vec<String> = result.errors().map(|e| String::from_utf8_lossy(e.message()).into_owned()).collect();
         assert!(errors.is_empty(), "{path} does not parse: {errors:?}\n{source}");
     }
 }
@@ -227,41 +237,65 @@ fn a_record_renders_its_models_partial() {
             "{template}: `cached:` is a rendering option, not a local:\n{src}"
         );
     }
+    let src = view(&files, "widgets/stray_json.rb");
+    assert!(
+        src.contains("io << Views::Widgets.widget_json(gadget)"),
+        "the record's class picks the partial, not the ivar's name:\n{src}"
+    );
 }
 
-/// The path comes from the model the local is named after. A local
-/// that names no model of the app has no path to take; a local for the
-/// partial (`label:`) has no way through a positional call; and an
-/// `as:` other than `widget` names a local the lowered partial does not
-/// take its record under. All three stay unrecognized, as before,
-/// rather than calling a partial that may not exist or that would miss
-/// its local.
+/// A local for the partial (`label:`) has no way through a positional
+/// call, and stays unrecognized. An `as:` other than `widget` names a
+/// local the lowered partial does not take its record under: refused
+/// with the reason, rather than calling a partial that would miss its
+/// local or rendering nothing.
 #[test]
-fn a_record_with_no_model_or_with_extra_locals_is_left_alone() {
+fn a_record_with_extra_locals_is_left_alone_and_another_as_is_refused() {
     let files = emitted();
-    for template in ["stray", "extra", "entry"] {
-        let src = view(&files, &format!("widgets/{template}_json.rb"));
-        assert!(
-            !src.contains("Views::Widgets.") && src.contains("io << \"\""),
-            "{template}: no partial call is emitted:\n{src}"
-        );
-    }
+    let src = view(&files, "widgets/extra_json.rb");
+    assert!(
+        !src.contains("Views::Widgets.") && src.contains("io << \"\""),
+        "extra: no partial call is emitted:\n{src}"
+    );
+    let src = view(&files, "widgets/entry_json.rb");
+    assert!(
+        !src.contains("Views::Widgets.") && src.contains("partial! of a record not supported"),
+        "entry: refused with its reason:\n{src}"
+    );
 }
 
-/// A String `as:` is compared like the Symbol: `as: "entry"` is left
-/// alone as `as: :entry` is, rather than binding the record as `widget`
-/// for a partial that reads `entry`; `as: "widget"` renders the partial.
-/// An `as:` that is not a literal is left alone too.
+/// A record whose class is not statically known has no partial to
+/// name. It is refused where it stands, not written as nothing: an
+/// empty object there was a 200 with the record's keys missing.
+#[test]
+fn a_record_of_no_known_model_is_refused_not_rendered_empty() {
+    let files = emitted();
+    let src = view(&files, "widgets/unknown_json.rb");
+    assert!(
+        !src.contains("Views::Widgets.")
+            && !src.contains("io << \"\"")
+            && src.contains("partial! of a record not supported"),
+        "unknown: refused with its reason:\n{src}"
+    );
+}
+
+/// A String `as:` is compared like the Symbol: `as: "entry"` is
+/// refused as `as: :entry` is, rather than binding the record as
+/// `widget` for a partial that reads `entry`; `as: "widget"` renders
+/// the partial. An `as:` that is not a literal is left alone.
 #[test]
 fn a_string_as_is_compared_like_a_symbol() {
     let files = emitted();
-    for template in ["entry_string", "dynamic_as"] {
-        let src = view(&files, &format!("widgets/{template}_json.rb"));
-        assert!(
-            !src.contains("Views::Widgets.") && src.contains("io << \"\""),
-            "{template}: no partial call is emitted:\n{src}"
-        );
-    }
+    let src = view(&files, "widgets/entry_string_json.rb");
+    assert!(
+        !src.contains("Views::Widgets.") && src.contains("partial! of a record not supported"),
+        "entry_string: refused with its reason:\n{src}"
+    );
+    let src = view(&files, "widgets/dynamic_as_json.rb");
+    assert!(
+        !src.contains("Views::Widgets.") && src.contains("io << \"\""),
+        "dynamic_as: no partial call is emitted:\n{src}"
+    );
     let src = view(&files, "widgets/widget_string_json.rb");
     assert!(
         src.contains("io << Views::Widgets.widget_json(widget)"),

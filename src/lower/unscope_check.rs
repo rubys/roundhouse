@@ -1,8 +1,9 @@
 //! Refuse an `unscope` the runtime cannot honour.
 //!
 //! The shared `Relation#unscope` implements only `unscope(where: <column>)`
-//! and `unscope(where: [<column>, ...])`. Anything else -- `unscope(:order)`,
-//! `unscope(:where)`, `unscope(where: nil)`, a non-literal target -- is
+//! and `unscope(where: [<column>, ...])`; `unscope(:where)` is rewritten to
+//! `Relation#unscope_where` first. Anything else -- `unscope(:order)`,
+//! `unscope(where: nil)`, a non-literal target -- is
 //! accepted by analysis (the method resolves) but raises at run time, or
 //! would silently remove nothing. A removed error is a claim the program
 //! runs, so those shapes are an Error here rather than a late surprise.
@@ -11,6 +12,21 @@ use crate::app::App;
 use crate::diagnostic::{Diagnostic, DiagnosticKind};
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::Symbol;
+
+/// `unscope(:where)` drops every WHERE condition: `Relation#unscope_where`.
+pub fn rewrite_unscope_where(app: &mut App) {
+    fn rewrite(e: &mut Expr) {
+        e.node.for_each_child_mut(&mut rewrite);
+        if let ExprNode::Send { recv: Some(_), method, args, block: None, .. } = &mut *e.node
+            && method.as_str() == "unscope"
+            && matches!(args.as_slice(), [arg] if matches!(&*arg.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "where"))
+        {
+            *method = Symbol::from("unscope_where");
+            args.clear();
+        }
+    }
+    super::for_each_hook_body(app, &mut rewrite);
+}
 
 pub fn apply_unscope_check(app: &App) -> Vec<Diagnostic> {
     let mut out = Vec::new();

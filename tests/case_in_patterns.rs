@@ -25,7 +25,7 @@ fn emit(body: &str) -> String {
         .map(|f| f.content.clone())
         .expect("matcher.rb");
     let errors: Vec<String> =
-        ruby_prism::parse(out.as_bytes()).errors().map(|e| e.message().to_string()).collect();
+        ruby_prism::parse(out.as_bytes()).errors().map(|e| String::from_utf8_lossy(e.message()).into_owned()).collect();
     assert!(errors.is_empty(), "emitted Ruby does not parse: {errors:?}\n{out}");
     out
 }

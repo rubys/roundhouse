@@ -62,6 +62,8 @@ const RT_V2_FORM_PARAMS: &str =
     include_str!("../../runtime/go/v2/form_params.go");
 const RT_V2_SLOTS: &str =
     include_str!("../../runtime/go/v2/slots.go");
+const RT_V2_I18N_HOST: &str =
+    include_str!("../../runtime/go/v2/i18n_host.go");
 const RT_V2_RH_DATETIME: &str =
     include_str!("../../runtime/go/v2/rh_datetime.go");
 
@@ -84,6 +86,7 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
     // renders `article.title`, whose model isn't the class being
     // emitted). Per-class tables are set by `emit_library_class`.
     expr::set_all_nullable_columns(nullable_column_pairs(app));
+    expr::reset_error_classes();
 
     // Hand-written runtime — copied verbatim under `app/v2/`.
     // Emitted FIRST so the transpiled framework runtime files can
@@ -114,6 +117,7 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         // (the `ActiveSupport.parse_db_time` intrinsic) + the
         // `JsonBuilder_encode_datetime_time` native twin. Stdlib-only.
         ("rh_datetime.go", RT_V2_RH_DATETIME),
+        ("i18n_host.go", RT_V2_I18N_HOST),
     ] {
         out.push(EmittedFile {
             path: output_path(OutputKind::HandWrittenRuntime { name }).path,
@@ -949,6 +953,9 @@ fn emit_dispatch_file(app: &App) -> EmittedFile {
     s.push_str("\tif strings.HasSuffix(r.URL.Path, \".json\") {\n");
     s.push_str("\t\trequestFormat = \"json\"\n");
     s.push_str("\t}\n");
+    // Read by format-dispatched actions only; an app without one still
+    // has to compile (Go rejects a declared-and-unused local).
+    s.push_str("\t_ = requestFormat\n");
     // Reset content_for / yield slot store at dispatch entry. The
     // slots are a module-singleton package-var map in Go; Rails
     // resets them per request via ActionView's slot lifecycle. The
@@ -958,7 +965,10 @@ fn emit_dispatch_file(app: &App) -> EmittedFile {
     // sequential requests. Concurrent requests still serialize on
     // the mutex — a proper per-request scope is the right long-term
     // fix.
-    s.push_str("\tActionViewViewHelpers_reset_slots_bang()\n\n");
+    s.push_str("\tActionViewViewHelpers_reset_slots_bang()\n");
+    s.push_str("\tI18nHost_reset_request()\n");
+    // Not left to the next request's reset: a goroutine ID is never reused, so a finished one's entry would stay
+    s.push_str("\tdefer I18nHost_reset_request()\n\n");
     s.push_str("\tswitch controller {\n");
     for ctrl in &app.controllers {
         let raw = ctrl.name.0.as_str();

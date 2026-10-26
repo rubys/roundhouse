@@ -32,13 +32,15 @@ const CALLS: &str = r#"class Thing < ApplicationRecord
   def self.locked = Mutex.new.synchronize { "x" } + 1
   def self.thread_locked = Thread::Mutex.new.synchronize { "x" } + 1
   def self.cached = ActiveSupport::Cache::MemoryStore.new.fetch("k") { "x" } + 1
+  def self.uncached = ActiveSupport::Cache::NullStore.new.fetch("k") { "x" } + 1
+  def self.noted = ActiveSupport::Notifications.subscribed(->(event) { event }, "demo") { "x" } + 1
 end
 "#;
 
 #[test]
 fn the_built_in_methods_answer_their_block() {
     let found = binops(&[("app/models/thing.rb", CALLS)]);
-    assert_eq!(found.len(), 3, "{found:?}");
+    assert_eq!(found.len(), 5, "{found:?}");
 }
 
 #[test]
@@ -47,7 +49,7 @@ fn an_app_defined_mutex_synchronize_answers_its_own_type() {
         ("app/models/thing.rb", CALLS),
         ("app/models/mutex_override.rb", "class Mutex\n  def synchronize\n    yield\n    42\n  end\nend\n"),
     ]);
-    assert_eq!(found.len(), 2, "{found:?}");
+    assert_eq!(found.len(), 4, "{found:?}");
 }
 
 #[test]
@@ -56,7 +58,7 @@ fn an_app_defined_thread_mutex_synchronize_answers_its_own_type() {
         ("app/models/thing.rb", CALLS),
         ("app/models/thread_mutex_override.rb", "class Thread::Mutex\n  def synchronize\n    yield\n    42\n  end\nend\n"),
     ]);
-    assert_eq!(found.len(), 2, "{found:?}");
+    assert_eq!(found.len(), 4, "{found:?}");
 }
 
 #[test]
@@ -65,7 +67,7 @@ fn an_app_defined_memory_store_fetch_answers_its_own_type() {
         ("app/models/thing.rb", CALLS),
         ("app/models/memory_store_override.rb", "class ActiveSupport::Cache::MemoryStore\n  def fetch(name)\n    yield\n    42\n  end\nend\n"),
     ]);
-    assert_eq!(found.len(), 2, "{found:?}");
+    assert_eq!(found.len(), 4, "{found:?}");
 }
 
 #[test]
@@ -74,5 +76,5 @@ fn an_app_redefinition_that_answers_its_block_keeps_the_block_type() {
         ("app/models/thing.rb", CALLS),
         ("app/models/mutex_override.rb", "class Mutex\n  def synchronize\n    yield\n  end\nend\n"),
     ]);
-    assert_eq!(found.len(), 3, "{found:?}");
+    assert_eq!(found.len(), 5, "{found:?}");
 }

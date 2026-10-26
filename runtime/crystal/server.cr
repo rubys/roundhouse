@@ -81,7 +81,11 @@ module Roundhouse
       @@layout = layout
 
       server = HTTP::Server.new do |context|
-        dispatch(context)
+        begin
+          dispatch(context)
+        ensure
+          I18nHost.reset_request
+        end
       end
       address = server.bind_tcp("127.0.0.1", resolved_port)
       puts "Roundhouse Crystal server listening on http://#{address}"
@@ -90,6 +94,7 @@ module Roundhouse
 
     def self.dispatch(context : HTTP::Server::Context) : Nil
       ActionView::ViewHelpers.reset_slots!
+      I18nHost.reset_request
       method = context.request.method.upcase
       path = context.request.path
 

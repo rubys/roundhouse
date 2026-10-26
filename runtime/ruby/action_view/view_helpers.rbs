@@ -43,6 +43,7 @@ module ActionView
     def self.builder_text: (String s) -> String
     def self.builder_attr: (String s) -> String
   def self.h: (untyped value) -> String
+  def self.tag_attr: (String key, untyped value) -> String
     # Percent-encoding for a query-string value; ASCII-only (see the .rb).
     def self.url_encode: (String s) -> String
     def self.erb_url_encode: (String s) -> String
@@ -52,6 +53,8 @@ module ActionView
     # both with the nested bracket grammar and Rails' per-level sort.
     def self.fragment_read: (String key) -> String?
     def self.fragment_write: (String key, String value, Integer ttl) -> String
+    def self.fragment_read_record: (String template, untyped record) -> String?
+    def self.fragment_write_record: (String template, untyped record, String value, Integer ttl) -> String
     def self.collection_caching?: () -> bool
     def self.collection_fragment_key: (String partial, untyped key) -> String
     def self.collection_fragment_read: (String name) -> String?
@@ -189,6 +192,7 @@ module ActionView
     # (and absolute/protocol-relative sources) returns it verbatim.
     def self.image_path: (String source, ?skip_pipeline: bool) -> String
     def self.asset_path: (String source, ?skip_pipeline: bool) -> String
+    def self.digested_asset_path: (String source) -> String
     def self.url_for: (String target) -> String
     def self.image_url: (String source, ?skip_pipeline: bool) -> String
     def self.image_tag: (String source, ?Hash[Symbol, untyped] opts) -> String

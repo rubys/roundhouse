@@ -183,13 +183,12 @@ module ActionController
     # is divergent and doesn't contradict the declared return.
     %a{abstract}
     def process_action: (Symbol _action_name) -> void
+    def recycle!: () -> void
 
     # `render(body, status:, content_type:, location:)` — sets @body,
     # @status, and optionally @content_type / @location. `status:` is
-    # monomorphic Symbol (was untyped Symbol|Integer; real-blog only
-    # passes Symbol forms — `:ok`, `:created`, `:unprocessable_entity`
-    # etc. — and STATUS_CODES maps them). Callers needing a literal
-    # integer code coerce upstream.
+    # a registered Symbol on strict targets. The Ruby/Spinel reopen
+    # accepts Integer codes too (action_controller_head.rbs).
     def render: (
       String body,
       ?status: Symbol,
@@ -198,7 +197,7 @@ module ActionController
     ) -> void
 
     # `redirect_to(path, notice:, alert:, status:)` — sets @location,
-    # @status, @flash entries. `status:` typed Symbol (see render).
+    # @status, @flash entries. Ruby/Spinel also accepts Integer status codes.
     def redirect_to: (
       String path,
       ?notice: String?,
@@ -226,6 +225,7 @@ module ActionController
                       ?immutable: bool) -> void
     def cache_control_max_age: () -> Integer
     def cache_control_public: () -> bool
+    def set_header: (String name, String value) -> String
     def headers: () -> ActionController::HeaderStore
     def helpers: () -> Base
     def send_data: (String data, ?type: String, ?disposition: String) -> void
@@ -241,9 +241,8 @@ module ActionController
     def request_protocol_for_url: () -> String
     def url_from_path: (String path) -> String
 
-    # Monomorphic on Symbol — body looks up STATUS_CODES. Integer
-    # pass-through was previously supported via `is_a?(Integer)`
-    # narrowing; that branch is removed since real-blog never uses it.
+    # Strict targets use Symbols; Ruby/Spinel widens resolve_status.
     def resolve_status: (Symbol s) -> Integer
+    def resolve_symbol_status: (Symbol s) -> Integer
   end
 end

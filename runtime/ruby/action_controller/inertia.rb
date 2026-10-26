@@ -337,11 +337,14 @@ module ActionController
       nil
     end
 
-    # Kernel's `instance_exec`, declared on Base. The block runs with
-    # the controller as `self` and returns whatever the prop computed;
-    # this encodes that value once.
+    # A computed prop proc is built in a controller method, so its
+    # `self` is already that controller (`-> { @stamp }`). `call` runs
+    # it and encodes the value. `instance_exec` would rebind a proc
+    # that was built on some other object; Spinel has no compile path
+    # for `instance_exec` of a proc that is not a literal at the call,
+    # and this method is the one body every target runs.
     def inertia_exec(work)
-      ActionController::JsonRender.encode(instance_exec(&work))
+      ActionController::JsonRender.encode(work.call)
     end
 
     def inertia_root_html(use_script_element)

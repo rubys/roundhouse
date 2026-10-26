@@ -41,7 +41,11 @@ pub fn apply_unported_rails_subclass_drop(app: &mut App) -> Vec<Diagnostic> {
                 continue;
             }
             let Some(parent) = lc.parent.as_ref() else { continue };
-            let base = if is_unported_rails_base(parent.0.as_str()) {
+            // A runtime that defines `ActiveModel::Validator` keeps its
+            // subclasses (`validates_with` classes).
+            let ported = app.ports_active_model_validator
+                && matches!(parent.0.as_str(), "ActiveModel::Validator" | "ActiveModel::EachValidator");
+            let base = if is_unported_rails_base(parent.0.as_str()) && !ported {
                 Some(parent.0.clone())
             } else {
                 doomed.get(&parent.0).cloned()

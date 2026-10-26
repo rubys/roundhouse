@@ -8,6 +8,7 @@
 //! CLDR's `n i v f t`. rails-i18n's rules are in [`super::rails_i18n`];
 //! this module reads an app's ruby-cldr `plurals.rb`.
 
+use crate::ingest::prism_api::PrismLocation;
 /// Each locale's rule in a ruby-cldr `plurals.rb` (`{ af: { i18n: {
 /// plural: { rule: lambda … } } } }`), `None` for one whose lambda is
 /// not the operands-and-comparisons shape ruby-cldr generates.

@@ -1,0 +1,87 @@
+#!/usr/bin/env ruby
+# scripts/campfire-users-campaign-report DIR — Markdown tables from a
+# scripts/campfire-users-campaign run: each cell is the median over its
+# repetitions with the range beside it, so a single noisy run cannot pass
+# for a result.
+require "json"
+
+dir = ARGV[0] or abort "usage: campfire-users-campaign-report DIR"
+versions = JSON.parse(File.read(File.join(dir, "versions.json"))) rescue {}
+
+def median(values)
+  s = values.sort
+  s.empty? ? nil : (s.length.odd? ? s[s.length / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2.0)
+end
+
+def cell(values, digits = 1)
+  values = values.compact
+  return "—" if values.empty?
+  fmt = ->(v) { digits.zero? ? v.round.to_s : format("%.#{digits}f", v) }
+  values.length == 1 ? fmt.(values[0]) : "#{fmt.(median(values))} (#{fmt.(values.min)}–#{fmt.(values.max)})"
+end
+
+# runs[group][lane] = [users.json lane result, one per rep]
+runs = Hash.new { |h, k| h[k] = Hash.new { |hh, kk| hh[kk] = [] } }
+Dir[File.join(dir, "*-[0-9]*", "users.json")].sort.each do |path|
+  group = File.basename(File.dirname(path)).sub(/-\d+\z/, "")
+  JSON.parse(File.read(path)).each { |lane, result| runs[group][lane] << result }
+end
+
+METRICS = [
+  [ "navigation p50 (ms)", ->(s) { s.dig("navigation_latency", "p50_ms") } ],
+  [ "navigation p99 (ms)", ->(s) { s.dig("navigation_latency", "p99_ms") } ],
+  [ "room page service p50 (ms)", ->(s) { s.dig("routes", "room", "service", "p50_ms") } ],
+  [ "delivery p99 (ms)", ->(s) { s.dig("delivery", "latency", "p99_ms") } ],
+  [ "peak PSS (MB)", ->(s) { s.dig("memory", "peak_pss_mb") }, 0 ],
+  [ "server CPU (cores)", ->(s) { s["server_cpu_cores"] }, 2 ],
+  [ "generator CPU (% of one core)", ->(s) { s["generator_cpu_percent"] }, 0 ],
+  # Requests that got no response; older runs have only the per-route counts.
+  [ "errors (requests with no response)", ->(s) { s["routes"].values.sum { |r| r["errors"].to_i } }, 0 ]
+].freeze
+
+puts "# Users profile campaign"
+puts
+puts "Versions: #{versions.map { |k, v| "#{k} `#{v.to_s[0, 40]}`" }.join(", ")}" unless versions.empty?
+runs.each do |group, lanes|
+  puts
+  puts "## #{group}"
+  puts
+  puts "| lane | reps | valid | people served (median, range) |"
+  puts "|---|--:|--:|--:|"
+  lanes.each do |lane, results|
+    caps = results.map { |r| r["capacity_people"] }
+    valid = results.count { |r| r["valid"] }
+    puts "| #{lane} | #{results.length} | #{valid} | #{cell(caps.map { |c| c || 0 }, 0)} |"
+  end
+  people = lanes.values.flatten.flat_map { |r| r["steps"].map { |s| s["people"] } }.uniq.sort
+  METRICS.each do |title, read, digits|
+    puts
+    puts "**#{title}**"
+    puts
+    puts "| lane | #{people.join(" | ")} |"
+    puts "|---|#{"--:|" * people.length}"
+    lanes.each do |lane, results|
+      row = people.map do |n|
+        cell(results.map { |r| (st = r["steps"].find { |s| s["people"] == n }) && read.(st) }, digits || 1)
+      end
+      puts "| #{lane} | #{row.join(" | ")} |"
+    end
+  end
+  checks = lanes.map do |lane, results|
+    "#{lane}: #{results.sum { |r| r["invalid"].to_i }} invalid, #{results.sum { |r| r["missing_deliveries"].to_i }} missing deliveries, " \
+      "#{results.sum { |r| r["errors"].to_i }} errors, #{results.sum { |r| r["resubscribes"].to_i }} resubscribes"
+  end
+  puts
+  puts "Checks across all reps — #{checks.join("; ")}."
+  kinds = lanes.flat_map do |lane, results|
+    results.flat_map { |r| r["steps"].flat_map { |st| (st["errors"] || {}).map { |kind, n| [ lane, st["people"], kind, n ] } } }
+  end
+  unless kinds.empty?
+    puts
+    puts "Errors by reason, summed over reps:"
+    puts
+    kinds.group_by { |lane, people, kind, _| [ lane, people, kind ] }.each do |(lane, people, kind), rows|
+      puts "- #{lane}, #{people} people: #{rows.sum(&:last)} × #{kind}"
+    end
+  end
+end

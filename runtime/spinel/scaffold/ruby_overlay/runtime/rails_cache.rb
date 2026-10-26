@@ -125,20 +125,26 @@ module Rails
     # keeps that expiry, as MemoryStore#increment does. Under the
     # shard Mutex, read-modify-write, so two Puma threads counting the
     # same key do not both see the old value.
-    def increment_str(key, ttl)
+    def increment_str(key, amount, ttl)
       k = key.to_s
       s = shard_of(k)
       @mutexes[s].synchronize do
         entry = @shards[s][k]
         if entry && !expired?(entry) && entry[0].is_a?(String)
-          n = entry[0].to_i + 1
+          n = entry[0].to_i + amount
           @shards[s][k] = [n.to_s.freeze, entry[1]]
           n
         else
-          @shards[s][k] = ["1".freeze, ttl.to_i > 0 ? monotonic_now + ttl.to_i : nil]
-          1
+          @shards[s][k] = [amount.to_s.freeze, ttl.to_i > 0 ? monotonic_now + ttl.to_i : nil]
+          amount
         end
       end
+    end
+
+    # Rails' `increment(name, amount = 1, expires_in:)`, the call
+    # `rate_limit` makes on the controller's `cache_store`.
+    def increment(key, amount = 1, expires_in: 0)
+      increment_str(key, amount, expires_in.to_i)
     end
 
     def read(key)

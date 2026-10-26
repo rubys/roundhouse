@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# scripts/campfire-users-campaign — the users profile, repeated, for numbers
+# that can be published: every cell is a median with its range over --reps
+# runs, and every version is recorded.
+#
+#   scripts/campfire-users-campaign [--out DIR] [--reps N] [--step S] [--warmup S]
+#                                   [--ladder-only | --compare-only]
+#
+# Two parts, each a sequence of scripts/bench-campfire --users-only runs:
+#
+#   ladder    rails at each campfire ref in LADDER (name=git-ref): the base
+#             the pull requests branch from, then each PR in turn, so each
+#             PR's effect is measured on its own. Prepared once per ref.
+#   compare   rails, ruby-falcon and tobi on COMPARE_REF (the fork's
+#             preview), prepared once; lane order alternates between reps so
+#             no lane always runs first or last.
+#
+# Isolation: bench-campfire pins each server to --server-cpus (four cores
+# and their SMT siblings) and the load generator, and the memory/CPU
+# sampler, to --client-cpus. They still share one machine's L3 cache and
+# memory bandwidth; the generator's own CPU is recorded per step
+# (generator_cpu_percent) so its load can be read beside the server's.
+#
+# Afterwards: scripts/campfire-users-campaign-report DIR > tables.md
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CAMPFIRE="${CAMPFIRE:-$HOME/git/once-campfire}"
+RUBY_DIR="${RUBY_DIR:-$HOME/.rubies/head}"
+OUT="$REPO_ROOT/bench/results/campfire-users-campaign-$(date +%Y%m%d-%H%M%S)"
+REPS=3
+STEP=60
+WARMUP=15
+PARTS="ladder compare"
+LADDER_PEOPLE="250,500,1000"
+COMPARE_PEOPLE="250,500,1000,2000,3000"
+# name=ref, in order. The base is where the PR branches fork from upstream.
+LADDER=(
+    "base=roundhouse-rb/shared-message-fragments~1"
+    "pr412=roundhouse-rb/shared-message-fragments"
+    "pr413=roundhouse-rb/fragment-versions"
+)
+COMPARE_REF="roundhouse-rb/preview"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --out)          OUT="$2"; shift 2 ;;
+        --reps)         REPS="$2"; shift 2 ;;
+        --step)         STEP="$2"; shift 2 ;;
+        --warmup)       WARMUP="$2"; shift 2 ;;
+        --ladder-only)  PARTS="ladder"; shift ;;
+        --compare-only) PARTS="compare"; shift ;;
+        -h|--help)      sed -n '2,/^set -euo/p' "$0" | sed '$d;s/^# \{0,1\}//'; exit 0 ;;
+        *) echo "campfire-users-campaign: unknown argument $1" >&2; exit 2 ;;
+    esac
+done
+mkdir -p "$OUT"
+OUT="$(cd "$OUT" && pwd)"
+LOG="$OUT/campaign.log"
+step() { printf '%s %s\n' "$(date +%H:%M:%S)" "$*" | tee -a "$LOG"; }
+
+git -C "$CAMPFIRE" fetch -q roundhouse-rb
+git -C "$CAMPFIRE" fetch -q origin
+
+# One worktree per ref, detached at the ref's commit, so the run names
+# exactly what it measured.
+worktree() {   # $1 = name, $2 = ref -> echoes the path
+    local path="$OUT/src-$1"
+    if [[ ! -d "$path" ]]; then
+        git -C "$CAMPFIRE" worktree add -q --detach "$path" "$2" >&2
+    fi
+    echo "$path"
+}
+
+# Versions of everything that ran.
+{
+    echo "{"
+    echo "  \"roundhouse\": \"$(git -C "$REPO_ROOT" rev-parse HEAD)\","
+    echo "  \"verification\": \"$(git -C "${VERIFICATION_ROOT:-$HOME/git/once-campfire-verification}" rev-parse HEAD)\","
+    echo "  \"tobi\": \"$(git -C "${TOBI_ROOT:-$HOME/git/campfire-once-ruby-ractor}" rev-parse HEAD)\","
+    for entry in "${LADDER[@]}" "compare=$COMPARE_REF"; do
+        echo "  \"campfire_${entry%%=*}\": \"$(git -C "$CAMPFIRE" rev-parse "${entry#*=}")\","
+    done
+    echo "  \"ruby\": \"$("$RUBY_DIR/bin/ruby" -v)\","
+    echo "  \"kernel\": \"$(uname -r)\","
+    echo "  \"cpu\": \"$(lscpu | sed -n 's/^Model name: *//p')\","
+    echo "  \"reps\": $REPS, \"step_secs\": $STEP, \"warmup_secs\": $WARMUP"
+    echo "}"
+} > "$OUT/versions.json"
+step "versions -> $OUT/versions.json"
+
+bench() {   # $1 = run dir, $2 = app, $3 = people, $4 = skip-prepare (0/1), rest = lanes
+    local dir="$1" app="$2" people="$3" skip="$4"; shift 4
+    local prep=(); (( skip )) && prep=(--skip-prepare)
+    "$REPO_ROOT/scripts/bench-campfire" "${prep[@]}" --app "$app" --ruby "$RUBY_DIR" --users-only \
+        --users-people "$people" --users-step "$STEP" --users-warmup "$WARMUP" --out "$dir" "$@" \
+        > "$dir.log" 2>&1 || step "  (bench-campfire exited $? — see $dir.log)"
+}
+
+if [[ " $PARTS " == *" ladder "* ]]; then
+    for entry in "${LADDER[@]}"; do
+        name="${entry%%=*}"; app="$(worktree "$name" "${entry#*=}")"
+        for rep in $(seq 1 "$REPS"); do
+            step "ladder $name rep $rep (campfire $(git -C "$app" rev-parse --short HEAD))"
+            bench "$OUT/ladder-$name-$rep" "$app" "$LADDER_PEOPLE" $(( rep > 1 )) rails
+        done
+    done
+fi
+
+if [[ " $PARTS " == *" compare "* ]]; then
+    app="$(worktree compare "$COMPARE_REF")"
+    for rep in $(seq 1 "$REPS"); do
+        if (( rep % 2 )); then lanes=(rails ruby-falcon tobi); else lanes=(tobi ruby-falcon rails); fi
+        step "compare rep $rep (${lanes[*]}; campfire $(git -C "$app" rev-parse --short HEAD))"
+        bench "$OUT/compare-$rep" "$app" "$COMPARE_PEOPLE" $(( rep > 1 )) "${lanes[@]}"
+    done
+fi
+step "done -> $OUT"

@@ -78,7 +78,30 @@ pub struct Column {
     /// This stays sparse so ordinary integer columns keep their serialized
     /// form and application typing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub generated_int4_compatible: Option<bool>,
+    pub generated_int4_compatible: Option<bool>,    /// A PostgreSQL array column (`t.bigint "tag_ids", array: true`):
+    /// Rails reads an `Array` of `col_type`, or nil when the column is
+    /// nullable and unset. `col_type` stays the element type, as Rails'
+    /// own column metadata keeps it. Sparse, so a non-array column keeps
+    /// its serialized form.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub array: bool,
+    /// The target stores this array column as an Array: set by
+    /// `lower::array_columns::store_arrays` on the ruby family, where it
+    /// is typed `Array[<element>]` and kept in SQLite as JSON text. Every
+    /// other target reads the element, as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub array_stored: bool,
+}
+
+impl Column {
+    /// The schema default a target reads. An array column's `[]` counts
+    /// only where the target stores the Array.
+    pub fn stored_default(&self) -> Option<&str> {
+        if self.array && !self.array_stored {
+            return None;
+        }
+        self.default.as_deref()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -120,6 +143,11 @@ pub enum ColumnType {
     /// Not modeled as `String` at ingest so a schema round-trip and a
     /// per-dialect renderer can still tell the two apart.
     Uuid,
+    /// `t.interval` — a Postgres `interval` column. SQLite stores the
+    /// canonical whole-second count as INTEGER. The public reader is an
+    /// `ActiveSupport::Duration`; keeping a distinct variant lets
+    /// PostgreSQL DDL still say `interval`.
+    Interval,
     Reference { table: TableRef },
 }
 

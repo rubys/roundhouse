@@ -49,6 +49,7 @@ use super::util::{constant_id_str, flatten_statements};
 use super::{IngestError, IngestResult};
 use crate::vfs::Vfs;
 
+use crate::ingest::prism_api::PrismLocation;
 /// One statement that can change the setting, in execution order.
 #[derive(Clone, Debug)]
 enum Step {

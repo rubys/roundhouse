@@ -40,7 +40,7 @@ puts "enum constants"
     let source =
         std::fs::read_to_string(run.emitted.join("app/models/article.rb")).unwrap_or_default();
     let parse = ruby_prism::parse(source.as_bytes());
-    let parse_errors: Vec<String> = parse.errors().map(|e| e.message().to_string()).collect();
+    let parse_errors: Vec<String> = parse.errors().map(|e| String::from_utf8_lossy(e.message()).into_owned()).collect();
     assert!(parse_errors.is_empty(), "{parse_errors:?} in:\n{source}");
     run.assert_passes();
     assert_eq!(run.stdout, "enum constants\n");

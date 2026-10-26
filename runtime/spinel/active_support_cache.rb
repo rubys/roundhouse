@@ -51,10 +51,36 @@ module ActiveSupport
     def self.retrieve_cache_key(key)
       return key.cache_key_with_version.to_s if key.respond_to?(:cache_key_with_version)
       return key.cache_key.to_s if key.respond_to?(:cache_key)
-      return key.map { |element| ActiveSupport::Cache.retrieve_cache_key(element) }.join("/") if key.is_a?(Array)
+      return ActiveSupport::Cache.append_cache_key(+"", key) if key.is_a?(Array)
       return ActiveSupport::Cache.retrieve_cache_key(key.to_a) if key.is_a?(Hash)
       return "" if key.nil?
+      # A String key comes back as a copy: the Array route's result is
+      # built in place, and Spinel cannot yet hand on a String that one
+      # route shares with the caller and another changes (#9258).
+      return key.dup if key.is_a?(String)
       key.to_s
+    end
+
+    # An Array's key as Rails joins it (each element's key, "/" between),
+    # appended to `out`, a nested Array's elements in place: one String
+    # for the whole key rather than an Array and a String per level. A
+    # cached collection expands one key per element.
+    # (A `while`, not `each_with_index`, which allocates per call.)
+    def self.append_cache_key(out, key)
+      i = 0
+      while i < key.length
+        element = key[i]
+        out << "/" if i > 0
+        if element.is_a?(Array)
+          ActiveSupport::Cache.append_cache_key(out, element)
+        elsif element.is_a?(String)
+          out << element
+        else
+          out << ActiveSupport::Cache.retrieve_cache_key(element)
+        end
+        i += 1
+      end
+      out
     end
 
     # `Store#expanded_key`: the key a store files an entry under.
@@ -86,7 +112,7 @@ module ActiveSupport
       def read(name, options = nil)
         MemoryStore.reject_options(options)
         key = ActiveSupport::Cache.expanded_key(name)
-        _, value = @lock.synchronize { read_locked(key) }
+        value = @lock.synchronize { @data.key?(key) ? touch_locked(key) : nil }
         MemoryStore.copy(value)
       end
 
@@ -137,8 +163,9 @@ module ActiveSupport
         out = {}
         names.each do |name|
           key = ActiveSupport::Cache.expanded_key(name)
-          found, value = @lock.synchronize { read_locked(key) }
-          out[name] = MemoryStore.copy(value) if found
+          @lock.synchronize do
+            out[name] = MemoryStore.copy(touch_locked(key)) if @data.key?(key)
+          end
         end
         out
       end
@@ -170,16 +197,24 @@ module ActiveSupport
         "#<ActiveSupport::Cache::MemoryStore entries=#{@data.size}, size=#{@cache_size}>"
       end
 
-      def self.copy(value, ancestors = [])
+      def self.copy(value)
         # Any String, a SafeBuffer included: `dup` keeps the class, so the
         # html-safe body a helper renders (campfire's text presentation,
         # through `auto_link`) comes back html-safe, as Rails' store
         # returns it.
         return value.dup if value.is_a?(String)
+        MemoryStore.copy_within(value, [])
+      end
+
+      # `copy` below the top level, with the Arrays and Hashes it is
+      # inside (`ancestors`), to refuse a recursive value. Apart from
+      # `copy` so a String, every cached fragment, makes no list.
+      def self.copy_within(value, ancestors)
+        return value.dup if value.is_a?(String)
         if value.instance_of?(Array)
           raise ArgumentError, "MemoryStore cannot safely copy a recursive value" if ancestors.any? { |ancestor| ancestor.equal?(value) }
           ancestors << value
-          out = value.map { |item| MemoryStore.copy(item, ancestors) }
+          out = value.map { |item| MemoryStore.copy_within(item, ancestors) }
           ancestors.pop
           return out
         end
@@ -188,9 +223,9 @@ module ActiveSupport
           raise ArgumentError, "MemoryStore cannot safely copy an identity Hash" if value.compare_by_identity?
           raise ArgumentError, "MemoryStore cannot safely copy a Hash with a default proc" if value.default_proc
           ancestors << value
-          out = Hash.new(MemoryStore.copy(value.default, ancestors))
+          out = Hash.new(MemoryStore.copy_within(value.default, ancestors))
           value.each do |key, item|
-            out[MemoryStore.copy(key, ancestors)] = MemoryStore.copy(item, ancestors)
+            out[MemoryStore.copy_within(key, ancestors)] = MemoryStore.copy_within(item, ancestors)
           end
           ancestors.pop
           return out
@@ -216,9 +251,16 @@ module ActiveSupport
       # Call only while holding @lock.
       def read_locked(key)
         return [false, nil] unless @data.key?(key)
+        [true, touch_locked(key)]
+      end
+
+      # A present key's value, the key moved to the most-recently-used
+      # end, under @lock. `read` and `read_multi` test `@data.key?` first and call this
+      # rather than `read_locked`, whose pair is an Array per read.
+      def touch_locked(key)
         value = @data.delete(key)
         @data[key] = value
-        [true, value]
+        value
       end
 
       def delete_locked(key)
@@ -233,6 +275,47 @@ module ActiveSupport
           break if @cache_size <= target_size
           delete_locked(key)
         end
+      end
+    end
+
+    # A store that keeps nothing. `fetch` and `fetch_str` still answer
+    # the block, and they do not write it. A subclass of `Rails::Cache`,
+    # so it can stand in for `Rails.cache`.
+    class NullStore < Rails::Cache
+      def read(name, options = nil)
+        nil
+      end
+
+      def write(name, value, options = nil)
+        true
+      end
+
+      def fetch(name)
+        yield
+      end
+
+      def delete(name)
+        false
+      end
+
+      def exist?(name)
+        false
+      end
+
+      def clear
+        nil
+      end
+
+      def read_str(key)
+        nil
+      end
+
+      def write_str(key, value, ttl)
+        value
+      end
+
+      def fetch_str(key, ttl)
+        yield
       end
     end
   end

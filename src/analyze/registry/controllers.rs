@@ -35,6 +35,15 @@ pub(in crate::analyze) fn register(
         for m in ["helpers", "helper", "default_url_options"] {
             acb.class_methods.insert(Symbol::from(m), Ty::Untyped);
         }
+        // `cache_store`, the class-level store (`Rails.cache` unless an
+        // app sets another) that `rate_limit`'s synthesized filter
+        // counts in — `self.class.cache_store`, as actionpack's default
+        // `store:` is. runtime/spinel/action_controller_fragment_caching.rb
+        // defines it on every controller class.
+        acb.class_methods.insert(
+            Symbol::from("cache_store"),
+            Ty::Class { id: ClassId(Symbol::from("Rails::Cache")), args: vec![].into() },
+        );
         classes
             .entry(ClassId(Symbol::from("ActionController::Base")))
             .or_insert(acb);
@@ -495,6 +504,9 @@ pub(in crate::analyze) fn register(
         }
         jar.instance_methods.insert(Symbol::from("to_h"), Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) });
         jar.instance_methods.insert(Symbol::from("clear"), Ty::Nil);
+        // Rails' jar is Enumerable over its whole view; `each` yields
+        // name and value (`block_params_for`) and answers the jar.
+        jar.instance_methods.insert(Symbol::from("each"), jar_ty.clone());
         classes.insert(jar_id, jar);
         app_ctrl.class_methods.insert(Symbol::from("cookies"), jar_ty);
     }
@@ -633,27 +645,29 @@ fn register_inertia(classes: &mut HashMap<ClassId, ClassInfo>, app_ctrl: &mut Cl
             page.instance_methods.insert(name.clone(), ty.clone());
         }
     }
-    // Phantom until controller_to_library rewrites to `prop_json`.
-    page.instance_methods.insert(
-        Symbol::from("prop"),
-        Ty::Fn {
-            params: vec![
-                crate::ty::Param {
-                    name: Symbol::from("key"),
-                    ty: Ty::Str.into(),
-                    kind: crate::ty::ParamKind::Required,
-                },
-                crate::ty::Param {
-                    name: Symbol::from("value"),
-                    ty: Ty::Untyped.into(),
-                    kind: crate::ty::ParamKind::Required,
-                },
-            ].into(),
-            block: None,
-            ret: std::sync::Arc::new(Ty::Nil),
-            effects: crate::effect::EffectSet::default(),
-        },
-    );
+    // Phantom until controller_to_library selects the runtime call.
+    for name in ["prop", "lazy_prop"] {
+        page.instance_methods.insert(
+            Symbol::from(name),
+            Ty::Fn {
+                params: vec![
+                    crate::ty::Param {
+                        name: Symbol::from("key"),
+                        ty: Ty::Str.into(),
+                        kind: crate::ty::ParamKind::Required,
+                    },
+                    crate::ty::Param {
+                        name: Symbol::from("value"),
+                        ty: Ty::Untyped.into(),
+                        kind: crate::ty::ParamKind::Required,
+                    },
+                ].into(),
+                block: None,
+                ret: std::sync::Arc::new(Ty::Nil),
+                effects: crate::effect::EffectSet::default(),
+            },
+        );
+    }
     if let Some(methods) = parsed.get(&ClassId(Symbol::from("ActionController::Base"))) {
         for (name, ty) in methods {
             app_ctrl.class_methods.insert(name.clone(), ty.clone());

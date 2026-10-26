@@ -12,7 +12,9 @@ module ActiveRecord
     # `untyped` (`spinel_relation_model_handle`): Spinel treats `Base` as
     # an instance (`sp_ActiveRecord__Base *`), so `Relation.new(User)`
     # would otherwise fail campfire AOT.
-    def initialize: (Base model) -> void
+    def initialize: (Base model, ?bool scoped) -> void
+    def apply_default_scope!: () -> nil
+    def self.unscoped_tables: () -> Array[String]
 
     # Rails' Relation#spawn — copy query state onto a fresh Relation so
     # a scope fork cannot mutate its caller's accumulators.
@@ -57,8 +59,10 @@ module ActiveRecord
     @friendly: bool
     # Rails NullRelation — `none` / empty IN. Kept across spawn/chain.
     @null: bool
+    @none: bool
     def unload_records: () -> void
     def null_relation?: () -> bool
+    def explicit_none?: () -> bool
     def mark_null!: () -> void
     def hash_has_empty_in?: (Hash[untyped, untyped]) -> bool
     def with_recursive: (Hash[Symbol, Array[Relation]] ctes) -> Relation
@@ -67,6 +71,9 @@ module ActiveRecord
     def from!: (String source) -> Relation
     def cte_prefix: () -> String
     def from_source: () -> String
+    def aggregate_column: (String column) -> String
+    def from_names_table?: () -> bool
+    def word_char?: (String char) -> bool
 
     # The association scope (`where_scope`) and what it presets on a
     # create (`scope_attributes`). The ivar is declared as well as the
@@ -174,6 +181,8 @@ module ActiveRecord
     def where_clauses: () -> Array[String]
     def unscope: (?where: Symbol | String | Array[Symbol | String]?) -> Relation
     def unscope!: (?where: Symbol | String | Array[Symbol | String]?) -> Relation
+    def unscope_where: () -> Relation
+    def unscope_where!: () -> Relation
     def arel: () -> Arel::SelectManager
     def none: () -> Relation
     def none!: () -> Relation
@@ -190,6 +199,20 @@ module ActiveRecord
     # array. Same over-claim as `map`/`collect` below.
     def preloaded: (untyped records, bool loaded) -> Relation
     def klass: () -> Class
+    def primary_key: () -> String
+
+    # Collection cache key (see relation.rb for why it is not Rails'
+    # digest). Declared ivars so Bar A seeds them from the memoizing
+    # `||=` first-write rather than freezing on `initialize`'s absence.
+    @cache_keys: Hash[String, String]?
+    @cache_versions: Hash[String, String]?
+    CACHE_KEY_DIGEST_KEY: String
+    def cache_key: (?(String | Symbol) timestamp_column) -> String
+    def cache_version: (?(String | Symbol) timestamp_column) -> String
+    def compute_cache_version: (String timestamp_column) -> String
+    def windowed_cache_version: (String timestamp_column, bool has_column) -> String
+    def cache_key_with_version: () -> String
+    def query_digest_hex: (String str) -> String
 
     def to_a: () -> Array[Base]
     def load_records: () -> Array[Base]
@@ -313,6 +336,7 @@ module ActiveRecord
     def find_or_create_by: (Hash[Symbol, untyped] conditions) -> Base
     def find_or_create_by!: (Hash[Symbol, untyped] conditions) -> Base
     def find_or_initialize_by: (Hash[Symbol, untyped] conditions) -> Base
+    def build: (Hash[Symbol, untyped] conditions) -> Base
 
     def to_sql: () -> String
     def bound_sql: () -> String
@@ -327,6 +351,9 @@ module ActiveRecord
     def bound_exists_sql: (Integer n) -> String
     def hash_conditions: (Hash[String | Symbol, untyped] hash) -> String
     def column_predicate: (String col, Relation | Array[untyped] | Base | String | Integer | Float | bool | nil val) -> String
+    def range_predicate: (String qcol, untyped range) -> String
+    def range_bound_sql: (untyped bound) -> String?
+    def array_with_ranges_predicate: (String qcol, Array[untyped] vals) -> String
     def substitute_binds: (String sql, Array[untyped] args) -> String
     def substitute_named_binds: (String sql, Hash[Symbol, untyped] binds) -> String
     def named_bind_start?: (String ch) -> bool

@@ -691,6 +691,23 @@ Nokogiri-backed Fragment.
 with every attribute it carried (`sgid`, `content_type`, `caption`,
 `filename`, `url`).
 
+### `constantize` resolves only the app's own constants
+
+`name.constantize` and `name.safe_constantize` turn any String into the
+constant it names in Rails. A name computed at run time (pundit's
+`"#{model}Policy"`) or read off the wire would then reach every constant
+in the process, the reflection this pipeline does not emit. On the Ruby,
+JRuby and Spinel targets `lower::constantize` routes each call to one generated
+`RoundhouseConstants` lookup, a `case` over the constants the app's own
+source defines: its models,
+controllers and library classes, including the source of a gem the app
+keeps in its tree (`gem "pundit", path: "vendor/pundit"`). A name in
+that set answers what Rails answers. A name outside it (`"String"`,
+a framework class) answers `nil` from `safe_constantize` and raises
+`NameError` from `constantize`, where Rails would resolve it. Every
+other target refuses the call with an unsupported diagnostic, and
+`name.constantize.instantiate(attrs)` stays `lower::record_snapshot`'s.
+
 ### Action Text decodes only the entities Rails' escaper emits
 
 `Content#to_plain_text` decodes `&amp; &lt; &gt; &quot; &#39; &apos;
@@ -794,6 +811,17 @@ test lives in the runtime rather than in generated per-model code.
 text), and an integer key gets no `?` predicate, because Rails'
 `present?` on any Integer — `0` included — is unconditionally true, and a
 method that always answers the same thing is worse than an honest gap.
+Multiparameter keys are modeled in the params object, not the model:
+`Params.scalar` reads a permitted scalar from its own key or, winning as
+Rails assigns those last, from `multiparameter_cast`, the text of the
+parts Hash Rails gives a String attribute (`{1 => "x", 2 => 7, 3 =>
+nil}`). The params class carries `rh_multiparameter_fields` and
+`rh_multiparameter_unsupported`, and the model's `from_params` and
+`update_from_*` raise before assigning when the shape is unsupported or
+a field is not a String/Text column or the secure-password trio. The raise
+sits there because the create path has no other synthesized method between
+`new(params)` and the app's own `save`.
+
 The permit-list path is a separate, ledgered gap: `permit(:name,
 settings: {})` drops the nested key from the typed params class under
 the `params_nested_filter` warning, so a form's settings never reach
@@ -1740,7 +1768,7 @@ broadcast had already gone out. `scripts/campfire-cable-walk` splices
 header. What this runtime does not have is the third option Rails
 actually uses: enqueue now, run elsewhere, later.
 
-### Queued jobs are serialized payloads, but nothing is durable
+### Queued jobs are serialized payloads, durable only under `:sidekiq`
 
 On the ruby, jruby and spinel lanes, a served app's `perform_later`
 queues an ActiveJob-format JSON payload: the `job.serialize` hash of
@@ -1754,18 +1782,34 @@ come from the job's `perform_later` call sites, and
 
 **What is still missing.**
 
-- **Durability.** The payloads sit in a process-local Array. Nothing is
-  retried (`retry_on` is inert), nothing is scheduled (`set(wait:)` is
-  dropped), and nothing survives a restart. A payload is what an
-  external adapter such as Sidekiq would store; no such adapter exists
-  yet.
+- **Durability, unless the app is on Sidekiq.** By default the payloads
+  sit in a process-local Array. Nothing is retried (`retry_on` is
+  inert), nothing is scheduled (`set(wait:)` is dropped), and nothing
+  survives a restart. An app whose `ApplicationJob` sets
+  `self.queue_adapter = :sidekiq` (or `config.active_job.queue_adapter
+  = :sidekiq`) pushes each payload to Redis instead, in Sidekiq 8's
+  envelope (`runtime/spinel/sidekiq_push.rb`, `sidekiq_redis.rb`):
+  `SADD queues` and `LPUSH queue:<name>`, or `ZADD schedule` for a
+  literal `set(wait:)` or `set(wait_until:)` that lands in the future.
+  A pushed job is run by a Ruby Sidekiq process; there is no in-binary
+  worker yet. Redis comes
+  from `Sidekiq.configure_client`'s `url:` and `password:`, then
+  `REDIS_PROVIDER`, then `REDIS_URL`. The connection is one per
+  process, with 1-second connect and read timeouts, and a dropped
+  connection is retried once. A non-literal `set(...)` is an error
+  under `:sidekiq`, and `set(priority:)` is dropped with a warning.
+  This holds on ruby, jruby and spinel; the other targets warn
+  (`sidekiq-adapter-not-honored`) and run the jobs in process. A pushed
+  job carries `"retry":true`, so Sidekiq retries it with its own
+  defaults; Active Job's `retry_on`, TLS (`rediss://`) and per-job
+  adapters are still missing.
 - **Some argument types.** A job whose call sites pass a Hash, a Date,
   an untyped value, or nothing typed at all keeps its closure, with a
   `job-closure-fallback` warning naming the parameter. Lobsters'
   `ResticJob`, `WalCheckpointJob` and `MastodonSyncListJob` are the
   corpus cases.
-- **One queue.** `queue_name` is recorded, but every entry drains in
-  arrival order.
+- **One queue in process.** `queue_name` is recorded, but every entry
+  drains in arrival order. Under `:sidekiq` it names the Redis queue.
 - **The test adapter keeps closures.** `assert_enqueued_with` still
   checks the job and not its arguments (above).
 - **`enqueue_after_transaction_commit`** is honored for payload jobs
@@ -2899,6 +2943,27 @@ Three gaps remain, all on spinel's side:
   order, which differs only when two gems define one key. A gem that is
   not an engine adds its files from its own code; none is read unless
   `src/i18n/gems.rs::NON_ENGINE_LOCALES` names its paths.
+  The same runtime is transpiled to every strict target. Each
+  reaches the locale, `Rails.env` and `config/i18n_translations` through
+  a hand-written `I18nHost` (`runtime/<target>/i18n_host.*`; the Ruby
+  family's is `runtime/ruby/i18n_host.rb`) that keeps the locale per
+  request: an `AsyncLocalStorage` scope on TypeScript (node:http
+  interleaves requests across awaits), a context variable on Python, a
+  per-fiber slot on Crystal, an `AsyncLocal` on C#, a thread-local on
+  Kotlin, Swift and Rust, a slot keyed by goroutine on Go, and the
+  request's process on Elixir. Every server resets it at the start of a request,
+  so a request starts at the default locale rather than inheriting a
+  previous one's. TypeScript, Python, C#, Kotlin, Swift and Go have no
+  Symbol apart from String, so `InvalidLocale`'s message shows a String
+  locale as `:de` where Rails shows `"de"`; Rust's untyped locale carries
+  no Symbol either, and shows a Symbol one as `"de"` where Rails shows
+  `:de`. Elixir keeps the parsed table in `:persistent_term`, as it does
+  whatever a load-once method fills (one that sets `@flag = true`, read
+  only as `@flag == true`): Plug serves each request in a process of its
+  own, where the process dictionary would parse the table again. Only the
+  Ruby family, TypeScript and Crystal carry
+  the catalog a translation chosen by a run-time key reads; elsewhere,
+  and in the worker and browser builds, such a translation is refused.
 - **`fragment_name_with_digest(name, digest_path)` adds no template
   digest**: templates carry none here (see
   `runtime/spinel/action_controller_fragment_caching.rb`), so an omitted

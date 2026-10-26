@@ -83,7 +83,7 @@ end
 }
 
 /// `record_timestamps: false` on the call leaves them as the row has them,
-/// as Rails' does; turning a model's stamping off is not modeled, and says so.
+/// as Rails' does.
 #[test]
 fn upsert_without_record_timestamps_leaves_them_unset() {
     emit_and_run::real_blog()
@@ -101,21 +101,44 @@ fn upsert_without_record_timestamps_leaves_them_unset() {
         .assert_passes();
 }
 
+fn quiet_stamping_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog().edit(
+        "app/models/article.rb",
+        "  validates :title, presence: true\n",
+        "  validates :title, presence: true\n\n  def self.quietly(title)\n    Article.record_timestamps = false\n    Article.create!(title: title, body: \"Long enough body text\")\n  ensure\n    Article.record_timestamps = true\n  end\n",
+    )
+}
+
+/// Rails' `record_timestamps = false` turns a model's stamping off until
+/// it is turned back on, and a subclass inherits it until it sets its own.
 #[test]
-fn turning_a_model_s_stamping_off_is_an_error() {
-    let (_emitted, errors) = emit_and_run::real_blog()
-        .edit(
-            "app/models/article.rb",
-            "  validates :title, presence: true\n",
-            "  validates :title, presence: true\n\n  def self.quiet\n    Article.record_timestamps = false\n    Article.record_timestamps = true\n  end\n",
+fn turning_a_model_s_stamping_off_leaves_its_saves_unstamped() {
+    quiet_stamping_app()
+        .write(
+            "test/models/quiet_stamping_test.rb",
+            "require \"test_helper\"\n\nclass QuietStampingTest < ActiveSupport::TestCase\n  test \"a save while stamping is off stamps nothing\" do\n    quiet = Article.quietly(\"Quiet\")\n    assert_nil quiet.reload.created_at\n    assert_nil quiet.updated_at\n    assert Article.record_timestamps\n    loud = Article.create!(title: \"Loud\", body: \"Long enough body text\")\n    assert_not_nil loud.reload.created_at\n  end\n\n  test \"a subclass inherits the switch until it sets its own\" do\n    ApplicationRecord.record_timestamps = false\n    assert_not Comment.record_timestamps\n    Comment.record_timestamps = true\n    assert Comment.record_timestamps\n    assert_not ApplicationRecord.record_timestamps\n  ensure\n    ApplicationRecord.record_timestamps = true\n    Comment.record_timestamps = true\n  end\nend\n",
         )
-        .emit(roundhouse::project::BuildTarget::Ruby);
-    let found: Vec<&String> = errors.iter().filter(|e| e.contains("turning a model's timestamp stamping off is not modeled")).collect();
-    assert_eq!(found.len(), 1, "{errors:#?}");
+        .run_test("test/models/quiet_stamping_test.rb")
+        .assert_passes();
+}
+
+/// Only the ruby family keeps the switch: a strict target reports it, and
+/// an app's own `record_timestamps=` on an instance is no model's switch.
+#[test]
+fn turning_a_model_s_stamping_off_is_reported_on_a_strict_target() {
+    let (_emitted, errors) = quiet_stamping_app().emit(roundhouse::project::BuildTarget::Rust);
+    let found: Vec<&String> = errors.iter().filter(|e| e.contains("ActiveRecord::Base.record_timestamps= not supported (rust)")).collect();
+    assert_eq!(found.len(), 2, "the `= false` and the `= true` that restores it: {errors:#?}");
+    let (_emitted, errors) = quiet_stamping_app().emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(!errors.iter().any(|e| e.contains("record_timestamps")), "{errors:#?}");
+    let (_emitted, errors) = emit_and_run::real_blog()
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < ApplicationRecord\n  def self.stamp_again\n    Article.record_timestamps = true\n  end\n")
+        .emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.iter().any(|e| e.contains("ActiveRecord::Base.record_timestamps= not supported (rust)")), "{errors:#?}");
     let (_emitted, errors) = emit_and_run::real_blog()
         .write("app/models/stamp_settings.rb", "class StampSettings\n  attr_accessor :record_timestamps\n\n  def self.quiet\n    settings = StampSettings.new\n    settings.record_timestamps = false\n    settings\n  end\nend\n")
-        .emit(roundhouse::project::BuildTarget::Ruby);
-    assert!(!errors.iter().any(|e| e.contains("timestamp stamping")), "{errors:#?}");
+        .emit(roundhouse::project::BuildTarget::Rust);
+    assert!(!errors.iter().any(|e| e.contains("record_timestamps")), "{errors:#?}");
 }
 
 /// No strict runtime carries `upsert_all`: the call is reported there.

@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Roundhouse · Fractal pass explorer</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg: #1a1b26; --bg-light: #24283b; --bg-lighter: #292e42; --border: #3b4261;
+    --text: #c0caf5; --text-dim: #737aa2; --ruby: #f7768e; --go: #73daca;
+    --python: #7aa2f7; --ts: #e0af68; --crystal: #bb9af7; --rust: #ff9e64;
+    --add: rgba(115, 218, 202, 0.14); --del: rgba(247, 118, 142, 0.14);
+    --mono: "SF Mono", "Fira Code", "Cascadia Code", ui-monospace, Menlo, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); display: flex; flex-direction: column; }
+  header { padding: 0.9rem 1.25rem 0.7rem; border-bottom: 1px solid var(--border); display: flex; gap: 1rem; align-items: baseline; flex-wrap: wrap; }
+  header h1 { font-size: 1.1rem; font-weight: 600; color: var(--ruby); }
+  header h1 a { color: inherit; text-decoration: none; }
+  header .tagline { font-size: 0.8rem; color: var(--text-dim); }
+  header .controls { margin-left: auto; display: flex; gap: 0.75rem; align-items: center; font-size: 0.8rem; color: var(--text-dim); }
+  select, button { font: inherit; color: var(--text); background: var(--bg-light); border: 1px solid var(--border); border-radius: 0.3rem; padding: 0.2rem 0.45rem; }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--ruby); }
+  #status { font-size: 0.78rem; color: var(--text-dim); min-width: 8rem; text-align: right; }
+  #status.err { color: var(--ruby); }
+  #status.ok { color: var(--go); }
+
+  /* The pipeline strip: one chip per stage, arrows between. */
+  #pipeline { display: flex; align-items: stretch; gap: 0.4rem; padding: 0.7rem 1.25rem; border-bottom: 1px solid var(--border); overflow-x: auto; }
+  .chip { flex: 0 0 auto; min-width: 9.5rem; text-align: left; padding: 0.45rem 0.7rem; border-radius: 0.45rem; background: var(--bg-light); border: 1px solid var(--border); border-top: 3px solid var(--border); color: var(--text); }
+  .chip .n { font-size: 0.68rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-dim); }
+  .chip .name { font-family: var(--mono); font-size: 0.85rem; }
+  .chip .count { font-size: 0.72rem; color: var(--text-dim); }
+  .chip.changed { border-top-color: var(--go); }
+  .chip.changed .count { color: var(--go); }
+  .chip.idle .name { color: var(--text-dim); }
+  .chip.active { background: color-mix(in srgb, var(--ruby) 16%, var(--bg-light)); border-color: var(--ruby); border-top-color: var(--ruby); }
+  .arrow { align-self: center; color: var(--text-dim); }
+
+  main { flex: 1; display: flex; min-height: 0; }
+  .col { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .col > .head { padding: 0.35rem 0.75rem; background: var(--bg-light); border-bottom: 1px solid var(--border); font-size: 0.75rem; color: var(--text-dim); display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+  #editorCol { flex: 1 1 0; border-right: 1px solid var(--border); }
+  #outputCol { flex: 1.25 1 0; }
+  .tabs { display: flex; gap: 0.25rem; flex-wrap: wrap; }
+  .tab { font-family: var(--mono); font-size: 0.72rem; padding: 0.15rem 0.45rem; border-radius: 0.25rem; border: 1px solid transparent; background: none; color: var(--text-dim); }
+  .tab.active { color: var(--text); border-color: var(--border); background: var(--bg-lighter); }
+  .tab.dirty::after { content: " •"; color: var(--go); }
+  textarea { flex: 1; width: 100%; resize: none; border: 0; outline: none; background: var(--bg); color: var(--text); font: 0.8rem/1.55 var(--mono); padding: 0.75rem; tab-size: 2; white-space: pre; }
+  #code { flex: 1; overflow: auto; font: 0.8rem/1.55 var(--mono); padding: 0.5rem 0; }
+  .line { display: grid; grid-template-columns: 3.2rem 1.2rem 1fr; white-space: pre-wrap; word-break: break-all; padding-right: 0.75rem; }
+  .line .no { color: var(--text-dim); text-align: right; padding-right: 0.6rem; user-select: none; }
+  .line .mark { color: var(--text-dim); user-select: none; }
+  .line.add { background: var(--add); }
+  .line.add .mark { color: var(--go); }
+  .line.del { background: var(--del); }
+  .line.del .mark { color: var(--ruby); }
+  .line.del .txt { color: var(--text-dim); text-decoration: line-through; text-decoration-color: rgba(247,118,142,0.5); }
+  #notes { border-top: 1px solid var(--border); max-height: 34%; overflow: auto; padding: 0.6rem 0.9rem; font-size: 0.8rem; line-height: 1.5; background: var(--bg-light); }
+  #notes h3 { font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-dim); margin: 0.2rem 0 0.35rem; }
+  #notes .summary { color: var(--text); margin-bottom: 0.4rem; }
+  #notes ul { list-style: none; margin-bottom: 0.5rem; }
+  #notes li { margin: 0.15rem 0 0.35rem; }
+  #notes code { font-family: var(--mono); font-size: 0.85em; color: var(--go); }
+  #notes .key { font-family: var(--mono); color: var(--python); }
+  #notes .to { color: var(--text-dim); padding-left: 1rem; }
+  #notes .declined { color: var(--ts); }
+  #notes .gap { color: var(--text-dim); }
+  label.toggle { display: inline-flex; gap: 0.3rem; align-items: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1><a href="../">Roundhouse</a> · Fractal pass explorer</h1>
+  <span class="tagline">Edit a small Rails app, pick a file, and inspect each pass. Preview only: <code>fractal emit</code> writes changed files; <code>fractal apply</code> updates the base app.</span>
+  <div class="controls">
+    <select id="example" hidden></select>
+    <label title="roundhouse --target fractal --file PATH">compile <select id="file"></select></label>
+    <span id="status">loading compiler…</span>
+  </div>
+</header>
+<nav id="pipeline" aria-label="Fractal passes, in order"></nav>
+<main>
+  <section id="editorCol" class="col" aria-label="Source">
+    <div class="head"><span>source</span><div class="tabs" id="srcTabs"></div></div>
+    <textarea id="editor" spellcheck="false" aria-label="Ruby source"></textarea>
+  </section>
+  <section id="outputCol" class="col" aria-label="After the selected pass">
+    <div class="head">
+      <span id="outTitle">after pass</span>
+      <div class="tabs" id="outTabs"></div>
+      <span style="margin-left:auto"></span>
+      <label class="toggle"><input type="checkbox" id="diffToggle" checked> diff vs previous stage</label>
+      <button id="prev" title="Previous pass (←)">←</button>
+      <button id="next" title="Next pass (→)">→</button>
+    </div>
+    <div id="code" role="region" aria-live="polite"></div>
+    <div id="notes"></div>
+  </section>
+</main>
+<script type="module" src="fractal.js"></script>
+</body>
+</html>

@@ -31,4 +31,20 @@ defmodule Params do
   def provided(sub, key) do
     is_binary(Map.get(sub, key))
   end
+
+  # The scalar readers the params lowering emits, and its record of
+  # multiparameter keys. Those keys (`title(1)`) are modeled on the Ruby
+  # family only (runtime/ruby/params.rb); this target ignores them, as
+  # it always has, so these pass through.
+  def scalar_provided(sub, key), do: provided(sub, key)
+
+  def scalar(sub, key), do: str(sub, key, "")
+
+  def no_fields, do: []
+
+  def multiparameter_fields(_sub, _keys), do: []
+
+  def multiparameter_unsupported(_sub, _keys), do: false
+
+  def any_of(list, names), do: Enum.any?(names, &(&1 in list))
 end

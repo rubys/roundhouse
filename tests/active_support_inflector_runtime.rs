@@ -10,6 +10,13 @@ raise "camelize word normalization" unless inflector.camelize("foo_BAR") == "Foo
 raise "camelize punctuation boundary" unless inflector.camelize("foo_BAR-Baz") == "FooBar-Baz"
 raise "lower camelize" unless inflector.camelize("foo/bar_baz", false) == "foo::BarBaz"
 raise "namespace camelize" unless inflector.camelize("/foo/bar") == "::Foo::Bar"
+raise "dasherize" unless inflector.dasherize("gear_boxes") == "gear-boxes"
+# On the constant, as the String lowering emits it: Spinel does not compile
+# `inflector.classify(...)` ("a method argument given a String, which no
+# conversion keeps in its sp_PolyArray * slot").
+raise "classify" unless ActiveSupport::Inflector.classify("gear_boxes") == "GearBox"
+raise "classify schema prefix" unless ActiveSupport::Inflector.classify("shop.gear_boxes") == "GearBox"
+raise "classify namespace" unless ActiveSupport::Inflector.classify("admin/gear_boxes") == "Admin::GearBox"
 raise "deconstantize" unless inflector.deconstantize("Admin::UsersController") == "Admin"
 raise "top-level deconstantize" unless inflector.deconstantize("UsersController").empty?
 raise "foreign_key" unless inflector.foreign_key("Admin::APIKey") == "api_key_id"

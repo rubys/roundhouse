@@ -141,6 +141,7 @@ pub const GEM_CATALOG: &[GemClass] = &[
             // `with_locale` returns its block's value — opaque here.
             ("with_locale", GemTy::Untyped),
             ("available_locales", GemTy::Untyped),
+            ("locale_available?", GemTy::Bool),
             ("exists?", GemTy::Bool),
         ],
         instance_methods: &[],
@@ -209,6 +210,9 @@ pub const GEM_CATALOG: &[GemClass] = &[
             ("provisioning_uri", GemTy::Str),
             ("now", GemTy::Str),
             ("at", GemTy::Str),
+            // The step in seconds, 30 unless `interval:` named another;
+            // lobsters widens `verify`'s drift by it.
+            ("interval", GemTy::Int),
             // `verify` returns the matching timestamp Integer or nil —
             // gradual rather than committing to `Int?`.
             ("verify", GemTy::Untyped),
@@ -419,4 +423,169 @@ pub const GEM_CATALOG: &[GemClass] = &[
         class_methods: &[],
         instance_methods: &[],
     },
+    // Faraday — the HTTP client. Ruby and JRuby run the real gem (the
+    // emitted Gemfile declares it on demand, `gems::RUNTIME_GEMS`);
+    // every other target refuses each reference (`lower::ruby_family_gems`).
+    // Responses and bodies are the gem's own objects, so they stay
+    // `Untyped` past the shapes below.
+    GemClass {
+        name: "Faraday",
+        class_methods: &[
+            ("new", GemTy::Instance("Faraday::Connection")),
+            ("default_adapter", GemTy::Sym),
+            ("default_adapter=", GemTy::Sym),
+            ("get", GemTy::Instance("Faraday::Response")),
+            ("post", GemTy::Instance("Faraday::Response")),
+            ("put", GemTy::Instance("Faraday::Response")),
+            ("patch", GemTy::Instance("Faraday::Response")),
+            ("delete", GemTy::Instance("Faraday::Response")),
+            ("head", GemTy::Instance("Faraday::Response")),
+        ],
+        instance_methods: &[],
+    },
+    GemClass {
+        name: "Faraday::Connection",
+        class_methods: &[],
+        instance_methods: &[
+            ("get", GemTy::Instance("Faraday::Response")),
+            ("post", GemTy::Instance("Faraday::Response")),
+            ("put", GemTy::Instance("Faraday::Response")),
+            ("patch", GemTy::Instance("Faraday::Response")),
+            ("delete", GemTy::Instance("Faraday::Response")),
+            ("head", GemTy::Instance("Faraday::Response")),
+            ("run_request", GemTy::Instance("Faraday::Response")),
+            ("request", GemTy::Untyped),
+            ("response", GemTy::Untyped),
+            ("use", GemTy::Untyped),
+            ("adapter", GemTy::Untyped),
+            ("headers", GemTy::Untyped),
+            ("params", GemTy::Untyped),
+            ("options", GemTy::Instance("Faraday::RequestOptions")),
+            ("url_prefix", GemTy::Untyped),
+            ("set_basic_auth", GemTy::Untyped),
+            ("builder", GemTy::Untyped),
+        ],
+    },
+    GemClass {
+        name: "Faraday::RequestOptions",
+        class_methods: &[],
+        instance_methods: &[
+            ("timeout", GemTy::Untyped),
+            ("timeout=", GemTy::Untyped),
+            ("open_timeout", GemTy::Untyped),
+            ("open_timeout=", GemTy::Untyped),
+            ("read_timeout", GemTy::Untyped),
+            ("read_timeout=", GemTy::Untyped),
+            ("write_timeout", GemTy::Untyped),
+            ("write_timeout=", GemTy::Untyped),
+            ("params_encoder", GemTy::Untyped),
+            ("params_encoder=", GemTy::Untyped),
+        ],
+    },
+    GemClass {
+        name: "Faraday::Response",
+        class_methods: &[],
+        instance_methods: &[
+            ("status", GemTy::Int),
+            ("body", GemTy::Untyped),
+            ("headers", GemTy::Untyped),
+            ("success?", GemTy::Bool),
+            ("finished?", GemTy::Bool),
+            ("reason_phrase", GemTy::Untyped),
+            ("env", GemTy::Untyped),
+            ("to_hash", GemTy::Untyped),
+        ],
+    },
+    // Values an app hands the connection: an encoder, a middleware class.
+    GemClass { name: "Faraday::FlatParamsEncoder", class_methods: &[], instance_methods: &[] },
+    GemClass { name: "Faraday::NestedParamsEncoder", class_methods: &[], instance_methods: &[] },
+    GemClass { name: "Faraday::Response::RaiseError", class_methods: &[], instance_methods: &[] },
+    // faraday-multipart: the parts a multipart body carries, and the
+    // Faraday v1 names it still aliases (`Faraday::UploadIO`, `FilePart`).
+    GemClass { name: "Faraday::Multipart", class_methods: &[], instance_methods: &[] },
+    GemClass { name: "Faraday::Multipart::FilePart", class_methods: &[], instance_methods: FARADAY_FILE_PART },
+    GemClass { name: "Faraday::Multipart::ParamPart", class_methods: &[], instance_methods: &[] },
+    GemClass { name: "Faraday::Multipart::CompositeReadIO", class_methods: &[], instance_methods: &[] },
+    GemClass { name: "Faraday::FilePart", class_methods: &[], instance_methods: FARADAY_FILE_PART },
+    GemClass { name: "Faraday::ParamPart", class_methods: &[], instance_methods: &[] },
+    GemClass { name: "Faraday::UploadIO", class_methods: &[], instance_methods: FARADAY_FILE_PART },
+    GemClass { name: "Faraday::CompositeReadIO", class_methods: &[], instance_methods: &[] },
+    // The error hierarchy an app rescues. `response` is the Hash the gem
+    // builds (`status`, `body`, `headers`), or nil for a connection error.
+    GemClass { name: "Faraday::Error", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::ClientError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::ServerError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::BadRequestError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::UnauthorizedError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::ForbiddenError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::ResourceNotFound", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::ConflictError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::UnprocessableEntityError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::TooManyRequestsError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::ConnectionFailed", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::TimeoutError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::SSLError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::ParsingError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    // Retryable — a block retried on an exception. As Faraday: the real
+    // gem on ruby and jruby, refused elsewhere (`lower::ruby_family_gems`).
+    GemClass {
+        name: "Retryable",
+        class_methods: &[("retryable", GemTy::Untyped)],
+        instance_methods: &[],
+    },
+    // JWT — token encode/decode (the jwt gem). As Faraday: the real gem
+    // on ruby and jruby, refused elsewhere (`lower::ruby_family_gems`).
+    // `decode` answers `[payload, header]`, both the gem's Hashes.
+    GemClass {
+        name: "JWT",
+        class_methods: &[("encode", GemTy::Str), ("decode", GemTy::Untyped)],
+        instance_methods: &[],
+    },
+    GemClass {
+        name: "JWT::Claims",
+        class_methods: &[("verify_payload!", GemTy::Untyped), ("valid_payload?", GemTy::Bool)],
+        instance_methods: &[],
+    },
+    GemClass { name: "JWT::JWK", class_methods: &[], instance_methods: &[] },
+    GemClass {
+        name: "JWT::JWK::Set",
+        class_methods: &[],
+        instance_methods: &[("keys", GemTy::Untyped), ("export", GemTy::Untyped), ("select!", GemTy::Untyped), ("filter!", GemTy::Untyped)],
+    },
+    GemClass { name: "JWT::EncodeError", class_methods: &[], instance_methods: JWT_ERROR },
+    GemClass { name: "JWT::DecodeError", class_methods: &[], instance_methods: JWT_ERROR },
+    GemClass { name: "JWT::VerificationError", class_methods: &[], instance_methods: JWT_ERROR },
+    GemClass { name: "JWT::ExpiredSignature", class_methods: &[], instance_methods: JWT_ERROR },
+    GemClass { name: "JWT::IncorrectAlgorithm", class_methods: &[], instance_methods: JWT_ERROR },
+    GemClass { name: "JWT::ImmatureSignature", class_methods: &[], instance_methods: JWT_ERROR },
+    GemClass { name: "JWT::InvalidIssuerError", class_methods: &[], instance_methods: JWT_ERROR },
+    GemClass { name: "JWT::InvalidIatError", class_methods: &[], instance_methods: JWT_ERROR },
+    GemClass { name: "JWT::InvalidAudError", class_methods: &[], instance_methods: JWT_ERROR },
+    GemClass { name: "JWT::InvalidSubError", class_methods: &[], instance_methods: JWT_ERROR },
+    GemClass { name: "JWT::InvalidCritError", class_methods: &[], instance_methods: JWT_ERROR },
+    GemClass { name: "JWT::InvalidJtiError", class_methods: &[], instance_methods: JWT_ERROR },
+    GemClass { name: "JWT::InvalidPayload", class_methods: &[], instance_methods: JWT_ERROR },
+    GemClass { name: "JWT::MissingRequiredClaim", class_methods: &[], instance_methods: JWT_ERROR },
+    GemClass { name: "JWT::Base64DecodeError", class_methods: &[], instance_methods: JWT_ERROR },
+    GemClass { name: "JWT::JWKError", class_methods: &[], instance_methods: JWT_ERROR },
 ];
+
+const FARADAY_FILE_PART: &[(&str, GemTy)] = &[
+    ("content_type", GemTy::Untyped),
+    ("original_filename", GemTy::Untyped),
+    ("local_path", GemTy::Untyped),
+    ("io", GemTy::Untyped),
+];
+
+const FARADAY_ERROR: &[(&str, GemTy)] = &[
+    ("message", GemTy::Str),
+    ("to_s", GemTy::Str),
+    ("response", GemTy::Untyped),
+    ("response_status", GemTy::Untyped),
+    ("response_body", GemTy::Untyped),
+    ("response_headers", GemTy::Untyped),
+    ("wrapped_exception", GemTy::Untyped),
+    ("backtrace", GemTy::Untyped),
+];
+
+const JWT_ERROR: &[(&str, GemTy)] = &[("message", GemTy::Str), ("to_s", GemTy::Str)];

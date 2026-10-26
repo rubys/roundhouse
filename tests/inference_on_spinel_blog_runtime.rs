@@ -274,10 +274,8 @@ fn untyped_subexpressions_baseline() {
         app.library_classes.len()
     );
 
-    // Loose ceiling — current measurement plus headroom. Tighten as
-    // inference improves; failing low is a good thing (un-pin and
-    // record the new lower bound). The point of the bound is to
-    // catch regressions, not to lock in today's number.
+    // The constants sit on the measured residual. A later drop lowers
+    // them in the same commit; they are not a budget with headroom.
     // 2026-10-05: 500 -> 505, MEASURED after the request-key finder
     // refresh onto 132a26c7. With this same analyzer and collector,
     // pristine 4f5a1239 / 132a26c7 runtimes measure 470 / 476; the
@@ -385,9 +383,13 @@ fn untyped_subexpressions_baseline() {
     // `Nil`, which is the honest "unknown" the RBS already says
     // (`?untyped`) rather than a type that silently zeroed `presence`.
 
-    // This uncalled API adds 27 nodes without its String parameter RBS.
-    // Keep the existing-method ceiling and RBS-aware typing gates intact.
-    const LIKE_CEILING: usize = 27;
+    // `sanitize_sql_like` itself, without its String parameter RBS.
+    // MEASURED 4 on 2026-10-19 (the old 27 counted the helper bodies,
+    // which the existing ledger now owns). Remeasured 3 after merging
+    // main: the `source = value` assign, the `value` read, and the
+    // escape call's `value`. The wildcard call's `source` is no longer
+    // a var on this analyzer.
+    const LIKE_CEILING: usize = 3;
     let existing_untyped = all_untyped.len() - like_untyped;
     eprintln!("inference-only ledger: existing={existing_untyped}, sanitize_sql_like={like_untyped}");
     // Transactional saves (connection.rb: `save`/`destroy`/`touch` in a
@@ -414,7 +416,68 @@ fn untyped_subexpressions_baseline() {
     // The seven new sites are that branch's `Db.transaction_open?`,
     // `Db._txn_depth`, and `Db.exec` calls, unmodeled here like the
     // other `Db` reads. The RBS-paired gate types the method.
-    const CEILING: usize = 794;
+    // Remeasured 780 on 2026-10-19 against this tree: the 794 constant
+    // had headroom the later runtime no longer uses.
+    // MEASURED 766 on 2026-10-19: commit and rollback share
+    // `_take_enlisted`, so the `Db._txn_records` slice is read once.
+    // MEASURED 765 on 2026-10-19: the savepoint ROLLBACK TO / RELEASE
+    // pair lives in `RawConnection._rollback_savepoint`, called from
+    // the raw transaction and both rescue arms of `Base.transaction`.
+    // Remeasured 634 on 2026-10-19 after merging main. The analyzer's
+    // narrowing and the pluck rest-arg removed sites this constant
+    // still counted; 765 had that headroom.
+    // MEASURED 631 on 2026-10-19: save and destroy share
+    // `_enlist_or_run`, so the `Db._txn_depth` / `Db._txn_records`
+    // walk is read once.
+    // MEASURED 837 on 2026-10-19 after merging main (`sanitize_sql_like`
+    // stays 3). Main's ledger was 631. `ActiveRecord::Tasks` and the
+    // Rake subset add the unseeded-parameter and `Db` reads this probe
+    // does not type; the RBS-paired probe types the same files.
+    // MEASURED 844 on 2026-10-19: schema load plans every statement
+    // before the first DROP, and migrate refuses a schema dump before
+    // it rewrites a table. Those helpers are unseeded here.
+    // This probe has no RBS, so a new parameter read is a var. The
+    // framework-surface classes add `Arel.sql`'s bind walk,
+    // `Arel::Nodes` (`SqlLiteral`, `Quoted`, `Not`, `Case`,
+    // `NamedFunction`), `Associations::Preloader`, `Type::String`,
+    // `Type::Integer`, and `RecordNotDestroyed`. The RBS-paired
+    // runtime gate still has zero vars in those methods.
+    // Unmatched-bind checks and quoted CASE values read the same
+    // untyped parameters again.
+    // MEASURED 993 on 2026-10-19 after rebasing onto main's 844.
+    // The framework-surface classes are unseeded on this probe.
+    // MEASURED 1014 on 2026-10-20: `Relation#column_predicate` renders a
+    // Range as Rails' comparison (#1130). No Range type, so the range,
+    // its ends, and Array elements that may hold one are vars here
+    // (993 → 1014, +21 on this probe; the RBS-paired gate measures +12
+    // gradual sites in relation.rb and bumps its own ceiling to 846).
+    // MEASURED 1043 on 2026-10-21 (main measured 1009): `touch_later`
+    // defers a `belongs_to …, touch: true` to the COMMIT, enlisting
+    // kind 3 on `Db._txn_records` (`touch_later` +13), and
+    // `_flush_deferred_touches_from` walks those entries (+16);
+    // `_commit_enlisted_from` skips them (+4) and `transaction` calls
+    // the flush (+1). Entry reads off `Db._txn_records` are vars on
+    // this RBS-less probe, as `_commit_enlisted_from`'s were already.
+    // MEASURED 1082 on 2026-10-21: `current_transaction.after_commit`
+    // holds its work on `Db._txn_callbacks` until the COMMIT
+    // (`_run_after_commits_from` +20, `_drop_after_commits_from` +7,
+    // `_after_commit` +6, `transaction` +6 for the savepoint mark and
+    // the run/drop calls). The same untyped reads off a `Db` list as the
+    // records above.
+    // MEASURED 1085 on 2026-10-22: a record's column read by name
+    // (`read_attribute`, `write_attribute`, `attribute_in_database`)
+    // answers whatever that column holds (+3 in connection.rb's Base).
+    // MEASURED 1086 on 2026-10-22: `merge` carries a merged `none` through
+    // `other.explicit_none?`, read off the same untyped `other` its
+    // `other.null_relation?` already reads (+1 in relation.rb).
+    // MEASURED 1085 on 2026-10-23, with `Base.sanitize_sql_for_order(condition)`
+    // answering its String unchanged; its parameter is a var on this
+    // RBS-less probe (`(String) -> String` in connection.rbs).
+    // MEASURED 1092 on 2026-10-26: `record_timestamps=` keeps the switch per
+    // class (`TimestampSwitches.store` / `lookup`), and the reader walks the
+    // ancestors for it. The class name and value parameters are vars on this
+    // RBS-less probe (+7 in connection.rb); the RBS-paired gate types them.
+    const CEILING: usize = 1092;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

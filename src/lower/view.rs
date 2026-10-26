@@ -664,6 +664,16 @@ pub enum FormBuilderMethod {
     Button,
     UrlField,
     EmailField,
+    /// `number_field` / `range_field` / `search_field` /
+    /// `telephone_field` (alias `phone_field`): Rails' `Tags::TextField`
+    /// subclasses, the same `<input>` under another `type`. The options
+    /// their `render` rewrites (`in:`/`within:` → `min`/`max`;
+    /// `autosave:`/`onsearch:`) are refused at analyze
+    /// (`unlowered_form_builder_calls`).
+    NumberField,
+    RangeField,
+    SearchField,
+    TelephoneField,
     FileField,
     RichTextArea,
     /// `form.fields_for :settings, obj do |nested| … end` — Rails'
@@ -788,6 +798,10 @@ pub fn classify_form_builder_method(method: &str) -> Option<FormBuilderMethod> {
         "button" => Some(FormBuilderMethod::Button),
         "url_field" => Some(FormBuilderMethod::UrlField),
         "email_field" => Some(FormBuilderMethod::EmailField),
+        "number_field" => Some(FormBuilderMethod::NumberField),
+        "range_field" => Some(FormBuilderMethod::RangeField),
+        "search_field" => Some(FormBuilderMethod::SearchField),
+        "telephone_field" | "phone_field" => Some(FormBuilderMethod::TelephoneField),
         // The INPUT TAG only. Receiving the upload is Active Storage,
         // which is deferred by design — but rendering `<input
         // type="file">` needs none of it, and without this the call
@@ -825,6 +839,10 @@ impl FormBuilderMethod {
                 | FormBuilderMethod::Select
                 | FormBuilderMethod::UrlField
                 | FormBuilderMethod::EmailField
+                | FormBuilderMethod::NumberField
+                | FormBuilderMethod::RangeField
+                | FormBuilderMethod::SearchField
+                | FormBuilderMethod::TelephoneField
                 | FormBuilderMethod::FileField
         )
     }

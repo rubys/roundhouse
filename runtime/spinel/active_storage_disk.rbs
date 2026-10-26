@@ -34,6 +34,7 @@ module ActiveStorage
   end
 
   module Routes
+    CONTROLLER_PATHS: Hash[Symbol, String]
     def self.table: () -> Array[ActionDispatch::Router::Route]
     def self.instantiate_controller: (Symbol sym) -> ActionController::Base
   end

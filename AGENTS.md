@@ -95,6 +95,14 @@ defect even if the build is green.
   coverage and request [broader checks](docs/ci/README.md) for broad/risky changes.
 - Do not suppress diagnostics, comparison differences, or advisory failures
   merely to make a check green. Establish the failing input and cause first.
+- **Keep Fractal's docs in sync with Fractal.** A change to `--target fractal`
+  (its CLI, its output, the driver's checks, or a pass added, changed or
+  removed under `src/emit/fractal/`) updates, in the same change, what
+  describes it: [`docs/pipeline/fractal.md`](docs/pipeline/fractal.md), the
+  page `site/fractal.html`, and the pass explorer in `wasm/fractal/` (its
+  example and `verify-fractal.mjs`). A new pass gets its section in
+  `docs/pipeline/fractal.md`, a `summary`, and an explorer example that
+  exercises it.
 
 ## The actual goal
 

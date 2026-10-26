@@ -388,6 +388,12 @@ fn parse_column_def(
         file: file.into(),
         message: format!("generated column dropped: {table}.{col_name}: {message}"),
     })?;
+    if let Some(clause) = unsupported_named_constraint(modifiers) {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: format!("column dropped: {table}.{col_name} has unsupported column constraint `{clause}`"),
+        });
+    }
     let (nullable, default) = parse_modifiers(modifiers);
     if generated.is_some() && default.is_some() {
         return Err(unsupported_col(file, table, &col_name, "generated column also has DEFAULT"));
@@ -408,6 +414,8 @@ fn parse_column_def(
         generated,
         generated_text_compatible,
         generated_int4_compatible,
+        array: false,
+        array_stored: false,
     }))
 }
 
@@ -420,9 +428,11 @@ fn parse_column_def(
 /// `pg_catalog.character varying` is not a qualified built-in spelling.
 /// Quoted qualified names are also rejected because type normalization
 /// lowercases their contents without preserving SQL identifier case.
-/// Other aliases (`inet`, `interval`, enums, `citext`, and fixed
-/// `character`) also normalize to text-like types without portable text
-/// semantics. A text typmod is marked because this IR does not retain it.
+/// Other aliases (`inet`, enums, `citext`, and fixed `character`) also
+/// normalize to text-like types without portable text semantics.
+/// `interval` is `ColumnType::Interval`, not text, and stays marked here
+/// so a generated expression cannot treat it as a string operand.
+/// A text typmod is marked because this IR does not retain it.
 fn has_nonportable_text_source_type(
     type_phrase: &str,
     enum_types: &HashSet<String>,
@@ -534,7 +544,8 @@ fn resolve_column_type(type_phrase: &str, enum_types: &HashSet<String>) -> Optio
         "jsonb" => ColumnType::Jsonb,
         "uuid" => ColumnType::Uuid,
         "inet" | "cidr" | "macaddr" | "macaddr8" => ColumnType::String { limit: None },
-        "interval" => ColumnType::String { limit: None },
+        // Same column as schema.rb `t.interval`, including `interval(6)`.
+        "interval" => ColumnType::Interval,
         other if enum_types.contains(other) => ColumnType::String { limit: None },
         _ => return None,
     })
@@ -613,6 +624,10 @@ fn handle_create_index(stmt: &str, file: &str, schema: &mut Schema, gaps: &mut V
     rest = rest[consumed..].trim_start();
     let Some(r5) = strip_prefix_ci(rest, "ON") else { return };
     rest = r5.trim_start();
+    // pg_dump's form for an index on a partitioned parent: `ON ONLY parent`.
+    if let Some(end) = consume_sql_keyword_ci(rest, 0, "ONLY") {
+        rest = rest[end..].trim_start();
+    }
     let Some((table_name, consumed2)) = read_ident(rest, 0) else { return };
     let table_sym = Symbol::from(table_name);
     let after_table = &rest[consumed2..];
@@ -1375,11 +1390,11 @@ fn word_seq_pos_after(words: &[(usize, String)], after_byte: usize, seq: &[&str]
 
 /// Where a column definition's type phrase ends and its modifiers
 /// (`DEFAULT …`, `NOT NULL`, `NULL`, `GENERATED …`, `COLLATE …`, an
-/// inline `PRIMARY KEY`) begin — the first depth-0 occurrence of one
-/// of those keywords, or the end of the string when the column has no
-/// modifiers at all.
+/// inline `PRIMARY KEY`, or a named `CONSTRAINT name NOT NULL`) begin —
+/// the first depth-0 occurrence of one of those keywords, or the end of
+/// the string when the column has no modifiers at all.
 fn find_modifier_start(rest: &str) -> usize {
-    const STOP: [&str; 6] = ["DEFAULT", "NOT", "NULL", "GENERATED", "COLLATE", "PRIMARY"];
+    const STOP: [&str; 7] = ["CONSTRAINT", "DEFAULT", "NOT", "NULL", "GENERATED", "COLLATE", "PRIMARY"];
     for (pos, word) in top_level_words(rest) {
         if STOP.contains(&word.as_str()) {
             return pos;
@@ -1446,21 +1461,62 @@ fn parse_generated_modifier(modifiers: &str) -> Result<Option<GeneratedColumn>, 
 }
 
 /// Consume only an optional `NULL` or `NOT NULL` clause plus SQL trivia.
+/// PostgreSQL 18 pg_dump may name the clause (`CONSTRAINT name NOT
+/// NULL`), so an optional `CONSTRAINT name` prefix is accepted too.
 /// Checking the full suffix prevents punctuation, string literals, or
 /// other modifiers from being silently ignored.
 fn only_optional_nullability(s: &str) -> bool {
-    let start = skip_sql_trivia(s, 0);
+    let mut start = skip_sql_trivia(s, 0);
     if start == s.len() {
         return true;
     }
-    if let Some(end) = consume_sql_keyword_ci(s, start, "NULL") {
-        return skip_sql_trivia(s, end) == s.len();
+    if let Some(after_constraint) = consume_sql_keyword_ci(s, start, "CONSTRAINT") {
+        let Some(after_name) = consume_constraint_name(s, after_constraint) else { return false };
+        start = skip_sql_trivia(s, after_name);
     }
-    let Some(after_not) = consume_sql_keyword_ci(s, start, "NOT") else { return false };
-    let Some(after_null) = consume_sql_keyword_ci(s, skip_sql_trivia(s, after_not), "NULL") else {
-        return false;
-    };
-    skip_sql_trivia(s, after_null) == s.len()
+    consume_nullability(s, start).is_some_and(|end| skip_sql_trivia(s, end) == s.len())
+}
+
+/// A `NULL` or `NOT NULL` clause starting at `start`, returning the byte
+/// just past it.
+fn consume_nullability(s: &str, start: usize) -> Option<usize> {
+    if let Some(end) = consume_sql_keyword_ci(s, start, "NULL") {
+        return Some(end);
+    }
+    let after_not = consume_sql_keyword_ci(s, start, "NOT")?;
+    consume_sql_keyword_ci(s, skip_sql_trivia(s, after_not), "NULL")
+}
+
+/// The name after a `CONSTRAINT` keyword ending at `after_keyword`,
+/// returning the byte just past it. An unquoted reserved word that opens
+/// a column constraint cannot be a name, so `CONSTRAINT NOT NULL` names
+/// nothing and yields `None`.
+fn consume_constraint_name(s: &str, after_keyword: usize) -> Option<usize> {
+    const RESERVED: [&str; 9] =
+        ["CHECK", "COLLATE", "CONSTRAINT", "DEFAULT", "NOT", "NULL", "PRIMARY", "REFERENCES", "UNIQUE"];
+    let start = skip_sql_trivia(s, after_keyword);
+    let (name, end) = read_ident(s, start)?;
+    let quoted = s.as_bytes().get(start) == Some(&b'"');
+    if !quoted && RESERVED.iter().any(|word| name.eq_ignore_ascii_case(word)) {
+        return None;
+    }
+    Some(end)
+}
+
+/// pg_dump writes `CONSTRAINT name` inside a column definition only for
+/// its nullability (`CONSTRAINT name NOT NULL`). Any other named clause
+/// (`PRIMARY KEY`, `UNIQUE`, `CHECK`, `REFERENCES`), or a `CONSTRAINT`
+/// with no name, is returned from that keyword on, so the column is
+/// refused rather than read as a plain one with its key or check lost.
+fn unsupported_named_constraint(modifiers: &str) -> Option<&str> {
+    top_level_words(modifiers).into_iter().find_map(|(pos, word)| {
+        if word != "CONSTRAINT" {
+            return None;
+        }
+        let named_nullability = consume_constraint_name(modifiers, pos + "CONSTRAINT".len())
+            .and_then(|end| consume_nullability(modifiers, skip_sql_trivia(modifiers, end)));
+        named_nullability.is_none().then(|| modifiers[pos..].trim_end())
+    })
 }
 
 /// From a column definition's modifier tail: whether the column is
@@ -1658,6 +1714,8 @@ CREATE INDEX widgets_payload_idx ON widgets USING public.gin (payload);"#;
         assert!(matches!(resolve_column_type("json", &enums), Some(ColumnType::Json)));
         assert!(matches!(resolve_column_type("jsonb", &enums), Some(ColumnType::Jsonb)));
         assert!(matches!(resolve_column_type("uuid", &enums), Some(ColumnType::Uuid)));
+        assert!(matches!(resolve_column_type("interval", &enums), Some(ColumnType::Interval)));
+        assert!(matches!(resolve_column_type("interval(6)", &enums), Some(ColumnType::Interval)));
         assert!(matches!(
             resolve_column_type("numeric(10,2)", &enums),
             Some(ColumnType::Decimal { precision: None, scale: None })

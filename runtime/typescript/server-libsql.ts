@@ -80,6 +80,7 @@ import { Flash } from "./flash.js";
 import { setBroadcaster, installDb, type ActionResponse } from "./juntos.js";
 import { Db } from "./db.js";
 import { ViewHelpers } from "./view_helpers.js";
+import { I18nHost } from "./i18n_host.js";
 
 // ── Action Cable server ────────────────────────────────────────
 
@@ -490,7 +491,7 @@ export async function startServer(opts: StartOptions): Promise<void> {
   setBroadcaster((stream, html) => cable.broadcast(stream, html));
 
   const server = createServer((req, res) => {
-    handleRequest(req, res).catch((err) => {
+    I18nHost.per_request(() => handleRequest(req, res)).catch((err) => {
       console.error("request error:", err);
       res.statusCode = 500;
       res.end("Server error");

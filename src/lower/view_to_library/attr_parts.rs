@@ -109,8 +109,14 @@ pub(crate) fn append_attr_parts(parts: &mut Vec<InterpPart>, opts: &[(Expr, Expr
 /// content: <config read>`, and with no key configured Rails renders
 /// `<meta name="vapid-public-key">` where the unguarded emit said
 /// `content=""` — the room-page comparator's find. Same guard shape as
-/// the nested-`data:` conditional form_builder's loop already carries
-/// (an `If` inside an `InterpPart::Expr`, proven on every lane).
+/// the nested-`data:` conditional form_builder's loop already carries.
+///
+/// ONE EVALUATION. The rule is `ActionView::ViewHelpers.tag_attr(key,
+/// value)`, a call, rather than an inline `if value.nil? … value.to_s`:
+/// that spelled the value expression twice, so it ran twice. campfire's
+/// layout passes `href: fresh_account_logo_path`, which reads
+/// `Current.account` (`Account.first`) and formats its `updated_at`, and
+/// the page called it four times for Rails' two.
 pub(crate) fn push_escaped_attr(parts: &mut Vec<InterpPart>, key: &str, value: &Expr) {
     let open = InterpPart::Text { value: format!(" {key}=\"") };
     let escaped = InterpPart::Expr {
@@ -129,14 +135,7 @@ pub(crate) fn push_escaped_attr(parts: &mut Vec<InterpPart>, key: &str, value: &
         return;
     }
     parts.push(InterpPart::Expr {
-        expr: Expr::new(
-            Span::synthetic(),
-            ExprNode::If {
-                cond: send(Some(value.clone()), "nil?", Vec::new(), None, false),
-                then_branch: lit_str(String::new()),
-                else_branch: string_interp(vec![open, escaped, close]),
-            },
-        ),
+        expr: view_helpers_call("tag_attr", vec![lit_str(key.to_string()), value.clone()]),
     });
 }
 

@@ -45,6 +45,8 @@ const PARAMS_KT: &str = include_str!("../../../runtime/kotlin/params.kt");
 /// intrinsic target) plus the `JsonBuilder.encodeDatetime(OffsetDateTime?)`
 /// overload (native datetime → Rails' canonical `...Z` millisecond JSON).
 const DATETIME_KT: &str = include_str!("../../../runtime/kotlin/datetime.kt");
+const I18N_HOST_KT: &str = include_str!("../../../runtime/kotlin/i18n_host.kt");
+const RH_CORE_KT: &str = include_str!("../../../runtime/kotlin/rh_core.kt");
 
 // The previous `ParamValue` sealed-union primitive was removed: the params
 // layer now holds untyped values as Kotlin's top type `Any?` (nested Hash →
@@ -123,6 +125,14 @@ pub fn primitives() -> Vec<EmittedFile> {
         EmittedFile {
             path: PathBuf::from("src/main/kotlin/RhDateTime.kt"),
             content: DATETIME_KT.to_string(),
+        },
+        EmittedFile {
+            path: PathBuf::from("src/main/kotlin/I18nHost.kt"),
+            content: I18N_HOST_KT.to_string(),
+        },
+        EmittedFile {
+            path: PathBuf::from("src/main/kotlin/RhCore.kt"),
+            content: RH_CORE_KT.to_string(),
         },
         EmittedFile {
             path: PathBuf::from("src/main/kotlin/AdapterInterface.kt"),

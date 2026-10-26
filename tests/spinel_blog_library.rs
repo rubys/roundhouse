@@ -37,7 +37,7 @@ fn errors_rb_ingests_and_emits_via_library_path() {
     // qualified — `ingest_library_classes` walks enclosing module
     // nesting and prepends the path to each class's syntactic name.
     let names: Vec<&str> = classes.iter().map(|c| c.name.0.as_str()).collect();
-    assert_eq!(classes.len(), 23, "names: {names:?}");
+    assert_eq!(classes.len(), 24, "names: {names:?}");
 
     // Rails 8.1's hierarchy: ActiveRecordError under StandardError, and every other class under it.
     for lc in &classes {
@@ -46,6 +46,7 @@ fn errors_rb_ingests_and_emits_via_library_path() {
         let expected = match lc.name.0.as_str() {
             "ActiveRecord::ActiveRecordError" => "StandardError",
             "ActiveRecord::RecordNotFound" | "ActiveRecord::RecordInvalid" | "ActiveRecord::RecordNotSaved"
+            | "ActiveRecord::RecordNotDestroyed"
             | "ActiveRecord::ReadOnlyRecord" | "ActiveRecord::SoleRecordExceeded" | "ActiveRecord::StatementInvalid"
             | "ActiveRecord::ReadOnlyError" => "ActiveRecordError",
             "ActiveRecord::RecordNotUnique" | "ActiveRecord::InvalidForeignKey" => "WrappedDatabaseException",
@@ -82,7 +83,7 @@ fn errors_rb_ingests_and_emits_via_library_path() {
         .iter()
         .filter(|f| f.path.extension().and_then(|e| e.to_str()) == Some("rb"))
         .count();
-    assert_eq!(rb_count, 23, "one .rb file per LibraryClass");
+    assert_eq!(rb_count, 24, "one .rb file per LibraryClass");
 
     let invalid_file = files
         .iter()

@@ -35,10 +35,8 @@ fn last_segment(qualified: &str) -> &str {
 /// class — `Exception` is the equivalent base. Other names pass through
 /// as their last namespace segment.
 fn python_base_class(qualified: &str) -> String {
-    match last_segment(qualified) {
-        "StandardError" => "Exception".to_string(),
-        other => other.to_string(),
-    }
+    let last = last_segment(qualified);
+    super::expr::python_core_error(last).map(str::to_string).unwrap_or_else(|| last.to_string())
 }
 
 /// True for the synthetic reader/writer methods `attr_accessor` /
@@ -184,6 +182,22 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
         writeln!(out, "class {name}:").unwrap();
     } else {
         writeln!(out, "class {name}({}):", bases.join(", ")).unwrap();
+    }
+    // Not left to the first assignment: Ruby reads an unassigned ivar as nil, and a Python class attribute read before its first write raises
+    {
+        fn class_ivars(e: &crate::expr::Expr, out: &mut std::collections::BTreeSet<String>) {
+            if let crate::expr::ExprNode::Assign { target: crate::expr::LValue::Ivar { name }, .. } = &*e.node {
+                out.insert(name.as_str().to_string());
+            }
+            e.node.for_each_child(&mut |c| class_ivars(c, out));
+        }
+        let mut ivars = std::collections::BTreeSet::new();
+        for m in class.methods.iter().filter(|m| m.receiver == MethodReceiver::Class) {
+            class_ivars(&m.body, &mut ivars);
+        }
+        for n in ivars {
+            writeln!(out, "    {n} = None").unwrap();
+        }
     }
 
     // Temporal (Date/DateTime/Time) columns arrive from the shared

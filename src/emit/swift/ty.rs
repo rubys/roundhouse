@@ -103,6 +103,9 @@ fn render_class(full: &str, args: &[Ty]) -> String {
             return "String".to_string();
         }
         "Regexp" => return "NSRegularExpression".to_string(),
+        // Not a type of its own: a raise of a core error is a fatalError, so nothing of that type is ever thrown or held
+        "StandardError" | "RuntimeError" | "Exception" | "ArgumentError" | "TypeError" | "NameError" | "NoMethodError"
+        | "NotImplementedError" | "KeyError" | "IndexError" => return "Error".to_string(),
         // The params union renders as the top type — the Kotlin arc
         // proved the sealed-union shape doesn't survive the runtime's
         // untyped narrowing (`is_a?(Hash)` doesn't match a union wrapper

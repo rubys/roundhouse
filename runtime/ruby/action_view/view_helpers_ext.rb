@@ -76,6 +76,17 @@ module ActionView
       )
     end
 
+    def self.digested_asset_path(source)
+      cut = source.length
+      query = source.index("?")
+      cut = query if !query.nil? && query < cut
+      fragment = source.index("#")
+      cut = fragment if !fragment.nil? && fragment < cut
+      logical = source[0, cut].to_s
+      suffix = source[cut, source.length - cut].to_s
+      Rails.application.propshaft_asset_path(logical) + suffix
+    end
+
     # Rails `class_names` (alias of `token_list`): strings/arrays add
     # their tokens, hash entries contribute their key when the value is
     # truthy (`class_names("nav", current_page: cur == path)`), nested

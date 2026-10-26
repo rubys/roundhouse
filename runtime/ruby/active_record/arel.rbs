@@ -1,5 +1,8 @@
 module Arel
-  def self.sql: (String fragment) -> String
+  class BindError < StandardError
+  end
+
+  def self.sql: (String fragment, *(Arel::Nodes::Node | String | Integer | Float | bool | nil) positional, **(Arel::Nodes::Node | String | Integer | Float | bool | nil) named) -> Arel::Nodes::SqlLiteral
 
   def self.star: () -> String
 
@@ -37,6 +40,62 @@ module Arel
     def in: (ActiveRecord::Relation | SelectManager subquery) -> String
 
     def not_in: (ActiveRecord::Relation | SelectManager subquery) -> String
+  end
+
+  module Nodes
+    def self.embed: (Arel::Nodes::Node | String | Integer | Float | bool | nil value) -> String
+    def self.quote_scalar: (String | Integer | Float | bool | nil value) -> String
+    def self.build_quoted: (String | Integer | Float | bool | nil value) -> Quoted
+    def self.replace_question: (String text, String literal) -> String
+    def self.replace_questions: (String text, Array[String] literals) -> String
+    def self.replace_named: (String text, String key, String literal) -> String
+    def self.name_boundary?: (String? ch) -> bool
+    def self.count_questions: (String text) -> Integer
+    def self.unbound_name: (String text) -> String?
+    def self.name_start?: (String? ch) -> bool
+
+    class Node
+      def to_s: () -> String
+      def to_sql: () -> String
+    end
+
+    class SqlLiteral < Node
+      @sql: String
+      def initialize: (String sql) -> void
+      def to_s: () -> String
+    end
+
+    class Quoted < Node
+      @sql: String
+      def initialize: (String sql) -> void
+      def to_s: () -> String
+    end
+
+    class Not < Node
+      @expr: String
+      def initialize: (String | Arel::Nodes::Node expr) -> void
+      def to_s: () -> String
+    end
+
+    class Case < Node
+      @predicates: Array[String?]
+      @results: Array[String]
+      @pending: String?
+      @fallback: String?
+      def initialize: () -> void
+      def when: (String | Arel::Nodes::Node predicate) -> self
+      def then: (String | Integer | Float | Arel::Nodes::Node | nil value) -> self
+      def else: (String | Integer | Float | Arel::Nodes::Node | nil value) -> self
+      def self.fragment: (String | Integer | Float | Arel::Nodes::Node | nil value) -> String
+      def to_s: () -> String
+    end
+
+    class NamedFunction < Node
+      @name: String
+      @exprs: Array[String]
+      def initialize: (String | Symbol name, Array[String | Arel::Nodes::Node] exprs) -> void
+      def to_s: () -> String
+    end
   end
 end
 

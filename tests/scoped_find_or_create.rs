@@ -281,9 +281,14 @@ end
     );
 }
 
+/// A symbol `after_initialize` is lowered now, like the block form, so a
+/// scoped find-or-create on its model runs it: the new record gets the
+/// scope's attributes before the callback reads them, and the second call
+/// finds that record (activerecord 8.1.4 answers the same: `owner <id>`,
+/// one row). It was refused while the symbol form went unlowered.
 #[test]
-fn unlowered_symbol_initialization_callback_remains_an_error() {
-    let run = emit_and_run::real_blog()
+fn a_symbol_initialization_callback_runs_in_scoped_find_or_create() {
+    emit_and_run::real_blog()
         .write(
             "app/models/comment.rb",
             r#"
@@ -293,20 +298,23 @@ class Comment < ApplicationRecord
   def derive_body
     self.body = "owner #{article_id}"
   end
-  def self.unsupported
-    Comment.where(article_id: 41).find_or_create_by!(commenter: "Callback")
+  def self.scoped_make
+    Comment.where(article_id: 1).find_or_create_by!(commenter: "Callback")
   end
 end
 "#,
         )
-        .run_ruby("");
-    assert!(
-        run.errors
-            .iter()
-            .any(|error| error.contains("scoped find-or-create cannot be lowered safely")),
-        "symbol initialization callback was silently ignored: {:?}",
-        run.errors
-    );
+        .run_ruby(
+            r#"a = Article.create!(title: "Title", body: "a body long enough")
+raise "article id: #{a.id}" unless a.id == 1
+c = Comment.scoped_make
+raise "created: #{[c.article_id, c.commenter, c.body].inspect}" unless c.article_id == a.id && c.commenter == "Callback" && c.body == "owner #{a.id}"
+d = Comment.scoped_make
+raise "found: #{[d.id, c.id, Comment.count].inspect}" unless d.id == c.id && Comment.count == 1 && d.body == "owner #{a.id}"
+puts "PASS"
+"#,
+        )
+        .assert_passes();
 }
 
 #[test]

@@ -78,13 +78,13 @@ fn rust_index_handler(name: &str) -> String {
     file[start..end].to_string()
 }
 
-/// The Rust HTTP handler calls the action without `process_action`, so
-/// it sets the action name itself.
+/// The Rust HTTP handler sets the action name before it runs the action
+/// through `process_action`.
 #[test]
 fn the_rust_http_handler_sets_the_action_name() {
     let posts = rust_index_handler("posts_controller");
     let assign = posts.find("c.assign_action_name(\"index\");");
-    let call = posts.find("c.index();");
+    let call = posts.find("c.process_action(\"index\");");
     assert!(
         matches!((assign, call), (Some(a), Some(c)) if a < c),
         "the handler sets the name before the action:\n{posts}"

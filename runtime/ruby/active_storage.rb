@@ -276,12 +276,55 @@ module ActiveStorage
   class Error < StandardError
   end
 
+  # The remaining exceptions in Rails 8.1's active_storage/errors.rb.
+  class InvariableError < Error
+  end
+
+  class UnpreviewableError < Error
+  end
+
+  class UnrepresentableError < Error
+  end
+
+  class IntegrityError < Error
+  end
+
+  class FileNotFoundError < Error
+  end
+
+  class InvalidKeyError < Error
+  end
+
   # Rails' `ActiveStorage::PreviewError` — raised when a previewer cannot
   # draw a poster (ffmpeg failed, timed out, …). Apps and railties rescue
   # or raise it; campfire's `TimeLimitedVideoPreviewer` raises it when
   # the wall-clock limit trips. Parent is `Error`, not bare StandardError,
   # matching Rails.
   class PreviewError < Error
+  end
+
+  # Nested exceptions keep their Rails owners as well as their parents.
+  class Service
+    class GCSService < Service
+      class MetadataServerError < ActiveStorage::Error
+      end
+
+      class MetadataServerNotFoundError < ActiveStorage::Error
+      end
+    end
+  end
+
+  module Transformers
+    class Transformer
+    end
+
+    class ImageProcessingTransformer < Transformer
+      class UnsupportedImageProcessingMethod < StandardError
+      end
+
+      class UnsupportedImageProcessingArgument < StandardError
+      end
+    end
   end
 
   # The video previewer's swap point. Drawing is the class-side
@@ -333,6 +376,9 @@ module ActiveStorage
   # exactly where `url_for(preview)` points in Rails; serving it draws
   # and transforms on demand, so building the URL does not.
   class Preview
+    class UnprocessedError < StandardError
+    end
+
     def initialize(blob, variation)
       @blob = blob
       @variation = variation
@@ -571,19 +617,21 @@ module ActiveStorage
     end
 
     def to_s
-      @filename
+      # Fresh characters: the stored name may still be a handle another
+      # name appends to; readers only answer text.
+      @filename + ""
     end
 
     # `.jpg` — the delimiter and the extension, "" when there is none.
     def extension_with_delimiter
       i = @filename.rindex(".")
-      i.nil? || i == 0 ? "" : @filename[i..]
+      i.nil? || i == 0 ? +"" : @filename[i..] + ""
     end
 
     # `jpg` — the extension without its delimiter, "" when there is none.
     def extension_without_delimiter
       e = extension_with_delimiter
-      e.empty? ? "" : e[1..]
+      e.empty? ? +"" : e[1..] + ""
     end
 
     def extension
@@ -593,7 +641,7 @@ module ActiveStorage
     # `racecar` for `racecar.jpg`; the whole name when there is no extension.
     def base
       e = extension_with_delimiter
-      e.empty? ? @filename : @filename[0, @filename.length - e.length]
+      e.empty? ? @filename + "" : @filename[0, @filename.length - e.length].to_s + ""
     end
 
     # Rails strips the characters no filesystem or URL wants.
@@ -602,7 +650,7 @@ module ActiveStorage
     end
 
     def as_json
-      @filename
+      @filename + ""
     end
   end
 
@@ -939,14 +987,27 @@ module ActiveStorage
 
     # `[key, disposition]`, or an empty key when the token is bad or
     # stale.
+    #
+    # Built by push onto an empty Array so Spinel keeps `Array[String]`
+    # (`sp_StrArray *`). A four- or two-element literal whose slots are
+    # `parts[i].to_s` widens to a poly array and fails the C compile
+    # against the RBS return type.
     def self.decode(token)
       json = ActionController::MessageVerifier.verified_data_json(
         Rails.application.secret_key_base, "ActiveStorage", token, "disk_key", false
       )
-      return ["", ""] if json == ""
-      parts = ActionController::MessageVerifier.json_value(json).split("|")
-      return ["", ""] if parts.length != 2
-      [parts[0].to_s, parts[1].to_s]
+      out = []
+      if json != ""
+        parts = ActionController::MessageVerifier.json_value(json).split("|")
+        if parts.length == 2
+          out << parts[0].to_s
+          out << parts[1].to_s
+          return out
+        end
+      end
+      out << +""
+      out << +""
+      out
     end
 
     # Rails' `Blob#url` signs `forced_disposition_for_serving ||
@@ -974,15 +1035,27 @@ module ActiveStorage
     end
 
     # `[key, content_type, content_length, checksum]`, or an empty key
-    # when the token is bad or stale.
+    # when the token is bad or stale. Same push shape as `decode`.
     def self.decode_upload(token)
       json = ActionController::MessageVerifier.verified_data_json(
         Rails.application.secret_key_base, "ActiveStorage", token, "blob_token", false
       )
-      return ["", "", "", ""] if json == ""
-      parts = ActionController::MessageVerifier.json_value(json).split("|")
-      return ["", "", "", ""] if parts.length != 4
-      [parts[0].to_s, parts[1].to_s, parts[2].to_s, parts[3].to_s]
+      out = []
+      if json != ""
+        parts = ActionController::MessageVerifier.json_value(json).split("|")
+        if parts.length == 4
+          out << parts[0].to_s
+          out << parts[1].to_s
+          out << parts[2].to_s
+          out << parts[3].to_s
+          return out
+        end
+      end
+      out << +""
+      out << +""
+      out << +""
+      out << +""
+      out
     end
 
     def self.upload_url(blob, checksum)

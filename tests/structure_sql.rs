@@ -440,6 +440,72 @@ ALTER TABLE ONLY shard.readings_p0
     assert_eq!(pk_gaps, 1, "{gaps:?}");
 }
 
+/// pg_dump writes an index on a partitioned table as `CREATE INDEX …
+/// ON ONLY parent`, then one index per partition and an `ALTER INDEX …
+/// ATTACH PARTITION` joining each to the parent's. `ONLY` used to be read
+/// as the table name, so every such index was ledgered as a clause before
+/// the column list. The parent keeps the index; the partitions' indexes
+/// stay out with the partitions.
+#[test]
+fn an_index_on_only_a_partitioned_parent_is_the_parents_index() {
+    let sql = r#"
+CREATE TABLE public.events (
+    id bigint NOT NULL,
+    account_id bigint NOT NULL,
+    created_at timestamp(6) without time zone NOT NULL,
+    status integer
+)
+PARTITION BY RANGE (created_at);
+
+CREATE TABLE public.events_2026_06 (
+    id bigint NOT NULL,
+    account_id bigint NOT NULL,
+    created_at timestamp(6) without time zone NOT NULL,
+    status integer
+);
+
+CREATE TABLE public.only_items (
+    id bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.events ATTACH PARTITION public.events_2026_06 FOR VALUES FROM ('2026-06-01 00:00:00') TO ('2026-07-01 00:00:00');
+
+CREATE UNIQUE INDEX idx_events_tenant_identity ON ONLY public.events USING btree (id, created_at, account_id);
+
+CREATE INDEX index_events_on_failures ON ONLY public.events USING btree (status, created_at DESC) WHERE (status >= 400);
+
+CREATE INDEX index_events_on_account_id ON ONLY public.events (account_id);
+
+CREATE UNIQUE INDEX events_2026_06_id_created_at_account_id_idx ON public.events_2026_06 USING btree (id, created_at, account_id);
+
+CREATE INDEX index_only_items_on_id ON only_items USING btree (id);
+
+ALTER INDEX public.idx_events_tenant_identity ATTACH PARTITION public.events_2026_06_id_created_at_account_id_idx;
+"#;
+    survey::activate();
+    let schema = ingest_structure_sql(sql.as_bytes(), "db/structure.sql").expect("survey mode never errors");
+    let gaps = survey::drain();
+    assert!(gaps.is_empty(), "{gaps:?}");
+
+    let indexes: Vec<(&str, bool, Option<&str>, Option<&str>)> = schema.tables[&Symbol::from("events")]
+        .indexes
+        .iter()
+        .map(|i| (i.name.as_str(), i.unique, i.using.as_deref(), i.predicate.as_deref()))
+        .collect();
+    // `index_events_on_failures` has a `DESC` column, which is skipped
+    // like any other non-plain column, `ONLY` or not.
+    assert_eq!(
+        indexes,
+        vec![
+            ("idx_events_tenant_identity", true, Some("btree"), None),
+            ("index_events_on_account_id", false, None, None),
+        ]
+    );
+    assert!(!schema.tables.contains_key(&Symbol::from("events_2026_06")));
+    // A table whose name starts with `only` is not read as `ONLY`.
+    assert_eq!(schema.tables[&Symbol::from("only_items")].indexes.len(), 1);
+}
+
 /// `CREATE … INDEX … WHERE (…)` keeps its predicate, as `where:` in
 /// `schema.rb` does. It used to be dropped, so a partial unique index
 /// came out unique over every row. The predicate is the rest of the
@@ -529,4 +595,97 @@ fn other_meta_commands_and_literals_are_left_alone() {
     let schema = ingest_structure_sql(sql.as_bytes(), "db/structure.sql").expect("strict ingest");
     let notes = &schema.tables[&Symbol::from("notes")];
     assert_eq!(col(notes, "body").default.as_deref(), Some("first line\n\\restrict kept"));
+}
+
+#[test]
+fn named_not_null_constraints_keep_the_column() {
+    // PostgreSQL 18 pg_dump names a column's NOT NULL whenever the stored
+    // constraint name is not `<table>_<column>_not_null`: renamed tables,
+    // partitions, and names truncated at 63 bytes.
+    let sql = r#"
+CREATE TABLE public.user_identities (
+    id uuid NOT NULL,
+    first_name text,
+    email character varying CONSTRAINT identities_email_not_null NOT NULL,
+    created_at timestamp(6) without time zone CONSTRAINT identities_created_at_not_null NOT NULL,
+    nickname text DEFAULT 'x'::text CONSTRAINT identities_nickname_not_null NOT NULL,
+    handle text CONSTRAINT "Identities handle not null" NOT NULL,
+    display_name text GENERATED ALWAYS AS (first_name) STORED CONSTRAINT identities_display_name_not_null NOT NULL
+);
+"#;
+    let schema = ingest_structure_sql(sql.as_bytes(), "db/structure.sql").expect("strict ingest");
+    let table = &schema.tables[&Symbol::from("user_identities")];
+    for name in ["email", "created_at", "nickname", "handle", "display_name"] {
+        assert!(!col(table, name).nullable, "{name} keeps NOT NULL");
+    }
+    assert!(col(table, "first_name").nullable);
+    assert!(matches!(col(table, "email").col_type, ColumnType::String { .. }));
+    assert!(matches!(col(table, "created_at").col_type, ColumnType::DateTime));
+    assert_eq!(col(table, "nickname").default.as_deref(), Some("x"));
+    assert_eq!(col(table, "display_name").generated.as_ref().expect("generated").expression, "first_name");
+}
+
+#[test]
+fn a_named_column_constraint_other_than_nullability_is_refused() {
+    // Only the nullability clause is modeled after `CONSTRAINT name`. A
+    // named key, check, uniqueness or reference must fail ingest rather
+    // than be read as a plain nullable column.
+    for (clause, quoted) in [
+        ("CONSTRAINT people_id_pkey PRIMARY KEY", "CONSTRAINT people_id_pkey PRIMARY KEY"),
+        ("CONSTRAINT people_id_key UNIQUE", "CONSTRAINT people_id_key UNIQUE"),
+        ("CONSTRAINT people_id_check CHECK (id > 0)", "CONSTRAINT people_id_check CHECK (id > 0)"),
+        ("CONSTRAINT people_id_fkey REFERENCES public.users(id)", "CONSTRAINT people_id_fkey REFERENCES public.users(id)"),
+        ("NOT NULL CONSTRAINT people_id_pkey PRIMARY KEY", "CONSTRAINT people_id_pkey PRIMARY KEY"),
+    ] {
+        let sql = format!("CREATE TABLE public.people (\n    id bigint {clause}\n);\n");
+        let error = ingest_structure_sql(sql.as_bytes(), "db/structure.sql")
+            .expect_err(clause)
+            .to_string();
+        assert!(
+            error.contains(&format!("column dropped: people.id has unsupported column constraint `{quoted}`")),
+            "{clause}: {error}"
+        );
+    }
+}
+
+#[test]
+fn a_constraint_keyword_needs_a_name() {
+    // `NOT` is a reserved word, so it cannot be the constraint's name:
+    // `CONSTRAINT NOT NULL` is malformed, not a named NOT NULL.
+    let quoted = "CREATE TABLE public.people (\n    email text CONSTRAINT \"not\" NOT NULL\n);\n";
+    let schema = ingest_structure_sql(quoted.as_bytes(), "db/structure.sql").expect("a quoted reserved word is a name");
+    assert!(!col(&schema.tables[&Symbol::from("people")], "email").nullable);
+
+    let plain = "CREATE TABLE public.people (\n    email text CONSTRAINT NOT NULL\n);\n";
+    let error = ingest_structure_sql(plain.as_bytes(), "db/structure.sql")
+        .expect_err("unnamed CONSTRAINT")
+        .to_string();
+    assert!(error.contains("column dropped: people.email has unsupported column constraint `CONSTRAINT NOT NULL`"), "{error}");
+
+    let generated = r#"
+CREATE TABLE public.people (
+    id bigint NOT NULL,
+    first_name text,
+    display_name text GENERATED ALWAYS AS (first_name) STORED CONSTRAINT NOT NULL
+);
+"#;
+    let error = ingest_structure_sql(generated.as_bytes(), "db/structure.sql")
+        .expect_err("unnamed CONSTRAINT after GENERATED")
+        .to_string();
+    assert!(error.contains("people.display_name"), "{error}");
+}
+
+#[test]
+fn a_constraint_keyword_without_a_not_null_still_fails_after_generated() {
+    let sql = r#"
+CREATE TABLE public.people (
+    id bigint NOT NULL,
+    first_name text,
+    display_name text GENERATED ALWAYS AS (first_name) STORED CONSTRAINT people_display_name_check
+);
+"#;
+    let error = ingest_structure_sql(sql.as_bytes(), "db/structure.sql")
+        .expect_err("a dangling constraint name is not a nullability clause")
+        .to_string();
+    assert!(error.contains("generated column dropped: people.display_name"), "{error}");
 }

@@ -95,9 +95,12 @@ pub fn apply_config_reader_lowering(app: &mut App) {
     // hook+view walks. They match disjoint chains, so one walk is
     // equivalent: config peels outermost-first (longest chain wins),
     // then cable/credentials apply post-order on the way back. Tests
-    // only ever saw the config rewrite.
+    // see the config rewrite and the cable mount path.
     super::for_each_hook_body(app, &mut |e| rewrite_fused(e, &lifted, true));
-    super::for_each_test_body(app, &mut |e| rewrite(e, &lifted));
+    super::for_each_test_body(app, &mut |e| {
+        rewrite(e, &lifted);
+        rewrite_cable_tree(e);
+    });
     for view in &mut app.views {
         rewrite_fused(&mut view.body, &lifted, true);
     }
@@ -212,6 +215,14 @@ fn is_credentials_root(e: &Expr) -> bool {
     m2.as_str() == "application"
         && a2.is_empty()
         && matches!(&*rr.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Rails")
+}
+
+/// `rewrite_cable_node` over a whole test body: a connection test asks
+/// for the mount path to build its socket's request
+/// (`TestSocket.build_request(ActionCable.server.config.mount_path || "/cable", …)`).
+fn rewrite_cable_tree(expr: &mut Expr) {
+    expr.node.for_each_child_mut(&mut |c| rewrite_cable_tree(c));
+    rewrite_cable_node(expr);
 }
 
 /// `ActionCable.server.config.mount_path` → `"/cable"`.

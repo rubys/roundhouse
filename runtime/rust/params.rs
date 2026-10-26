@@ -40,4 +40,32 @@ impl Params {
     pub fn provided(sub: HashMap<String, ParamValue>, key: &str) -> bool {
         matches!(sub.get(key), Some(serde_json::Value::String(_)))
     }
+
+    // The scalar readers the params lowering emits, and its record of
+    // multiparameter keys. Those keys (`title(1)`) are modeled on the
+    // Ruby family only (runtime/ruby/params.rb); this target ignores
+    // them, as it always has, so these pass through.
+    pub fn scalar_provided(sub: HashMap<String, ParamValue>, key: &str) -> bool {
+        Params::provided(sub, key)
+    }
+
+    pub fn scalar(sub: HashMap<String, ParamValue>, key: &str) -> String {
+        Params::str(sub, key, "")
+    }
+
+    pub fn no_fields() -> Vec<String> {
+        Vec::new()
+    }
+
+    pub fn multiparameter_fields(_sub: HashMap<String, ParamValue>, _keys: Vec<&str>) -> Vec<String> {
+        Vec::new()
+    }
+
+    pub fn multiparameter_unsupported(_sub: HashMap<String, ParamValue>, _keys: Vec<&str>) -> bool {
+        false
+    }
+
+    pub fn any_of(list: Vec<String>, names: Vec<&str>) -> bool {
+        names.iter().any(|n| list.iter().any(|l| l == n))
+    }
 }

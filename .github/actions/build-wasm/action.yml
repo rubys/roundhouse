@@ -1,0 +1,40 @@
+name: Build browser compiler
+description: Build the pinned compiler with the shared WASI SDK and host bindgen setup
+inputs:
+  wasi-sdk-version:
+    description: WASI SDK release
+    default: '33.0'
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/setup-rust
+      with:
+        targets: wasm32-wasip1
+    - uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: wasm
+    - name: Install host bindgen dependency
+      shell: bash
+      run: '"$GITHUB_WORKSPACE/scripts/ci-apt-install" libclang-dev'
+    - name: Cache WASI SDK
+      id: wasi-sdk
+      uses: actions/cache@v6
+      with:
+        path: /opt/wasi-sdk
+        key: wasi-sdk-${{ inputs.wasi-sdk-version }}-x86_64-linux
+    - name: Install WASI SDK
+      if: steps.wasi-sdk.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        VERSION: ${{ inputs.wasi-sdk-version }}
+      run: |
+        major="${VERSION%%.*}"
+        curl -fsSL "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${major}/wasi-sdk-${VERSION}-x86_64-linux.tar.gz" -o "$RUNNER_TEMP/wasi-sdk.tar.gz"
+        sudo mkdir -p /opt/wasi-sdk
+        sudo tar -xzf "$RUNNER_TEMP/wasi-sdk.tar.gz" -C /opt/wasi-sdk --strip-components=1
+    - name: Build WebAssembly compiler
+      shell: bash
+      env:
+        WASI_SDK_PATH: /opt/wasi-sdk
+        ROUNDHOUSE_COMMIT: ${{ github.sha }}
+      run: cargo build --locked --release --target wasm32-wasip1 --manifest-path wasm/Cargo.toml

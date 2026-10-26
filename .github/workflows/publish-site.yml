@@ -1,0 +1,87 @@
+name: Publish site
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Full validation uses this same group for its deploy job. Hold the lock
+# during baseline selection and assembly to prevent concurrent deployments.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  site:
+    if: github.repository == 'rubys/roundhouse' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      deployments: read
+    outputs:
+      artifact: github-pages-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Restore the last successfully deployed site and select changed inputs
+        id: restore
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci-site.py restore --root _site --state "$RUNNER_TEMP/site-state.json"
+      - name: Rebuild the compiler only when its inputs changed
+        if: steps.restore.outputs.wasm == 'true'
+        uses: ./.github/actions/build-wasm
+      - name: Update source assets and retain generated downloads and their evidence
+        run: |
+          python3 scripts/ci-site.py assemble --root _site --state "$RUNNER_TEMP/site-state.json" \
+            --wasm wasm/target/wasm32-wasip1/release/roundhouse_wasm.wasm
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Install browser check dependencies
+        working-directory: tests/browser_smoke
+        run: '"$GITHUB_WORKSPACE/scripts/ci-npm" ci'
+      - name: Install Chromium
+        working-directory: tests/browser_smoke
+        run: '"$GITHUB_WORKSPACE/scripts/ci-playwright-install"'
+      - name: Check updated pages and affected browser surfaces
+        run: |
+          set -euo pipefail
+          python3 -m http.server 8099 --bind 127.0.0.1 --directory _site >"$RUNNER_TEMP/site-server.log" 2>&1 &
+          server=$!
+          trap 'kill "$server"' EXIT
+          timeout 15 bash -c 'until curl -fsS http://127.0.0.1:8099/ >/dev/null; do sleep 0.1; done'
+          node scripts/ci-site-smoke.mjs --root _site --state "$RUNNER_TEMP/site-state.json"
+      - name: Record the retained and rebuilt source revisions
+        run: cat _site/ci/site-publication.json >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the complete site
+        uses: actions/upload-pages-artifact@v5
+        with:
+          name: github-pages-${{ github.run_attempt }}
+          path: _site
+          retention-days: 7
+
+  deploy:
+    needs: site
+    if: github.repository == 'rubys/roundhouse' && github.ref == 'refs/heads/main' && needs.site.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy the checked site
+        id: deployment
+        uses: actions/deploy-pages@v5
+        with:
+          artifact_name: ${{ needs.site.outputs.artifact }}

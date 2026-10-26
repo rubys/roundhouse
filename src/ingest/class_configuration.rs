@@ -237,11 +237,17 @@ fn expand_controller(
             (&config.writer, ClassConfigurationRole::Writer),
             (&config.reader, ClassConfigurationRole::Reader),
         ] {
-            // The analyzer's parameter table has no receiver-kind key.
-            // Refuse rather than mixing instance and class call-site types.
-            if surface.instance_methods.contains(&method.name) || controller.class_methods().any(|existing| existing.name == method.name) {
+            // An instance method of the same name is a different method.
+            // Call sites pick a side (`ParamKey` includes `MethodReceiver`):
+            // a bare send in an instance body hits the instance method, and
+            // `self.class.writer` / a class-body send hits this one. Rails
+            // concerns use that split (`def self.period_config(**opts)` next
+            // to `def period_config; self.class.period_options; end`).
+            // A second class method of the same name on this controller is
+            // the same method twice, which the param table cannot keep apart.
+            if controller.class_methods().any(|existing| existing.name == method.name) {
                 return Err(refuse(
-                    "instance/class configuration method name collision is not supported",
+                    "a second class method of the same name is not supported",
                 ));
             }
             if !names.insert(&method.name) {

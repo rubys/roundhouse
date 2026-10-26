@@ -82,6 +82,12 @@ module ActionDispatch
         CGI_VARIABLES.include?(upper) ? upper : "HTTP_" + upper
       end
 
+      def self.env_name_from_header(name)
+        key = name.upcase.tr("_-", ",_")
+        return key if key == "CONTENT_TYPE" || key == "CONTENT_LENGTH"
+        "HTTP_" + key
+      end
+
       # Rails reads Authorization from its ordinary Rack key, legacy
       # server spellings, and the CGI redirect fallback.
       def self.authorization(env)

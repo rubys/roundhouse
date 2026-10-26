@@ -1222,7 +1222,7 @@ fn read_configs(sources: &[crate::span::SourceFile]) -> HashMap<String, Config> 
     }
     let mut finder = Finder { nesting: Vec::new(), found: HashMap::new() };
     for source in sources.iter().filter(|s| s.text.contains("config.")) {
-        let parsed = ruby_prism::parse(source.text.as_bytes());
+        let parsed = super::prism::parse_silent(source.text.as_bytes());
         ruby_prism::Visit::visit(&mut finder, &parsed.node());
     }
     finder.found

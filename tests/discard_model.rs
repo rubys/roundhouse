@@ -1,6 +1,6 @@
 //! `include Discard::Model` (the `discard` gem): admitted when the gem is
 //! locked and the table carries the discard column, expanded into the
-//! scopes and predicates it stands for; refused otherwise.
+//! scopes and predicates it stands for, its callbacks the generic chain; refused otherwise.
 
 use roundhouse::analyze::diagnose;
 use roundhouse::diagnostic::Severity;
@@ -149,10 +149,14 @@ fn without_the_gem_in_the_lock_the_include_stays_unresolved() {
 }
 
 #[test]
-fn a_before_discard_hook_is_refused_not_dropped() {
+fn a_before_discard_hook_joins_the_discard_chain() {
     let src = "class Article < ApplicationRecord\n  include Discard::Model\n  before_discard :check\n\n  def check\n    true\n  end\nend\n";
-    let err = ingest_app_from_tree(tree(Some(LOCK), SCHEMA, &[("article", src)])).err().expect("refused");
-    assert!(err.to_string().contains("before_discard"), "{err}");
+    let mut app = ingest_app_from_tree(tree(Some(LOCK), SCHEMA, &[("article", src)])).expect("admitted");
+    let errs = errors(&mut app);
+    assert!(errs.is_empty(), "{errs:?}");
+    let article = app.models.iter().find(|m| m.name.0.as_str() == "Article").unwrap();
+    assert!(article.methods().any(|m| m.name.as_str() == "_run_discard_callbacks"));
+    assert!(!article.body.iter().any(|i| matches!(i, ModelBodyItem::Unknown { .. })));
 }
 
 #[test]

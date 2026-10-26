@@ -1496,6 +1496,32 @@ module Db
     records
   end
 
+  # The work `current_transaction.after_commit` holds for the COMMIT
+  # (ActiveRecord::Base._after_commit), beside the records above. Seeded
+  # and cleared, as the records are, so the element type is the work's.
+  def self._txn_callbacks
+    work = Thread.current[:ar_txn_callbacks]
+    if work.nil?
+      work = [-> { nil }]
+      work.clear
+      Thread.current[:ar_txn_callbacks] = work
+    end
+    work
+  end
+
+  # The tables whose model is inside `Model.unscoped { … }` on this
+  # thread (relation.rb's `Relation.unscoped_tables`). Seeded and
+  # cleared, as the records are, so the element type is String.
+  def self._unscoped_tables
+    tables = Thread.current[:ar_unscoped_tables]
+    if tables.nil?
+      tables = [""]
+      tables.clear
+      Thread.current[:ar_unscoped_tables] = tables
+    end
+    tables
+  end
+
   # Request-scoped connection lease for the thread-per-connection
   # server. Leases a connection index (parking on the pool's condition
   # variable while none is free), binds its DbConn to this thread's
@@ -1578,32 +1604,45 @@ module Db
       request_error = e
     ensure
       cleanup_error = nil
-      # Close a leftover snapshot before rolling back an abandoned app
-      # transaction, then drain readers before eviction. Each stage runs
-      # even when an earlier cleanup failed, without replacing the request error.
-      begin
-        if conn.snap_depth > 0
-          conn.snap_depth = 1
-          read_snapshot_end
+      # `Db.close` inside the lease drops `@pools` and closes `conn`.
+      # Snapshot and rollback cleanup talk to SQLite, so skip them when
+      # this pool is no longer the live one. The lease index still goes
+      # back to the pool that issued it.
+      pool_live = false
+      if !@pools.nil?
+        pi = 0
+        while pi < @pools.length
+          pool_live = true if @pools[pi].equal?(pool)
+          pi += 1
         end
-      rescue StandardError => e
-        cleanup_error = e
       end
-      begin
-        release_abandoned_write(conn)
-      rescue StandardError => e
-        cleanup_error = e if cleanup_error.nil?
-      end
-      begin
-        conn.qc_end
-        conn.release_all
-      rescue StandardError => e
-        cleanup_error = e if cleanup_error.nil?
-      ensure
-        conn.trim!
+      if pool_live
+        begin
+          if conn.snap_depth > 0
+            conn.snap_depth = 1
+            read_snapshot_end
+          end
+        rescue StandardError => e
+          cleanup_error = e
+        end
+        begin
+          release_abandoned_write(conn)
+        rescue StandardError => e
+          cleanup_error = e if cleanup_error.nil?
+        end
+        begin
+          conn.qc_end
+          conn.release_all
+        rescue StandardError => e
+          cleanup_error = e if cleanup_error.nil?
+        ensure
+          conn.trim!
+          Thread.current[:db_conn] = nil
+        end
+      else
         Thread.current[:db_conn] = nil
-        pool.release(idx)
       end
+      pool.release(idx)
       raise cleanup_error if !cleanup_error.nil? && request_error.nil?
     end
     raise request_error if !request_error.nil?
@@ -1611,22 +1650,33 @@ module Db
   end
 
   def self.close
-    return if @pools.nil?
+    # A closed handle left in the thread slot is the next statement's
+    # connection. Schema purge closes and reopens the same path.
+    Thread.current[:db_conn] = nil
+    Thread.current[:db_pool] = nil
+    # A pin left set would `release(0)` on the pool `configure` opens next.
+    Thread.current[:db_txn_pin] = false
     error = nil
-    begin
-      i = 0
-      while i < @pools.length
-        begin
-          @pools[i].close_all
-          @pools[i].dump_stmt_stats("close", i) if DbConn::STMT_STATS
-        rescue StandardError => e
-          error = e if error.nil?
+    if !@pools.nil?
+      begin
+        i = 0
+        while i < @pools.length
+          begin
+            @pools[i].close_all
+            @pools[i].dump_stmt_stats("close", i) if DbConn::STMT_STATS
+          rescue StandardError => e
+            error = e if error.nil?
+          end
+          i += 1
         end
-        i += 1
+      ensure
+        @pools = nil
       end
-    ensure
-      @pools = nil
     end
+    # Lease cleanup skips `release_abandoned_write` once this pool is
+    # gone. An open BEGIN would otherwise leave `@permit_held` set, and
+    # the next write waits out the permit timeout.
+    release_permit
     raise error if !error.nil?
   end
 
@@ -2144,6 +2194,9 @@ module Db
   # No-op (single nil check) when no capture is installed.
   def self.record_query(sql)
     @query_log.push(sql) unless @query_log.nil?
+    if defined?(ActiveSupport::Notifications) && ActiveSupport::Notifications.respond_to?(:sql)
+      ActiveSupport::Notifications.sql(sql)
+    end
     if @sql_trace
       $stderr.puts "  SQL " + sql
     end

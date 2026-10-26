@@ -172,6 +172,21 @@ impl Overlay {
         self.run_spinel_with_flags(script, &[])
     }
 
+    /// `run_spinel` with a database: before the script's first line,
+    /// configure an in-memory SQLite database and load the schema with the
+    /// harness-standard boot (`Db.configure` / `Db.exec` / assign adapter),
+    /// matching emitted `test/test_helper.rb` and the BOOT pastes in sibling
+    /// Spinel suites. Plain `run_spinel` boots libraries only, so any query
+    /// there reads an unconfigured adapter. (CRuby `run_ruby` instead calls
+    /// `Main.configure_default_adapter!`, which uses the SqliteAdapter
+    /// spelling; Spinel contract consumers do not load `main.rb`.)
+    pub fn run_spinel_with_db(self, script: &str) -> Run {
+        let script = format!(
+            "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{script}"
+        );
+        self.run_spinel_with_flags(&script, &[])
+    }
+
     /// Also enforce the emitted sidecars, as the shipped Makefile does.
     pub fn run_spinel_with_rbs(self, script: &str) -> Run {
         self.run_spinel_with_flags(script, &["--rbs", "."])
@@ -289,7 +304,7 @@ impl Overlay {
         // As the CLI does: an error ingest reports gates the emit too.
         let (app, ingest_diags) = roundhouse::ingest::prism::scope(|| ingest_app(&source));
         let mut app = app.expect("ingest the overlaid fixture");
-        let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
+        let lower_diags = roundhouse::session::analyze_and_lower_for(&mut app, target);
         let mut errors: Vec<_> = ingest_diags
             .into_iter()
             .chain(diagnose(&app))

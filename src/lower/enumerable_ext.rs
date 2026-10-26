@@ -84,6 +84,13 @@ fn rewrite(expr: &mut Expr) {
 
 pub(crate) fn rewrite_node(expr: &mut Expr) -> bool {
     let span = expr.span;
+    // AS `String#first` / `String#last`, before the counted-terminal arm
+    // below, which answers every other `first(n)` / `last(n)` receiver.
+    let string_access = matches!(&*expr.node,
+        ExprNode::Send { method, block: None, .. } if matches!(method.as_str(), "first" | "last"));
+    if string_access && ground_string_access(expr) {
+        return true;
+    }
     let ExprNode::Send { recv, method, args, block, parenthesized } = &mut *expr.node else {
         return false;
     };
@@ -589,6 +596,45 @@ fn bind_once_as(span: crate::span::Span, arg: &Expr, name: &str, skip_simple: bo
 /// parameter is a String on every target). Arguments keep their
 /// evaluation order: the options are reordered to the positional
 /// order only when neither value can have an effect.
+/// AS `String#first(limit = 1)` / `String#last(limit = 1)` ->
+/// `ActiveSupport.string_first(text, limit)` / `string_last`. Only a
+/// receiver the analyzer typed as a String, or as `String | nil` (the
+/// temporary a safe navigation binds, `password_salt&.last(10)`, before
+/// the `&&` that guards it narrows): a nil there raises NoMethodError in
+/// the module function as `nil.last` does in Ruby. `first`/`last` on an
+/// Array, a Relation or any other union is that class's own method, and
+/// stays it.
+fn ground_string_access(expr: &mut Expr) -> bool {
+    let span = expr.span;
+    let ExprNode::Send { recv, method, args, parenthesized, .. } = &mut *expr.node else {
+        return false;
+    };
+    let stringish = match recv.as_ref().and_then(|r| r.ty.as_ref()) {
+        Some(Ty::Str) => true,
+        Some(Ty::Union { variants }) => {
+            variants.len() == 2
+                && variants.iter().any(|v| matches!(v, Ty::Str))
+                && variants.iter().any(|v| matches!(v, Ty::Nil))
+        }
+        _ => false,
+    };
+    if !stringish || args.len() > 1 {
+        return false;
+    }
+    let limit = args.pop().unwrap_or_else(|| {
+        let mut one = Expr::new(span, ExprNode::Lit { value: crate::expr::Literal::Int { value: 1 } });
+        one.ty = Some(Ty::Int);
+        one
+    });
+    let receiver = recv.take().expect("checked above");
+    *recv = Some(Expr::new(span, ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] }));
+    *method = Symbol::from(if method.as_str() == "first" { "string_first" } else { "string_last" });
+    args.push(receiver);
+    args.push(limit);
+    *parenthesized = true;
+    true
+}
+
 fn ground_string_truncate(expr: &mut Expr) -> bool {
     let span = expr.span;
     let ExprNode::Send { recv, args, parenthesized, .. } = &mut *expr.node else {

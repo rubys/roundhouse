@@ -97,6 +97,11 @@ module ActiveRecord
     def initialize: (?String message, ?Base? record) -> void
   end
 
+  class RecordNotDestroyed < ActiveRecordError
+    def record: () -> Base?
+    def initialize: (?String message, ?Base? record) -> void
+  end
+
   class ReadOnlyRecord < ActiveRecordError
     def initialize: (?String message) -> void
   end

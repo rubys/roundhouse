@@ -97,7 +97,7 @@ fn file<'a>(files: &'a [(String, String)], path: &str) -> &'a str {
 fn assert_parses(files: &[(String, String)], path: &str) {
     let source = file(files, path);
     let result = ruby_prism::parse(source.as_bytes());
-    let errors: Vec<String> = result.errors().map(|e| e.message().to_string()).collect();
+    let errors: Vec<String> = result.errors().map(|e| String::from_utf8_lossy(e.message()).into_owned()).collect();
     assert!(
         errors.is_empty(),
         "{path} does not parse: {errors:?}\n{source}"
@@ -138,7 +138,7 @@ fn the_spinel_tree_defines_the_http_auth_helpers_and_reads_the_header() {
     // this must include Authorization for the auth helpers to see credentials.
     assert!(
         file(&files, "main.rb")
-            .contains("request_obj.env[ActionDispatch::Http::Headers.env_name(name)] = value"),
+            .contains("request_obj.env[ActionDispatch::Http::Headers.env_name_from_header(name)] = value"),
         "main.rb does not map parsed headers into the request env"
     );
     // The route's captures reach the request through `Main.route_parameters`,

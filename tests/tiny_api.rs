@@ -174,7 +174,7 @@ fn spinel_and_ruby_emit_the_app_and_every_file_parses() {
         );
         for (path, source) in files.iter().filter(|(p, _)| p.ends_with(".rb")) {
             let result = ruby_prism::parse(source.as_bytes());
-            let errors: Vec<String> = result.errors().map(|e| e.message().to_string()).collect();
+            let errors: Vec<String> = result.errors().map(|e| String::from_utf8_lossy(e.message()).into_owned()).collect();
             assert!(
                 errors.is_empty(),
                 "{target:?} {path} does not parse: {errors:?}\n{source}"

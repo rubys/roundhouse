@@ -149,7 +149,7 @@ threads = n_threads.times.map do |t|
         store.write_str(k, "body-#{t}-#{r}", 0)
         hit = store.read_str(k)
         raise "lost write #{k}" if hit.nil? || !hit.start_with?("body-")
-        store.increment_str("rate-#{t % 4}", 60)
+        store.increment_str("rate-#{t % 4}", 1, 60)
       end
     rescue => e
       errs << "#{e.class}: #{e.message}"

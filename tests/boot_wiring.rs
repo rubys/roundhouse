@@ -52,9 +52,10 @@ fn a_library_the_tree_defines_itself_is_not_required() {
     assert!(!boot.lines().any(|l| l.trim() == "require \"shellwords\""), "{boot}");
 }
 
-/// A library Spinel has no package for (`date`, `yaml`, ...) stays out
-/// of the spinel tree, whose `--require-gate` build would refuse it, and
-/// is carried on the ruby family.
+/// A library Spinel has no package for (`date`, ...) stays out of the
+/// spinel tree, whose `--require-gate` build would refuse it, and is
+/// carried on the ruby family. `yaml` has one (packages/yaml) and is
+/// carried on both.
 #[test]
 fn a_library_spinel_lacks_is_required_on_the_ruby_family_only() {
     let overlay = || {
@@ -68,9 +69,10 @@ fn a_library_spinel_lacks_is_required_on_the_ruby_family_only() {
         assert!(errors.is_empty(), "{target:?} errors: {errors:?}");
         let boot = std::fs::read_to_string(emitted.join("boot.rb")).expect("read boot.rb");
         assert!(boot.lines().any(|l| l.trim() == "require \"open3\""), "{target:?}:\n{boot}");
-        for lib in ["date", "yaml"] {
+        for (lib, on_spinel) in [("date", false), ("yaml", true)] {
             let line = format!("require {lib:?}");
-            assert_eq!(boot.lines().take(12).any(|l| l.trim() == line), carried, "{target:?} {lib}:\n{boot}");
+            let expected = carried || on_spinel;
+            assert_eq!(boot.lines().take(12).any(|l| l.trim() == line), expected, "{target:?} {lib}:\n{boot}");
         }
     }
 }
@@ -116,4 +118,25 @@ fn rails_version_is_the_locked_one() {
     let run = app_with_requires().run_ruby("puts Rails::VERSION::STRING\nputs Rails::VERSION::PRE.inspect\n");
     run.assert_passes();
     assert!(run.stdout.contains("8.1.4\nnil"), "{}", run.stdout);
+}
+
+#[test]
+fn boot_requires_only_the_library_files_ingest_loads() {
+    for target in [BuildTarget::Spinel, BuildTarget::Ruby] {
+        let (emitted, errors) = emit_and_run::real_blog()
+            .write("config/application.rb", "config.autoload_lib(ignore: %w[tools])\n")
+            .write(
+                "lib/tools/tool_probe.rb",
+                "require \"io/console\"\nclass ToolProbe\n  def self.rows = 1\nend\n",
+            )
+            .write(
+                "lib/app_probe.rb",
+                "require \"open3\"\nclass AppProbe\n  def self.rows = 1\nend\n",
+            )
+            .emit(target);
+        assert!(errors.is_empty(), "{target:?} errors: {errors:?}");
+        let boot = std::fs::read_to_string(emitted.join("boot.rb")).expect("read boot.rb");
+        assert!(boot.lines().any(|line| line == "require \"open3\""), "{target:?}:\n{boot}");
+        assert!(!boot.lines().any(|line| line == "require \"io/console\""), "{target:?}:\n{boot}");
+    }
 }

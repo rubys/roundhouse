@@ -1,9 +1,22 @@
 module I18n
+  self.@site_table: Hash[String, Integer]
+  self.@leaf_table: Hash[String, String]
+  self.@node_table: Hash[String, bool]
+  self.@leaf_order: Array[String]
+  self.@empty_table: Hash[String, bool]
+  self.@chain_table: Hash[String, Array[String]]
+  self.@entry_list: Array[Array[String]]
+  self.@rule_table: Hash[String, Array[String]]
+  self.@opaque_table: Hash[String, Array[String]]
+  self.@table_loaded: bool
+  self.@catalog_loaded: bool
   class InvalidLocale < ArgumentError
   end
 
   def self.default_locale: () -> Symbol
   def self.available_locales: () -> Array[Symbol]
+  def self.locale_available?: (String | Symbol | nil locale) -> bool
+  def self.available_named: (String name) -> Symbol?
   def self.thread_locale_name: () -> String
   def self.locale: () -> Symbol
   def self.locale=: (String | Symbol | nil value) -> String
@@ -67,4 +80,5 @@ module I18n
   def self.translation_table: () -> Hash[String, Integer]
   def self.translation_entries: () -> Array[Array[String]]
   def self.load_translation_table: () -> nil
+  def self.load_runtime_catalog: () -> nil
 end

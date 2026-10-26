@@ -15,6 +15,8 @@
 //! and defers the close to the matching `<% end %>`, which emits `end).to_s`.
 //! A small block stack matches each `<% end %>` to its opener.
 
+use crate::ingest::prism_api::PrismLocation;
+
 /// Classification of a block on the compile-time stack. `Output` means the
 /// block was opened by a `<%= ... do %>` tag and must close with
 /// `end).to_s` to complete the enclosing `_buf = _buf + (EXPR).to_s` form.
@@ -190,6 +192,25 @@ pub fn compile_raw_mapped(source: &str) -> (String, Vec<ErbSegment>) {
     pending.push(source, 0, source.len());
     pending.flush(&mut out, &mut map);
     out.push_str("_buf\n");
+    (out, map)
+}
+
+/// A `.ruby` template (Rails' `:source.to_proc` handler): the source is
+/// Ruby whose value is the body, appended unescaped: the `<%== %>`
+/// spelling, `raw((…))`, around the whole file. The source is
+/// copied byte for byte, so one segment maps it back.
+pub fn compile_ruby_mapped(source: &str) -> (String, Vec<ErbSegment>) {
+    let mut out = String::from("_buf = \"\"\n_buf = _buf + (raw((\n");
+    let c_start = out.len();
+    out.push_str(source);
+    let c_end = out.len();
+    out.push_str("\n))).to_s\n_buf\n");
+    let map = vec![ErbSegment {
+        c_start: c_start as u32,
+        c_end: c_end as u32,
+        e_start: 0,
+        e_end: source.len() as u32,
+    }];
     (out, map)
 }
 

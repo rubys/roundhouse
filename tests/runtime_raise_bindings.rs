@@ -31,31 +31,15 @@ fn sanitize_sql_like_error_references_have_rust_runtime_bindings() {
         .find(|file| file.path == std::path::Path::new("src/active_record_base.rs"))
         .expect("ActiveRecord::Base runtime")
         .content;
-    for (name, kind, expected) in [
-        (
-            "RuntimeError",
-            rust_errors::RuntimeError,
-            "FrameworkError::Runtime",
-        ),
-        (
-            "IndexError",
-            rust_errors::IndexError,
-            "FrameworkError::Index",
-        ),
+    for (name, kind) in [
+        ("RuntimeError", rust_errors::RuntimeError),
+        ("IndexError", rust_errors::IndexError),
     ] {
-        assert!(base.contains(&format!("raise({name},")), "{name}: {base}");
-        assert!(
-            base.contains(&format!("use crate::errors_ext::{name};")),
-            "{name}: {base}"
-        );
-        let failure = std::panic::catch_unwind(|| rust_errors::raise(kind, "replacement escape"))
+        assert!(base.contains(&format!("raise_msg(crate::errors_ext::{name},")), "{name}: {base}");
+        let failure = std::panic::catch_unwind(|| rust_errors::raise_msg(kind, "replacement escape".to_string()))
             .expect_err("raise must diverge");
-        let message = failure
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| failure.downcast_ref::<&str>().copied())
-            .expect("panic message");
-        assert_eq!(message, expected);
+        let raised = failure.downcast_ref::<rust_errors::Raised>().expect("a Raised payload");
+        assert_eq!((raised.class, raised.message.as_str()), (name, "replacement escape"));
     }
 }
 
@@ -135,7 +119,7 @@ fn emitted_rust_like_escaping_compiles_and_runs_with_a_deadline() {
         r#"#[allow(dead_code)]
 #[path = {errors:?}]
 mod errors_ext;
-use errors_ext::{{raise, RuntimeError, IndexError}};
+use errors_ext::Raised;
 struct LikeProbe;
 impl LikeProbe {{
 {method}
@@ -146,16 +130,15 @@ fn main() {{
     }}
     std::panic::set_hook(Box::new(|_| {{}}));
     for (marker, expected) in [
-        ("\\k<name>", "FrameworkError::Index"),
-        ("\\k<>", "FrameworkError::Index"),
-        ("\\k<name", "FrameworkError::Runtime"),
+        ("\\k<name>", "IndexError"),
+        ("\\k<>", "IndexError"),
+        ("\\k<name", "RuntimeError"),
     ] {{
         assert_eq!(LikeProbe::sanitize_sql_like("plain", marker), "plain");
         let error = std::panic::catch_unwind(|| LikeProbe::sanitize_sql_like("x%_", marker))
             .expect_err("named replacement must raise");
-        let message = error.downcast_ref::<String>().map(String::as_str)
-            .or_else(|| error.downcast_ref::<&str>().copied()).expect("panic message");
-        assert_eq!(message, expected);
+        let raised = error.downcast_ref::<Raised>().expect("a Raised payload");
+        assert_eq!(raised.class, expected);
     }}
 }}
 "#

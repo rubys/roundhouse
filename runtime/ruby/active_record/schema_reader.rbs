@@ -1,0 +1,20 @@
+module ActiveRecord
+  module Tasks
+    module DatabaseTasks
+      def self.load_ruby_schema: (String text) -> nil
+      def self.version_token: (String line) -> String
+      def self.plan_create_table: (Array[String] lines, Integer index, Array[String] statements) -> Integer
+      def self.table_name_from: (String line) -> String
+      def self.column_def: (String line) -> String
+      def self.token_at: (String text) -> String
+      def self.sql_type: (String name) -> String
+      def self.literal_sql: (String raw) -> String
+      def self.integer_token?: (String raw) -> bool
+      def self.quote_ident: (String text) -> String
+      def self.ident?: (String text) -> bool
+      def self.execute_sql: (String sql) -> nil
+      def self.ensure_schema_migrations: () -> nil
+      def self.record_version: (String version) -> nil
+    end
+  end
+end

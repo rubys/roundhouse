@@ -28,6 +28,7 @@ root = ARGV[0] or abort "usage: spinel_cable_heartbeat.rb <repo-root>"
 root = File.expand_path(root)
 
 require "json"
+require "stringio"
 
 module Rails
   Application = Struct.new(:secret_key_base)
@@ -66,8 +67,18 @@ module Tep
         @writes << s
         s.bytesize
       end
+
+      # What `Connection::Base#close` asks of the socket after its frame.
+      attr_reader :closes
+      def close(code, reason)
+        (@closes ||= []) << [code, reason]
+        0
+      end
     end
   end
+
+  # The handler seeds' cookie jar (`Cable::WsMessage`).
+  def self.str_hash = Hash.new("")
 
   # Only the slots `cable.rb` reads. The real one is `Tep::App`;
   # `Tep::APP` is the per-process singleton it reaches for.
@@ -83,6 +94,15 @@ module Tep
     end
   end
   APP = FakeApp.new
+end
+
+# `Cable.app_beats` takes a lease around each app beat.
+module Db
+  LEASES = []
+  def self.with_connection
+    LEASES << :lease
+    yield
+  end
 end
 
 load "#{root}/runtime/spinel/action_cable.rb"   # requires cable.rb
@@ -208,6 +228,63 @@ check("the last close empties the registry", conns.length, 0)
 check("a beat over nobody is not an error", Cable.beat, 0)
 check("and the heartbeat is still marked running", Tep::APP.cable_heartbeat, 1)
 check("  without a second thread", spawned, 1)
+
+# --- the app's beat ---------------------------------------------------
+# Rails' heartbeat calls every connection's `beat`; campfire's override
+# checks its session and closes the socket once it is gone. The handlers
+# are registered as `Cable.upgrade` registers them.
+class BeatingConnection < ActionCable::Connection::Base
+  attr_reader :beats
+  attr_accessor :gone, :explode
+  def beat
+    super
+    @beats = (@beats || 0) + 1
+    raise "beat failed" if @explode
+    perform_work -> { close(reason: ActionCable::INTERNAL[:disconnect_reasons][:unauthorized]) if @gone }, :call
+  end
+end
+
+def socket_for(fd, conn)
+  msg = Cable::WsMessage.new
+  msg.ws = Tep::WebSocket::Driver.new(fd)
+  msg.connection = conn
+  sock = Cable::Socket.new    # what `Cable.upgrade` does
+  sock.ws = msg.ws
+  conn.transport = sock
+  Cable.beats.add(msg)
+  Cable.register(msg.ws)    # what the socket's open handler does
+  msg
+end
+
+kept = BeatingConnection.new(ActionController::CookieJar.new({}))
+ended = BeatingConnection.new(ActionController::CookieJar.new({}))
+broken = BeatingConnection.new(ActionController::CookieJar.new({}))
+kept_msg = socket_for(201, kept)
+ended_msg = socket_for(202, ended)
+socket_for(203, broken)
+ended.gone = true
+broken.explode = true
+Db::LEASES.clear
+
+$stderr = StringIO.new
+Cable.beat_cycle
+$stderr = STDERR
+check("a cycle calls every connection's beat", [kept.beats, ended.beats, broken.beats], [1, 1, 1])
+check("  each under a database lease", Db::LEASES.length, 3)
+def beyond_pings(driver) = driver.writes.map { |w| JSON.parse(w) }.reject { |f| f["type"] == "ping" }
+check("a connection whose session remains stays open", beyond_pings(kept_msg.ws), [])
+check("one whose session is gone is told why",
+      beyond_pings(ended_msg.ws),
+      [{ "type" => "disconnect", "reason" => "unauthorized", "reconnect" => true }])
+check("  and its socket is closed", ended_msg.ws.closes, [[1000, ""]])
+check("perform_work runs only a callable's call",
+      (begin; kept.perform_work(-> { 1 }, :run); :ran; rescue ArgumentError; :refused; end), :refused)
+
+Cable.unregister(ended_msg.ws)    # what the socket's close handler does
+Cable.beats.remove(ended_msg)
+Cable.beat_cycle rescue nil
+check("a closed socket's connection is no longer beaten", ended.beats, 1)
+check("  while the others still are", kept.beats, 2)
 
 if FAILURES.empty?
   puts "spinel cable heartbeat: all probes pass"

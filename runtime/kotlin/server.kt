@@ -112,6 +112,7 @@ object Server {
         layout: (String, String?, String?) -> String,
     ) {
         ViewHelpers.resetSlotsBang()
+        I18nHost.resetRequest()
 
         // Compiled assets (/assets/tailwind.css, …) — served before route
         // dispatch so the greedy app router doesn't 404 them.

@@ -217,9 +217,50 @@ fn collect_constant_expr_from_stmt(node: &Node<'_>, out: &mut Vec<(Symbol, Expr)
             }
             _ => value,
         };
-        if let Ok(expr) = ingest_expr(&inner, VIRTUAL_FILE) {
+        if let Ok(mut expr) = ingest_expr(&inner, VIRTUAL_FILE) {
+            bare_hash_new_as_literal(&mut expr);
             out.push((Symbol::new(name_str), expr));
         }
+    }
+}
+
+/// `Hash.new` with no arguments and no block: an empty Hash, exactly
+/// what `{}` builds. The runtime spells a constant this way when it
+/// needs its own object: CRuby compiles `{}.freeze` to one shared
+/// frozen empty Hash, so two constants written `{}.freeze` are the same
+/// object (`HYDRATE_ATTRS` in `active_record/base.rb` is told apart
+/// from `EMPTY_ATTRS` by identity). The transpiled targets have no
+/// such sharing and lower an empty Hash literal, not a `Hash`
+/// constructor, so a constant value of this shape is read as `{}`:
+/// typed here, and its value rewritten by `bare_hash_new_as_literal`.
+fn is_bare_hash_new(node: &Node<'_>) -> bool {
+    let Some(call) = node.as_call_node() else { return false };
+    if call.name().as_slice() != b"new" || call.arguments().is_some() || call.block().is_some() {
+        return false;
+    }
+    call.receiver()
+        .and_then(|r| r.as_constant_read_node())
+        .is_some_and(|k| k.name().as_slice() == b"Hash")
+}
+
+/// The ingested-`Expr` side of `is_bare_hash_new`: a constant whose
+/// value is `Hash.new` (or `Hash.new.freeze`) becomes the empty Hash
+/// literal it is equal to.
+fn bare_hash_new_as_literal(value: &mut Expr) {
+    let target = match &mut *value.node {
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if method.as_str() == "freeze" && args.is_empty() =>
+        {
+            r
+        }
+        _ => value,
+    };
+    let is_hash_new = matches!(&*target.node,
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if method.as_str() == "new" && args.is_empty()
+                && matches!(&*r.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Hash"));
+    if is_hash_new {
+        *target.node = ExprNode::Hash { entries: vec![], kwargs: false };
     }
 }
 
@@ -304,6 +345,13 @@ fn type_of_const_literal(node: &Node<'_>) -> Option<Ty> {
             }
             return None;
         }
+        // `Hash.new` types as the `{}` it equals (see `is_bare_hash_new`).
+        if is_bare_hash_new(node) {
+            return Some(Ty::Hash {
+                key: std::sync::Arc::new(Ty::Untyped),
+                value: std::sync::Arc::new(Ty::Untyped),
+            });
+        }
         // `CONST = Klass.new(…)` — a constructed instance is as much a
         // typed constant as a literal is, and it is the shape a rule
         // TABLE takes when its entries are objects rather than strings:
@@ -332,7 +380,9 @@ fn type_of_const_literal(node: &Node<'_>) -> Option<Ty> {
         };
         let assoc = first.as_assoc_node()?;
         let key_ty = type_of_literal_node(&assoc.key())?;
-        let value_ty = type_of_literal_node(&assoc.value())?;
+        // A table of tables (`ActionCable::INTERNAL`'s `disconnect_reasons`)
+        // is typed as deep as its literals go.
+        let value_ty = type_of_const_literal(&assoc.value())?;
         return Some(Ty::Hash {
             key: std::sync::Arc::new(key_ty),
             value: std::sync::Arc::new(value_ty),
@@ -387,7 +437,7 @@ pub fn parse_methods(source: &str) -> Result<Vec<MethodDef>, String> {
 
     let errors: Vec<String> = result
         .errors()
-        .map(|e| e.message().to_string())
+        .map(|e| crate::ingest::prism_api::diagnostic_message(&e))
         .collect();
     if !errors.is_empty() {
         return Err(format!("parse error: {}", errors.join("; ")));
@@ -531,6 +581,7 @@ pub fn parse_library_with_rbs(
         reclassify_abstract_attributes(&mut lc.methods);
         for (_, value) in &mut lc.constants {
             project_runtime_keywords(value);
+            bare_hash_new_as_literal(value);
         }
         for call in &mut lc.unknown_calls {
             project_runtime_keywords(call);
@@ -626,6 +677,7 @@ pub fn parse_library_with_rbs(
         let empty_ivars: std::collections::HashMap<Symbol, Ty> =
             std::collections::HashMap::new();
         for m in &mut lc.methods {
+            stamp_sig_return_on_empty_tail(m);
             let ctx = build_ctx(m, &empty_ivars);
             typer.analyze_expr(&mut m.body, &ctx);
         }
@@ -667,8 +719,24 @@ pub fn parse_library_with_rbs(
                 .map(|(name, ty)| (name, Ty::Union { variants: vec![ty, Ty::Nil].into() }))
                 .collect();
             for m in &mut lc.methods {
+                stamp_sig_return_on_empty_tail(m);
                 let ctx = build_ctx(m, &reseeded);
                 typer.analyze_expr(&mut m.body, &ctx);
+            }
+        }
+        // Not the assigned local's own type: `@table = table` built from `{}` keeps an open key, and each emitter declares the ivar from what is assigned
+        if let Some(declared) = rbs_ivars_by_class.get(&lc.name) {
+            fn stamp(e: &mut Expr, declared: &std::collections::HashMap<Symbol, Ty>) {
+                if let ExprNode::Assign { target: crate::expr::LValue::Ivar { name }, value } = &mut *e.node
+                    && let Some(ty) = declared.get(name)
+                    && value.ty.as_ref().is_none_or(|t| t.mentions_unknown())
+                {
+                    value.ty = Some(ty.clone());
+                }
+                e.node.for_each_child_mut(&mut |c| stamp(c, declared));
+            }
+            for m in &mut lc.methods {
+                stamp(&mut m.body, declared);
             }
         }
     }
@@ -696,6 +764,16 @@ fn seed_well_known_classes(
     // (active_record/connection.rb) calls `Db.prepare`/`step?`/
     // `column_*` directly, so its bodies need the same typing here.
     crate::lower::view_to_library::insert_db_stub(classes);
+
+    // Not transpiled with the rest: each strict target writes I18nHost by hand, so only its signatures reach the files that call it.
+    let host = crate::rbs::parse_app_signatures(include_str!("../runtime/ruby/i18n_host.rbs"))
+        .expect("runtime/ruby/i18n_host.rbs must parse");
+    for (class_id, methods) in host {
+        let info = classes.entry(class_id).or_default();
+        for (name, ty) in methods {
+            info.class_methods.insert(name, ty);
+        }
+    }
 
     let row_ty = Ty::Hash {
         key: std::sync::Arc::new(Ty::Str),
@@ -967,6 +1045,7 @@ pub fn parse_methods_with_rbs_in_ctx(
     let empty_ivars: std::collections::HashMap<Symbol, Ty> =
         std::collections::HashMap::new();
     for m in &mut methods {
+        stamp_sig_return_on_empty_tail(m);
         let ctx = build_ctx(m, &empty_ivars);
         typer.analyze_expr(&mut m.body, &ctx);
     }
@@ -983,12 +1062,22 @@ pub fn parse_methods_with_rbs_in_ctx(
             .map(|(name, ty)| (name, Ty::Union { variants: vec![ty, Ty::Nil].into() }))
             .collect();
         for m in &mut methods {
+            stamp_sig_return_on_empty_tail(m);
             let ctx = build_ctx(m, &reseeded);
             typer.analyze_expr(&mut m.body, &ctx);
         }
     }
 
     Ok(methods)
+}
+
+/// Forward a method's declared Hash/Array return onto a bare empty
+/// `{}` / `[]` tail before body-typing. See
+/// [`crate::analyze::stamp_expected_on_empty_return_tail`].
+fn stamp_sig_return_on_empty_tail(m: &mut MethodDef) {
+    if let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() {
+        crate::analyze::stamp_expected_on_empty_return_tail(&mut m.body, ret);
+    }
 }
 
 fn walk_scope(
@@ -1131,7 +1220,7 @@ fn collect_from_stmt(
                     if let Some(args) = call.arguments() {
                         for arg in args.arguments().iter() {
                             let Some(sym) = arg.as_symbol_node() else { continue };
-                            let Some(loc) = sym.value_loc() else { continue };
+                            let loc = sym.content_loc();
                             let attr_name = std::str::from_utf8(loc.as_slice())
                                 .map_err(|_| "attr name not UTF-8".to_string())?;
                             if mk_reader {
@@ -1529,7 +1618,7 @@ fn method_params(
 
     // Block: `&block` — populated into `block_param` slot, not the
     // flat list. Anonymous `&` has no name — return None.
-    let block_param = match params_node.block() {
+    let block_param = match crate::ingest::prism_api::block_parameter(&params_node) {
         Some(block) => match block.name() {
             Some(loc) => Some(Param::positional(Symbol::new(decode_utf8(
                 loc.as_slice(),
@@ -1557,6 +1646,41 @@ mod tests {
         let mut methods = parse_methods(src).expect("parses");
         assert_eq!(methods.len(), 1, "expected exactly one method");
         methods.remove(0)
+    }
+
+    /// A runtime constant spelled `Hash.new.freeze` (so CRuby gives it its
+    /// own object rather than the shared frozen `{}`) reaches the
+    /// transpiled targets as the empty Hash literal, typed as a Hash, in
+    /// both the module-constant and the class-constant views. A
+    /// `Hash.new` with a default value is a different thing and is left
+    /// alone.
+    #[test]
+    fn bare_hash_new_constant_reads_as_empty_hash_literal() {
+        let src = "class Widget\n  SHARED = {}.freeze\n  OWN = Hash.new.freeze\n  PLAIN = Hash.new\n  DEFAULTED = Hash.new(0)\nend\n";
+        let empty = |e: &Expr| matches!(&*e.node, ExprNode::Hash { entries, .. } if entries.is_empty());
+        let exprs = parse_module_constant_exprs(src).expect("parses");
+        let by_name = |n: &str| exprs.iter().find(|(k, _)| k.as_str() == n).map(|(_, v)| v).unwrap();
+        assert!(empty(by_name("SHARED")));
+        assert!(empty(by_name("OWN")), "{:?}", by_name("OWN").node);
+        assert!(empty(by_name("PLAIN")), "{:?}", by_name("PLAIN").node);
+        assert!(!empty(by_name("DEFAULTED")), "{:?}", by_name("DEFAULTED").node);
+
+        let types = parse_module_constants(src).expect("parses");
+        for name in ["SHARED", "OWN", "PLAIN"] {
+            assert!(matches!(types.get(&Symbol::from(name)), Some(Ty::Hash { .. })), "{name}: {:?}", types.get(&Symbol::from(name)));
+        }
+
+        // The class-constant view keeps the `.freeze` and rewrites its receiver.
+        let parsed = parse(b"Hash.new.freeze\n");
+        let program = parsed.node();
+        let stmt = program.as_program_node().unwrap().statements().body().iter().next().unwrap();
+        let mut class_value = ingest_expr(&stmt, VIRTUAL_FILE).expect("ingests");
+        bare_hash_new_as_literal(&mut class_value);
+        assert!(
+            matches!(&*class_value.node, ExprNode::Send { recv: Some(r), method, .. } if method.as_str() == "freeze" && empty(r)),
+            "{:?}",
+            class_value.node
+        );
     }
 
     #[test]
@@ -1989,6 +2113,57 @@ mod tests {
         let m = &methods[0];
         // The If as a whole unions its branches (both StringInterp → Str).
         assert_eq!(m.body.ty.as_ref(), Some(&Ty::Str));
+    }
+
+    /// Declared `-> Hash[Symbol, String]` must stamp a bare `{}` return
+    /// so Crystal emit renders `{} of Symbol => String`, not the
+    /// String=>String empty-hash default (FV compare-extra crystal:
+    /// `default_url_options` on ActionController::Base).
+    #[test]
+    fn rbs_return_stamps_empty_hash_on_default_url_options() {
+        let ruby = include_bytes!("../runtime/ruby/action_controller/base.rb");
+        let rbs = include_str!("../runtime/ruby/action_controller/base.rbs");
+        let classes = parse_library_with_rbs(ruby, rbs, "action_controller/base.rb")
+            .expect("action_controller/base parses and types");
+        let base = classes
+            .iter()
+            .find(|c| c.name.0.as_str() == "ActionController::Base")
+            .expect("Base class");
+        let m = base
+            .methods
+            .iter()
+            .find(|m| m.name.as_str() == "default_url_options")
+            .expect("default_url_options");
+        match m.body.ty.as_ref() {
+            Some(Ty::Hash { key, value }) => {
+                assert!(
+                    matches!(key.as_ref(), Ty::Sym),
+                    "expected Hash[Symbol, _], key={key:?}"
+                );
+                assert!(
+                    matches!(value.as_ref(), Ty::Str),
+                    "expected Hash[_, String], value={value:?}"
+                );
+            }
+            other => panic!("default_url_options body must be Hash[Symbol, String], got {other:?}"),
+        }
+        // End-to-end Crystal emit (the FV failure surface): annotation
+        // and empty-hash `of` clause must agree on Symbol keys.
+        let crystal = crate::emit::crystal::emit_library_class(base)
+            .expect("Crystal emit of ActionController::Base");
+        let needle = "def default_url_options : Hash(Symbol, String)";
+        let idx = crystal
+            .find(needle)
+            .unwrap_or_else(|| panic!("missing `{needle}` in Crystal emit"));
+        let window = &crystal[idx..crystal.len().min(idx + 200)];
+        assert!(
+            window.contains("{} of Symbol => String"),
+            "Crystal empty-hash return must match declared Hash(Symbol, String):\n{window}"
+        );
+        assert!(
+            !window.contains("{} of String => String"),
+            "Crystal must not emit String-keyed empty hash for default_url_options:\n{window}"
+        );
     }
 
     /// RBS `@keys`/`@vals` must stamp empty `[]` initializers so

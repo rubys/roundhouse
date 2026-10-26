@@ -143,6 +143,21 @@ pub(super) fn emit_form_builder_inline(
             binding,
             ctx,
         ),
+        FormBuilderMethod::NumberField
+        | FormBuilderMethod::RangeField
+        | FormBuilderMethod::SearchField
+        | FormBuilderMethod::TelephoneField => emit_typed_input_field(
+            match kind {
+                FormBuilderMethod::NumberField => "number",
+                FormBuilderMethod::RangeField => "range",
+                FormBuilderMethod::SearchField => "search",
+                _ => "tel",
+            },
+            positional.first().copied(),
+            opts.as_slice(),
+            binding,
+            ctx,
+        ),
     };
     wrap_field_errors(out, kind, positional.first().copied(), binding, ctx)
 }

@@ -169,6 +169,18 @@ pub fn apply_fused_pre_tag_rewrites(app: &mut App) {
                         });
                     }
                 }
+                ModelBodyItem::Validation { validation, .. } => {
+                    if let Some(cond) = &mut validation.if_cond {
+                        walk_postorder(cond, &mut |e| {
+                            super::attribute_aliases::rewrite_node(e, &models, true);
+                        });
+                    }
+                    if let Some(cond) = &mut validation.unless_cond {
+                        walk_postorder(cond, &mut |e| {
+                            super::attribute_aliases::rewrite_node(e, &models, true);
+                        });
+                    }
+                }
                 ModelBodyItem::Unknown { expr, .. } => {
                     walk_postorder(expr, &mut |e| {
                         super::attribute_aliases::rewrite_node(e, &models, true);

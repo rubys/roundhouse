@@ -86,8 +86,54 @@ fn is_open_value(e: &Expr) -> bool {
     }
 }
 
+/// `ActiveSupport::JSON` as a receiver.
+fn is_active_support_json(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Const { path }
+        if path.len() == 2 && path[0].as_str() == "ActiveSupport" && path[1].as_str() == "JSON")
+}
+
+/// The options argument `escape: false`, written either way: as the
+/// keyword it reads as, or as the braced Hash Rails' `encode(value,
+/// options = nil)` compares against.
+fn is_escape_false(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Hash { entries, .. } => {
+            entries.len() == 1
+                && matches!(&*entries[0].0.node, ExprNode::Lit { value: crate::expr::Literal::Sym { value } } if value.as_str() == "escape")
+                && matches!(&*entries[0].1.node, ExprNode::Lit { value: crate::expr::Literal::Bool { value: false } })
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn rewrite_node(expr: &mut Expr) {
     let replacement = match &mut *expr.node {
+        // Rails' `ActiveSupport::JSON.encode(value, escape: false)`: the
+        // document without the HTML-entity escaping, for text that is
+        // never embedded in a page (campfire digests its fragment
+        // dependencies that way). The runtime's one-argument
+        // `encode_without_escape`, so no target has to take an options
+        // Hash; any other options keep the call as written, which a
+        // target without a two-argument `encode` reports.
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if method.as_str() == "encode"
+                && is_active_support_json(r)
+                && args.len() == 2
+                && is_escape_false(&args[1]) =>
+        {
+            let mut call = Expr::new(
+                expr.span,
+                ExprNode::Send {
+                    recv: Some(r.clone()),
+                    method: crate::ident::Symbol::from("encode_without_escape"),
+                    args: vec![args[0].clone()],
+                    block: None,
+                    parenthesized: true,
+                },
+            );
+            call.ty = Some(Ty::Str);
+            Some(call)
+        }
         // A typed, no-block Hash#deep_merge call is routed through the
         // shared helper because Spinel cannot dispatch this ActiveSupport
         // core extension on its native Hash representation.

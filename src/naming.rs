@@ -24,6 +24,27 @@ pub fn snake_case(class_name: &str) -> String {
     s
 }
 
+/// ActiveSupport-style word break for a constant segment: like
+/// `snake_case`, but also splits an acronym from the next word
+/// (`HTMLApp` → `html_app`). `snake_case` keeps that as `htmlapp`.
+pub fn underscore_words(name: &str) -> String {
+    let chars: Vec<char> = name.replace("::", "_").chars().collect();
+    let mut out = String::with_capacity(chars.len() + 4);
+    for (i, c) in chars.iter().enumerate() {
+        if c.is_ascii_uppercase()
+            && i > 0
+            && (chars[i - 1].is_ascii_lowercase()
+                || chars[i - 1].is_ascii_digit()
+                || (chars[i - 1].is_ascii_uppercase()
+                    && chars.get(i + 1).is_some_and(char::is_ascii_lowercase)))
+        {
+            out.push('_');
+        }
+        out.push(c.to_ascii_lowercase());
+    }
+    out
+}
+
 /// Rails `underscore`: like `snake_case`, but `::` becomes a path
 /// separator (`ShortId::CandidateId` → `short_id/candidate_id`). Use for
 /// file placement of possibly-namespaced classes — a literal `::` in a
@@ -519,4 +540,42 @@ pub(crate) fn is_sqlite_keyword(name: &str) -> bool {
             | "transaction" | "trigger" | "unbounded" | "union" | "unique" | "update" | "using"
             | "vacuum" | "values" | "view" | "virtual" | "when" | "where" | "window" | "with" | "without"
     )
+}
+
+#[cfg(test)]
+mod string_query_parity {
+    use super::{is_reserved_local, RESERVED_LOCALS};
+    use ruby_prism::StringQuery;
+
+    /// Prism's `StringQuery::is_keyword` is a *superset* of
+    /// [`RESERVED_LOCALS`]: it also treats `__FILE__` / `__LINE__` /
+    /// `__ENCODING__` as keywords. Pseudo-vars stay in the table for
+    /// `safe_local` but are excluded from [`is_reserved_local`]. Until
+    /// those differences are modeled explicitly, do not replace the
+    /// table with StringQuery.
+    #[test]
+    fn reserved_locals_are_prism_keywords_but_prism_has_extras() {
+        for name in RESERVED_LOCALS {
+            assert_eq!(
+                StringQuery::new(name.as_bytes()).is_keyword(),
+                Ok(true),
+                "{name} should be a Prism keyword"
+            );
+        }
+        for magic in ["__FILE__", "__LINE__", "__ENCODING__"] {
+            assert_eq!(
+                StringQuery::new(magic.as_bytes()).is_keyword(),
+                Ok(true),
+                "{magic}"
+            );
+            assert!(
+                !RESERVED_LOCALS.contains(&magic),
+                "{magic} is intentionally absent from RESERVED_LOCALS"
+            );
+        }
+        for pseudo in ["self", "nil", "true", "false"] {
+            assert!(RESERVED_LOCALS.contains(&pseudo));
+            assert!(!is_reserved_local(pseudo));
+        }
+    }
 }

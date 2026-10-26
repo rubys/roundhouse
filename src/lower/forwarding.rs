@@ -175,7 +175,7 @@ pub(super) fn apply_with_plans(
                         && recv.as_ref().is_some_and(|recv| {
                             matches!(&*recv.node, ExprNode::Const { .. })
                                 && (matches!(
-                                    &e.diagnostic,
+                                    &crate::expr::ExprCold::of(&e.cold).diagnostic,
                                     Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. })
                                         if construct.as_str() == crate::diagnostic::CONSTRUCTOR_KEYWORD_ARGUMENTS
                                 ) || matches!(

@@ -21,6 +21,7 @@ use crate::ty::Ty;
 use super::ClassInfo;
 use super::body::ConstResolver;
 
+use crate::ingest::prism_api::PrismLocation;
 pub(super) fn register(
     app: &App,
     resolver: &ConstResolver,

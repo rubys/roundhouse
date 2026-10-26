@@ -404,10 +404,8 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
 
     let parent_name = lc.parent.as_ref().map(|p| {
         let last = type_name(p.0.as_str());
-        match last.as_str() {
-            "StandardError" | "RuntimeError" => "Exception".to_string(),
-            other => other.to_string(),
-        }
+        // Not a second table: a raise and a superclass name the same Ruby class, so they map alike
+        super::expr::map_exception_class(&last)
     });
 
     let inherited: HashSet<String> = lc
@@ -428,6 +426,10 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
         None => String::new(),
     };
     let mut out = format!("public class {class_name}{parent_clause} {{\n");
+    // Not left to the implicit constructor: C# inherits none, and `raise X, "message"` builds one with the message
+    if init.is_none() && lc.parent.as_ref().is_some_and(|p| super::expr::derives_from_exception(&type_name(p.0.as_str()))) {
+        out.push_str(&format!("    public {class_name}() {{ }}\n    public {class_name}(string message) : base(message) {{ }}\n"));
+    }
 
     // Properties (auto-properties). Constructor-param-backed properties are
     // assigned in the constructor; column props are plain `public` (leaf, not
@@ -998,9 +1000,12 @@ fn emit_method(m: &MethodDef, modifier: &str) -> String {
         params.push(format!("{bt} block"));
     }
 
+    // Not void for a method without a signature: an app method's answer is its body's type
     let ret_ty = match m.signature.as_ref() {
         Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
-        _ => None,
+        _ if m.name.as_str() == "initialize" => None,
+        // Not untyped when the body's type is open: a statement-only tail would then leave a value method with no return
+        _ => m.body.ty.clone().filter(|t| !t.is_open()),
     };
     let returns_value = matches!(&ret_ty, Some(t) if !matches!(t, Ty::Nil));
     let ret_decl = match &ret_ty {
@@ -1161,6 +1166,9 @@ fn wrap_return(e: &Expr) -> String {
         ExprNode::Array { elements, .. } => {
             let els: Vec<String> = elements.iter().map(emit_expr).collect();
             return format!("return new() {{ {} }};", els.join(", "));
+        }
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            return super::expr::emit_begin_rescue(body, rescues, else_branch.as_ref(), ensure.as_ref(), &wrap_return);
         }
         // A value-position `if` → return from each branch (C# has no
         // block-valued `if`). Empty branches return the type default.

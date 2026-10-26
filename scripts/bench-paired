@@ -1,0 +1,406 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+#
+# scripts/bench-paired — per-route latency ratio between two live servers,
+# measured in alternating pairs.
+#
+# scripts/bench answers "how much throughput does each target sustain".
+# This answers a narrower question that an aggregate hides: on THIS route,
+# is the target slower or faster than the reference, and is the difference
+# bigger than the noise? A target that is 3x faster on average can still
+# be slower on one route (a residue path, a fallback, a lowering that
+# allocates more), and a median across routes will not show it.
+#
+# The method follows the measurement protocol of Yuan et al., "Where Does
+# the Performance Go? Understanding and Recovering Performance Regressions
+# in C-to-Rust Translation" (arXiv:2610.23044), adapted to HTTP routes:
+#
+#   - One route is one operation: a complete request with a checkable
+#     response. Prove the responses match first with roundhouse-compare on
+#     the same paths and the same seeded rows; this script only times.
+#   - Each sample is one keep-alive connection issuing requests back to
+#     back (`wrk -t1 -c1`) for --sample-sec seconds, reported as the mean
+#     time per request. One connection measures per-request cost, not
+#     saturation throughput.
+#   - Samples are taken in pairs, reference and target back to back, and
+#     the order alternates every pair, so drift (thermals, a neighbour, the
+#     JIT finishing elsewhere) lands on both sides equally.
+#   - --warmup-pairs pairs are discarded before measuring.
+#   - A batch is stable when the coefficient of variation of its pairwise
+#     ratios is at most --max-cv. An unstable batch is retaken, at most
+#     --retries times, and is reported as unstable if it never settles.
+#   - Ratio outliers are dropped with Tukey's 1.5 x IQR fences; the route's
+#     ratio is the median of the remaining pairwise ratios, with a seeded
+#     bootstrap 95% interval.
+#
+# The ratio is target time / reference time: below 1 the target is faster.
+# A route's verdict compares the interval with --tolerance:
+#
+#   slower        the whole interval is above 1 + tolerance
+#   faster        the whole interval is below 1 - tolerance
+#   same          the whole interval is inside 1 +/- tolerance
+#   inconclusive  anything else; take more pairs or quieten the machine
+#
+# Usage:
+#   scripts/bench-paired --reference http://localhost:4000 \
+#                        --target    http://localhost:3000 \
+#                        [--path /articles ...] [options]
+#   scripts/bench-paired --analyze RESULT.json [options]
+#
+# Options:
+#   --reference URL     Base URL of the reference server (e.g. Rails)
+#   --target URL        Base URL of the server under test
+#   --path PATH         Route to time (repeatable). Default: the real-blog
+#                       paths scripts/compare checks for the ruby target
+#   --pairs N           Measured pairs per route (default 30)
+#   --warmup-pairs N    Discarded pairs per route (default 5)
+#   --sample-sec N      Seconds per sample; wrk takes whole seconds
+#                       (default 1)
+#   --max-cv F          Stability bound on the pairwise-ratio CV (0.03)
+#   --retries N         Retakes of an unstable batch (default 2)
+#   --tolerance F       Band around 1 that counts as no change (0.03)
+#   --seed N            Bootstrap seed (default 1)
+#   --out FILE          Write every sample, the config, the machine and
+#                       the summary as JSON
+#   --analyze FILE      Re-analyze a --out file instead of measuring;
+#                       --tolerance, --max-cv and --seed may be changed
+#   --fail-on-slower    Exit 1 when any route's verdict is slower
+#   --wrk PATH          wrk executable (default: wrk on PATH)
+#
+# Exit status: 0 measured (or analyzed); 1 with --fail-on-slower and at
+# least one slower route; 2 on a usage or measurement error (a server that
+# does not answer, a non-2xx/3xx response, statuses that differ between
+# the two servers, wrk missing).
+#
+# What this does not do: start, seed or pin the servers. Start both from
+# the same seeded rows, in the configuration being compared (production
+# environment, the same JIT and worker settings), and pin them to
+# separate isolated cores with `taskset` where the machine allows.
+# docs/development/benchmarking.md has a real-blog recipe.
+
+require 'json'
+require 'net/http'
+require 'open3'
+require 'optparse'
+require 'time'
+require 'uri'
+
+module PairedBench
+  VERSION = 1
+
+  DEFAULT_PATHS = %w[
+    / /articles /articles/1 /articles/new /articles/1/edit
+    /articles.json /articles/1.json
+  ].freeze
+
+  TUNABLE_DEFAULTS = { tolerance: 0.03, max_cv: 0.03, seed: 1 }.freeze
+
+  class Error < StandardError; end
+
+  module Stats
+    module_function
+
+    def mean(xs)
+      xs.sum.to_f / xs.size
+    end
+
+    # Linear-interpolated quantile of a sorted array (the R-7 rule).
+    def quantile(sorted, q)
+      return sorted.first.to_f if sorted.size == 1
+
+      pos = (sorted.size - 1) * q
+      lo = pos.floor
+      hi = pos.ceil
+      sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo)
+    end
+
+    def median(xs)
+      quantile(xs.sort, 0.5)
+    end
+
+    # Sample coefficient of variation; 0 for fewer than two values.
+    def cv(xs)
+      return 0.0 if xs.size < 2
+
+      m = mean(xs)
+      var = xs.sum { |x| (x - m)**2 } / (xs.size - 1)
+      Math.sqrt(var) / m
+    end
+
+    # Indexes of the values inside Tukey's 1.5 x IQR fences.
+    def tukey_keep(xs)
+      sorted = xs.sort
+      q1 = quantile(sorted, 0.25)
+      q3 = quantile(sorted, 0.75)
+      fence = 1.5 * (q3 - q1)
+      xs.each_index.select { |i| xs[i] >= q1 - fence && xs[i] <= q3 + fence }
+    end
+
+    # Percentile bootstrap interval for the median.
+    def bootstrap_median_ci(xs, seed:, resamples: 2000, level: 0.95)
+      rng = Random.new(seed)
+      medians = Array.new(resamples) do
+        median(Array.new(xs.size) { xs[rng.rand(xs.size)] })
+      end.sort
+      tail = (1 - level) / 2
+      [quantile(medians, tail), quantile(medians, 1 - tail)]
+    end
+
+    def geomean(xs)
+      Math.exp(xs.sum { |x| Math.log(x) } / xs.size)
+    end
+  end
+
+  module_function
+
+  def verdict(ci, tolerance)
+    lo, hi = ci
+    if lo > 1 + tolerance then 'slower'
+    elsif hi < 1 - tolerance then 'faster'
+    elsif lo >= 1 - tolerance && hi <= 1 + tolerance then 'same'
+    else 'inconclusive'
+    end
+  end
+
+  # Summarize one route from its final attempt's pairs.
+  def analyze_route(route, tolerance:, max_cv:, seed:)
+    pairs = route.fetch('attempts').last.fetch('pairs')
+    raise Error, "#{route['path']}: no measured pairs" if pairs.empty?
+
+    ratios = pairs.map { |p| p.fetch('target_us') / p.fetch('reference_us') }
+    cv = Stats.cv(ratios)
+    kept = Stats.tukey_keep(ratios)
+    kept_ratios = kept.map { |i| ratios[i] }
+    ci = Stats.bootstrap_median_ci(kept_ratios, seed: seed)
+    {
+      'path' => route.fetch('path'),
+      'pairs' => pairs.size,
+      'outliers' => pairs.size - kept.size,
+      'attempts' => route.fetch('attempts').size,
+      'reference_us' => Stats.median(kept.map { |i| pairs[i]['reference_us'] }),
+      'target_us' => Stats.median(kept.map { |i| pairs[i]['target_us'] }),
+      'ratio' => Stats.median(kept_ratios),
+      'ci95' => ci,
+      'cv' => cv,
+      'stable' => cv <= max_cv,
+      'verdict' => verdict(ci, tolerance)
+    }
+  end
+
+  def summarize(doc, tolerance:, max_cv:, seed:)
+    routes = doc.fetch('routes').map do |route|
+      analyze_route(route, tolerance: tolerance, max_cv: max_cv, seed: seed)
+    end
+    counts = Hash.new(0)
+    routes.each { |r| counts[r['verdict']] += 1 }
+    {
+      'tolerance' => tolerance,
+      'max_cv' => max_cv,
+      'seed' => seed,
+      'routes' => routes,
+      'geomean_ratio' => Stats.geomean(routes.map { |r| r['ratio'] }),
+      'verdicts' => counts,
+      'unstable' => routes.reject { |r| r['stable'] }.map { |r| r['path'] }
+    }
+  end
+
+  def format_us(us)
+    us >= 1000 ? format('%.2fms', us / 1000.0) : format('%.1fus', us)
+  end
+
+  def render(summary, labels)
+    width = [summary['routes'].map { |r| r['path'].size }.max, 5].max
+    out = +''
+    out << format("%-#{width}s  %10s  %10s  %7s  %-17s  %6s  %s\n",
+                  'route', labels[0], labels[1], 'ratio', '95% CI', 'CV', 'verdict')
+    summary['routes'].each do |r|
+      lo, hi = r['ci95']
+      note = r['stable'] ? '' : ' (unstable)'
+      out << format("%-#{width}s  %10s  %10s  %7.3f  [%6.3f, %6.3f]  %5.1f%%  %s%s\n",
+                    r['path'], format_us(r['reference_us']), format_us(r['target_us']),
+                    r['ratio'], lo, hi, r['cv'] * 100, r['verdict'], note)
+    end
+    out << format("\ngeomean ratio %.3f over %d routes (%s time / %s time; below 1 means %s is faster)\n",
+                  summary['geomean_ratio'], summary['routes'].size,
+                  labels[1], labels[0], labels[1])
+    out << "verdicts: #{summary['verdicts'].sort.map { |k, v| "#{v} #{k}" }.join(', ')}"
+    out << " (tolerance #{(summary['tolerance'] * 100).round(2)}%)\n"
+    unless summary['unstable'].empty?
+      out << "unstable (CV above #{(summary['max_cv'] * 100).round(2)}% after retries): " \
+             "#{summary['unstable'].join(' ')}\n"
+    end
+    out
+  end
+
+  # ── measurement ─────────────────────────────────────────────────────
+
+  class Sampler
+    def initialize(wrk:, sample_sec:)
+      @wrk = wrk
+      @sample_sec = sample_sec
+    end
+
+    # Mean microseconds per request over one wrk sample.
+    def sample(url)
+      cmd = [@wrk, '-t1', '-c1', "-d#{@sample_sec}s", url]
+      out, status = Open3.capture2e(*cmd)
+      raise Error, "#{url}: wrk exited #{status.exitstatus}\n#{out}" unless status.success?
+
+      if (bad = out[/Non-2xx or 3xx responses:\s*(\d+)/, 1])
+        raise Error, "#{url}: #{bad} responses were not 2xx/3xx"
+      end
+      if (errs = out[/Socket errors:[^\n]*/])
+        raise Error, "#{url}: #{errs.strip}"
+      end
+      rps = out[%r{Requests/sec:\s*([\d.]+)}, 1]&.to_f
+      raise Error, "#{url}: no requests completed\n#{out}" if rps.nil? || rps <= 0
+
+      1_000_000.0 / rps
+    rescue Errno::ENOENT
+      raise Error, "#{@wrk} not found; install wrk or pass --wrk"
+    end
+  end
+
+  def status_of(url)
+    uri = URI(url)
+    Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https',
+                                        open_timeout: 5, read_timeout: 30) do |http|
+      http.request(Net::HTTP::Get.new(uri)).code.to_i
+    end
+  rescue SystemCallError, IOError, Timeout::Error, SocketError => e
+    raise Error, "#{url}: #{e.class}: #{e.message}"
+  end
+
+  def join_url(base, path)
+    base.sub(%r{/+\z}, '') + path
+  end
+
+  def measure_route(path, opts, sampler, log)
+    urls = { 'reference' => join_url(opts[:reference], path),
+             'target' => join_url(opts[:target], path) }
+    statuses = urls.transform_values { |u| status_of(u) }
+    if statuses.values.any? { |s| s >= 400 } || statuses.values.uniq.size > 1
+      raise Error, "#{path}: reference answered #{statuses['reference']}, " \
+                   "target answered #{statuses['target']}; both must agree and be 2xx/3xx"
+    end
+
+    take = lambda do |count|
+      Array.new(count) do |i|
+        order = i.even? ? %w[reference target] : %w[target reference]
+        times = order.to_h { |side| [side, sampler.sample(urls[side])] }
+        { 'order' => "#{order.first}-first",
+          'reference_us' => times['reference'], 'target_us' => times['target'] }
+      end
+    end
+
+    log.puts "#{path}: warming up (#{opts[:warmup_pairs]} pairs)"
+    take.call(opts[:warmup_pairs])
+    attempts = []
+    loop do
+      pairs = take.call(opts[:pairs])
+      cv = Stats.cv(pairs.map { |p| p['target_us'] / p['reference_us'] })
+      attempts << { 'cv' => cv, 'pairs' => pairs }
+      log.puts format('%s: attempt %d, %d pairs, CV %.2f%%', path, attempts.size, pairs.size, cv * 100)
+      break if cv <= opts[:max_cv] || attempts.size > opts[:retries]
+    end
+    { 'path' => path, 'statuses' => statuses, 'attempts' => attempts }
+  end
+
+  def machine
+    env_script = File.join(__dir__, 'bench-env')
+    out, status = Open3.capture2('ruby', env_script)
+    status.success? ? JSON.parse(out) : {}
+  rescue StandardError
+    {}
+  end
+
+  def measure(opts, log)
+    sampler = Sampler.new(wrk: opts[:wrk], sample_sec: opts[:sample_sec])
+    started = Time.now.utc.iso8601
+    routes = opts[:paths].map { |path| measure_route(path, opts, sampler, log) }
+    {
+      'tool' => 'bench-paired',
+      'version' => VERSION,
+      'started_at' => started,
+      'finished_at' => Time.now.utc.iso8601,
+      'config' => {
+        'reference' => opts[:reference], 'target' => opts[:target],
+        'pairs' => opts[:pairs], 'warmup_pairs' => opts[:warmup_pairs],
+        'sample_sec' => opts[:sample_sec], 'retries' => opts[:retries],
+        'max_cv' => opts[:max_cv], 'tolerance' => opts[:tolerance], 'seed' => opts[:seed],
+        'labels' => opts[:labels]
+      },
+      'machine' => machine,
+      'routes' => routes
+    }
+  end
+
+  # ── command line ────────────────────────────────────────────────────
+
+  def parse(argv)
+    opts = { paths: [], pairs: 30, warmup_pairs: 5, sample_sec: 1, retries: 2,
+             wrk: 'wrk', fail_on_slower: false }
+    parser = OptionParser.new do |o|
+      o.on('--reference URL') { |v| opts[:reference] = v }
+      o.on('--target URL') { |v| opts[:target] = v }
+      o.on('--path PATH') { |v| opts[:paths] << v }
+      o.on('--pairs N', Integer) { |v| opts[:pairs] = v }
+      o.on('--warmup-pairs N', Integer) { |v| opts[:warmup_pairs] = v }
+      o.on('--sample-sec N', Integer) { |v| opts[:sample_sec] = v }
+      o.on('--max-cv F', Float) { |v| opts[:max_cv] = v }
+      o.on('--retries N', Integer) { |v| opts[:retries] = v }
+      o.on('--tolerance F', Float) { |v| opts[:tolerance] = v }
+      o.on('--seed N', Integer) { |v| opts[:seed] = v }
+      o.on('--out FILE') { |v| opts[:out] = v }
+      o.on('--analyze FILE') { |v| opts[:analyze] = v }
+      o.on('--fail-on-slower') { opts[:fail_on_slower] = true }
+      o.on('--wrk PATH') { |v| opts[:wrk] = v }
+      o.on('--label-reference NAME') { |v| (opts[:labels] ||= [nil, nil])[0] = v }
+      o.on('--label-target NAME') { |v| (opts[:labels] ||= [nil, nil])[1] = v }
+      o.on('-h', '--help') do
+        puts File.read(__FILE__).lines.drop(3).take_while { |l| l.start_with?('#') }
+                 .map { |l| l.sub(/^# ?/, '') }.join
+        exit 0
+      end
+    end
+    parser.parse!(argv)
+    raise Error, "unexpected argument: #{argv.first}" unless argv.empty?
+    raise Error, '--pairs must be at least 2' if opts[:pairs] < 2
+    raise Error, '--sample-sec must be at least 1' if opts[:sample_sec] < 1
+    raise Error, '--warmup-pairs and --retries must not be negative' if opts[:warmup_pairs].negative? || opts[:retries].negative?
+    unless opts[:analyze]
+      raise Error, '--reference and --target are required (or --analyze FILE)' unless opts[:reference] && opts[:target]
+    end
+    opts
+  rescue OptionParser::ParseError => e
+    raise Error, e.message
+  end
+
+  def main(argv)
+    opts = parse(argv)
+    if opts[:analyze]
+      doc = JSON.parse(File.read(opts[:analyze]))
+      config = doc.fetch('config', {})
+    else
+      opts[:paths] = DEFAULT_PATHS.dup if opts[:paths].empty?
+      TUNABLE_DEFAULTS.each { |k, v| opts[k] ||= v }
+      opts[:labels] = [opts.dig(:labels, 0) || 'reference', opts.dig(:labels, 1) || 'target']
+      doc = measure(opts, $stderr)
+      config = doc['config']
+    end
+    tunables = TUNABLE_DEFAULTS.to_h { |k, v| [k, opts[k] || config[k.to_s] || v] }
+    labels = [opts.dig(:labels, 0) || config.dig('labels', 0) || 'reference',
+              opts.dig(:labels, 1) || config.dig('labels', 1) || 'target']
+    summary = summarize(doc, **tunables)
+    if opts[:out]
+      File.write(opts[:out], JSON.pretty_generate(doc.merge('summary' => summary)) + "\n")
+    end
+    print render(summary, labels)
+    opts[:fail_on_slower] && summary['verdicts']['slower'].positive? ? 1 : 0
+  rescue Error, JSON::ParserError, KeyError, Errno::ENOENT => e
+    warn "bench-paired: #{e.message}"
+    2
+  end
+end
+
+exit PairedBench.main(ARGV) if $PROGRAM_NAME == __FILE__

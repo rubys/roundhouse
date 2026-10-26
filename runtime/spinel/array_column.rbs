@@ -1,0 +1,5 @@
+module ArrayColumn
+  def self.load_ints: (String? text) -> Array[Integer]?
+  def self.load_strings: (String? text) -> Array[String]?
+  def self.dump: (Array[untyped]? value) -> String?
+end

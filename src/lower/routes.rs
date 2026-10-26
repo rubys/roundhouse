@@ -127,6 +127,35 @@ fn compile_seg_patterns(
     (out, None)
 }
 
+/// Add a route's `(.:format)` requirement (`dialect::FORMAT_REQUIREMENT`)
+/// to its compiled segment patterns, under `format`: the router checks a
+/// request's extension against it, and a request with no extension is
+/// not held to it. A requirement outside the subset refuses the route,
+/// as any other does; a route already refused stays so.
+fn with_format_requirement(
+    constraints: &indexmap::IndexMap<Symbol, String>,
+    (mut seg_patterns, refused): (Vec<(String, String)>, Option<(String, String)>),
+) -> (Vec<(String, String)>, Option<(String, String)>) {
+    let Some(src) = constraints.get(&Symbol::from(crate::dialect::FORMAT_REQUIREMENT)) else {
+        return (seg_patterns, refused);
+    };
+    if refused.is_some() {
+        return (seg_patterns, refused);
+    }
+    let pattern = if src == crate::dialect::FORMAT_NONE {
+        Some(crate::lower::segment_pattern::NEVER.to_string())
+    } else {
+        crate::lower::segment_pattern::compile(src)
+    };
+    match pattern {
+        Some(p) => {
+            seg_patterns.push(("format".to_string(), p));
+            (seg_patterns, None)
+        }
+        None => (Vec::new(), Some(("format".to_string(), src.clone()))),
+    }
+}
+
 /// Is this constraint regex a plain digit class (`\d+` / `[0-9]+`,
 /// optionally `\A…\z` / `^…$` anchored)? Those are the only
 /// constraints the regex-free runtime router can enforce; anything
@@ -257,11 +286,12 @@ struct Ctx {
 /// One enclosing resource.
 #[derive(Clone, Debug, PartialEq)]
 struct Nesting {
-    /// Helper-name segment (`user`, `account`); accumulates into the
-    /// prefix in declaration order.
+    /// Helper-name segment (`user`, `account`; `person` under `as:
+    /// :people`); accumulates into the prefix in declaration order and
+    /// names a child's `:<singular>_id`.
     singular: String,
-    /// Plural helper-name segment, the name as written (`users`,
-    /// `account`).
+    /// Plural helper-name segment: the `as:` name when given, else the
+    /// name as written (`users`, `account`).
     plural: String,
     /// Path segment: the name as written, or the resource's `path:`
     /// (`resources :users, path: "people"` nests at `/people/:user_id`).
@@ -311,6 +341,30 @@ impl Ctx {
             .map(|n| format!("{}_", n.singular))
             .collect()
     }
+
+    /// Helper name of a member or collection route whose own name is
+    /// `action`: the action FIRST, then everything the enclosing scopes
+    /// put in front of the resource (namespace or `scope as:` prefix,
+    /// outer resources' singulars), then the innermost resource —
+    /// singular for a member route, plural for a collection one. Rails
+    /// 8.1 (`Scope#action_name`, checked with `bin/rails routes`):
+    ///
+    ///   namespace :admin { resources :widgets { collection { post :batch } } } → batch_admin_widgets
+    ///   resources :users { resources :notes { member { post :pin } } }        → pin_user_note
+    ///   namespace :admin { resources :rooms { get :recent, on: :collection, as: :fresh } } → fresh_admin_rooms
+    ///
+    /// None for a nested route (it reads parent-first) or outside any
+    /// resources block.
+    fn action_first_name(&self, action: &str, scope: ResourceScope) -> Option<String> {
+        let (innermost, outer) = self.parents.split_last()?;
+        let resource = match scope {
+            ResourceScope::Member => &innermost.singular,
+            ResourceScope::Collection => &innermost.plural,
+            ResourceScope::Nested => return None,
+        };
+        let outer: String = outer.iter().map(|n| format!("{}_", n.singular)).collect();
+        Some(format!("{action}_{}{outer}{resource}", self.name_prefix))
+    }
 }
 
 /// Route-helper name for a fully-static path: segments joined with `_`
@@ -353,6 +407,7 @@ fn singular_resource_actions() -> &'static [(&'static str, HttpMethod, &'static 
 fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
     match spec {
         RouteSpec::Explicit { method, path, controller, action, as_name, scope, constraints } => {
+            let constraints_map = constraints;
             // `:format => "rss"` rides the constraints map at ingest
             // (it shapes the request, not the routing triple); surface
             // it as the route's forced response format.
@@ -383,21 +438,10 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             // `requested_comments`. Member paths carry `:id` and so fall
             // through the static rule anyway, but both are decided here
             // to keep the scope rule in one place.
-            let scoped_name = match scope {
-                ResourceScope::Member | ResourceScope::Collection => {
-                    ctx.parent_pair().and_then(|(parent, parent_plural)| {
-                        static_path_name(path).map(|child| match scope {
-                            ResourceScope::Member => {
-                                format!("{}{child}_{parent}", ctx.name_prefix)
-                            }
-                            _ => format!("{}{child}_{parent_plural}", ctx.name_prefix),
-                        })
-                    })
-                }
-                // A bare verb in the resources block is a nested route;
-                // it keeps the parent-first order, decided below.
-                ResourceScope::Nested => None,
-            };
+            // A bare verb in the resources block is a nested route; it
+            // keeps the parent-first order, decided below.
+            let scoped_name =
+                static_path_name(path).and_then(|child| ctx.action_first_name(&child, *scope));
             let (derived_name, named) = match as_name.as_ref() {
                 // Where an explicit `as:` sits relative to the enclosing
                 // resource depends on the scope, and the two go OPPOSITE
@@ -415,18 +459,13 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 // `room_at_message` and `room_bot_messages`.
                 Some(s) => {
                     let s = s.as_str();
-                    let n = match (scope, ctx.parent_pair()) {
-                        (ResourceScope::Member, Some((parent, _))) => {
-                            format!("{}{s}_{parent}", ctx.name_prefix)
-                        }
-                        (ResourceScope::Collection, Some((_, plural))) => {
-                            format!("{}{s}_{plural}", ctx.name_prefix)
-                        }
-                        (ResourceScope::Nested, _) => {
+                    let n = match ctx.action_first_name(s, *scope) {
+                        Some(n) => n,
+                        None if *scope == ResourceScope::Nested => {
                             format!("{}{}{s}", ctx.name_prefix, ctx.parent_name_prefix())
                         }
                         // No enclosing resource — the name stands alone.
-                        _ => format!("{}{s}", ctx.name_prefix),
+                        None => format!("{}{s}", ctx.name_prefix),
                     };
                     (n, true)
                 }
@@ -522,7 +561,8 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 // route rather than serve it unenforced — a route
                 // that advertises `[^@/.]+` but can't actually check
                 // it is exactly the original bug.
-                let (seg_patterns, refused) = compile_seg_patterns(&constraints);
+                let (seg_patterns, refused) =
+                    with_format_requirement(constraints_map, compile_seg_patterns(&constraints));
                 out.push(FlatRoute {
                     method: method.clone(),
                     path: vpath,
@@ -673,9 +713,15 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             let child_ctx = Ctx {
                 parents: {
                     let mut p = ctx.parents.clone();
+                    // A child reads the parent's HELPER names, so an
+                    // `as:` alias reaches it too: Rails 8.1.4 nests
+                    // `resources :users, as: :people { resources :notes }`
+                    // as `person_notes` at `/users/:person_id/notes`, and
+                    // names a member route `pin_person`. Only the path
+                    // segment stays `users`.
                     p.push(Nesting {
-                        singular: singular_low.clone(),
-                        plural: name.as_str().to_string(),
+                        singular: helper_singular.clone(),
+                        plural: helper_plural.clone(),
                         segment: segment.to_string(),
                         has_id: !*singular,
                         param: id_param.to_string(),
@@ -752,7 +798,8 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 // Same fail-closed rule as the `Explicit` arm: a
                 // requirement outside the supported subset refuses
                 // this action's route rather than serve it unenforced.
-                let (seg_patterns, refused) = compile_seg_patterns(&other_constraints);
+                let (seg_patterns, refused) =
+                    with_format_requirement(resource_constraints, compile_seg_patterns(&other_constraints));
                 out.push(FlatRoute {
                     method: method.clone(),
                     path: full_path.clone(),
@@ -992,9 +1039,17 @@ fn nest_path(
         // `get "pages/:page"` is `/comments/:id/pages/:page` and even a
         // leading-slash `get "/comments/:id" => …` comes out as
         // `/comments/:id/comments/:id` (measured against Rails 8.1).
+        // A SINGULAR parent has no id, so neither do its member routes:
+        // `resource :profile { member { get :preview } }` is
+        // `/profile/preview` (Rails 8.1.4), like its own `show`.
         ResourceScope::Member => {
-            params.push(innermost.param.clone());
-            (format!("{prefix}{parent_plural}/:{}{path}", innermost.param), params)
+            let mut full = format!("{prefix}{parent_plural}");
+            if innermost.has_id {
+                full.push_str(&format!("/:{}", innermost.param));
+                params.push(innermost.param.clone());
+            }
+            full.push_str(path);
+            (full, params)
         }
         // `collection do get "search" end` → `/photos/search` (no id);
         // `get "/(:name)"` → `/photos(/:name)`, never a bare `/:name`.

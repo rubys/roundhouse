@@ -128,7 +128,48 @@ module ActiveStorage
   class Error < StandardError
   end
 
+  class InvariableError < ActiveStorage::Error
+  end
+
+  class UnpreviewableError < ActiveStorage::Error
+  end
+
+  class UnrepresentableError < ActiveStorage::Error
+  end
+
+  class IntegrityError < ActiveStorage::Error
+  end
+
+  class FileNotFoundError < ActiveStorage::Error
+  end
+
+  class InvalidKeyError < ActiveStorage::Error
+  end
+
   class PreviewError < ActiveStorage::Error
+  end
+
+  class Service
+    class GCSService < ActiveStorage::Service
+      class MetadataServerError < ActiveStorage::Error
+      end
+
+      class MetadataServerNotFoundError < ActiveStorage::Error
+      end
+    end
+  end
+
+  module Transformers
+    class Transformer
+    end
+
+    class ImageProcessingTransformer < ActiveStorage::Transformers::Transformer
+      class UnsupportedImageProcessingMethod < StandardError
+      end
+
+      class UnsupportedImageProcessingArgument < StandardError
+      end
+    end
   end
 
   class Previewer
@@ -140,6 +181,9 @@ module ActiveStorage
   end
 
   class Preview
+    class UnprocessedError < StandardError
+    end
+
     def initialize: (ActiveStorage::Blob? blob, ActiveStorage::Variation? variation) -> void
     def blob: () -> ActiveStorage::Blob?
     def variation: () -> ActiveStorage::Variation?

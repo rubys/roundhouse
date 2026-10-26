@@ -103,6 +103,7 @@ const PARAMS_SOURCE: &str = include_str!("../../runtime/python/params.py");
 /// Ships as `app/rh_datetime.py`; imported by models.py when a temporal
 /// column's reader `@property` references `Roundhouse.RhDateTime`.
 const RH_DATETIME_SOURCE: &str = include_str!("../../runtime/python/rh_datetime.py");
+const I18N_HOST_SOURCE: &str = include_str!("../../runtime/python/i18n_host.py");
 /// Python HTTP runtime — the `ActionResponse` value type
 /// `app/v2/dispatch.handle` returns and the server/TestClient glue
 /// consumes. Copied verbatim into generated projects as
@@ -145,6 +146,8 @@ const LIVE_FRAMEWORK: &[&str] = &[
     "app/session.py",
     "app/action_controller_base.py",
     "app/router.py",
+    "app/active_support_inflections.py",
+    "app/i18n_locale.py",
 ];
 
 /// Emit the switched-over framework leaf files (see `LIVE_FRAMEWORK`).
@@ -177,6 +180,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         files.push(EmittedFile {
             path: PathBuf::from("app/rh_datetime.py"),
             content: RH_DATETIME_SOURCE.to_string(),
+        });
+        files.push(EmittedFile {
+            path: PathBuf::from("app/i18n_host.py"),
+            content: I18N_HOST_SOURCE.to_string(),
         });
         files.push(schema_sql::emit_schema_sql(app));
         files.push(EmittedFile {

@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Roundhouse — Fractal: compile a Rails app in place, one file at a time</title>
+  <meta name="description" content="Fractal compiles a Rails app in place: it rewrites the files you name to remove framework work the app's own source makes unnecessary, and the compiled app still runs on Rails.">
+  <style>
+    /* Self-contained: the palette and doc layout of the Roundhouse site. */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #1a1b26; --bg-light: #24283b; --bg-lighter: #292e42; --border: #3b4261;
+      --text: #c0caf5; --text-dim: #737aa2;
+      --ruby: #f7768e; --crystal: #bb9af7; --go: #73daca; --python: #7aa2f7;
+      --rust: #ff9e64; --typescript: #e0af68;
+      --accent: var(--ruby);
+      --mono: "SF Mono", "Fira Code", "Cascadia Code", ui-monospace, Menlo, monospace;
+    }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; display: flex; flex-direction: column; }
+    header { padding: 1.25rem 1.5rem 0.75rem; border-bottom: 1px solid var(--border); }
+    header h1 { font-size: 1.25rem; font-weight: 600; color: var(--accent); }
+    header h1 a { color: inherit; text-decoration: none; }
+    .tagline { font-size: 0.8rem; color: var(--text-dim); margin-top: 0.15rem; }
+    main { max-width: 52rem; width: 100%; margin: 0 auto; padding: 2.5rem 1.5rem 4rem; line-height: 1.6; flex: 1; }
+    h2 { font-size: 1.3rem; font-weight: 600; color: var(--accent); margin: 2.75rem 0 0.85rem; padding-top: 0.5rem; border-top: 1px solid var(--border); }
+    h2 .n { color: var(--text-dim); font-weight: 400; margin-right: 0.4rem; }
+    h3 { font-size: 1.02rem; font-weight: 600; margin: 1.6rem 0 0.5rem; }
+    p { margin-bottom: 1rem; }
+    .lead { font-size: 1.08rem; margin-bottom: 1.4rem; }
+    .status-line { font-size: 0.85rem; color: var(--text-dim); border-left: 3px solid var(--accent); padding: 0.2rem 0 0.2rem 0.85rem; margin: 0 0 1.6rem; }
+    a { color: var(--python); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code { font-family: var(--mono); font-size: 0.85em; background: var(--bg-lighter); padding: 0.1rem 0.35rem; border-radius: 0.25rem; color: var(--go); }
+    pre { background: var(--bg-light); border: 1px solid var(--border); border-radius: 0.4rem; padding: 0.9rem 1.1rem; overflow-x: auto; margin: 0 0 1.25rem; font: 0.8rem/1.55 var(--mono); }
+    pre code { background: none; padding: 0; color: var(--text); font-size: inherit; }
+    pre .c { color: var(--text-dim); }
+    pre .k { color: var(--crystal); }
+    pre mark { background: color-mix(in srgb, var(--typescript) 25%, transparent); color: var(--text); border-radius: 0.2rem; padding: 0 0.15rem; }
+    ul, ol { margin: 0 0 1rem 1.25rem; }
+    li { margin-bottom: 0.4rem; }
+    figure { margin: 1.4rem 0 1.2rem; }
+    figure svg { width: 100%; height: auto; display: block; }
+    figcaption { font-size: 0.8rem; color: var(--text-dim); margin-top: 0.4rem; text-align: center; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 0.9rem; margin: 1rem 0 1.4rem; }
+    .card { padding: 0.9rem 1rem; border-radius: 0.5rem; background: color-mix(in srgb, var(--card, var(--accent)) 12%, var(--bg-light)); border: 1px solid color-mix(in srgb, var(--card, var(--accent)) 40%, var(--border)); border-top: 3px solid var(--card, var(--accent)); font-size: 0.88rem; }
+    .card b { display: block; color: var(--card, var(--accent)); margin-bottom: 0.2rem; }
+    .card.go { --card: var(--go); } .card.python { --card: var(--python); } .card.crystal { --card: var(--crystal); }
+    .card.ts { --card: var(--typescript); } .card.rust { --card: var(--rust); }
+    .cta { display: flex; flex-wrap: wrap; gap: 0.6rem; margin: 1.2rem 0 1.6rem; }
+    .cta a { display: inline-block; padding: 0.5rem 0.95rem; border: 1px solid var(--accent); border-radius: 0.35rem; color: var(--accent); font-weight: 600; font-size: 0.88rem; }
+    .cta a:hover { background: var(--bg-light); text-decoration: none; }
+    .note { font-size: 0.85rem; color: var(--text-dim); }
+    footer { padding: 0.6rem 1.5rem; border-top: 1px solid var(--border); font-size: 0.75rem; color: var(--text-dim); }
+    /* Diagram classes */
+    .d-box { fill: var(--bg-light); stroke: var(--border); }
+    .d-rails { fill: color-mix(in srgb, var(--go) 14%, var(--bg-light)); stroke: color-mix(in srgb, var(--go) 50%, var(--border)); }
+    .d-cell { fill: var(--bg-lighter); stroke: var(--border); }
+    .d-pick { fill: color-mix(in srgb, var(--ruby) 30%, var(--bg-light)); stroke: var(--ruby); }
+    .d-bad { fill: color-mix(in srgb, var(--ruby) 18%, var(--bg-light)); stroke: color-mix(in srgb, var(--ruby) 45%, var(--border)); }
+    .d-step { fill: var(--bg-light); stroke: var(--border); }
+    .d-pass { fill: color-mix(in srgb, var(--crystal) 16%, var(--bg-light)); stroke: color-mix(in srgb, var(--crystal) 55%, var(--border)); }
+    .d-pass-planned { fill: var(--bg); stroke: var(--border); stroke-dasharray: 4 3; }
+    .d-jit { fill: color-mix(in srgb, var(--typescript) 14%, var(--bg-light)); stroke: color-mix(in srgb, var(--typescript) 50%, var(--border)); }
+    .d-line { stroke: var(--text-dim); stroke-width: 1.5; fill: none; }
+    .d-arrow { fill: var(--text-dim); }
+    .t { fill: var(--text); font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    .t-b { fill: var(--text); font: 600 14px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    .t-h { fill: var(--accent); font: 600 14px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    .t-s { fill: var(--text-dim); font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    .t-m { fill: var(--text); font: 12px "SF Mono", "Fira Code", ui-monospace, Menlo, monospace; }
+    .t-good { fill: var(--go); font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    .t-bad { fill: var(--ruby); font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1><a href="./">Roundhouse</a></h1>
+    <p class="tagline">Fractal — compile a Rails app in place, one file at a time</p>
+  </header>
+
+  <main>
+    <p class="lead">
+      Fractal is Roundhouse's compile-time optimizer for an app that stays on
+      Rails. You name the files to compile. Fractal reads them and what its
+      passes need to know about the rest of the app, finds work the app's own
+      source makes unnecessary, and rewrites those files. <code>fractal emit</code>
+      writes only changed files at app-relative paths. <code>fractal apply</code>
+      replaces those files in the base app. Rails runs the result with the same
+      gems and line numbers; no complete app copy is created.
+    </p>
+    <p class="status-line">
+      Status: early. The pipeline is built, and the <a href="fractal/">pass
+      explorer</a> runs it in your browser. No pass is registered yet: the
+      first, <code>inline-enum-predicates</code>, was removed because
+      <a href="https://github.com/rails/rails/pull/59250">rails/rails#59250</a>
+      proposes plain <code>def</code> predicates. The proposal remains open.
+    </p>
+    <div class="cta">
+      <a href="fractal/">▶ Open the pass explorer</a>
+    </div>
+    <ol>
+      <li>Emit the changed files:
+        <pre><code>fractal emit --file app/models/article.rb path/to/app -o out/fractal</code></pre>
+      </li>
+      <li>Apply them to the base app:
+        <pre><code>fractal apply out/fractal path/to/app</code></pre>
+      </li>
+    </ol>
+
+    <h2><span class="n">1</span>The idea, simply</h2>
+    <p>
+      Fractal compiles the files you select while the app stays on Rails.
+      It leaves every other file unchanged. A file that no pass changes
+      does not appear in the emitted overlay.
+    </p>
+    <p>
+      The trick is not doing every chore faster. It is noticing chores that
+      don't need doing at all, like looking up the same fixed recipe every
+      time you cook, when you could write the step down where you use it.
+    </p>
+    <figure>
+      <svg viewBox="0 0 760 250" role="img" aria-label="Left: converting a whole app requires every class to convert. Right: Fractal emits only changed files, applies them to the base app, and leaves the other files unchanged on Rails.">
+        <text x="180" y="22" class="t-h" text-anchor="middle">Convert the whole app</text>
+        <g transform="translate(40,38)">
+          <rect width="280" height="182" rx="12" class="d-box"/>
+          <rect x="16"  y="16" width="76" height="44" rx="6" class="d-bad"/>
+          <rect x="102" y="16" width="76" height="44" rx="6" class="d-cell"/>
+          <rect x="188" y="16" width="76" height="44" rx="6" class="d-bad"/>
+          <rect x="16"  y="68" width="76" height="44" rx="6" class="d-cell"/>
+          <rect x="102" y="68" width="76" height="44" rx="6" class="d-bad"/>
+          <rect x="188" y="68" width="76" height="44" rx="6" class="d-cell"/>
+          <text x="140" y="142" class="t" text-anchor="middle">Every class has to convert.</text>
+          <text x="140" y="164" class="t-bad" text-anchor="middle">One gap and nothing ships.</text>
+        </g>
+        <text x="580" y="22" class="t-h" text-anchor="middle">Fractal: name a file</text>
+        <g transform="translate(440,38)">
+          <rect width="280" height="182" rx="12" class="d-rails"/>
+          <rect x="16"  y="16" width="76" height="44" rx="6" class="d-cell"/>
+          <rect x="102" y="16" width="76" height="44" rx="6" class="d-pick"/>
+          <rect x="188" y="16" width="76" height="44" rx="6" class="d-cell"/>
+          <rect x="16"  y="68" width="76" height="44" rx="6" class="d-cell"/>
+          <rect x="102" y="68" width="76" height="44" rx="6" class="d-cell"/>
+          <rect x="188" y="68" width="76" height="44" rx="6" class="d-cell"/>
+          <text x="140" y="43" class="t-b" text-anchor="middle">--file</text>
+          <text x="140" y="142" class="t" text-anchor="middle">Every other file stays unchanged.</text>
+          <text x="140" y="164" class="t-good" text-anchor="middle">Start with one safe rewrite.</text>
+        </g>
+      </svg>
+    </figure>
+    <div class="cards">
+      <div class="card"><b>The file</b> is what you compile: <code>--file app/models/article.rb</code>. Emit includes it only when a pass changes it.</div>
+      <div class="card python"><b>An edit</b> is where a rewrite happens: a span of the file replaced, on the same line.</div>
+      <div class="card go"><b>Not sure?</b> Fractal leaves the code as written and says why.</div>
+    </div>
+
+    <h2><span class="n">2</span>Fractal removes work. The JIT runs what's left.</h2>
+    <p>
+      Fractal reuses what Roundhouse already knows about an app: which class a
+      name refers to, the types flowing through a method, which definitions
+      exist and where, and what a framework declaration means. It does not
+      convert the app. It edits the app's own Ruby, so the rewritten code is
+      ordinary code that Bootsnap caches and the JIT compiles like any other.
+    </p>
+    <figure>
+      <svg viewBox="0 0 760 175" role="img" aria-label="Pipeline: read the selected files and what the passes need, propose edits, check and rewrite them, emit only changed files, then apply them to the base app and run Rails with the JIT.">
+        <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-arrow"/></marker></defs>
+        <rect x="8"   y="30" width="134" height="76" rx="10" class="d-step"/><text x="75"  y="62" class="t-b" text-anchor="middle">Read</text><text x="75"  y="84" class="t-s" text-anchor="middle">the files you name</text>
+        <rect x="160" y="30" width="134" height="76" rx="10" class="d-pass"/><text x="227" y="62" class="t-b" text-anchor="middle">Passes</text><text x="227" y="84" class="t-s" text-anchor="middle">propose edits</text>
+        <rect x="312" y="30" width="134" height="76" rx="10" class="d-step"/><text x="379" y="62" class="t-b" text-anchor="middle">Rewrite</text><text x="379" y="84" class="t-s" text-anchor="middle">checked, same lines</text>
+        <rect x="464" y="30" width="134" height="76" rx="10" class="d-step"/><text x="531" y="62" class="t-b" text-anchor="middle">Emit overlay</text><text x="531" y="84" class="t-s" text-anchor="middle">changed files only</text>
+        <rect x="616" y="30" width="136" height="76" rx="10" class="d-jit"/><text x="684" y="62" class="t-b" text-anchor="middle">Rails + JIT</text><text x="684" y="84" class="t-s" text-anchor="middle">same app, less work</text>
+        <line x1="142" y1="68" x2="158" y2="68" class="d-line" marker-end="url(#ar)"/>
+        <line x1="294" y1="68" x2="310" y2="68" class="d-line" marker-end="url(#ar)"/>
+        <line x1="446" y1="68" x2="462" y2="68" class="d-line" marker-end="url(#ar)"/>
+        <line x1="598" y1="68" x2="614" y2="68" class="d-line" marker-end="url(#ar)"/>
+        <text x="75"  y="134" class="t-s" text-anchor="middle">+ what passes need</text>
+        <text x="227" y="134" class="t-s" text-anchor="middle">in a fixed order</text>
+        <text x="379" y="134" class="t-s" text-anchor="middle">or refused whole</text>
+        <text x="531" y="134" class="t-s" text-anchor="middle">apply to the base app</text>
+        <text x="684" y="134" class="t-s" text-anchor="middle">runs the app</text>
+        <text x="380" y="164" class="t-s" text-anchor="middle">Build time: every assumption checked here ──────────▶ run time: nothing installed at boot</text>
+      </svg>
+    </figure>
+    <div class="cards">
+      <div class="card ts"><b>Left to the JIT</b> Inlining calls, type-specialized dispatch, arithmetic, constant folding, faster blocks.</div>
+      <div class="card crystal"><b>Fractal's job</b> Framework machinery that interprets a description fixed at build time, and methods Rails generates at boot from a description the build already read.</div>
+    </div>
+    <p>
+      What Fractal has that a JIT does not is the app's source at build time.
+      It can read a description that is fixed once the app is written (an
+      <code>enum</code> mapping, say) and write code that no longer needs to
+      consult it on every call. Because a rewrite is an edit to source, work
+      Rails does at boot (in a class body) and work it does on every call (in
+      a method body) are removed the same way.
+    </p>
+
+    <h2><span class="n">3</span>Passes, in order</h2>
+    <p>
+      A JIT like ZJIT does not optimize a method in one big step. It runs a
+      list of small passes, in a fixed order, each doing one thing.
+    </p>
+    <p>
+      Fractal works the same way, at the level of Ruby source. Each pass reads
+      a compiled file and proposes <strong>one kind of edit</strong> anywhere in
+      it, or leaves a site alone and says why. The passes always run in the
+      same order, so a build can be read one pass at a time, and new passes can
+      be added one at a time.
+    </p>
+    <figure>
+      <svg viewBox="0 0 760 190" role="img" aria-label="A compiled file's source flows through Fractal's passes in order: the first pass, then later passes. Each pass either edits the file or leaves a site alone and says why.">
+        <defs><marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-arrow"/></marker></defs>
+        <text x="380" y="28" class="t" text-anchor="middle">Every pass reads the compiled file, and either proposes its edits or says why not.</text>
+        <rect x="20"  y="52" width="120" height="62" rx="10" class="d-step"/><text x="80"  y="80" class="t-b" text-anchor="middle">source</text><text x="80"  y="100" class="t-s" text-anchor="middle">as written</text>
+        <rect x="170" y="52" width="190" height="62" rx="10" class="d-pass-planned"/><text x="265" y="80" class="t-b" text-anchor="middle">first pass</text><text x="265" y="100" class="t-s" text-anchor="middle">pass 1</text>
+        <rect x="400" y="52" width="140" height="62" rx="10" class="d-pass-planned"/><text x="470" y="80" class="t-b" text-anchor="middle">next pass</text><text x="470" y="100" class="t-s" text-anchor="middle">pass 2</text>
+        <rect x="580" y="52" width="160" height="62" rx="10" class="d-pass-planned"/><text x="660" y="80" class="t-b" text-anchor="middle">…</text><text x="660" y="100" class="t-s" text-anchor="middle">one kind of edit each</text>
+        <line x1="140" y1="83" x2="168" y2="83" class="d-line" marker-end="url(#ar2)"/>
+        <line x1="360" y1="83" x2="398" y2="83" class="d-line" marker-end="url(#ar2)"/>
+        <line x1="540" y1="83" x2="578" y2="83" class="d-line" marker-end="url(#ar2)"/>
+        <text x="380" y="148" class="t-s" text-anchor="middle">After each pass you can read the file as it stands: that is a stage.</text>
+        <text x="380" y="170" class="t-s" text-anchor="middle">No runtime fallback: whatever a pass cannot check at build time, it declines.</text>
+      </svg>
+    </figure>
+
+    <h3>What a pass is allowed to do</h3>
+    <ul>
+      <li><strong>Edit the compiled file, anywhere in it.</strong> A class body and a method body are edited the same way.</li>
+      <li><strong>Keep every line where it was.</strong> An edit replaces text with text of the same number of lines, so backtraces, coverage and <code>source_location</code> still point at the line a person wrote.</li>
+      <li><strong>Keep the contract.</strong> Callers get the same values, exceptions and objects, for every caller in the app as it will run.</li>
+      <li><strong>Check every assumption at build time.</strong> The compiled app has no guards and no original to fall back to, so an assumption the build can't check from the app's source and <code>Gemfile.lock</code> is a reason to decline.</li>
+      <li><strong>Decline with a reason</strong> whenever it cannot show that its edit behaves like the original.</li>
+    </ul>
+    <p>
+      The driver, not the pass, applies the edits, and it refuses a pass's
+      proposal whole, with a report, when an edit falls outside the file,
+      overlaps another edit or moves a line, or when the rewritten file has a
+      parse error or warning the original did not.
+    </p>
+
+    <h3>Why the first pass was removed</h3>
+    <p>
+      The first pass, <code>inline-enum-predicates</code>, replaced a call to
+      an Active Record enum predicate (<code>published?</code>) inside the enum's
+      own class with the comparison Rails' generated method runs
+      (<code>(status_for_database == 1)</code>). Rails defines each predicate
+      with a <code>define_method</code> block calling <code>public_send</code>,
+      which ZJIT cannot call directly.
+      <a href="https://github.com/rails/rails/pull/59250">rails/rails#59250</a>
+      proposes plain <code>def</code> predicates so every app can get the
+      benefit without a build step. The proposal remains open; released
+      Rails versions still use block-backed predicates.
+    </p>
+
+    <h2><span class="n">4</span>What “done” looks like</h2>
+    <div class="cards">
+      <div class="card go"><b>Less work</b> Measurably fewer CPU cycles and allocations, with the JIT already on.</div>
+      <div class="card python"><b>Same contract</b> Rails behaviour and every outside caller unchanged; the app's tests pass against the compiled app.</div>
+      <div class="card crystal"><b>Undo</b> Restore source through version control. Rebuilding does not reverse an applied rewrite.</div>
+    </div>
+    <p>
+      Apply the overlay, then run the app's test suite on the base app.
+      Build from the same source and <code>Gemfile.lock</code> that the deploy
+      runs. Every transformation is
+      also a trade, so a pass is kept only where the measured trade is worth
+      it.
+    </p>
+  </main>
+
+  <footer>
+    Roundhouse · Fractal.
+  </footer>
+</body>
+</html>

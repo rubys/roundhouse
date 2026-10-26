@@ -66,6 +66,11 @@
 #                                              dataset (1,000 users / 20 rooms
 #                                              by default) + its cookie file,
 #                                              leaving the oracle untouched
+#   scripts/campfire-oracle users-seed [options]
+#                                              the users profile's dataset
+#                                              (5,000 users / 30 rooms, skewed
+#                                              closed-room memberships) + its
+#                                              cookie file, oracle untouched
 #   scripts/campfire-oracle check-lock          diff the lockfile vs the pin
 #   scripts/campfire-oracle bundle --runtime truffleruby
 #                                              install the oracle's gems under
@@ -665,6 +670,20 @@ restore_oracle() {
 SOCKET_USERS_DEFAULT=1000
 SOCKET_ROOMS_DEFAULT=20
 SOCKET_MESSAGES_DEFAULT=20
+SEED_KIND=socket
+SEED_MEMBERSHIP=""
+
+# The many-viewer population for bench-campfire's users profile: the same
+# machinery as the socket seed, in its own files, with skewed closed-room
+# memberships (CF_MEMBERSHIP=skewed in campfire-oracle-seed.rb) so that
+# viewers see different rooms and a busy room has many readers.
+cmd_users_seed() {
+    SEED_DB="${SEED_DB:-$REPO_ROOT/build/campfire-users-seed.sqlite3}"
+    SEED_COOKIES="${SEED_COOKIES:-$REPO_ROOT/build/campfire-users-cookies.txt}"
+    SOCKET_USERS_DEFAULT=5000 SOCKET_ROOMS_DEFAULT=30 SOCKET_MESSAGES_DEFAULT=200
+    SEED_KIND=users SEED_MEMBERSHIP=skewed
+    cmd_socket_seed
+}
 
 cmd_socket_seed() {
     [[ -d "$OUT" ]] || die "no oracle at $OUT — run 'prepare' first"
@@ -677,10 +696,13 @@ cmd_socket_seed() {
     # rooms.messages_count: the emit lanes queried a column the cached
     # database did not have, and every socket-phase page answered 500.
     local seed_stamp="$seed_db.schema-sha256" want_stamp
-    want_stamp="$(shasum -a 256 "$OUT/db/schema.rb" | cut -d' ' -f1)"
+    # The seed script and the sizes are in the key too: a population that
+    # changed shape must not be served from the cache.
+    want_stamp="$(cat "$OUT/db/schema.rb" "$REPO_ROOT/scripts/campfire-oracle-seed.rb" \
+        <(echo "$USERS $ROOMS $MESSAGES $SOCKET_USERS_DEFAULT $SOCKET_ROOMS_DEFAULT $SOCKET_MESSAGES_DEFAULT $SEED_MEMBERSHIP") | shasum -a 256 | cut -d' ' -f1)"
     if [[ -f "$seed_db" && -s "$seed_cookies" ]] && (( FORCE == 0 )) \
         && [[ "$(cat "$seed_stamp" 2>/dev/null)" == "$want_stamp" ]]; then
-        step "socket seed already built ($(wc -l < "$seed_cookies") cookies) — $seed_db"
+        step "$SEED_KIND seed already built ($(wc -l < "$seed_cookies") cookies) — $seed_db"
         echo "$seed_db"; return 0
     fi
 
@@ -706,11 +728,11 @@ cmd_socket_seed() {
     [[ -f "$SS_DEV" ]] && cp "$SS_DEV" "$SS_BAK/development.sqlite3"
     trap 'restore_oracle' EXIT INT TERM
 
-    step "socket seed: $su users, $sr rooms, $sm messages/room (the oracle is restored afterwards)"
+    step "$SEED_KIND seed: $su users, $sr rooms, $sm messages/room${SEED_MEMBERSHIP:+, $SEED_MEMBERSHIP memberships} (the oracle is restored afterwards)"
     rm -f "$SS_DEV" "$SS_DEV-wal" "$SS_DEV-shm"
     (cd "$OUT" && RAILS_ENV=development bin/rails db:prepare >/dev/null) \
         || die "socket seed: db:prepare failed"
-    (cd "$OUT" && CF_USERS="$su" CF_ROOMS="$sr" CF_MESSAGES="$sm" \
+    (cd "$OUT" && CF_USERS="$su" CF_ROOMS="$sr" CF_MESSAGES="$sm" CF_MEMBERSHIP="$SEED_MEMBERSHIP" \
         bin/rails runner "$(cat "$REPO_ROOT/scripts/campfire-oracle-seed.rb")") \
         || die "socket seed: seeding failed"
 
@@ -722,7 +744,7 @@ cmd_socket_seed() {
     COUNT="$su" COOKIE_FILE="$seed_cookies" cmd_cookies || die "socket seed: minting failed"
     cp "$SS_DEV" "$seed_db"
     echo "$want_stamp" > "$seed_stamp"
-    step "socket seed ready: $seed_db ($(wc -l < "$seed_cookies") cookies)"
+    step "$SEED_KIND seed ready: $seed_db ($(wc -l < "$seed_cookies") cookies)"
     echo "$seed_db"
 }
 
@@ -817,11 +839,12 @@ cmd_check_lock() {
 case "$CMD" in
     prepare)    cmd_prepare ;;
     socket-seed) cmd_socket_seed ;;
+    users-seed) cmd_users_seed ;;
     serve)      cmd_serve ;;
     login)      cmd_login ;;
     cookies)    cmd_cookies ;;
     check-lock) cmd_check_lock ;;
     bundle)     cmd_bundle ;;
     ""|-h|--help) sed -n '2,134p' "$0" | sed 's/^# \{0,1\}//' ;;
-    *)          die "unknown command '$CMD' (prepare|serve|login|cookies|socket-seed|check-lock|bundle)" ;;
+    *)          die "unknown command '$CMD' (prepare|serve|login|cookies|socket-seed|users-seed|check-lock|bundle)" ;;
 esac

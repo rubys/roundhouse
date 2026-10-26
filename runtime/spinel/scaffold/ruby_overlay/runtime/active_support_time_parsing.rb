@@ -1,4 +1,16 @@
 # frozen_string_literal: true
+# Emitted trees place this file beside `active_support_interval.rb`.
+# The source tree keeps that one parser under `runtime/spinel/`.
+begin
+  require_relative "active_support_interval"
+rescue LoadError
+  # Source-tree fallback: the parser lives under runtime/spinel/, three
+  # directories up from this overlay. Emitted trees place the sibling
+  # beside this file, so the fallback never runs there. A computed path
+  # stays out of the static require graph, which only resolves literals.
+  rel = File.join("..", "..", "..", "active_support_interval")
+  require_relative rel
+end
 # Native date-only parsing plus UTC-safe timestamp parsing/stamping.
 #
 # Dates store as YYYY-MM-DD, with no time or zone. Separately,

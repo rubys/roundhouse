@@ -29,13 +29,24 @@
 //! The writer returns the argument it was given. Rails'
 //! `AttributeSet#write_from_user` does, and `obj.n = "08"` is `"08"`.
 //!
-//! A value of another class raises `TypeError` where Rails would call
-//! `to_i` (integer) or keep it (datetime): the static targets cannot ask
+//! `default:` is a literal (`true`, `false`, a number, a String, a
+//! Symbol; `nil` is no default) or a lambda that takes no parameters. As
+//! in Rails, the reader applies it on the attribute's first read, cast as
+//! an assigned value is, and keeps it, and a write before that read means
+//! the default is never read. The value lives in a class method,
+//! `__default_<name>`, whose body is the literal or the lambda's, so a
+//! lambda runs with the class as `self` and a String default is a fresh
+//! String each time.
+//!
+//! A value of another class is nil for `:integer` where it is blank or
+//! has no `to_i` (a Symbol, an Array, a Hash), as Rails' `to_i rescue
+//! nil`, and its `to_i` otherwise. For `:datetime` it raises
+//! `TypeError` where Rails would keep it: the static targets cannot ask
 //! an arbitrary object, and raising is not a different answer.
 //!
 //! A class is left as it was, include and all (so `check` still reports
 //! it), when anything here would be a guess: an `attribute` call with
-//! no type, another type, options, a block, a receiver, or a trailing
+//! no type, another type, an option other than a readable `default:`, a block, a receiver, or a trailing
 //! `#:` cast; a class that defines `initialize` or one of the accessors
 //! itself (Rails' would reach the generated one through `super`); a
 //! superclass, which may declare attributes of its own; any other
@@ -75,15 +86,16 @@ impl AttrType {
         }
     }
 
-    /// The cast call. The bodies live on `ActiveSupport`, beside
+    /// The cast of `value`. The bodies live on `ActiveSupport`, beside
     /// `cast_boolean`, so every target compiles the same method.
-    fn cast(self) -> &'static str {
-        match self {
-            AttrType::String => "ActiveSupport.cast_string(value)",
-            AttrType::Integer => "ActiveSupport.cast_integer(value)",
-            AttrType::Boolean => "ActiveSupport.cast_boolean(value)",
-            AttrType::DateTime => "ActiveSupport.cast_datetime(value)",
-        }
+    fn cast(self, value: &str) -> String {
+        let method = match self {
+            AttrType::String => "cast_string",
+            AttrType::Integer => "cast_integer",
+            AttrType::Boolean => "cast_boolean",
+            AttrType::DateTime => "cast_datetime",
+        };
+        format!("ActiveSupport.{method}({value})")
     }
 }
 
@@ -99,7 +111,7 @@ pub fn lower_active_model_attributes(app: &mut crate::App) {
         let (parsed, diags) = crate::ingest::prism::scope(|| {
             crate::ingest::ingest_library_classes(src.as_bytes(), "<active_model_attributes>")
         });
-        let methods: Vec<_> = match parsed {
+        let mut methods: Vec<_> = match parsed {
             Ok(classes) if diags.is_empty() => classes.into_iter().flat_map(|c| c.methods).collect(),
             Ok(_) => {
                 super::survey::record_synthesis_failure(
@@ -114,6 +126,18 @@ pub fn lower_active_model_attributes(app: &mut crate::App) {
                 continue;
             }
         };
+        // Each default's class method carries the declared value: the
+        // literal, or the lambda's body, which Rails calls with the class
+        // as `self`.
+        for attr in &attrs {
+            let Some(default) = &attr.default else { continue };
+            if let Some(method) = methods
+                .iter_mut()
+                .find(|m| m.receiver == MethodReceiver::Class && m.name.as_str() == default_method(&attr.name))
+            {
+                method.body = default.clone();
+            }
+        }
         lc.methods.extend(methods);
         lc.unknown_calls.retain(|call| attribute_call(call).is_none());
         lc.includes.retain(|i| i.0.as_str() != MODULE);
@@ -122,7 +146,7 @@ pub fn lower_active_model_attributes(app: &mut crate::App) {
 
 /// Every `attribute :name, :type` the class declares, or `None` when the
 /// class is left as it was (see the module doc).
-fn declared_attributes(lc: &LibraryClass) -> Option<Vec<(Symbol, AttrType)>> {
+fn declared_attributes(lc: &LibraryClass) -> Option<Vec<Attr>> {
     if lc.is_module || lc.parent.is_some() {
         return None;
     }
@@ -132,18 +156,19 @@ fn declared_attributes(lc: &LibraryClass) -> Option<Vec<(Symbol, AttrType)>> {
     if lc.includes.iter().any(|i| i.0.as_str() != MODULE) {
         return None;
     }
-    let mut attrs: Vec<(Symbol, AttrType)> = Vec::new();
+    let mut attrs: Vec<Attr> = Vec::new();
     for call in &lc.unknown_calls {
         match attribute_declaration(call) {
             AttributeDecl::Absent => {}
-            // A block, a receiver, a trailing `#:`, options, or another
-            // type: dropping it would keep the include removed.
+            // A block, a receiver, a trailing `#:`, an option other than
+            // `default:`, or another type: dropping it would keep the
+            // include removed.
             AttributeDecl::Refuse => return None,
-            AttributeDecl::Take(name, ty) => {
-                if attrs.iter().any(|(n, _)| *n == name) {
+            AttributeDecl::Take(attr) => {
+                if attrs.iter().any(|a| a.name == attr.name) {
                     return None;
                 }
-                attrs.push((name, ty));
+                attrs.push(attr);
             }
         }
     }
@@ -158,17 +183,53 @@ fn declared_attributes(lc: &LibraryClass) -> Option<Vec<(Symbol, AttrType)>> {
     if defines("initialize")
         || attrs
             .iter()
-            .any(|(n, _)| defines(n.as_str()) || defines(&format!("{}=", n.as_str())))
+            .any(|a| defines(a.name.as_str()) || defines(&format!("{}=", a.name.as_str())))
     {
         return None;
     }
     Some(attrs)
 }
 
+/// One declared attribute: its name, its type, and its `default:`, the
+/// literal or the zero-arity lambda's body.
+struct Attr {
+    name: Symbol,
+    ty: AttrType,
+    default: Option<crate::expr::Expr>,
+}
+
 enum AttributeDecl {
     Absent,
     Refuse,
-    Take(Symbol, AttrType),
+    Take(Attr),
+}
+
+/// The class method that answers an attribute's default.
+fn default_method(name: &Symbol) -> String {
+    format!("__default_{}", name.as_str())
+}
+
+/// `default: <literal>` or `default: -> { … }`. A literal is `true`,
+/// `false`, a number, a String or a Symbol (`nil` is no default); a lambda
+/// takes no parameters. Anything else is refused.
+fn default_value(options: &crate::expr::Expr) -> Result<Option<crate::expr::Expr>, ()> {
+    let ExprNode::Hash { entries, .. } = &*options.node else { return Err(()) };
+    let [(key, value)] = entries.as_slice() else { return Err(()) };
+    if sym(key).as_ref().map(|k| k.as_str()) != Some("default") {
+        return Err(());
+    }
+    match &*value.node {
+        ExprNode::Lit { value: Literal::Nil } => Ok(None),
+        ExprNode::Lit {
+            value: Literal::Bool { .. } | Literal::Int { .. } | Literal::Float { .. } | Literal::Str { .. } | Literal::Sym { .. },
+        } => Ok(Some(value.clone())),
+        ExprNode::Lambda { params, rest_param: None, extra_params, block_param: None, body, .. }
+            if params.is_empty() && extra_params.is_empty() =>
+        {
+            Ok(Some(body.clone()))
+        }
+        _ => Err(()),
+    }
 }
 
 /// One `attribute` declaration. A trailing `#:` is a cast around the
@@ -189,14 +250,19 @@ fn attribute_declaration(call: &crate::expr::Expr) -> AttributeDecl {
     if cast || recv.is_some() || block.is_some() {
         return AttributeDecl::Refuse;
     }
-    let [name, ty] = args.as_slice() else {
-        return AttributeDecl::Refuse;
+    let (name, ty, default) = match args.as_slice() {
+        [name, ty] => (name, ty, None),
+        [name, ty, options] => match default_value(options) {
+            Ok(default) => (name, ty, default),
+            Err(()) => return AttributeDecl::Refuse,
+        },
+        _ => return AttributeDecl::Refuse,
     };
     let (Some(name), Some(ty)) = (sym(name), sym(ty)) else {
         return AttributeDecl::Refuse;
     };
     match AttrType::from_symbol(ty.as_str()) {
-        Some(ty) => AttributeDecl::Take(name, ty),
+        Some(ty) => AttributeDecl::Take(Attr { name, ty, default }),
         None => AttributeDecl::Refuse,
     }
 }
@@ -217,25 +283,46 @@ fn sym(e: &crate::expr::Expr) -> Option<Symbol> {
 }
 
 /// The accessors as Ruby, parsed by ingest like any class body.
-fn synthesized_source(lc: &LibraryClass, attrs: &[(Symbol, AttrType)]) -> String {
+fn synthesized_source(lc: &LibraryClass, attrs: &[Attr]) -> String {
     let class = lc.name.0.as_str();
     // Rails' `initialize(*)` takes no attribute hash without
-    // `ActiveModel::Model`; every attribute reads nil until written.
-    // No `super`: see the module comment.
+    // `ActiveModel::Model`; an attribute reads its default, or nil, until
+    // written. No `super`: see the module comment.
     let mut body = String::from("  def initialize\n");
-    for (name, _) in attrs {
-        body.push_str(&format!("    @{} = nil\n", name.as_str()));
+    for attr in attrs {
+        let a = attr.name.as_str();
+        body.push_str(&format!("    @{a} = nil\n"));
+        if attr.default.is_some() {
+            body.push_str(&format!("    @{a}_default_applied = false\n"));
+        }
     }
     body.push_str("  end\n\n");
-    for (name, ty) in attrs {
-        let a = name.as_str();
-        body.push_str(&format!("  def {a}\n    @{a}\n  end\n\n"));
-        // The last expression is the assigned argument, as
-        // `AttributeSet#write_from_user` returns it.
-        body.push_str(&format!(
-            "  def {a}=(value)\n    @{a} = {}\n    value\n  end\n\n",
-            ty.cast()
-        ));
+    for attr in attrs {
+        let a = attr.name.as_str();
+        if attr.default.is_some() {
+            // Rails reads a default on the attribute's first read, cast as
+            // an assigned value is, and keeps it; a write before that read
+            // means it is never read. The class method's body is the
+            // declared default (`lower_active_model_attributes`).
+            let default = default_method(&attr.name);
+            body.push_str(&format!("  def self.{default}\n    nil\n  end\n\n"));
+            body.push_str(&format!(
+                "  def {a}\n    unless @{a}_default_applied\n      @{a} = {}\n      @{a}_default_applied = true\n    end\n    @{a}\n  end\n\n",
+                attr.ty.cast(&format!("self.class.{default}"))
+            ));
+            body.push_str(&format!(
+                "  def {a}=(value)\n    @{a} = {}\n    @{a}_default_applied = true\n    value\n  end\n\n",
+                attr.ty.cast("value")
+            ));
+        } else {
+            body.push_str(&format!("  def {a}\n    @{a}\n  end\n\n"));
+            // The last expression is the assigned argument, as
+            // `AttributeSet#write_from_user` returns it.
+            body.push_str(&format!(
+                "  def {a}=(value)\n    @{a} = {}\n    value\n  end\n\n",
+                attr.ty.cast("value")
+            ));
+        }
     }
     format!("class {class}\n{body}end\n")
 }

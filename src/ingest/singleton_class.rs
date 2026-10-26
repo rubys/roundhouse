@@ -44,6 +44,7 @@ use super::library_class::{
 use super::util::{constant_id_str, flatten_statements, symbol_value};
 use super::{IngestError, IngestResult};
 
+use crate::ingest::prism_api::PrismLocation;
 /// What one `class << self` block declares.
 #[derive(Default)]
 pub(super) struct SingletonBody {

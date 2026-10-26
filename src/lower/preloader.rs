@@ -1,4 +1,4 @@
-// Not Rails' `ActiveRecord::Associations::Preloader`, which no target ships: its one public use, `new(records:, associations:).call`, is the model's own `preload_associations`, or `ActiveRecord::Preloading.records` grouping several models' records by class.
+// `ActiveRecord::Associations::Preloader.new(records:, associations:).call` lowers to the model's `preload_associations`, or to `ActiveRecord::Preloading.records` when the records are several models. The class itself is the ruby-family runtime (`preloading.rb`): `check` resolves it, and a call that also passes `scope:` is not this rewrite.
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
@@ -58,10 +58,10 @@ fn is_preloader_const(expr: &Expr) -> bool {
 /// Drop the refusals typing left on `Preloader` and its `new`, once the call is known to lower.
 pub(crate) fn clear_refusals(new: &mut Expr) {
     let preloader = Ty::Class { id: ClassId(Symbol::from("ActiveRecord::Associations::Preloader")), args: vec![].into() };
-    new.diagnostic = None;
+    new.set_diagnostic(None);
     new.ty = Some(preloader.clone());
     if let ExprNode::Send { recv: Some(konst), .. } = &mut *new.node {
-        konst.diagnostic = None;
+        konst.set_diagnostic(None);
         konst.ty = Some(preloader);
     }
 }

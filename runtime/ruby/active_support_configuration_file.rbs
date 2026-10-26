@@ -1,0 +1,5 @@
+module ActiveSupport
+  class ConfigurationFile
+    def self.parse: (String path) -> untyped
+  end
+end

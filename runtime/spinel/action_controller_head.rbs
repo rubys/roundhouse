@@ -1,5 +1,8 @@
 module ActionController
   class Base
+    def render: (String body, ?status: Symbol | Integer, ?content_type: String?, ?location: String?) -> void
+    def redirect_to: (String path, ?notice: String?, ?alert: String?, ?status: Symbol | Integer) -> void
+    def resolve_status: (Symbol | Integer status) -> Integer
     def head: ((Symbol | Integer | nil) status, ?(Hash[String | Symbol, Object?] | nil) options) -> bool
     def head_response?: () -> bool
     def head_status_code: (Symbol | Integer status) -> Integer

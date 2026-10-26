@@ -640,6 +640,13 @@ pub fn attribute_unknown_gems(diags: &mut [Diagnostic], app: &App) {
             }
             continue;
         }
+        // Kept an error: the call site is the gem's own refusal, and only what it feeds becomes a note
+        if let DiagnosticKind::Unsupported { construct, .. } = &d.kind
+            && crate::gems::claims_surface(construct.as_str())
+        {
+            sites.push((d.span.file, d.span.start, construct.as_str().to_string()));
+            continue;
+        }
         if !eligible(&d.kind) || d.severity == Severity::Info {
             continue;
         }

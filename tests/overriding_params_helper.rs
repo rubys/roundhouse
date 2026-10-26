@@ -78,7 +78,7 @@ fn a_bare_permit_reads_the_top_level_params() {
     );
     assert!(src.contains("NoteParams.new"), "{src}");
     assert!(
-        src.contains(r#"Params.provided(@params, "body")"#),
+        src.contains(r#"Params.scalar_provided(@params, "body")"#),
         "reads presence off the flat params:\n{src}"
     );
     assert!(!src.contains("from_raw"), "from_raw would dig into :note:\n{src}");

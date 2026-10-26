@@ -30,6 +30,14 @@ public static class RhRuntime
     }
 
     // `a.merge(b)` → a new dictionary, b winning on key collisions.
+    // Ruby's Array#[](start, length): nil past the end, clamped otherwise
+    public static List<T>? ListSlice<T>(List<T> list, long start, long length)
+    {
+        if (start < 0) start += list.Count;
+        if (start < 0 || start > list.Count || length < 0) return null;
+        return list.Skip((int)start).Take((int)length).ToList();
+    }
+
     public static Dictionary<string, object?> Merge(object? a, object? b)
     {
         var result = new Dictionary<string, object?>();
@@ -141,4 +149,17 @@ public sealed class RhHashView : IDictionary<object, object?>, IReadOnlyDictiona
     void ICollection.CopyTo(Array array, int index) => inner.CopyTo(array, index);
     bool ICollection.IsSynchronized => inner.IsSynchronized;
     object ICollection.SyncRoot => inner.SyncRoot;
+}
+
+// Not mapped to an existing .NET exception: a `rescue NoMethodError` would then catch that unrelated type too
+public class NoMethodError : Exception
+{
+    public NoMethodError() { }
+    public NoMethodError(string message) : base(message) { }
+}
+
+public class NameError : Exception
+{
+    public NameError() { }
+    public NameError(string message) : base(message) { }
 }

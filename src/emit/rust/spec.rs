@@ -154,7 +154,10 @@ fn emit_ctrl_test_send(
             "unprocessable_entity" | "unprocessable_content" => {
                 "resp.assert_unprocessable();".to_string()
             }
-            other => format!("resp.assert_status(/* {other:?} */ 200);"),
+            other => match crate::lower::controller_test::asserted_status_code(other) {
+                Some(code) => format!("resp.assert_status({code});"),
+                None => format!("{};", crate::emit::diagnostics::report_unsupported(crate::span::Span::synthetic(), "rust", "assert_response", format!("`:{other}` names no single status"))),
+            },
         },
         Some(ControllerTestSend::AssertRedirectedTo { url }) => {
             let u = emit_url_expr(url, app);
@@ -283,10 +286,7 @@ fn emit_assert_select_classified(
     use crate::lower::AssertSelectKind;
     let ExprNode::Lit { value: Literal::Str { value: selector } } = &*selector_expr.node
     else {
-        return format!(
-            "/* TODO: dynamic selector */ resp.assert_select({:?});",
-            emit_ctrl_test_expr(selector_expr, app),
-        );
+        return format!("{};", crate::emit::diagnostics::report_unsupported(selector_expr.span, "rust", "assert_select", "a selector computed when the test runs"));
     };
     match kind {
         AssertSelectKind::Text(expr) => {
@@ -404,7 +404,34 @@ fn emit_ctrl_test_expr(expr: &Expr, app: &App) -> String {
                 format!("{method}({})", args_s.join(", "))
             }
         }
-        _ => format!("/* TODO expr {:?} */", std::mem::discriminant(&*expr.node)),
+        ExprNode::StringInterp { parts } => {
+            let mut template = String::new();
+            let mut values = Vec::new();
+            for part in parts {
+                match part {
+                    crate::expr::InterpPart::Text { value } => template.push_str(&value.replace('{', "{{").replace('}', "}}")),
+                    // Ruby's `"#{nil}"` is the empty String
+                    crate::expr::InterpPart::Expr { expr } if matches!(&*expr.node, ExprNode::Lit { value: Literal::Nil }) => {}
+                    crate::expr::InterpPart::Expr { expr } => {
+                        let value = emit_ctrl_test_expr(expr, app);
+                        let nilable = matches!(expr.ty.as_ref(), Some(crate::ty::Ty::Union { variants }) if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil)));
+                        // Not formatted as is: an Option has no Display, so `{}` would not compile
+                        if nilable && !value.ends_with(".unwrap_or_default()") {
+                            return crate::emit::diagnostics::report_unsupported(expr.span, "rust", "StringInterp", "a value that may be nil, in a controller test");
+                        }
+                        template.push_str("{}");
+                        values.push(value);
+                    }
+                }
+            }
+            if values.is_empty() {
+                // Not the escaped template: with no value to format, `{{` would reach the literal as written
+                format!("{:?}.to_string()", template.replace("{{", "{").replace("}}", "}"))
+            } else {
+                format!("format!({template:?}, {})", values.join(", "))
+            }
+        }
+        other => crate::emit::diagnostics::report_unsupported(expr.span, "rust", other.kind_str(), "in a controller test"),
     }
 }
 

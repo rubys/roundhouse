@@ -15,6 +15,13 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "support/emit_and_run.rs"]
+#[allow(dead_code)]
+mod emit_and_run;
+#[path = "support/i18n_locales_app.rs"]
+#[allow(dead_code)]
+mod i18n_locales_app;
+
 use roundhouse::emit::go;
 use roundhouse::ingest::ingest_app;
 
@@ -148,5 +155,94 @@ fn real_blog_go_test_passes() {
         scratch.display(),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+#[ignore]
+fn real_blog_i18n_locales_run() {
+    // The answers `emit_and_run::i18n_locales` checks on CRuby, but for a String
+    // locale named in an error: Go has no Symbol apart from string, so `"de"` shows as `:de`.
+    let (emitted, errors) = i18n_locales_app::probe_app()
+        .edit("app/models/article.rb", i18n_locales_app::IN_LOCALE, "")
+        .emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("app/v2/i18n_probe_test.go"), r#"package v2
+
+import (
+	"reflect"
+	"testing"
+)
+
+func TestI18nLocalesProbe(t *testing.T) {
+	expect := func(what string, got, want interface{}) {
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s: %#v", what, got)
+		}
+	}
+	expect("lookups", Article_lookups(), []string{"Hello", "Hi <x>", "1 item", "2 items", "Translation missing: en.probe.nope", "Cześć", "fallback 3", "en"})
+	expect("polish", Article_polish(), []string{"1 rzecz", "5 rzeczy", "English only", "Cześć", "Translation missing: pl.probe.nope", "Cześć", "Hi Ola", "pl"})
+	expect("restored", I18n_locale(), "en")
+	expect("named", []string{Article_named("pl"), Article_named("en"), Article_named(nil)}, []string{"Cześć", "Hello", "Hello"})
+	expect("dynamic", []string{Article_probe_key("greet"), Article_only_key("xx")}, []string{"Hello", "Translation missing: en.probe.only_xx"})
+	func() {
+		defer func() {
+			e, ok := recover().(*I18nInvalidLocale)
+			if !ok {
+				t.Fatalf("named de: %#v", e)
+			}
+			expect("named de", e.Message, ":de is not a valid locale")
+		}()
+		Article_named("de")
+	}()
+}
+"#).expect("write probe");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-run", "TestI18nLocalesProbe", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore]
+fn real_blog_flash_each_yields() {
+    // A yielding runtime method takes the block as a Go function.
+    let (emitted, errors) = emit_and_run::real_blog().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("app/v2/flash_each_test.go"), r#"package v2
+
+import (
+	"reflect"
+	"testing"
+)
+
+func TestFlashEachYieldsPopulatedFields(t *testing.T) {
+	flash := NewActionDispatchFlash(map[string]string{"alert": "Oops"})
+	var got []string
+	flash.Each(func(k string, v string) { got = append(got, k+"="+v) })
+	if !reflect.DeepEqual(got, []string{"alert=Oops"}) {
+		t.Fatalf("%#v", got)
+	}
+}
+"#).expect("write test");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-run", "TestFlashEachYieldsPopulatedFields", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 }

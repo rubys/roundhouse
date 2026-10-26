@@ -3,7 +3,9 @@
 //! (`markers::push_attribute_api_methods`): a typed ivar reader plus a
 //! writer that applies Rails' Type::Boolean cast for `:boolean` (the
 //! form roundtrip assigns "0"/"1" strings; an uncast write leaves "0"
-//! truthy). Surfaced by lobsters' `attribute :mod_note, :boolean` on
+//! truthy). This lowering is a strict target's, whose field stays a
+//! non-nil `Bool`; the ruby family's nil cast is
+//! `emit_and_run::attribute_api_boolean_cast`. Surfaced by lobsters' `attribute :mod_note, :boolean` on
 //! Message: no reader synthesized → f.check_box's typed checked state
 //! had nothing to read under spinel AOT.
 
@@ -61,7 +63,7 @@ fn boolean_attribute_synthesizes_typed_reader_and_cast_writer() {
 
     let writer = find("mod_note=").expect("writer synthesized");
     let body = format!("{:?}", writer.body);
-    for falsey in ["\"0\"", "\"false\"", "\"f\""] {
+    for falsey in ["\"0\"", "\"f\"", "\"F\"", "\"false\"", "\"FALSE\"", "\"off\"", "\"OFF\""] {
         assert!(
             body.contains(falsey),
             "boolean cast must reject {falsey}:\n{body}"

@@ -198,10 +198,31 @@ fn campfire_docker_recipe_avoids_a_frontend_pull_and_ships_executable_boot() {
 }
 
 #[test]
-fn campfire_docker_smoke_caches_apt_for_eight_hours_and_always_builds() {
+fn campfire_docker_smoke_caches_apt_for_eight_hours_and_skips_without_tgz() {
     let workflow: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let archive = &workflow["jobs"]["campfire-archive-build"];
+    assert_eq!(
+        archive["outputs"]["docker_tgz"].as_str(),
+        Some("${{ steps.docker-tgz.outputs.present }}")
+    );
+    let mark = archive["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| {
+            step["name"].as_str() == Some("Record whether campfire/docker.tgz was produced")
+        })
+        .expect("producer must mark docker.tgz presence");
+    assert_eq!(mark["id"].as_str(), Some("docker-tgz"));
+    assert_eq!(mark["if"].as_str(), Some("always()"));
+
     let job = &workflow["jobs"]["campfire-smoke-docker"];
+    let gate = job["if"].as_str().unwrap();
+    assert!(
+        gate.contains("needs.campfire-archive-build.outputs.docker_tgz == 'true'"),
+        "smoke-docker must skip when pack did not produce docker.tgz: {gate}"
+    );
     let steps = job["steps"].as_sequence().unwrap();
     let step = |name: &str| {
         steps
@@ -279,6 +300,10 @@ fn campfire_docker_smoke_caches_apt_for_eight_hours_and_always_builds() {
     assert!(
         !script.contains("sccache") && !script.contains("CCACHE"),
         "do not hide the pack compile behind a compiler cache"
+    );
+    assert!(
+        script.contains("despite producer docker_tgz=true"),
+        "missing tgz after a true gate is an error, not a soft pack skip"
     );
 
     let save = step("Save Campfire Docker apt layers");
@@ -409,16 +434,6 @@ fn rust_ci_uses_the_repository_pin_before_restoring_caches() {
             }
         }
     }
-    let wasm_setup = workflow["jobs"]["build-wasm"]["steps"]
-        .as_sequence()
-        .unwrap()
-        .iter()
-        .find(|step| step["uses"].as_str() == Some("./.github/actions/setup-rust"))
-        .unwrap();
-    assert_eq!(
-        wasm_setup["with"]["targets"].as_str(),
-        Some("wasm32-wasip1")
-    );
     let smoke_setup = workflow["jobs"]["smoke"]["steps"]
         .as_sequence()
         .unwrap()
@@ -1033,7 +1048,7 @@ fn campfire_failure_capture_keeps_the_original_exit_and_actual_c() {
         .unwrap();
         for (path, body) in [
             (
-                "bin/cargo",
+                "bin/roundhouse",
                 "#!/bin/sh\necho emit-output >&2\nexit \"$EMIT_EXIT\"\n",
             ),
             (
@@ -1060,6 +1075,10 @@ fn campfire_failure_capture_keeps_the_original_exit_and_actual_c() {
                 root.join("bin").display(),
                 std::env::var("PATH").unwrap()
             ),
+        );
+        command.env(
+            "ROUNDHOUSE_BIN",
+            root.join("bin/roundhouse").to_string_lossy().as_ref(),
         );
         command.env("EMIT_EXIT", emit_exit.to_string());
         command.env("BUILD_EXIT", build_exit.to_string());
@@ -1155,9 +1174,32 @@ fn spinel_model_differential_does_not_wait_for_the_gc_comparison_build() {
     let ci: serde_yaml_ng::Value = serde_yaml_ng::from_str(&src).expect("parse CI workflow");
     let jobs = &ci["jobs"];
     let db = &jobs["campfire-spinel-db"];
-    assert_eq!(db["needs"][0].as_str(), Some("spinel-build"));
-    assert_eq!(db["needs"][1].as_str(), Some("plan"));
+    let db_needs: Vec<_> = db["needs"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .filter_map(|n| n.as_str())
+        .collect();
+    assert!(
+        db_needs.contains(&"spinel-build") && db_needs.contains(&"plan"),
+        "db differential still needs the Spinel toolchain and plan: {db_needs:?}"
+    );
+    assert!(
+        db_needs.contains(&"build-roundhouse"),
+        "db differential must reuse the same-run debug binary: {db_needs:?}"
+    );
+    assert!(
+        !db_needs.contains(&"campfire-spinel-build"),
+        "db differential must not wait on the GC comparison producer: {db_needs:?}"
+    );
     assert_eq!(db["continue-on-error"].as_bool(), Some(true));
+    assert!(
+        db["if"]
+            .as_str()
+            .unwrap()
+            .contains("needs.build-roundhouse.outputs.roundhouse-bin-artifact-id != ''"),
+        "missing producer binary must block the db job, not cargo-fallback"
+    );
 
     let command = "scripts/campfire-db-differential --spinel /tmp/campfire";
     let db_steps = db["steps"].as_sequence().expect("DB job steps");
@@ -1408,16 +1450,43 @@ fn pr_reuse_receipts_are_checked_against_adversarial_inputs() {
 fn reused_checks_keep_cargo_dependencies_locked_and_upload_only_execution_receipts() {
     let ci: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
-    for (name, expected_cargo_commands) in [("store-check", 1)] {
+    for name in ["store-check"] {
         let steps = ci["jobs"][name]["steps"].as_sequence().unwrap();
-        let commands: Vec<_> = steps
+        let commands = steps
             .iter()
             .filter_map(|step| step["run"].as_str())
             .flat_map(str::lines)
             .map(str::trim)
-            .filter(|line| line.starts_with("cargo "))
-            .collect();
-        assert_eq!(commands.len(), expected_cargo_commands);
+            .filter(|line| line.starts_with("cargo "));
+        assert!(
+            commands.clone().any(|command| {
+                let mut args = command.split_whitespace().skip(1);
+                if args.next() != Some("build") {
+                    return false;
+                }
+                let mut options = args.clone().zip(args.skip(1));
+                options
+                    .clone()
+                    .any(|(flag, value)| flag == "--profile" && value == "dev")
+                    && options.any(|(flag, value)| flag == "--bin" && value == "emit_preview")
+            }),
+            "{name}: missing the development bench build"
+        );
+        assert!(
+            steps
+                .iter()
+                .filter_map(|step| step["run"].as_str())
+                .flat_map(str::lines)
+                .any(|line| {
+                    let mut args = line.split_whitespace();
+                    args.next() == Some("target/debug/emit_preview")
+                        && args
+                            .clone()
+                            .zip(args.skip(1))
+                            .any(|(flag, _)| flag == "--target")
+                }),
+            "{name}: missing the bench execution"
+        );
         for command in commands {
             assert!(
                 command.split_whitespace().any(|flag| flag == "--locked"),

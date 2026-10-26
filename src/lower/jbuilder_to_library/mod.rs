@@ -85,6 +85,12 @@ use crate::ident::{ClassId, Symbol, VarId};
 use crate::naming::singularize;
 use crate::span::Span;
 
+mod record_partial;
+mod record_value;
+
+use record_partial::Unresolved;
+use record_value::{RecordShapes, RecordValue};
+
 use super::view_to_library::{
     build_view_signature, infer_view_arg, insert_framework_stubs, split_view_name, view_module_id,
 };
@@ -360,13 +366,17 @@ fn build_library_class(
         partials: partials.clone(),
         partial_key,
         template: format!("{dir}/{base}"),
+        record_sites: std::rc::Rc::new(record_partial::record_sites(&view.body, &app.models)),
+        arg_model: arg_model.clone(),
+        span_types: std::rc::Rc::new(record_value::span_types(&view.body)),
+        record_shapes: std::rc::Rc::new(RecordShapes::build(app)),
     };
 
     let mut body_stmts: Vec<Expr> = Vec::new();
     body_stmts.push(assign_accumulator_string_new(&ctx.accumulator));
     body_stmts.extend(walk_template(&rewritten, &ctx));
     let mut result = var_ref(Symbol::from(ctx.accumulator.as_str()));
-    result.hint = Some(IrHint::StringBuilderResult);
+    result.set_hint(Some(IrHint::StringBuilderResult));
     body_stmts.push(result);
 
     let mut body = seq(body_stmts);
@@ -662,6 +672,18 @@ struct Ctx {
     /// (`messages/_message`): what a `json.cache!` key names it by,
     /// where Rails names it by its digest path.
     template: String,
+    /// The model of each `json.partial!(record, …)` record, keyed by
+    /// the record's span (`record_partial::record_sites`), resolved on
+    /// the analyzed template before its ivars become locals.
+    record_sites: std::rc::Rc<record_partial::RecordSites>,
+    /// The model `arg_name` is a record of, when known.
+    arg_model: Option<String>,
+    /// The analyzer's type of each expression of the template as
+    /// written, by span (`record_value::span_types`): the walk reads a
+    /// copy whose ivars are locals, which carries no types.
+    span_types: std::rc::Rc<std::collections::HashMap<Span, crate::ty::Ty>>,
+    /// The app's models as JSON values (`record_value`).
+    record_shapes: std::rc::Rc<RecordShapes>,
 }
 
 /// Classification of a single top-level statement in a jbuilder
@@ -842,7 +864,7 @@ fn walk_cached_template(body: &Expr, ctx: &Ctx) -> Option<Vec<Expr>> {
     let mut miss = vec![assign_accumulator_string_new(&cap)];
     miss.extend(emit_object(&inner_stmts, &cap_ctx));
     let mut cap_result = var_ref(Symbol::from(cap.as_str()));
-    cap_result.hint = Some(IrHint::StringBuilderResult);
+    cap_result.set_hint(Some(IrHint::StringBuilderResult));
     miss.push(io_append_call(
         &ctx.accumulator,
         send(Some(helpers()), "jbuilder_fragment_write", vec![var_ref(key_var.clone()), cap_result], None, true),
@@ -961,9 +983,12 @@ fn emit_object_filled(raw_stmts: &[&Expr], ctx: &Ctx) -> (Vec<Expr>, bool) {
             }
             JbStmt::ArrayExtract { collection, attrs } => Some(emit_array_extract(collection, attrs, ctx)),
             JbStmt::PartialRecord { arg, as_name } => {
-                record_partial_path(arg, as_name.as_ref(), &ctx.resource_dir, &ctx.models)
-                    .map(|(partial_path, local)| {
-                        emit_partial_call(&partial_path, vec![(local, (*arg).clone())], ctx)
+                record_partial_path(arg, as_name.as_ref(), &ctx.resource_dir, &ctx.record_sites)
+                    .ok()
+                    .map(|branches| {
+                        let (mut stmts, call) = record_partial_call(arg, &branches, ctx);
+                        stmts.push(io_append_call(&ctx.accumulator, call));
+                        stmts
                     })
             }
             _ => None,
@@ -1008,7 +1033,7 @@ fn has_unlowered(stmts: &[&Expr], ctx: &Ctx) -> bool {
         | JbStmt::ArrayBlock { .. }
         | JbStmt::ArrayExtract { .. } => true,
         JbStmt::PartialRecord { arg, as_name } => {
-            record_partial_path(arg, as_name.as_ref(), &ctx.resource_dir, &ctx.models).is_none()
+            record_partial_path(arg, as_name.as_ref(), &ctx.resource_dir, &ctx.record_sites).is_err()
         }
         JbStmt::Cond { then_branch, else_branch, .. } => {
             has_unlowered(&branch_stmts(then_branch), ctx) || has_unlowered(&branch_stmts(else_branch), ctx)
@@ -1111,11 +1136,11 @@ fn emit_merged_partial(call: Expr, ctx: &Ctx, out: &mut Vec<Expr>, sep: Sep) -> 
 /// survey lists it and the Ruby emit raises it where it stood.
 fn unsupported_stmt(span: Span, construct: &str, detail: &str) -> Expr {
     let mut e = Expr::new(span, ExprNode::Lit { value: Literal::Nil });
-    e.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+    e.set_diagnostic(Some(crate::diagnostic::DiagnosticKind::Unsupported {
         target: None,
         construct: Symbol::from(construct),
         detail: detail.to_string(),
-    });
+    }));
     e
 }
 
@@ -1177,12 +1202,21 @@ fn emit_pairs(
         match stmt {
             JbStmt::Extract { obj, attrs } => {
                 let obj_is_arg = obj_is_named_local(obj, &ctx.arg_name);
+                let obj_model = record_model_of(obj, ctx);
                 for attr in attrs {
                     push_separator(out, ctx, sep);
                     out.push(io_append_lit(
                         &ctx.accumulator,
                         &format!("\"{}\":", attr.as_str()),
                     ));
+                    // An association: its record (or records) as
+                    // `as_json` writes them.
+                    if let Some(record) = obj_model.as_deref().and_then(|m| ctx.record_shapes.reader(m, attr)) {
+                        let read = send(Some((*obj).clone()), attr.as_str(), Vec::new(), None, false);
+                        out.extend(record_value_or_refusal(read, record.as_ref(), src.span, ctx));
+                        sep = Sep::After;
+                        continue;
+                    }
                     // A temporal column serializes from its `<col>_raw`
                     // storage reader (the stored ISO-8601 text), NOT the
                     // parsing `<col>` reader. Other columns (Integer,
@@ -1220,12 +1254,24 @@ fn emit_pairs(
                 // `encode_value` would otherwise render `Time#to_s`
                 // ("2026-09-12 13:26:25 UTC") where Rails renders
                 // `xmlschema(3)` ("2026-09-12T13:26:25.149Z").
-                let encoded = temporal_column_read(value, ctx)
-                    .and_then(|(obj, col)| temporal_column_json(&obj, &col, ctx.arg_columns.get(&col)?))
-                    .unwrap_or_else(|| {
-                        json_builder_encode(rewrite_h_escape(&rewrite_route_helpers(value, ctx)))
-                    });
-                out.push(io_append_call(&ctx.accumulator, encoded));
+                // A record, or records: as `as_json` writes them.
+                if let Some(record) = ctx.span_types.get(&value.span).and_then(|t| ctx.record_shapes.of_ty(t)) {
+                    let value = rewrite_h_escape(&rewrite_route_helpers(value, ctx));
+                    out.extend(record_value_or_refusal(value, Some(&record), src.span, ctx));
+                } else if let Some(record) = association_read(value, ctx) {
+                    // An association reader the analyzer left untyped
+                    // (a polymorphic one): its records as the reader
+                    // on the owner's model answers them.
+                    let value = rewrite_h_escape(&rewrite_route_helpers(value, ctx));
+                    out.extend(record_value_or_refusal(value, record.as_ref(), src.span, ctx));
+                } else {
+                    let encoded = temporal_column_read(value, ctx)
+                        .and_then(|(obj, col)| temporal_column_json(&obj, &col, ctx.arg_columns.get(&col)?))
+                        .unwrap_or_else(|| {
+                            json_builder_encode(rewrite_h_escape(&rewrite_route_helpers(value, ctx)))
+                        });
+                    out.push(io_append_call(&ctx.accumulator, encoded));
+                }
                 sep = Sep::After;
             }
             JbStmt::PairPartial { key, partial_path, arg, as_name } => {
@@ -1293,12 +1339,21 @@ fn emit_pairs(
                 sep = emit_merged_partial(partial_call(partial_path, locals, ctx), ctx, out, sep);
             }
             JbStmt::PartialRecord { arg, as_name } => {
-                match record_partial_path(arg, as_name.as_ref(), &ctx.resource_dir, &ctx.models) {
-                    Some((partial_path, local)) => {
-                        let call = partial_call(&partial_path, vec![(local, (*arg).clone())], ctx);
+                match record_partial_path(arg, as_name.as_ref(), &ctx.resource_dir, &ctx.record_sites) {
+                    Ok(branches) => {
+                        let (stmts, call) = record_partial_call(arg, &branches, ctx);
+                        out.extend(stmts);
                         sep = emit_merged_partial(call, ctx, out, sep);
                     }
-                    None => out.push(io_append_lit(&ctx.accumulator, "")),
+                    // Refused visibly: rendering nothing here was a 200
+                    // with the record's keys missing.
+                    Err(why) => {
+                        crate::ingest::survey::record(&crate::ingest::IngestError::Unsupported {
+                            file: String::new(),
+                            message: format!("jbuilder: `json.partial!` of a record whose partial is not statically known: {}", why.detail()),
+                        });
+                        out.push(unsupported_stmt(src.span, "jbuilder partial! of a record", &why.detail()));
+                    }
                 }
             }
             JbStmt::ArrayPartial { .. } | JbStmt::ArrayBlock { .. } | JbStmt::ArrayExtract { .. } => {
@@ -1892,7 +1947,7 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
             // caching, so it renders the same partial. Any other
             // option is a local for the partial, which the call has no
             // way to pass, so that form stays Unknown.
-            if block.is_none() && local_name(path_arg).is_some() {
+            if block.is_none() && record_partial::is_record_position(path_arg) {
                 let options_ok = match args.len() {
                     1 => true,
                     2 => extract_hash(&args[1]).is_some_and(|opts| {
@@ -1933,7 +1988,9 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
                 let Some(partial_path) = hash_get_string(opts, "partial") else {
                     return JbStmt::Unknown;
                 };
-                return match partial_locals(opts, &["partial", "as", "collection", "cached"]) {
+                return match partial_locals(opts, &["partial", "as", "collection", "cached"])
+                    .and_then(|locals| bind_object_local(locals, opts, &partial_path))
+                {
                     Some(locals) => JbStmt::Partial { partial_path, locals },
                     None => JbStmt::Unknown,
                 };
@@ -1954,7 +2011,9 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
                     {
                         return JbStmt::ArrayPartial { collection, partial_path, item_var };
                     }
-                    match partial_locals(opts, &["as"]) {
+                    match partial_locals(opts, &["as"])
+                        .and_then(|locals| bind_object_local(locals, opts, &partial_path))
+                    {
                         Some(locals) => locals,
                         None => return JbStmt::Unknown,
                     }
@@ -2121,7 +2180,116 @@ fn emit_array_extract(collection: &Expr, attrs: &[Symbol], ctx: &Ctx) -> Vec<Exp
     let mut inner = ctx.clone();
     inner.arg_name = item.as_str().to_string();
     inner.arg_columns = ctx.model_columns.get(&model).cloned().unwrap_or_default();
+    inner.arg_model = Some(model);
     emit_array_block(collection, &item, &body, &inner)
+}
+
+/// The records `value` reads when it is an association reader on a
+/// record of a known model (`@tag.thing`): `Some(None)` for a reader
+/// whose class the row decides and the app gives no closed set of.
+fn association_read(value: &Expr, ctx: &Ctx) -> Option<Option<RecordValue>> {
+    let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*value.node else {
+        return None;
+    };
+    if !args.is_empty() {
+        return None;
+    }
+    let owner = record_model_of(recv, ctx)?;
+    ctx.record_shapes.reader(&owner, method)
+}
+
+/// The model of the record `obj` is: its static type, else the
+/// template argument's model when `obj` is that argument.
+fn record_model_of(obj: &Expr, ctx: &Ctx) -> Option<String> {
+    match ctx.span_types.get(&obj.span).and_then(|t| ctx.record_shapes.of_ty(t)) {
+        Some(RecordValue::One(m)) => Some(m),
+        Some(RecordValue::Many(_) | RecordValue::OneOf(_)) => None,
+        None => ctx.arg_model.clone().filter(|_| obj_is_named_local(obj, &ctx.arg_name)),
+    }
+}
+
+/// The JSON of `value`, a record or records of one model, as Active
+/// Record's `as_json` writes it: the object `json.extract!(record,
+/// *attributes)` builds (`null` for a nil record), or an array of
+/// them. A record of a closed set of models is written by a switch on
+/// its class, each branch its model's object, raising for a class
+/// outside the set. Refused, with the reason, when a model's `as_json`
+/// is not its columns or the record's class is not known (`record` is
+/// None: a polymorphic reader with no recorded targets).
+fn record_value_or_refusal(value: Expr, record: Option<&RecordValue>, span: Span, ctx: &Ctx) -> Vec<Expr> {
+    let refuse = |why: &str| {
+        crate::ingest::survey::record(&crate::ingest::IngestError::Unsupported {
+            file: String::new(),
+            message: format!("jbuilder: a record as a value, which Jbuilder encodes with `as_json`: {why}"),
+        });
+        vec![unsupported_stmt(span, "jbuilder record value", why)]
+    };
+    let Some(record) = record else {
+        return refuse("a polymorphic association's record is of the class its row names, and the app declares no closed set of them");
+    };
+    // `json.extract!(<var>, *attributes)` for `model`, with the context
+    // that writes it.
+    let extract = |var: &Symbol, model: &str| -> Result<(Expr, Ctx), &'static str> {
+        let attrs = ctx.record_shapes.attributes(model)?;
+        let mut args = vec![var_ref(var.clone())];
+        args.extend(attrs.iter().map(|a| {
+            Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Sym { value: a.clone() } })
+        }));
+        let json = send(None, "json", Vec::new(), None, false);
+        let mut inner = ctx.clone();
+        inner.arg_name = var.as_str().to_string();
+        inner.arg_columns = ctx.model_columns.get(model).cloned().unwrap_or_default();
+        inner.arg_model = Some(model.to_string());
+        Ok((send(Some(json), "extract!", args, None, true), inner))
+    };
+    let models: Vec<&str> = match record {
+        RecordValue::Many(model) => {
+            let item = Symbol::from("__item");
+            return match extract(&item, model) {
+                Ok((stmt, inner)) => emit_array_block(&value, &item, &stmt, &inner),
+                Err(why) => refuse(why),
+            };
+        }
+        RecordValue::One(model) => vec![model.as_str()],
+        RecordValue::OneOf(models) => models.iter().map(String::as_str).collect(),
+    };
+    let n = ctx.temps.get();
+    ctx.temps.set(n + 1);
+    let rec = Symbol::from(format!("__rec{n}"));
+    let object = |model: &str| -> Result<Expr, &'static str> {
+        let (stmt, inner) = extract(&rec, model)?;
+        Ok(seq(emit_object_filled(&[&stmt], &inner).0))
+    };
+    let mut branch = match record {
+        // One model: its object, the class unchecked as before.
+        RecordValue::One(model) => match object(model) {
+            Ok(o) => o,
+            Err(why) => return refuse(why),
+        },
+        _ => {
+            let mut switch = raise_outside_set("jbuilder record value", &models);
+            for model in models.iter().rev() {
+                match object(model) {
+                    Ok(o) => switch = is_a_branch(&rec, model, o, switch),
+                    Err(why) => return refuse(why),
+                }
+            }
+            switch
+        }
+    };
+    branch = Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond: send(Some(var_ref(rec.clone())), "nil?", Vec::new(), None, false),
+            then_branch: io_append_lit(&ctx.accumulator, "null"),
+            else_branch: branch,
+        },
+    );
+    let bind = Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign { target: LValue::Var { id: VarId(0), name: rec }, value },
+    );
+    vec![bind, branch]
 }
 
 fn is_json_receiver(recv: &Expr) -> bool {
@@ -2215,6 +2383,36 @@ fn partial_locals<'a>(entries: &'a [(Expr, Expr)], skip: &[&str]) -> Option<Vec<
         Some(_) if out.len() == 1 => partial_locals(extract_hash(out[0].1)?, &[]),
         Some(_) => None,
     }
+}
+
+/// The locals of a one-partial render with an `object:` option: Action
+/// View also binds the object under `as:`, or under the partial's own
+/// name (`gadget` for `gadgets/gadget`), as it binds the record of
+/// `json.partial!(record)`. `object` stays a local too
+/// (`local_assigns[:object]` is set in Rails). None when `as:` is not
+/// a literal name.
+fn bind_object_local<'a>(
+    mut locals: Vec<(Symbol, &'a Expr)>,
+    opts: &'a [(Expr, Expr)],
+    partial_path: &str,
+) -> Option<Vec<(Symbol, &'a Expr)>> {
+    let Some(object) = hash_get_value(opts, "object") else {
+        return Some(locals);
+    };
+    let name = match hash_get_value(opts, "as") {
+        None => {
+            let base = partial_path.rsplit('/').next().unwrap_or(partial_path);
+            Symbol::from(base.trim_start_matches('_'))
+        }
+        Some(v) => match &*v.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => value.clone(),
+            _ => Symbol::from(string_literal(v)?.as_str()),
+        },
+    };
+    if !locals.iter().any(|(k, _)| *k == name) {
+        locals.push((name, object));
+    }
+    Some(locals)
 }
 
 fn string_literal(e: &Expr) -> Option<String> {
@@ -2332,7 +2530,7 @@ fn emit_array_block(collection: &Expr, item_var: &Symbol, body: &Expr, ctx: &Ctx
             filled = always;
             exprs.extend(object);
             let mut result = var_ref(Symbol::from(inner.accumulator.as_str()));
-            result.hint = Some(IrHint::StringBuilderResult);
+            result.set_hint(Some(IrHint::StringBuilderResult));
             exprs.push(result);
             seq(exprs)
         }
@@ -2403,56 +2601,100 @@ fn emit_array_block(collection: &Expr, item_var: &Symbol, body: &Expr, ctx: &Ctx
     ]
 }
 
-/// The partial path `json.partial! <local>` renders: Active Model's
+/// The partial path `json.partial!(record, …)` renders: Active Model's
 /// `to_partial_path`, `"<plural>/<singular>"` of the record's model
 /// (`widgets/widget` for a `Widget`), under the namespace of the
 /// template's own directory (`admin/widgets/widget` from
 /// `admin/widgets/`), which is Action View's
 /// `prefix_partial_path_with_controller_namespace` default. The model
-/// is the one the local is named after, the same name-to-model reading
-/// the template's parameters get (`ivar_ty`). Unresolved when the
-/// local names no model of the app, or when `as:` names the partial's
-/// local something other than the model's singular: the lowered partial
-/// takes its record under that singular, and a partial reading the
-/// `as:` name would not find it.
+/// is the record's static type (`record_partial::record_sites`), not
+/// the name of the local that holds it. Unresolved when that type is
+/// not one model, or when `as:` names the partial's local something
+/// other than the model's singular: the lowered partial takes its
+/// record under that singular, and a partial reading the `as:` name
+/// would not find it.
+///
+/// A record of a closed set of models (a union's members, a
+/// polymorphic reader's targets) has one `(path, local, model)` per
+/// member, which `record_partial_call` switches over.
 fn record_partial_path(
     arg: &Expr,
     as_name: Option<&Symbol>,
     resource_dir: &str,
-    models: &std::collections::HashSet<String>,
-) -> Option<(String, Symbol)> {
-    let name = local_name(arg)?;
-    let model = crate::naming::camelize(name.as_str());
-    if !models.contains(&model) {
-        return None;
-    }
-    let singular = crate::naming::snake_case(&model);
-    if as_name.is_some_and(|a| a.as_str() != singular) {
-        return None;
-    }
-    let path = format!("{}/{}", crate::naming::pluralize_snake(&model), singular);
-    let path = match resource_dir.rsplit_once('/') {
-        Some((namespace, _)) => format!("{namespace}/{path}"),
-        None => path,
-    };
-    Some((path, Symbol::from(singular)))
+    sites: &record_partial::RecordSites,
+) -> Result<RecordBranches, Unresolved> {
+    let record = sites.get(&arg.span).cloned().unwrap_or(Err(Unresolved::Unknown))?;
+    let branches = record
+        .names
+        .into_iter()
+        .map(|model| {
+            let (path, element) = record_partial::model_partial_path(&model, resource_dir);
+            if let Some(a) = as_name.filter(|a| **a != element) {
+                return Err(Unresolved::As { model, as_name: a.clone() });
+            }
+            Ok((path, element, model))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(RecordBranches { branches, switched: record.switched })
 }
 
-/// The name of a bare local: a `Var`, or the receiverless, argless,
-/// blockless `Send` prism gives a partial's locals. An ivar counts under
-/// its own name: the template walk reads it as that local
-/// (`rewrite_ivars_to_locals`), and the render graph, which walks the
-/// template as written (`render_edges`), has to find the same partial
-/// for `json.partial! @widget`, or the template's ivar closure misses
-/// the partial's ivars and its call passes them as undefined names.
-fn local_name(e: &Expr) -> Option<Symbol> {
-    match &*e.node {
-        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => Some(name.clone()),
-        ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
-            Some(method.clone())
-        }
-        _ => None,
+/// The `(path, local, model)` of each model a record may be, and
+/// whether its class is switched on.
+struct RecordBranches {
+    branches: Vec<(String, Symbol, String)>,
+    switched: bool,
+}
+
+/// The statements and the call that render `arg`'s partial. One model:
+/// its partial's call. A closed set: the record bound once and a switch
+/// on its class, each branch calling its model's partial, and a raise
+/// for a record of any other class, whose partial was not lowered:
+///
+///   __rec0 = <arg>
+///   __part0 = ""
+///   if __rec0.is_a?(Widget) then __part0 = Views::Widgets.widget_json(__rec0)
+///   elsif __rec0.is_a?(Gadget) then __part0 = Views::Gadgets.gadget_json(__rec0)
+///   else raise("…") end
+fn record_partial_call(arg: &Expr, record: &RecordBranches, ctx: &Ctx) -> (Vec<Expr>, Expr) {
+    let branches = &record.branches;
+    if let ([(path, local, _)], false) = (branches.as_slice(), record.switched) {
+        return (Vec::new(), partial_call(path, vec![(local.clone(), arg.clone())], ctx));
     }
+    let n = ctx.temps.get();
+    ctx.temps.set(n + 1);
+    let rec = Symbol::from(format!("__rec{n}"));
+    let part = Symbol::from(format!("__part{n}"));
+    let assign = |name: &Symbol, value: Expr| {
+        Expr::new(Span::synthetic(), ExprNode::Assign { target: LValue::Var { id: VarId(0), name: name.clone() }, value })
+    };
+    let models: Vec<&str> = branches.iter().map(|(_, _, m)| m.as_str()).collect();
+    let mut switch = raise_outside_set("jbuilder partial! of a record", &models);
+    for (path, local, model) in branches.iter().rev() {
+        let call = partial_call(path, vec![(local.clone(), var_ref(rec.clone()))], ctx);
+        switch = is_a_branch(&rec, model, assign(&part, call), switch);
+    }
+    let stmts = vec![assign(&rec, arg.clone()), assign(&part, lit_str(String::new())), switch];
+    (stmts, var_ref(part))
+}
+
+/// `if <rec>.is_a?(<Model>) then <then> else <otherwise> end`.
+fn is_a_branch(rec: &Symbol, model: &str, then: Expr, otherwise: Expr) -> Expr {
+    let class = const_path(&model.split("::").map(Symbol::from).collect::<Vec<_>>());
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond: send(Some(var_ref(rec.clone())), "is_a?", vec![class], None, true),
+            then_branch: then,
+            else_branch: otherwise,
+        },
+    )
+}
+
+/// The `else` of a switch over a closed set of models: a record of a
+/// class outside it raises rather than render a shape nobody lowered.
+fn raise_outside_set(construct: &str, models: &[&str]) -> Expr {
+    let message = format!("roundhouse: {construct} of a class other than {}", models.join(", "));
+    send(None, "raise", vec![lit_str(message)], None, true)
 }
 
 fn emit_partial_call(partial_path: &str, locals: Vec<(Symbol, Expr)>, ctx: &Ctx) -> Vec<Expr> {
@@ -2551,7 +2793,7 @@ fn partial_params(app: &App) -> PartialParams {
     let known_models: Vec<String> =
         app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
     let views: Vec<&View> = app.views.iter().filter(|v| v.jbuilder && !v.analysis_only).collect();
-    let edges = render_edges(&views, &known_models);
+    let edges = render_edges(&views, &app.models);
     let closures = ivar_closures(&views, &edges);
     let mut bound: std::collections::HashMap<(String, String), Vec<Symbol>> =
         std::collections::HashMap::new();
@@ -2665,8 +2907,7 @@ fn partial_always_filled(partial_path: &str, ctx: &Ctx) -> bool {
 /// local names the render binds.
 type RenderSites = Vec<((String, String), Option<Symbol>, Vec<Symbol>)>;
 
-fn render_edges(views: &[&View], known_models: &[String]) -> Vec<(Symbol, RenderSites)> {
-    let models: std::collections::HashSet<String> = known_models.iter().cloned().collect();
+fn render_edges(views: &[&View], models: &[crate::dialect::Model]) -> Vec<(Symbol, RenderSites)> {
     let mut partial_views: std::collections::HashMap<(String, String), Symbol> =
         std::collections::HashMap::new();
     for v in views {
@@ -2681,7 +2922,8 @@ fn render_edges(views: &[&View], known_models: &[String]) -> Vec<(Symbol, Render
         .map(|v| {
             let (dir, _) = split_view_name(v.name.as_str());
             let mut sites = Vec::new();
-            collect_partial_sites(&v.body, dir, &models, &mut sites);
+            let records = record_partial::record_sites(&v.body, models);
+            collect_partial_sites(&v.body, dir, &records, &mut sites);
             let sites = sites
                 .into_iter()
                 .map(|(key, names)| {
@@ -2791,10 +3033,8 @@ fn ivar_closures(
 /// partials it renders, so a partial is typed with its renderers'
 /// ivars as an ERB partial is.
 pub(crate) fn jbuilder_render_edges(app: &App) -> Vec<(Symbol, Vec<Symbol>)> {
-    let known_models: Vec<String> =
-        app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
     let views: Vec<&View> = app.views.iter().filter(|v| v.jbuilder && !v.analysis_only).collect();
-    render_edges(&views, &known_models)
+    render_edges(&views, &app.models)
         .into_iter()
         .map(|(name, sites)| (name, sites.into_iter().filter_map(|(_, t, _)| t).collect()))
         .collect()
@@ -2806,9 +3046,8 @@ pub(crate) fn jbuilder_ivar_closures(
     views: &[View],
     models: &[crate::dialect::Model],
 ) -> std::collections::HashMap<Symbol, Vec<Symbol>> {
-    let known_models: Vec<String> = models.iter().map(|m| m.name.0.as_str().to_string()).collect();
     let views: Vec<&View> = views.iter().filter(|v| v.jbuilder && !v.analysis_only).collect();
-    let edges = render_edges(&views, &known_models);
+    let edges = render_edges(&views, models);
     ivar_closures(&views, &edges)
 }
 
@@ -2840,7 +3079,7 @@ fn collect_local_names(e: &Expr, out: &mut std::collections::HashSet<Symbol>) {
 fn collect_partial_sites(
     e: &Expr,
     dir: &str,
-    models: &std::collections::HashSet<String>,
+    records: &record_partial::RecordSites,
     out: &mut Vec<((String, String), Vec<Symbol>)>,
 ) {
     if let ExprNode::Send { recv: Some(recv), block: None, .. } = &*e.node {
@@ -2852,7 +3091,11 @@ fn collect_partial_sites(
                 JbStmt::ArrayPartial { partial_path, item_var, .. } => Some((partial_path, vec![item_var])),
                 JbStmt::PairPartial { partial_path, as_name, .. } => Some((partial_path, vec![as_name])),
                 JbStmt::PartialRecord { arg, as_name } => {
-                    record_partial_path(arg, as_name.as_ref(), dir, models).map(|(p, l)| (p, vec![l]))
+                    for (path, local, _) in record_partial_path(arg, as_name.as_ref(), dir, records).map(|r| r.branches).unwrap_or_default() {
+                        let (mod_path, method) = partial_target(&path, dir);
+                        out.push((partial_key(&mod_path, &method), vec![local]));
+                    }
+                    None
                 }
                 _ => None,
             };
@@ -2862,7 +3105,7 @@ fn collect_partial_sites(
             }
         }
     }
-    e.node.for_each_child(&mut |c| collect_partial_sites(c, dir, models, out));
+    e.node.for_each_child(&mut |c| collect_partial_sites(c, dir, records, out));
 }
 
 /// The `local_assigns[:x]` keys a template reads, in first-seen order.
@@ -3179,21 +3422,21 @@ fn assign_accumulator_string_new(name: &str) -> Expr {
             value: new_call,
         },
     );
-    e.hint = Some(IrHint::StringBuilderInit);
+    e.set_hint(Some(IrHint::StringBuilderInit));
     e
 }
 
 fn io_append_lit(accumulator: &str, s: &str) -> Expr {
     let recv = var_ref(Symbol::from(accumulator));
     let mut e = send(Some(recv), "<<", vec![lit_str(s.to_string())], None, false);
-    e.hint = Some(IrHint::StringBuilderAppend);
+    e.set_hint(Some(IrHint::StringBuilderAppend));
     e
 }
 
 fn io_append_call(accumulator: &str, call: Expr) -> Expr {
     let recv = var_ref(Symbol::from(accumulator));
     let mut e = send(Some(recv), "<<", vec![call], None, false);
-    e.hint = Some(IrHint::StringBuilderAppend);
+    e.set_hint(Some(IrHint::StringBuilderAppend));
     e
 }
 

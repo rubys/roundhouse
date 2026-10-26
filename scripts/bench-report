@@ -1061,7 +1061,9 @@ if sockets && !sockets.empty?
                  ok = r['delivered'] == r['expected']
                  %(#{fmt_int(r['delivered'])}/#{fmt_int(r['expected'])}#{ok ? '' : ' <span class="caveat">short</span>'})
                else '—' end
-      html << %(<tr><td><strong>#{tgt}</strong></td><td class="num">#{fmt_int(n)}</td>) +
+      shape = r['shape'].to_s.strip
+      shape = shape.empty? ? '' : %(<br><span class="legend">#{shape.gsub('&', '&amp;').gsub('<', '&lt;').gsub('>', '&gt;')}</span>)
+      html << %(<tr><td><strong>#{tgt}</strong>#{shape}</td><td class="num">#{fmt_int(n)}</td>) +
               %(<td class="num">#{r['subscribers_per_room'] || '—'}</td>) +
               %(<td class="num">#{r['storm_s'] ? "#{fmt_dec(r['storm_s'], 1)} s" : '—'}</td>) +
               %(<td class="num">#{r['idle_cores'] ? fmt_dec(r['idle_cores'], 3) : '—'}</td>) +

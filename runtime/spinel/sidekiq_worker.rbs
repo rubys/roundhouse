@@ -1,0 +1,6 @@
+# Typing for the façade at runtime/spinel/sidekiq_worker.rb. Dropped
+# with the façade when a tree on :sidekiq gets the real worker.
+module SidekiqWorker
+  def self.prepare_pool: (Array[String] argv) -> nil
+  def self.cli: (Array[String] argv) -> nil
+end

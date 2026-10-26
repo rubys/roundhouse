@@ -23,7 +23,7 @@
 use roundhouse::erb::compile_erb;
 
 fn parse_errors(ruby: &str) -> Vec<String> {
-    ruby_prism::parse(ruby.as_bytes()).errors().map(|e| e.message().to_string()).collect()
+    ruby_prism::parse(ruby.as_bytes()).errors().map(|e| String::from_utf8_lossy(e.message()).into_owned()).collect()
 }
 
 #[test]

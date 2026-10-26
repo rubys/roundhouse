@@ -108,14 +108,12 @@ fn ordered_reopenings_parent_precedence_and_rooted_modules_match_scans() {
     let expected = positions(&app);
     let parent = outer_class_parent("Same", &app, &app.library_classes);
     assert!(parent.is_none(), "first model's None parent wins over library classes");
-    let lexical = lexical_parent("Outer::Leaf", &ClassId(Symbol::from("Base")), &app, &app.library_classes);
     let bare = first_module_bare_named("Hook", &app, &app.library_classes).unwrap() as *const _;
     reset();
     let _guard = install_lookup_indexes(&app);
     assert_eq!(positions(&app), expected);
     assert_eq!(outer_class_parent("Same", &app, &app.library_classes), parent);
     assert_eq!(outer_class_parent("Missing", &app, &app.library_classes), None);
-    assert_eq!(lexical_parent("Outer::Leaf", &ClassId(Symbol::from("Base")), &app, &app.library_classes), lexical);
     assert_eq!(first_module_bare_named("Hook", &app, &app.library_classes).unwrap() as *const _, bare);
     assert_eq!(first_module_bare_named("Hook", &app, &app.library_classes).unwrap() as *const _, bare);
     assert_eq!(BARE_MODULE_BUILDS.get(), 1);

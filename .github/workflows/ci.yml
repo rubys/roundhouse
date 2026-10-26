@@ -26,9 +26,11 @@ on:
         value: ${{ jobs.compact-required.outputs.passed == 'true' && jobs.assemble-site.outputs.ready == 'true' }}
 
 # Separate from the full-ci caller's lock: workflow_call inherits its context.
-# Push-to-main is Ruby+Spinel, not the extra-language matrix; cancel
-# superseded SHAs so merge trains do not stack. Scheduled/manual full-ci
-# is the extra-SDK ledger and keeps its own lock.
+# Push-to-main is the Ruby floor plus path-owned lanes (Spinel when the
+# diff owns it); the broad Spinel suite and extra-language matrix ride
+# Full validation. Cancel superseded SHAs so merge trains do not stack.
+# Scheduled/manual full-ci is the extra-SDK + broad Spinel ledger and
+# keeps its own lock.
 concurrency:
   group: validation-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
@@ -54,15 +56,16 @@ env:
   # Mastodon (AGPL) is the scale case.
   MASTODON_SHA: 163f96cee4dea23365bff9b433871e68d20d9ee7
   RUBY_BENCH_SHA: d771f81f1ce9db51376e03ca7b8e6a83160556d4
-  CAMPFIRE_SHA: 11d3fb9ce01faad3384807563053ba86126f747e
+  CAMPFIRE_SHA: c8f74a0b0e1e93146c4d7c1d6ac80c9079682216
   # rubys/spinel-pg, the PostgreSQL driver the Spinel Db shim
   # (runtime/spinel/db_pg.rb) is tested against in spinel-framework.
   # Pinned like the apps above; bump deliberately.
   SPINEL_PG_SHA: f48735c91aa8cde258299e1189957972667a0d1f
-  # rubys/spinel-redis, the Redis client the Sidekiq push runs on in a
-  # Spinel tree, tested against a live Redis in sidekiq-live. A tag, the
-  # same ref the emitted spin.toml pins (src/project.rs); bump both together.
-  SPINEL_REDIS_REF: v0.2.0
+  # spinel-redis, the Redis client the Sidekiq push runs on in a Spinel
+  # tree, tested against a live Redis in sidekiq-live. The same repository
+  # and tag the emitted spin.toml pins (src/project.rs); bump both together.
+  SPINEL_REDIS_REPO: rubys/spinel-redis
+  SPINEL_REDIS_REF: v0.3.1
 
 jobs:
   plan:
@@ -82,7 +85,6 @@ jobs:
       site: ${{ steps.plan.outputs.site }}
       publish: ${{ steps.plan.outputs.publish }}
       spinel-revision: ${{ steps.plan.outputs.spinel-revision }}
-      campfire-latest-revision: ${{ steps.plan.outputs.campfire-latest-revision }}
       spinel-tests: ${{ steps.plan.outputs.spinel-tests }}
       spinel-framework-shards: ${{ steps.plan.outputs.spinel-framework-shards }}
       spinel-timings: ${{ steps.plan.outputs.spinel-timings }}
@@ -277,6 +279,21 @@ jobs:
           set -euo pipefail
           target/debug/roundhouse check --continue fixtures/store 2>&1 | tee /tmp/store-check.txt
           grep -E "^roundhouse-check: .* 0 error\(s\), 0 warning\(s\), 0 gap-attributed note\(s\), 0 survey gap\(s\)" /tmp/store-check.txt
+      # Use the actual dev profile and reuse the Store library build.
+      # These checks also run when the Store analysis result is reused.
+      - name: Build the unoptimized development bench driver
+        run: |
+          python3 scripts/ci-resources.py --out "$RUNNER_TEMP/store-check-resources/dev-build" -- \
+            cargo build --locked --profile dev --bin emit_preview
+      - name: Emit every bench lane in the debug profile (scripts/bench's shape)
+        run: |
+          python3 scripts/ci-resources.py --out "$RUNNER_TEMP/store-check-resources/bench" -- \
+            bash -euo pipefail -c "
+              test -x target/debug/emit_preview
+              for target in typescript crystal rust python elixir go kotlin swift csharp; do
+                target/debug/emit_preview --target \"\$target\" fixtures/real-blog >/dev/null
+              done
+            "
       - name: Record actual successful execution
         id: execution
         if: success() && steps.reuse.outputs.eligible == 'true' && steps.build.outcome == 'success' && steps.check.outcome == 'success'
@@ -291,6 +308,13 @@ jobs:
           path: ${{ steps.reuse.outputs.bundle }}
           retention-days: 7
           if-no-files-found: error
+      - name: Upload Store bench resource samples
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: store-check-resources-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/store-check-resources/
+          if-no-files-found: ignore
 
   # -------------------------------------------------------------------
   # Build the in-browser compiler wasm (roundhouse_wasm.wasm) from source
@@ -312,41 +336,9 @@ jobs:
     # build-site → smoke → deploy tail behind it (2026-08-19).
     timeout-minutes: 15
 
-    env:
-      WASI_SDK_VERSION: "33.0"
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rust
-        with:
-          targets: wasm32-wasip1
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: wasm
-      - name: Install libclang (host bindgen)
-        timeout-minutes: 8
-        run: |
-          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libclang-dev
-      - name: Cache WASI SDK
-        id: wasi-sdk
-        uses: actions/cache@v6
-        with:
-          path: /opt/wasi-sdk
-          key: wasi-sdk-${{ env.WASI_SDK_VERSION }}-x86_64-linux
-      - name: Install WASI SDK
-        if: steps.wasi-sdk.outputs.cache-hit != 'true'
-        run: |
-          ver="${WASI_SDK_VERSION}"; major="${ver%%.*}"
-          url="https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${major}/wasi-sdk-${ver}-x86_64-linux.tar.gz"
-          curl -fsSL "$url" -o /tmp/wasi-sdk.tar.gz
-          sudo mkdir -p /opt/wasi-sdk
-          sudo tar -xzf /tmp/wasi-sdk.tar.gz -C /opt/wasi-sdk --strip-components=1
-      - name: Build roundhouse_wasm.wasm
-        env:
-          WASI_SDK_PATH: /opt/wasi-sdk
-          # Stamped into the wasm's `version` export, which /ide/ puts on
-          # its copyable summary line.
-          ROUNDHOUSE_COMMIT: ${{ github.sha }}
-        run: cargo build --release --target wasm32-wasip1 --manifest-path wasm/Cargo.toml
+      - uses: ./.github/actions/build-wasm
       - name: Upload wasm artifact
         uses: actions/upload-artifact@v7
         with:
@@ -523,23 +515,8 @@ jobs:
       - name: Check documentation tests
         run: |
           python3 scripts/ci-resources.py --out "$RUNNER_TEMP/unit-build-resources/docs" -- \
-            cargo test --locked --doc
-      # Test-profile binaries use opt-level=1. Rebuild this driver in the
-      # actual dev profile so the independent debug stack gate stays honest.
-      # Run after archiving: the test archive retains its own helper binaries.
-      - name: Build the unoptimized development bench driver
-        run: |
-          python3 scripts/ci-resources.py --out "$RUNNER_TEMP/unit-build-resources/dev-build" -- \
-            cargo build --locked --profile dev --bin emit_preview
-      - name: Emit every bench lane in the debug profile (scripts/bench's shape)
-        run: |
-          python3 scripts/ci-resources.py --out "$RUNNER_TEMP/unit-build-resources/bench" -- \
-            bash -euo pipefail -c "
-              test -x target/debug/emit_preview
-              for target in typescript crystal rust python elixir go kotlin swift csharp; do
-                target/debug/emit_preview --target \"\$target\" fixtures/real-blog >/dev/null
-              done
-            "
+            cargo test --locked --doc \
+              --config 'profile.test.package.roundhouse.opt-level=0'
       - name: Upload current-run test bundle
         id: unit-tests
         uses: actions/upload-artifact@v7
@@ -601,7 +578,7 @@ jobs:
           "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips42
       - name: Install gems used by emitted Ruby and Campfire harness tests
         run: |
-          gem install --no-document minitest csv rails-html-sanitizer sqlite3 bcrypt rack ruby-vips markly
+          gem install --no-document minitest csv rails-html-sanitizer sqlite3 bcrypt rack ruby-vips markly faraday faraday-multipart faraday-retry retryable jwt
           gem install --no-document activerecord -v '~> 8.1.0'
       # Roundsnap's in-repo MRI gem is not a Cargo target. The default
       # `tests/roundsnap_delivery.rs` case rides the archived partitions;
@@ -901,7 +878,7 @@ jobs:
       - name: Install Playwright Chromium (+ system deps)
         run: $GITHUB_WORKSPACE/scripts/ci-playwright-install
         working-directory: tests/browser_smoke
-      - name: Serve wasm/ and verify the /ide/ + /playground/ + /studio/ pages
+      - name: Serve wasm/ and verify the /ide/ + /playground/ + /studio/ + /fractal/ pages
         run: |
           set -euo pipefail
           (cd wasm && python3 -m http.server 8099 >/tmp/ide-server.log 2>&1 &)
@@ -914,6 +891,8 @@ jobs:
           # wasm/lib/test-runtime.mjs — the in-memory Db shim that once drifted
           # off the `_opt` seam unseen because nothing here ran it.
           (cd wasm/studio && node verify-studio.mjs)
+          # Fractal's pass explorer, over the same worker's fractal_stages export.
+          (cd wasm/fractal && node verify-fractal.mjs)
 
   # Per-target framework-test conformance gate for the spinel AOT
   # target. Same emit pipeline as framework-tests-ruby, but each
@@ -1006,6 +985,10 @@ jobs:
           repository: rubys/spinel-pg
           ref: ${{ env.SPINEL_PG_SHA }}
           path: spinel-pg
+      # Not the runner's system Ruby: a suite compares the binary with CRuby, and the baseline's messages are 3.4's
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ env.MRI_RUBY }}
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
@@ -1061,9 +1044,10 @@ jobs:
           STATUS: ${{ job.status }}
         run: echo "shard-${{ matrix.shard }}=$STATUS" >> "$GITHUB_OUTPUT"
 
-  # Sidekiq pushes against a real Redis (tests/sidekiq_push_live.rs): the
-  # push runtime over redis-rb under CRuby, and over spinel-redis compiled
-  # by Spinel, each read back through real Sidekiq's API. Planned only
+  # Sidekiq pushes and the worker role against a real Redis
+  # (tests/sidekiq_push_live.rs, tests/sidekiq_worker_live.rs): the
+  # runtime over redis-rb under CRuby, and over spinel-redis compiled by
+  # Spinel, each read back through real Sidekiq's API. Planned only
   # when the push runtime, its client or the gate changes. Advisory like
   # the other Spinel jobs, since the Spinel half tracks spinel-build.
   sidekiq-live:
@@ -1088,7 +1072,7 @@ jobs:
       - name: Check out spinel-redis (pinned)
         uses: actions/checkout@v7
         with:
-          repository: rubys/spinel-redis
+          repository: ${{ env.SPINEL_REDIS_REPO }}
           ref: ${{ env.SPINEL_REDIS_REF }}
           path: spinel-redis
       - uses: ruby/setup-ruby@v1
@@ -1113,7 +1097,9 @@ jobs:
         env:
           SIDEKIQ_LIVE_REDIS_URL: redis://127.0.0.1:6379/15
           SPINEL_REDIS_DIR: ${{ github.workspace }}/spinel-redis
-        run: cargo test --test sidekiq_push_live -- --ignored --nocapture --test-threads=1
+        run: |
+          cargo test --test sidekiq_push_live -- --ignored --nocapture --test-threads=1
+          cargo test --test sidekiq_worker_live -- --ignored --nocapture --test-threads=1
       - *advisory-result
 
   # Campfire conformance runs ONCE Campfire's own suite against a
@@ -1159,7 +1145,8 @@ jobs:
         with:
           name: roundhouse-debug-bin
           path: roundhouse-debug-bin
-      - name: Stage shared debug roundhouse binary
+      - &stage-roundhouse-debug-bin
+        name: Stage shared debug roundhouse binary
         run: |
           set -euo pipefail
           chmod +x roundhouse-debug-bin/roundhouse
@@ -1246,13 +1233,15 @@ jobs:
   # All GC modes execute the same program; compile it once and preserve
   # its executable bit in a tarball. The DB differential builds its own
   # scenario overlay and must not reuse this binary.
+  # Emission uses the same-run debug binary from build-roundhouse (no
+  # cargo rebuild): same contract as campfire-compare / conformance.
   campfire-spinel-build:
     name: campfire-spinel-build (binary)
-    needs: [spinel-build, plan]
-    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-spinel-build') && needs.spinel-build.outputs.artifact-id != '' }}
+    needs: [build-roundhouse, spinel-build, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-spinel-build') && needs.build-roundhouse.outputs.roundhouse-bin-artifact-id != '' && needs.spinel-build.outputs.artifact-id != '' }}
     runs-on: ubuntu-latest
     # 60m: apt alone can take 20m; fetch 5m + emit/build 25m still need room.
-    timeout-minutes: 60
+    timeout-minutes: 85
     continue-on-error: true
     outputs:
       artifact-id: ${{ steps.binary.outputs.artifact-id }}
@@ -1261,8 +1250,12 @@ jobs:
       MAKEFLAGS: "-j4"
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      # No setup-rust: emission uses the current-run debug binary.
+      - uses: actions/download-artifact@v8
+        with:
+          name: roundhouse-debug-bin
+          path: roundhouse-debug-bin
+      - *stage-roundhouse-debug-bin
       - uses: actions/download-artifact@v8
         with:
           name: spinel-dist
@@ -1288,10 +1281,12 @@ jobs:
           mkdir -p /tmp/campfire && tar -xzf /tmp/campfire.tar.gz -C /tmp/campfire --strip-components=1
       - name: Emit and build the comparison binary
         id: build
-        timeout-minutes: 25
+        # Spinel's one-String representation (its default since baea3e288) analyses campfire about 2.9x as long as the old one (matz/spinel#9258).
+        timeout-minutes: 55
         run: |
           set -o pipefail
-          cargo run --quiet --bin roundhouse -- --target spinel /tmp/campfire \
+          test -x "$ROUNDHOUSE_BIN"
+          "$ROUNDHOUSE_BIN" --target spinel /tmp/campfire \
             -o build/campfire-compare-spinel --allow-unsupported 2>&1 | tee campfire-emit.log
           make -C build/campfire-compare-spinel build 2>&1 | tee campfire-build.log
           tar -czf campfire-compare-spinel.tar.gz -C build campfire-compare-spinel
@@ -1495,10 +1490,12 @@ jobs:
   # A different app (the model-scenario overlay), so it needs its own
   # build, not the comparison binary. Start after the toolchain is ready
   # instead of serializing it behind the shared build and request walk.
+  # ROUNDHOUSE_BIN from build-roundhouse: campfire-db-differential's
+  # roundhouse_run must not fall back to cargo on CI.
   campfire-spinel-db:
     name: campfire-spinel-db (models)
-    needs: [spinel-build, plan]
-    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-spinel-db') && needs.spinel-build.outputs.artifact-id != '' }}
+    needs: [build-roundhouse, spinel-build, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-spinel-db') && needs.build-roundhouse.outputs.roundhouse-bin-artifact-id != '' && needs.spinel-build.outputs.artifact-id != '' }}
     outputs: &advisory-outputs
       execution: ${{ steps.result.outputs.status }}
     runs-on: ubuntu-latest
@@ -1516,8 +1513,12 @@ jobs:
       MAKEFLAGS: "-j4"
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      # No setup-rust: emission uses the current-run debug binary.
+      - uses: actions/download-artifact@v8
+        with:
+          name: roundhouse-debug-bin
+          path: roundhouse-debug-bin
+      - *stage-roundhouse-debug-bin
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ env.MRI_RUBY }}
@@ -1550,7 +1551,6 @@ jobs:
       - name: scripts/campfire-db-differential --spinel
         run: scripts/campfire-db-differential --spinel /tmp/campfire
       - *advisory-result
-
   campfire-conformance:
     needs: [build-roundhouse, plan]
     # Require the producer's debug binary artifact id so a missing
@@ -1567,21 +1567,7 @@ jobs:
         with:
           name: roundhouse-debug-bin
           path: roundhouse-debug-bin
-      - &stage-roundhouse-debug-bin
-        name: Stage shared debug roundhouse binary
-        run: |
-          set -euo pipefail
-          chmod +x roundhouse-debug-bin/roundhouse
-          test -x roundhouse-debug-bin/roundhouse
-          test -f roundhouse-debug-bin/identity.txt
-          echo "=== producer identity ==="
-          cat roundhouse-debug-bin/identity.txt
-          echo "=== consumer probe ==="
-          ./roundhouse-debug-bin/roundhouse --version
-          grep -q "source_sha=${GITHUB_SHA}" roundhouse-debug-bin/identity.txt
-          grep -q 'profile=debug' roundhouse-debug-bin/identity.txt
-          echo "ROUNDHOUSE_BIN=${GITHUB_WORKSPACE}/roundhouse-debug-bin/roundhouse" >> "$GITHUB_ENV"
-          echo "ROUNDHOUSE_BIN_TRACE=1" >> "$GITHUB_ENV"
+      - *stage-roundhouse-debug-bin
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ env.MRI_RUBY }}
@@ -1670,9 +1656,9 @@ jobs:
       # so the floor can be raised. The pin is `CAMPFIRE_SHA`.
       - name: Enforce the floor
         env:
-          # 579 tests passed, 84 files green.
-          FLOOR_TESTS: 579
-          FLOOR_FILES: 84
+          # 623 tests passed, 87 files green.
+          FLOOR_TESTS: 623
+          FLOOR_FILES: 87
         run: |
           set -euo pipefail
           tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/campfire-tally.txt)
@@ -1751,108 +1737,6 @@ jobs:
           path: /tmp/campfire-suite/summary.json
           if-no-files-found: warn
 
-  # campfire-latest: the same conformance run against basecamp/once-campfire
-  # MAIN as of this run (the planner resolves it once), on the Ruby that
-  # main's own `.ruby-version` names. ADVISORY, and deliberately so: the
-  # blocking job above stays on the pinned CAMPFIRE_SHA, because a moving
-  # input cannot own a ratchet and upstream churn must not turn unrelated
-  # PRs red (the spinel-framework rule). What this job buys is the
-  # same-day signal: every run says how far main is from the pin in gaps,
-  # errors and tests, so a bump starts from a measured list.
-  campfire-latest:
-    needs: [build-roundhouse, plan]
-    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'campfire-latest') && needs.build-roundhouse.outputs.roundhouse-bin-artifact-id != '' }}
-    outputs: *advisory-outputs
-    continue-on-error: true
-    runs-on: ubuntu-latest
-    timeout-minutes: 55
-    env:
-      CAMPFIRE_LATEST: ${{ needs.plan.outputs.campfire-latest-revision }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          name: roundhouse-debug-bin
-          path: roundhouse-debug-bin
-      - *stage-roundhouse-debug-bin
-      - name: Fetch once-campfire main
-        run: |
-          set -euo pipefail
-          test -n "$CAMPFIRE_LATEST"
-          curl -fsSL "https://codeload.github.com/basecamp/once-campfire/tar.gz/${CAMPFIRE_LATEST}" -o /tmp/campfire.tar.gz
-          mkdir -p campfire-latest
-          tar -xzf /tmp/campfire.tar.gz -C campfire-latest --strip-components=1
-          echo "campfire main: $CAMPFIRE_LATEST, Ruby $(cat campfire-latest/.ruby-version)"
-      # `default` reads campfire's own `.ruby-version` from working-directory.
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: default
-          working-directory: campfire-latest
-      - *campfire-suite-apt
-      - *campfire-suite-gems
-      - name: Survey the strict emit
-        id: survey
-        run: |
-          set -uo pipefail
-          status=0
-          "$ROUNDHOUSE_BIN" --target spinel --survey campfire-latest -o /tmp/campfire-latest-spinel \
-            > /tmp/campfire-latest-strict.log 2>&1 || status=$?
-          errors=$(grep -c 'error\[' /tmp/campfire-latest-strict.log || true)
-          gaps=$(sed -n 's/.*Survey: \([0-9]*\) ingest gap.*/\1/p' /tmp/campfire-latest-strict.log | head -1)
-          # No survey line means no gap was recorded, but only a run that
-          # finished or stopped at counted errors proves that: a crash with
-          # neither is unknown, and the suite must not run on it.
-          if [ -z "$gaps" ]; then
-            if [ "$status" -ne 0 ] && [ "$errors" -eq 0 ]; then gaps=unknown; else gaps=0; fi
-          fi
-          echo "errors=$errors" >> "$GITHUB_OUTPUT"
-          echo "gaps=$gaps" >> "$GITHUB_OUTPUT"
-          echo "campfire main strict emit: $gaps ingest gap(s), $errors error(s), exit $status"
-          sed -n '/── Survey/,$p' /tmp/campfire-latest-strict.log
-          grep 'error\[' /tmp/campfire-latest-strict.log || true
-      - name: Run campfire's suite against the emit
-        id: suite
-        if: ${{ steps.survey.outputs.gaps == '0' }}
-        run: |
-          scripts/campfire-suite \
-            --tally /tmp/campfire-latest-tally.txt \
-            --fail-log /tmp/campfire-latest-failures.txt \
-            --json /tmp/campfire-latest-suite/summary.json \
-            campfire-latest
-      - name: Report against the pinned floor
-        if: always()
-        env:
-          GAPS: ${{ steps.survey.outputs.gaps }}
-          ERRORS: ${{ steps.survey.outputs.errors }}
-        run: |
-          set -uo pipefail
-          floor=$(awk '/FLOOR_TESTS:/ {print $2; exit}' .github/workflows/ci.yml)
-          if [ -s /tmp/campfire-latest-tally.txt ]; then
-            tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/campfire-latest-tally.txt)
-            total=$(awk -F'|' '{t += $4} END {print t+0}' /tmp/campfire-latest-tally.txt)
-            suite="$tests of $total tests green (pinned floor: $floor)"
-          else
-            if [ "${GAPS:-}" = "unknown" ]; then
-              suite="not run: the strict emit failed before a survey (see the step log)"
-            else
-              suite="not run: the emit stops at ${GAPS:-?} ingest gap(s)"
-            fi
-          fi
-          {
-            echo "## Campfire main vs. the pin"
-            echo
-            echo "| | |"
-            echo "|---|---|"
-            echo "| main | \`${CAMPFIRE_LATEST}\` (Ruby $(cat campfire-latest/.ruby-version 2>/dev/null)) |"
-            echo "| pin | \`${CAMPFIRE_SHA}\` |"
-            echo "| ingest gaps | ${GAPS:-?} |"
-            echo "| strict-emit errors | ${ERRORS:-?} (pin ceiling: 0) |"
-            echo "| suite | $suite |"
-          } | tee -a "$GITHUB_STEP_SUMMARY"
-          echo "::notice::campfire main: ${GAPS:-?} gap(s), ${ERRORS:-?} error(s); suite $suite"
-      - *advisory-result
-
-
   # -------------------------------------------------------------------
   # (toolchain-ruby retired by the smoke consolidation: smoke-ruby's
   # README § Test runs `bundle exec rake test`, which discovers every
@@ -1886,12 +1770,55 @@ jobs:
   # emit bug), so the job stays advisory via continue-on-error until that
   # closes. Running it (vs `if: false`) keeps the model-suite progress
   # visible and catches regressions in the compile path.
+  #
+  # Compile once (this producer), then four shards only restore binaries
+  # and run — same path contract as unit-build (CARGO_BIN_EXE_roundhouse
+  # and the test binary path are compile-time absolute).
+  spinel-toolchain-build:
+    name: spinel-toolchain-build (binaries)
+    # Compile-only: fixture is a runtime input for shards, not for cargo --no-run.
+    needs: [plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-toolchain') }}
+    outputs:
+      artifact-id: ${{ steps.bundle.outputs.artifact-id }}
+      execution: ${{ steps.result.outputs.status }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    continue-on-error: ${{ needs.plan.outputs.spinel-advisory == 'true' }}
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      # Not the test profile's opt-level 1: Spinel and cc are the run here, and it tripled the crate's compile (44s to 3m35s).
+      CARGO_PROFILE_TEST_OPT_LEVEL: "0"
+      # Keep backtrace line data inside the archived executables.
+      CARGO_PROFILE_TEST_SPLIT_DEBUGINFO: "off"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+      - name: Build spinel_toolchain + tiny_api archive
+        run: |
+          python3 scripts/ci-spinel-toolchain.py build \
+            --archive "$RUNNER_TEMP/spinel-toolchain/spinel-toolchain.tar.gz" \
+            --inventory "$RUNNER_TEMP/spinel-toolchain/inventory.json"
+      - name: Upload current-run toolchain binaries
+        id: bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: spinel-toolchain-bundle
+          overwrite: true
+          path: |
+            ${{ runner.temp }}/spinel-toolchain/spinel-toolchain.tar.gz
+            ${{ runner.temp }}/spinel-toolchain/inventory.json
+          if-no-files-found: error
+          retention-days: 1
+      - *advisory-result
+
   spinel-toolchain:
     name: spinel-toolchain (suite, ${{ matrix.shard }})
     # Tracks matz/spinel master UNPINNED. Advisory unless ci:spinel focus
     # hardens the CORE lane (spinel-advisory=false).
-    needs: [generate-fixture, spinel-build, plan]
-    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-toolchain') && needs.generate-fixture.result == 'success' && needs.spinel-build.outputs.artifact-id != '' }}
+    needs: [generate-fixture, spinel-build, spinel-toolchain-build, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-toolchain') && needs.generate-fixture.result == 'success' && needs.spinel-build.outputs.artifact-id != '' && needs.spinel-toolchain-build.outputs.artifact-id != '' }}
     # Four shards, balanced by `ci-plan.py toolchain-shard` on recorded
     # seconds: a new test lands on the lightest shard instead of growing a
     # hand-kept catch-all one (two such shards reached 25 of 25 minutes).
@@ -1914,17 +1841,35 @@ jobs:
     continue-on-error: ${{ needs.plan.outputs.spinel-advisory == 'true' }}
     env:
       MAKEFLAGS: "-j4"
-      # Not the test profile's opt-level 1: Spinel and cc are the run here, and it tripled the crate's compile (44s to 3m35s).
-      CARGO_PROFILE_TEST_OPT_LEVEL: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      # No setup-rust: the producer archive restores the test binaries.
       - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
       - name: Extract fixture
         run: tar -xzf real-blog.tar.gz
+      - uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ needs.spinel-toolchain-build.outputs.artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/spinel-toolchain
+      - name: Restore spinel_toolchain binaries
+        run: |
+          python3 scripts/ci-spinel-toolchain.py restore \
+            --archive "$RUNNER_TEMP/spinel-toolchain/spinel-toolchain.tar.gz" \
+            --inventory "$RUNNER_TEMP/spinel-toolchain/inventory.json" \
+            --env-file "$RUNNER_TEMP/spinel-toolchain/bins.env"
+          set -a
+          # shellcheck disable=SC1090
+          . "$RUNNER_TEMP/spinel-toolchain/bins.env"
+          set +a
+          {
+            echo "SPINEL_TOOLCHAIN_BIN=$SPINEL_TOOLCHAIN_BIN"
+            echo "TINY_API_BIN=$TINY_API_BIN"
+            echo "ROUNDHOUSE_BIN=$ROUNDHOUSE_BIN"
+          } >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v8
         with:
           name: spinel-dist
@@ -1946,27 +1891,29 @@ jobs:
           bundler-cache: true
           working-directory: ./runtime/spinel/scaffold
       # One process per test, as many as libtest's threads, so each test's seconds are its own.
-      - name: cargo test --test spinel_toolchain -- --ignored (${{ matrix.shard }})
+      - name: run spinel_toolchain ignored suite (${{ matrix.shard }})
         env:
           CI_SPINEL_TIMINGS: ${{ needs.plan.outputs.spinel-timings }}
           CI_SPINEL_TIMINGS_OUT: ${{ runner.temp }}/spinel-timings/toolchain-${{ matrix.shard }}.jsonl
           # The binary runs outside cargo, so .cargo/config.toml's [env] stack size is not applied.
           RUST_MIN_STACK: "33554432"
         run: |
-          mapfile -t mine < <(cargo test --test spinel_toolchain -- --ignored --list --format terse | sed -n 's/: test$//p' | python3 scripts/ci-plan.py toolchain-shard --shard ${{ matrix.shard }})
+          test -x "$SPINEL_TOOLCHAIN_BIN"
+          mapfile -t mine < <("$SPINEL_TOOLCHAIN_BIN" --ignored --list --format terse | sed -n 's/: test$//p' | python3 scripts/ci-plan.py toolchain-shard --shard ${{ matrix.shard }})
           test "${#mine[@]}" -gt 0
-          bin=$(cargo test --test spinel_toolchain --no-run --message-format=json | jq -r 'select(.target.name == "spinel_toolchain" and .executable != null) | .executable')
-          test -x "$bin"
-          printf '%s\n' "${mine[@]}" | python3 scripts/ci-plan.py run-tests --kind toolchain --parallel "$(nproc)" -- "$bin" --ignored --nocapture --exact
+          printf '%s\n' "${mine[@]}" | python3 scripts/ci-plan.py run-tests --kind toolchain --parallel "$(nproc)" -- "$SPINEL_TOOLCHAIN_BIN" --ignored --nocapture --exact
       # fixtures/tiny-api, the API-only app (#321): `spin build` of the
       # app entry, HTTP requests to the binary, and the model script
       # compiled natively. Filtered by name, so the ignored test named
       # after an open issue (#163) is not selected.
-      - name: cargo test --test tiny_api spinel_gate_ -- --ignored
+      - name: run tiny_api spinel_gate_ --ignored
         if: ${{ !cancelled() && matrix.shard == 3 }}
         env:
           CI_SPINEL_TIMINGS_OUT: ${{ runner.temp }}/spinel-timings/toolchain-${{ matrix.shard }}.jsonl
-        run: python3 scripts/ci-plan.py timed --kind toolchain --name tiny_api -- cargo test --test tiny_api spinel_gate_ -- --ignored --nocapture
+        run: |
+          test -x "$TINY_API_BIN"
+          python3 scripts/ci-plan.py timed --kind toolchain --name tiny_api -- \
+            "$TINY_API_BIN" --ignored --nocapture spinel_gate_
       - name: Upload recorded test seconds
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
@@ -2085,13 +2032,22 @@ jobs:
         uses: gradle/actions/setup-gradle@v5
         with:
           gradle-version: '9.5.1'
-      - name: Install Swift
+      - &swift-platform
+        name: Name the Swift platform
+        id: swift-platform
         if: matrix.target == 'swift'
-        uses: swift-actions/setup-swift@v2
+        run: echo "release=$(. /etc/os-release && echo "$VERSION_ID")" >> "$GITHUB_OUTPUT"
+      - &swift-toolchain-cache
+        name: Cache Swift toolchain
+        if: matrix.target == 'swift'
+        uses: actions/cache@v6
         with:
-          # Stay on 6.1 while emit caps Hummingbird below 2.27 (2.27+ needs
-          # tools 6.2; on 6.2.1 swift-websocket 1.6.2 fails a lifetime check).
-          swift-version: '6.1'
+          path: ~/swift-toolchain
+          key: swift-toolchain-${{ runner.os }}-${{ steps.swift-platform.outputs.release }}-${{ runner.arch }}-6.4.1
+      - &swift-install
+        name: Install Swift
+        if: matrix.target == 'swift'
+        run: '"$GITHUB_WORKSPACE/scripts/ci-swift-install" 6.4.1'
       - name: Install libsqlite3-dev (Swift CSQLite systemLibrary)
         if: matrix.target == 'swift'
         timeout-minutes: 8
@@ -2107,9 +2063,9 @@ jobs:
           path: |
             ~/.cache/org.swift.swiftpm
             ~/.swiftpm
-          key: swiftpm-${{ runner.os }}-${{ runner.arch }}-swift6.1-${{ hashFiles('src/emit/swift/package.rs') }}
+          key: swiftpm-${{ runner.os }}-${{ runner.arch }}-swift6.4-${{ hashFiles('src/emit/swift/package.rs') }}
           restore-keys: |
-            swiftpm-${{ runner.os }}-${{ runner.arch }}-swift6.1-
+            swiftpm-${{ runner.os }}-${{ runner.arch }}-swift6.4-
       - name: Install .NET (C#)
         if: matrix.target == 'csharp'
         uses: actions/setup-dotnet@v6
@@ -2165,6 +2121,15 @@ jobs:
             echo '::error::Rust controller identity test did not execute successfully'
             exit 1
           fi
+      - name: cargo test --test rust_toolchain real_blog_i18n_locales_run
+        if: ${{ !cancelled() && matrix.target == 'rust' }}
+        run: cargo test --locked --test rust_toolchain real_blog_i18n_locales_run -- --ignored --nocapture --exact
+      - name: cargo test --test rust_toolchain real_blog_begin_rescue_runs
+        if: ${{ !cancelled() && matrix.target == 'rust' }}
+        run: cargo test --locked --test rust_toolchain real_blog_begin_rescue_runs -- --ignored --nocapture --exact
+      - name: cargo test --test rust_toolchain real_blog_rescue_from_runs
+        if: ${{ !cancelled() && matrix.target == 'rust' }}
+        run: cargo test --locked --test rust_toolchain real_blog_rescue_from_runs -- --ignored --nocapture --exact
       - name: cargo test --test emit_and_run render json writer on rust
         if: ${{ !cancelled() && matrix.target == 'rust' }}
         run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_rust -- --ignored --nocapture --exact
@@ -2216,6 +2181,9 @@ jobs:
       - name: cargo test --test emit_and_run render json writer on kotlin
         if: ${{ !cancelled() && matrix.target == 'kotlin' }}
         run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_kotlin -- --ignored --nocapture --exact
+      - name: cargo test --test kotlin_toolchain real_blog_i18n_locales_run
+        if: ${{ !cancelled() && matrix.target == 'kotlin' }}
+        run: cargo test --locked --test kotlin_toolchain real_blog_i18n_locales_run -- --ignored --nocapture --exact
       - name: cargo test --test framework_tests_swift
         if: ${{ !cancelled() && matrix.target == 'swift' }}
         run: |
@@ -2226,6 +2194,12 @@ jobs:
       - name: cargo test --test emit_and_run render json writer on swift
         if: ${{ !cancelled() && matrix.target == 'swift' }}
         run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_swift -- --ignored --nocapture --exact
+      - name: cargo test --test swift_toolchain real_blog_i18n_locales_run
+        if: ${{ !cancelled() && matrix.target == 'swift' }}
+        run: cargo test --locked --test swift_toolchain real_blog_i18n_locales_run -- --ignored --nocapture --exact
+      - name: cargo test --test swift_toolchain real_blog_rescue_modifier_runs
+        if: ${{ !cancelled() && matrix.target == 'swift' }}
+        run: cargo test --locked --test swift_toolchain real_blog_rescue_modifier_runs -- --ignored --nocapture --exact
       - name: cargo test --test typescript_toolchain real_blog -- --ignored
         if: ${{ !cancelled() && matrix.target == 'typescript' }}
         run: cargo test --test typescript_toolchain real_blog -- --ignored --nocapture
@@ -2259,6 +2233,12 @@ jobs:
       - name: cargo test --test python_toolchain -- --ignored
         if: ${{ !cancelled() && matrix.target == 'python' }}
         run: cargo test --test python_toolchain -- --ignored --nocapture
+      - name: cargo test --test go_toolchain real_blog_i18n_locales_run
+        if: ${{ !cancelled() && matrix.target == 'go' }}
+        run: cargo test --locked --test go_toolchain real_blog_i18n_locales_run -- --ignored --nocapture --exact
+      - name: cargo test --test go_toolchain real_blog_flash_each_yields
+        if: ${{ !cancelled() && matrix.target == 'go' }}
+        run: cargo test --locked --test go_toolchain real_blog_flash_each_yields -- --ignored --nocapture --exact
       - name: cargo test --test emit_and_run render json writer on go
         if: ${{ !cancelled() && matrix.target == 'go' }}
         run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_go -- --ignored --nocapture --exact
@@ -2605,12 +2585,9 @@ jobs:
         uses: gradle/actions/setup-gradle@v5
         with:
           gradle-version: '9.5.1'
-      - name: Install Swift
-        if: matrix.target == 'swift'
-        uses: swift-actions/setup-swift@v2
-        with:
-          # Stay on 6.1 while emit caps Hummingbird below 2.27 (see compare-extra).
-          swift-version: '6.1'
+      - *swift-platform
+      - *swift-toolchain-cache
+      - *swift-install
       - name: Install libsqlite3-dev (Swift CSQLite systemLibrary)
         if: matrix.target == 'swift'
         timeout-minutes: 8
@@ -2853,6 +2830,9 @@ jobs:
     name: campfire-archive-build
     needs: [build-roundhouse, spinel-build, plan]
     if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-archive-build') && needs.build-roundhouse.outputs.roundhouse-bin-artifact-id != '' }}
+    # Consumers gate on docker_tgz so a pack skip does not red smoke-docker.
+    outputs:
+      docker_tgz: ${{ steps.docker-tgz.outputs.present }}
     runs-on: ubuntu-latest
     # `spin pack` runs Spinel's front end over the whole Campfire tree,
     # including ruby-vips.
@@ -2892,6 +2872,16 @@ jobs:
           tar -xzf /tmp/campfire.tar.gz -C /tmp/campfire --strip-components=1
       - name: Build campfire/spinel.tgz + campfire/docker.tgz
         run: scripts/build-campfire-archive --out _site /tmp/campfire
+      - name: Record whether campfire/docker.tgz was produced
+        id: docker-tgz
+        if: always()
+        run: |
+          if [ -f _site/campfire/docker.tgz ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::campfire/docker.tgz not produced (spin pack skipped or failed); campfire-smoke-docker will skip"
+          fi
       - name: Record archive producer evidence
         if: always()
         env:
@@ -2932,7 +2922,9 @@ jobs:
   campfire-smoke-docker:
     name: campfire-smoke-docker
     needs: [campfire-archive-build, plan]
-    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-smoke-docker') && needs.campfire-archive-build.result == 'success' }}
+    # Skip the whole job when pack did not produce docker.tgz — that is a
+    # producer/pack gap, not a Docker smoke failure (see archive notice).
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-smoke-docker') && needs.campfire-archive-build.result == 'success' && needs.campfire-archive-build.outputs.docker_tgz == 'true' }}
     outputs: *advisory-outputs
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -2965,8 +2957,10 @@ jobs:
         id: smoke
         run: |
           set -euo pipefail
+          # Job if already requires producer docker_tgz=true; fail loudly if
+          # the artifact is still missing (gating bug, not a soft pack skip).
           if [ ! -f campfire/docker.tgz ]; then
-            echo "::warning::no campfire/docker.tgz this run (spinel toolchain missing?)"
+            echo "::error::campfire/docker.tgz missing despite producer docker_tgz=true"
             exit 1
           fi
           tar xzf campfire/docker.tgz
@@ -3293,25 +3287,16 @@ jobs:
       # as an artifact (NOT committed) — see wasm/vendor/ruby-rbs-sys/README.md
       # and the "Publishing to Pages" section of docs/archive/browser-demo-plan.md. Pure
       # static files (no npm/vite, no COOP/COEP), so they serve straight off Pages.
-      - name: Bundle the in-browser playground + studio demos (→ _site/lib, _site/playground, _site/studio)
+      - name: Bundle the in-browser playground + studio demos (→ _site/lib, _site/playground, _site/studio, _site/fractal)
         if: needs.plan.outputs.site == 'true'
         run: |
           set -euo pipefail
-          mkdir -p _site/lib _site/playground _site/studio
-          # Shared lib: every code module + the freshly-built compiler wasm (from
-          # the build-wasm artifact — not committed; see that job + wasm/vendor/).
-          # A glob, not a list: browser-smoke-ide serves wasm/ directly, so a
-          # module missing from a hand-kept list only fails on the live site
-          # (local-bundle.mjs, 2026-09-15).
-          cp wasm/lib/*.mjs wasm/lib/*.js _site/lib/
+          # Shared with the site-only publisher, including each browser entrypoint.
+          python3 scripts/ci-site.py browser-assets --root _site
           cp wasm-artifact/roundhouse_wasm.wasm _site/lib/
           # Fresh seed app from the just-generated real-blog fixture (→ lib).
           (cd wasm/browser-spike && node gen-fixture.mjs)
           cp wasm/browser-spike/fixture.json _site/lib/fixture.json
-          # Each surface: its own HTML + entry module(s). Studio also ships its
-          # app-host service worker (sw.js), which serves the running app.
-          cp wasm/playground/index.html wasm/playground/playground.js _site/playground/
-          cp wasm/studio/index.html wasm/studio/studio.js wasm/studio/sw.js _site/studio/
           echo "lib files:";        find _site/lib -type f | sort
           echo "playground files:"; find _site/playground -type f | sort
           echo "studio files:";     find _site/studio -type f | sort
@@ -3340,8 +3325,6 @@ jobs:
         if: needs.plan.outputs.site == 'true'
         run: |
           set -euo pipefail
-          mkdir -p _site/ide
-          cp wasm/ide/index.html wasm/ide/ide.js _site/ide/
           cp wasm/ide/app-src.json _site/ide/
           echo "ide files:"; find _site/ide -type f | sort
 
@@ -3845,7 +3828,7 @@ jobs:
   # Informational validation summary; no branch-protection or merge policy.
   ci-summary:
     name: CI summary
-    needs: [plan, generate-fixture, unit-build, unit, build-roundhouse, store-check, compare, compare-ruby, compare-ruby-next, browser-smoke-typescript, campfire-conformance, campfire-compare, campfire-latest, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, spinel-build, spinel-framework, sidekiq-live, campfire-spinel-build, campfire-spinel-compare, campfire-spinel-db, spinel-toolchain, spinel-compare, spinel-smoke, campfire-archive-build, campfire-smoke, campfire-smoke-docker, spinel-timings, archive-results, assemble-site]
+    needs: [plan, generate-fixture, unit-build, unit, build-roundhouse, store-check, compare, compare-ruby, compare-ruby-next, browser-smoke-typescript, campfire-conformance, campfire-compare, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, spinel-build, spinel-framework, sidekiq-live, campfire-spinel-build, campfire-spinel-compare, campfire-spinel-db, spinel-toolchain-build, spinel-toolchain, spinel-compare, spinel-smoke, campfire-archive-build, campfire-smoke, campfire-smoke-docker, spinel-timings, archive-results, assemble-site]
     # Report selected failures and expected skips; stop on workflow cancellation.
     if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest

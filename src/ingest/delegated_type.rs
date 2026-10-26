@@ -28,6 +28,7 @@ use crate::ty::Ty;
 use super::util::{bool_value, constant_id_str, string_value, symbol_or_string_value, symbol_value};
 use super::IngestResult;
 
+use crate::ingest::prism_api::PrismLocation;
 pub(super) fn expand_delegated_type_decl(
     call: &ruby_prism::CallNode<'_>,
     file: &str,

@@ -94,6 +94,22 @@ one OS worker per core; `SPINEL_WORKERS=N` caps the worker count.
 default of 1: the prefork mode is not ready (roundhouse#79), and the
 single process already uses every core.
 
+`UNIX_BIND=unix:///run/myapp/http.sock?mode=600` adds a filesystem Unix
+listener beside TCP. `--unix-bind URL` overrides the environment; unset or
+empty disables it. The native default mode is 0600. Only absolute paths
+and an optional octal `mode` up to 0777 are accepted. The directory must
+already exist and be controlled by the operator. Symlinks, non-sockets,
+active listeners and probe errors are refused. A stale socket is replaced
+only after a nonblocking connect returns connection refused. The parent
+removes its socket on shutdown only if device and inode still match.
+
+Native requests carry `request.env["roundhouse.listener"]` as `"unix"` or
+`"tcp"`, assigned from the accepted connection after header import. The
+generated Ruby/Puma config also binds `UNIX_BIND`, defaulting to mode 600;
+Puma retains its own socket lifecycle and `puma.socket` env value. These
+mode bits control pathname-socket connections on Linux; abstract sockets
+are not supported.
+
 ```sh
 spin test
 ```

@@ -94,6 +94,24 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
             return json_value_as_str(inner_raw, value);
         }
     }
+    // Not `vec!["a"]`: that is a Vec<&str>, and a String-element parameter takes owned Strings
+    if let (ExprNode::Array { elements, .. }, Ty::Array { elem }) = (&*arg.node, peel_nil(param_ty)) {
+        if elem.is_stringish() && !elements.is_empty() && elements.iter().all(|e| matches!(&*e.node, ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } })) {
+            let items: Vec<String> = elements.iter().map(|e| format!("{}.to_string()", emit_expr(e))).collect();
+            return format!("vec![{}]", items.join(", "));
+        }
+    }
+    // A number into a nilable parameter of several types: rust renders it Option<Value>, which takes the number boxed
+    if let Ty::Union { variants } = param_ty {
+        let non_nil: Vec<&Ty> = variants.iter().filter(|v| !matches!(v, Ty::Nil)).collect();
+        let several = non_nil.len() > 1 || matches!(non_nil.as_slice(), [Ty::Union { .. }]);
+        if variants.iter().any(|v| matches!(v, Ty::Nil))
+            && several
+            && matches!(arg.ty.as_ref(), Some(Ty::Int | Ty::Float))
+        {
+            return format!("Some(serde_json::Value::from({}))", emit_expr(arg));
+        }
+    }
     let raw = emit_expr(arg);
     let arg_ty_peeled = arg.ty.as_ref().map(peel_nil);
 
@@ -194,8 +212,12 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
         // miss (`ActionController.header_key_ok?(key)` with String
         // vs `String?`). Rust-only; do not lift Option wrapping into
         // the shared lowerer.
+        // Not the read's own type alone: a local bound to an Option keeps that type even where the analyzer narrowed the read
+        let binds_option = matches!(&*arg.node, ExprNode::Var { name, .. }
+            if super::super::local_var_ty(name.as_str()).is_some_and(|t| is_option_ty(&t)));
         if !matches!(&*arg.node, ExprNode::Cast { .. })
             && !arg.ty.as_ref().is_some_and(is_option_ty)
+            && !binds_option
         {
             let inner = peel_nil(param_ty);
             if inner.is_stringish() {

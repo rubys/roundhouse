@@ -161,7 +161,7 @@ fn emit_test_expr_go(e: &Expr, ctx: GoTestCtx) -> String {
                 emit_test_expr_go(right, ctx)
             )
         }
-        _ => format!("/* TODO: Go test emit for {:?} */", std::mem::discriminant(&*e.node)),
+        other => crate::emit::diagnostics::report_unsupported(e.span, "go2", other.kind_str(), "in a test"),
     }
 }
 

@@ -1,5 +1,6 @@
 //! `Random.uuid` → `SecureRandom.uuid`, and the rest of the
-//! `Random::Formatter` surface with it.
+//! `Random::Formatter` surface with it; ActiveSupport's
+//! `Digest::UUID.uuid_v4`, which is `SecureRandom.uuid`, too.
 //!
 //! These are not two methods that happen to agree. `securerandom.rb`
 //! defines ONE module, `Random::Formatter`, and extends BOTH `Random`
@@ -53,12 +54,14 @@ fn rewrite(expr: &mut Expr) {
 }
 
 pub(crate) fn rewrite_node(expr: &mut Expr) {
-    let ExprNode::Send { recv: Some(recv), method, .. } = &mut *expr.node else { return };
-    if !FORMATTER_ONLY.contains(&method.as_str()) {
-        return;
-    }
+    let ExprNode::Send { recv: Some(recv), method, args, block, .. } = &mut *expr.node else { return };
     let ExprNode::Const { path } = &*recv.node else { return };
-    if path.len() != 1 || path[0].as_str() != "Random" {
+    let named: Vec<&str> = path.iter().map(|seg| seg.as_str()).filter(|seg| !seg.is_empty()).collect();
+    // ActiveSupport's `Digest::UUID.uuid_v4` is `SecureRandom.uuid`, by
+    // definition (`active_support/core_ext/digest/uuid.rb`).
+    if named == ["Digest", "UUID"] && method.as_str() == "uuid_v4" && args.is_empty() && block.is_none() {
+        *method = Symbol::from("uuid");
+    } else if !FORMATTER_ONLY.contains(&method.as_str()) || path.len() != 1 || path[0].as_str() != "Random" {
         return;
     }
     let span = recv.span;

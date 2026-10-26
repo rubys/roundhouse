@@ -49,6 +49,7 @@ use super::util::{constant_id_str, flatten_statements};
 use super::{IngestError, IngestResult};
 use crate::vfs::Vfs;
 
+use crate::ingest::prism_api::PrismLocation;
 const ORIGINS: &str = "allowed_request_origins";
 const SAME_ORIGIN: &str = "allow_same_origin_as_host";
 const DISABLE: &str = "disable_request_forgery_protection";

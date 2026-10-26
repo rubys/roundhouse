@@ -1,6 +1,7 @@
 module ActiveSupport
   module JSON
     def self.encode: (untyped value) -> String
+    def self.encode_without_escape: (untyped value) -> String
     def self.decode: (String text) -> untyped
     def self.jsonable: (untyped value) -> untyped
     def self.time_json: (::Time t) -> String
@@ -35,6 +36,9 @@ module ActiveSupport
   def self.errors_delete: (Array[String] errors, Array[ActiveRecord::ErrorDetail] details, String attribute) -> Array[String]?
   def self.errors_details: (Array[ActiveRecord::ErrorDetail] details) -> Hash[Symbol, Array[ActiveRecord::ErrorDetail]]
   def self.errors_import: (Array[String] errors, Array[ActiveRecord::ErrorDetail] details, ActiveRecord::ErrorDetail error, String? attribute, Hash[String, String] names, String before, String between, String after) -> Array[ActiveRecord::ErrorDetail]
+  def self.error_detail: (String name, String? kind, String? message, Hash[String, String] options, Hash[String, String] site, Hash[String, String] names, Hash[String, String] overrides, String before, String between, String after) -> ActiveRecord::ErrorDetail
+  def self.error_template: (Hash[String, String] table, String key, String? count) -> String?
+  def self.interpolate: (String template, Hash[String, String] values) -> String
   def self.errors_merge: (Array[String] errors, Array[ActiveRecord::ErrorDetail] details, Array[ActiveRecord::ErrorDetail] others, Hash[String, String] names, String before, String between, String after) -> Array[ActiveRecord::ErrorDetail]
 
   # Rails' name for "this signed value does not verify" — see the .rb.
@@ -66,7 +70,14 @@ module ActiveSupport
   def self.cast_string: (::Object? value) -> String?
   def self.cast_integer: (::Object? value) -> Integer?
   def self.integer_from_string: (String value) -> Integer?
+  def self.cast_float: (::Object? value) -> Float?
+  def self.cast_decimal: (::Object? value) -> Float?
+  def self.numeric_blank?: (::Object? value) -> bool
+  def self.numericality_number: (::Object? raw, ::Object? value) -> (Integer | Float)?
+  def self.float_from_string: (String value) -> Float?
   def self.integer_from_bytes: (Array[Integer] raw) -> Integer
+  def self.string_first: (String text, Integer limit) -> String
+  def self.string_last: (String text, Integer limit) -> String
   def self.squish: (String text) -> String
   def self.squish!: (String text) -> String
   def self.truncate: (String text, Integer truncate_to, String? omission, String? separator) -> String

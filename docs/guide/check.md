@@ -302,6 +302,14 @@ Unresolved source constants keep their error severity even when the
 gem census identifies a likely owner: their emitted expression is a
 refusal stub. Gem context is added without certifying runtime support.
 
+A controller or view calling a helper of such a gem by name
+(`authorize`, `policy_scope`, `doorkeeper_authorize!`, a
+`before_action` naming one) keeps an error too: nothing defines the
+helper on any target, so the call is refused where it is written, as
+*`X` not supported*. What the call feeds (an `@articles` read in the
+view) is the note. A gem under `source_gems`, or a method of that name
+the app defines itself, is not refused.
+
 **The unchecked-send line** — printed on every run, between the gem
 census and the total:
 

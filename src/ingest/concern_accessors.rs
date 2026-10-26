@@ -14,6 +14,7 @@ use crate::App;
 use super::survey::unwrap_or_record;
 use super::{IngestError, IngestResult};
 
+use crate::ingest::prism_api::PrismLocation;
 /// Retain recognized attr_* declarations, including conditional ones,
 /// so refusal is attributed to each includer rather than silently dropped.
 pub(super) fn is_candidate(item: &ModelBodyItem) -> bool {
@@ -30,8 +31,10 @@ pub(super) fn is_candidate(item: &ModelBodyItem) -> bool {
     matches!(item, ModelBodyItem::Unknown { expr, .. } if accessor(expr))
 }
 
-/// Computed/splat names retain concern lexical scope, and one-sided
-/// accessors need a separate analyzer fix. Neither is admitted here.
+/// Computed/splat names retain concern lexical scope and are not
+/// admitted here. A one-sided `attr_reader` / `attr_writer` is: the model
+/// lowering, the analyzer and the audit each take its half alone, as for
+/// a model's own declaration.
 pub(super) fn is_supported(item: &ModelBodyItem) -> bool {
     let ModelBodyItem::Unknown { expr, .. } = item else {
         return false;
@@ -46,7 +49,7 @@ pub(super) fn is_supported(item: &ModelBodyItem) -> bool {
     else {
         return false;
     };
-    method.as_str() == "attr_accessor"
+    matches!(method.as_str(), "attr_accessor" | "attr_reader" | "attr_writer")
         && !args.is_empty()
         && args.iter().all(|arg| {
             matches!(
@@ -64,7 +67,7 @@ pub(super) fn decline(item: &mut ModelBodyItem, detail: &str) {
     let ModelBodyItem::Unknown { expr, .. } = item else {
         unreachable!()
     };
-    expr.diagnostic.get_or_insert(DiagnosticKind::Unsupported {
+    expr.diagnostic_mut().get_or_insert(DiagnosticKind::Unsupported {
         target: None,
         construct: Symbol::from("concern attr_accessor"),
         detail: detail.into(),
@@ -191,7 +194,7 @@ fn validate_activation(
         })))
         .collect();
     for (index, source) in app.sources.iter().enumerate().filter(|(_, s)| s.path.ends_with(".rb")) {
-        let parsed = ruby_prism::parse(source.text.as_bytes());
+        let parsed = super::prism::parse_silent(source.text.as_bytes());
         let root = parsed.node();
         let bodies = find_all_classes_with_scope(&root).into_iter()
             .filter_map(|(scope, class)| Some((scope, class_name_path(&class)?, class.body()?, false)))
@@ -460,7 +463,7 @@ fn refusals(
             };
             if let Some(DiagnosticKind::Unsupported {
                 construct, detail, ..
-            }) = &expr.diagnostic
+            }) = &expr.diagnostic()
             {
                 refused.push((expr.span, format!("{construct} on {} {detail}", model.name.0)));
                 continue;

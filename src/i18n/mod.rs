@@ -909,6 +909,35 @@ impl ModelI18n {
     }
 
     /// Each attribute the locale names for this model, with that name.
+    /// The model's own error messages, in Rails' lookup order: under each
+    /// of its keys (its own, then its ancestors'), `<scope>.errors.models.
+    /// <key>.attributes.<attr>.<kind>` as "<attr>.<kind>" and `<scope>.
+    /// errors.models.<key>.<kind>` as "<kind>", with any plural form's
+    /// suffix (".one", ".other", ".zero"). An earlier key's entry wins.
+    pub fn error_overrides(&self) -> Vec<(String, String)> {
+        let scope = self.scope();
+        let mut out: Vec<(String, String)> = Vec::new();
+        for key in &self.keys {
+            let prefix = format!("{scope}.errors.models.{key}.");
+            for (entry, text) in &self.catalog().entries {
+                let Some(rest) = entry.strip_prefix(prefix.as_str()) else { continue };
+                let name = match rest.strip_prefix("attributes.") {
+                    Some(attr_kind) => attr_kind.to_string(),
+                    None => rest.to_string(),
+                };
+                if !out.iter().any(|(k, _)| *k == name) {
+                    out.push((name, text.clone()));
+                }
+            }
+        }
+        out
+    }
+
+    /// `activerecord`, or `activemodel` for a plain ActiveModel class.
+    pub fn error_scope(&self) -> &str {
+        self.scope()
+    }
+
     pub fn translated_attribute_names(&self) -> Vec<(String, String)> {
         let scope = self.scope();
         let prefixes: Vec<String> =

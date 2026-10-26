@@ -22,19 +22,33 @@
 //!     needs range syntax, only "is this char in (or not in) this
 //!     set".
 //!   - `.` — matches any character.
-//!   - `(X)` — a group wrapping exactly ONE atom above (no
-//!     alternation, no nested groups); only its OWN quantifier
-//!     matters, the parens themselves carry nothing.
+//!   - `(X)` / `(?:X)` — a capturing or non-capturing group. The
+//!     parens carry nothing (a constraint has no captures to read);
+//!     the group's own quantifier applies to its body.
+//!   - `|` — ordered alternation. Each branch is compiled into its
+//!     own backtrack-free sequence and the runtime tries those
+//!     sequences against the WHOLE segment, first success wins. A
+//!     group alternation distributes over the rest of the pattern
+//!     (`(?:ABR|SNB)\d{12}` is `ABR`+twelve digits, or `SNB`+twelve
+//!     digits), so a later failure does not have to rewind into an
+//!     earlier branch.
+//!   - `{n}`, `{n,m}`, `{n,}` — bounded and open repeats, within a
+//!     fixed cap (`MAX_REPEAT` / `MAX_ALTERNATIVES`). An exact repeat
+//!     is copies of the atom; a closed range is one alternative per
+//!     length; `{n,}` on a single character or class is `n - 1`
+//!     exact copies plus a `+`.
 //!
 //! NOT supported (each refuses the whole pattern, compile returns
 //! `None`): anchors (`^ $ \A \z \Z \b \B` — Rails itself rejects
 //! anchors inside a routing requirement, so refusing here mirrors
-//! Rails), backreferences (`\1`, `\k<...>`), lookaround (`(?=` `(?!`
-//! `(?<=` `(?<!`), alternation (`|`), any other backslash escape
-//! (`\w \s \D \S \W`, …), and a lazy quantifier (`+?` `*?` `??`) that
-//! ISN'T the pattern's last item (lazy vs. greedy only coincide, for
-//! a whole-segment anchored match with nothing after, when nothing
-//! comes after — checked explicitly below).
+//! Rails), backreferences (`\1`, `\k<...>`), lookaround and other
+//! `(?…)` groups besides `(?:…)`, any other backslash escape
+//! (`\w \s \D \S \W`, …), a lazy quantifier (`+?` `*?` `??`) that
+//! ISN'T the pattern's last item, an unbounded quantifier (`+` `*`
+//! `{n,}`) on a multi-character atom or an alternation, and an
+//! expansion that would need more than `MAX_ALTERNATIVES` whole
+//! patterns (the cross product of several ranges). A `{` that is
+//! not a Ruby quantifier stays a literal, as it does in Ruby.
 //!
 //! # Why no backtracking is needed
 //!
@@ -79,11 +93,24 @@ enum Item {
     /// A fixed string, matched exactly once (`quant` is always `One`
     /// here — multi-char literals never repeat), OR a single
     /// character under its own quantifier (`text` is one char).
-    Literal { text: String, quant: Quant },
+    /// `lazy` is recorded only so a non-final lazy quantifier can be
+    /// refused; the encoded program is the greedy reading, which
+    /// agrees with lazy on a whole-segment match.
+    Literal {
+        text: String,
+        quant: Quant,
+        lazy: bool,
+    },
     /// A character class: `chars` lists its members (ranges already
     /// expanded); `negated` flips membership; `any` (dot) ignores
     /// `chars`/`negated` and matches every character.
-    Class { chars: Vec<char>, negated: bool, any: bool, quant: Quant },
+    Class {
+        chars: Vec<char>,
+        negated: bool,
+        any: bool,
+        quant: Quant,
+        lazy: bool,
+    },
 }
 
 impl Item {
@@ -91,6 +118,12 @@ impl Item {
         match self {
             Item::Literal { quant, .. } => *quant,
             Item::Class { quant, .. } => *quant,
+        }
+    }
+
+    fn lazy(&self) -> bool {
+        match self {
+            Item::Literal { lazy, .. } | Item::Class { lazy, .. } => *lazy,
         }
     }
 }
@@ -106,10 +139,13 @@ enum Reach {
 
 fn reach_of(item: &Item) -> Reach {
     match item {
-        Item::Literal { text, .. } => {
-            Reach::Finite(text.chars().take(1).collect())
-        }
-        Item::Class { chars, negated, any, .. } => {
+        Item::Literal { text, .. } => Reach::Finite(text.chars().take(1).collect()),
+        Item::Class {
+            chars,
+            negated,
+            any,
+            ..
+        } => {
             if *any {
                 Reach::Any
             } else if *negated {
@@ -163,32 +199,6 @@ fn check_safe_adjacency(items: &[Item]) -> Option<()> {
     Some(())
 }
 
-/// Parse a quantifier (`+ * ?` or none) starting at `*i`, plus a
-/// trailing lazy `?` marker. Returns `(quant, lazy)`.
-fn parse_quant(chars: &[char], i: &mut usize) -> (Quant, bool) {
-    let base = match chars.get(*i) {
-        Some('+') => {
-            *i += 1;
-            Quant::Plus
-        }
-        Some('*') => {
-            *i += 1;
-            Quant::Star
-        }
-        Some('?') => {
-            *i += 1;
-            Quant::Opt
-        }
-        _ => return (Quant::One, false),
-    };
-    if chars.get(*i) == Some(&'?') {
-        *i += 1;
-        (base, true)
-    } else {
-        (base, false)
-    }
-}
-
 /// Parse a `[...]` bracket expression starting just after the `[` (at
 /// `*i`). Returns `(members, negated)`; advances `*i` past the `]`.
 /// Ranges (`a-b`) are expanded into their member characters.
@@ -230,7 +240,8 @@ fn parse_bracket(chars: &[char], i: &mut usize) -> Option<(Vec<char>, bool)> {
                 // `a-b` range, but `-` right before the closing `]`
                 // (or at the very start, already handled by it simply
                 // being a member) is a literal hyphen, matching Ruby.
-                if chars.get(*i) == Some(&'-') && chars.get(*i + 1) != Some(&']') && chars.get(*i + 1).is_some() {
+                if chars.get(*i) == Some(&'-') && chars.get(*i + 1) != Some(&']') && chars.get(*i + 1).is_some()
+                {
                     let hi = *chars.get(*i + 1)?;
                     if c > hi {
                         return None;
@@ -246,181 +257,441 @@ fn parse_bracket(chars: &[char], i: &mut usize) -> Option<(Vec<char>, bool)> {
     Some((members, negated))
 }
 
-/// Parse the body of a `(...)` group: exactly one atom (a bracket
-/// class, `\d`, or `.`), no quantifier of its own (the group's
-/// quantifier, parsed by the caller, applies instead). Anything else
-/// — alternation, a literal, a nested group, a lookaround marker —
-/// is out of the supported subset.
-fn parse_group_atom(chars: &[char], i: &mut usize) -> Option<Item> {
-    if chars.get(*i) == Some(&'?') {
-        return None; // (?=…) (?!…) (?<…) (?:…) — none supported.
-    }
-    let item = match chars.get(*i) {
-        Some('[') => {
-            *i += 1;
-            let (members, negated) = parse_bracket(chars, i)?;
-            Item::Class { chars: members, negated, any: false, quant: Quant::One }
-        }
-        Some('.') => {
-            *i += 1;
-            Item::Class { chars: Vec::new(), negated: false, any: true, quant: Quant::One }
-        }
-        Some('\\') => {
-            *i += 1;
-            match chars.get(*i) {
-                Some('d') => {
-                    *i += 1;
-                    Item::Class { chars: ('0'..='9').collect(), negated: false, any: false, quant: Quant::One }
-                }
-                _ => return None,
-            }
-        }
-        _ => return None,
-    };
-    if chars.get(*i) != Some(&')') {
-        return None;
-    }
-    *i += 1;
-    Some(item)
+/// How many times the preceding atom is repeated. `AtLeast` is `{n,}`;
+/// `Between` is `{n,m}`.
+#[derive(Clone, Copy)]
+enum Rep {
+    One,
+    Opt,
+    Star,
+    Plus,
+    Exact(u16),
+    AtLeast(u16),
+    Between(u16, u16),
 }
 
-fn parse_items(src: &str) -> Option<Vec<Item>> {
-    let chars: Vec<char> = src.chars().collect();
-    let mut i = 0usize;
-    let mut items: Vec<Item> = Vec::new();
-    let mut lazy_flags: Vec<bool> = Vec::new();
-    let mut pending = String::new();
+/// An unexpanded pattern. Alternation and bounded repeats become
+/// several [`Item`] sequences in [`expand`]; the runtime never sees
+/// this tree.
+#[derive(Clone)]
+enum Ast {
+    Empty,
+    Leaf(Item),
+    Concat(Vec<Ast>),
+    Alt(Vec<Ast>),
+}
 
-    while i < chars.len() {
-        match chars[i] {
-            '^' | '$' => return None,
-            '|' => return None,
-            ')' => return None,
-            '+' | '*' | '?' => return None, // quantifier with nothing before it
-            '\\' => {
-                i += 1;
-                match *chars.get(i)? {
-                    'A' | 'z' | 'Z' | 'b' | 'B' => return None,
-                    '1'..='9' => return None, // backreference
-                    'k' => return None,       // \k<name> backreference
-                    'w' | 's' | 'D' | 'S' | 'W' => return None,
-                    'd' => {
-                        if !pending.is_empty() {
-                            items.push(Item::Literal { text: std::mem::take(&mut pending), quant: Quant::One });
-                            lazy_flags.push(false);
-                        }
-                        i += 1;
-                        let (quant, lazy) = parse_quant(&chars, &mut i);
-                        items.push(Item::Class {
-                            chars: ('0'..='9').collect(),
-                            negated: false,
-                            any: false,
-                            quant,
-                        });
-                        lazy_flags.push(lazy);
-                    }
-                    esc => {
-                        i += 1;
-                        let (quant, lazy) = parse_quant(&chars, &mut i);
-                        if quant == Quant::One {
-                            pending.push(esc);
-                        } else {
-                            if !pending.is_empty() {
-                                items.push(Item::Literal {
-                                    text: std::mem::take(&mut pending),
-                                    quant: Quant::One,
-                                });
-                                lazy_flags.push(false);
-                            }
-                            items.push(Item::Literal { text: esc.to_string(), quant });
-                            lazy_flags.push(lazy);
-                        }
-                    }
-                }
-            }
-            '.' => {
-                if !pending.is_empty() {
-                    items.push(Item::Literal { text: std::mem::take(&mut pending), quant: Quant::One });
-                    lazy_flags.push(false);
-                }
-                i += 1;
-                let (quant, lazy) = parse_quant(&chars, &mut i);
-                items.push(Item::Class { chars: Vec::new(), negated: false, any: true, quant });
-                lazy_flags.push(lazy);
-            }
-            '[' => {
-                if !pending.is_empty() {
-                    items.push(Item::Literal { text: std::mem::take(&mut pending), quant: Quant::One });
-                    lazy_flags.push(false);
-                }
-                i += 1;
-                let (members, negated) = parse_bracket(&chars, &mut i)?;
-                let (quant, lazy) = parse_quant(&chars, &mut i);
-                items.push(Item::Class { chars: members, negated, any: false, quant });
-                lazy_flags.push(lazy);
-            }
-            '(' => {
-                if !pending.is_empty() {
-                    items.push(Item::Literal { text: std::mem::take(&mut pending), quant: Quant::One });
-                    lazy_flags.push(false);
-                }
-                i += 1;
-                let atom = parse_group_atom(&chars, &mut i)?;
-                let (quant, lazy) = parse_quant(&chars, &mut i);
-                let item = match atom {
-                    Item::Class { chars: cs, negated, any, .. } => {
-                        Item::Class { chars: cs, negated, any, quant }
-                    }
-                    Item::Literal { text, .. } => Item::Literal { text, quant },
-                };
-                items.push(item);
-                lazy_flags.push(lazy);
-            }
-            c => {
-                i += 1;
-                let (quant, lazy) = parse_quant(&chars, &mut i);
-                if quant == Quant::One {
-                    pending.push(c);
-                } else {
-                    if !pending.is_empty() {
-                        items.push(Item::Literal { text: std::mem::take(&mut pending), quant: Quant::One });
-                        lazy_flags.push(false);
-                    }
-                    items.push(Item::Literal { text: c.to_string(), quant });
-                    lazy_flags.push(lazy);
-                }
-            }
-        }
+/// Expansion caps. A route constraint that needs more than this is
+/// refused rather than turned into a large program. Twelve-digit
+/// repeats and a handful of literal alternatives (the shapes route
+/// files actually write) sit well under both.
+const MAX_REPEAT: usize = 64;
+const MAX_ALTERNATIVES: usize = 64;
+
+fn literal_item(text: impl Into<String>) -> Item {
+    Item::Literal {
+        text: text.into(),
+        quant: Quant::One,
+        lazy: false,
     }
-    if !pending.is_empty() {
-        items.push(Item::Literal { text: pending, quant: Quant::One });
-        lazy_flags.push(false);
+}
+
+fn class_item(chars: Vec<char>, negated: bool, any: bool) -> Item {
+    Item::Class {
+        chars,
+        negated,
+        any,
+        quant: Quant::One,
+        lazy: false,
     }
-    if items.is_empty() {
+}
+
+fn with_quant(item: &Item, quant: Quant, lazy: bool) -> Item {
+    match item {
+        Item::Literal { text, .. } => Item::Literal {
+            text: text.clone(),
+            quant,
+            lazy,
+        },
+        Item::Class {
+            chars,
+            negated,
+            any,
+            ..
+        } => Item::Class {
+            chars: chars.clone(),
+            negated: *negated,
+            any: *any,
+            quant,
+            lazy,
+        },
+    }
+}
+
+/// A single unquantified character or class — the only atoms `?`,
+/// `+`, `*`, and `{n,}` can attach to without enumerating copies.
+/// A multi-character literal (`(?:ab)?`) is not one: the runtime's
+/// quantified literal match compares a single character.
+fn repeatable_atom(ast: &Ast) -> Option<Item> {
+    let seqs = expand(ast)?;
+    if seqs.len() != 1 {
         return None;
     }
-    // A lazy quantifier only coincides with its greedy reading when
-    // nothing follows it (both are forced to consume everything by
-    // the whole-segment anchor) — refuse anywhere else.
-    let last = items.len() - 1;
-    for (idx, lazy) in lazy_flags.iter().enumerate() {
-        if *lazy && idx != last {
-            return None;
+    let mut seq = seqs.into_iter().next()?;
+    if seq.len() != 1 {
+        return None;
+    }
+    let item = seq.pop()?;
+    if item.quant() != Quant::One {
+        return None;
+    }
+    match &item {
+        Item::Literal { text, .. } if text.chars().count() == 1 => Some(item),
+        Item::Class { .. } => Some(item),
+        _ => None,
+    }
+}
+
+fn apply_rep(ast: Ast, rep: Rep, lazy: bool) -> Option<Ast> {
+    match rep {
+        Rep::One => Some(ast),
+        Rep::Opt => {
+            if let Some(item) = repeatable_atom(&ast) {
+                Some(Ast::Leaf(with_quant(&item, Quant::Opt, lazy)))
+            } else {
+                Some(Ast::Alt(vec![ast, Ast::Empty]))
+            }
+        }
+        Rep::Star => unbounded(ast, Quant::Star, lazy),
+        Rep::Plus => unbounded(ast, Quant::Plus, lazy),
+        Rep::Exact(0) => Some(Ast::Empty),
+        Rep::Exact(n) => {
+            if n as usize > MAX_REPEAT {
+                return None;
+            }
+            Some(Ast::Concat((0..n).map(|_| ast.clone()).collect()))
+        }
+        Rep::AtLeast(0) => unbounded(ast, Quant::Star, lazy),
+        Rep::AtLeast(1) => unbounded(ast, Quant::Plus, lazy),
+        Rep::AtLeast(n) => {
+            if n as usize > MAX_REPEAT {
+                return None;
+            }
+            let item = repeatable_atom(&ast)?;
+            let mut parts = Vec::new();
+            for _ in 0..n - 1 {
+                parts.push(Ast::Leaf(with_quant(&item, Quant::One, false)));
+            }
+            parts.push(Ast::Leaf(with_quant(&item, Quant::Plus, lazy)));
+            Some(Ast::Concat(parts))
+        }
+        Rep::Between(lo, hi) => {
+            if hi < lo || (hi - lo) as usize > MAX_REPEAT {
+                return None;
+            }
+            let mut alts = Vec::new();
+            for n in lo..=hi {
+                alts.push(apply_rep(ast.clone(), Rep::Exact(n), false)?);
+            }
+            Some(Ast::Alt(alts))
         }
     }
-    Some(items)
+}
+
+fn unbounded(ast: Ast, quant: Quant, lazy: bool) -> Option<Ast> {
+    let item = repeatable_atom(&ast)?;
+    Some(Ast::Leaf(with_quant(&item, quant, lazy)))
+}
+
+/// Merge adjacent exact literals so `SEE` is one item, not three.
+fn coalesce(items: &mut Vec<Item>) {
+    let mut out: Vec<Item> = Vec::new();
+    for item in items.drain(..) {
+        if let Item::Literal {
+            text,
+            quant: Quant::One,
+            lazy: false,
+        } = &item
+            && let Some(Item::Literal {
+                text: prev,
+                quant: Quant::One,
+                lazy: false,
+            }) = out.last_mut()
+        {
+            prev.push_str(text);
+            continue;
+        }
+        out.push(item);
+    }
+    *items = out;
+}
+
+/// Every way `ast` can match, as backtrack-free item sequences.
+/// `None` when the cross product would pass [`MAX_ALTERNATIVES`].
+fn expand(ast: &Ast) -> Option<Vec<Vec<Item>>> {
+    match ast {
+        Ast::Empty => Some(vec![vec![]]),
+        Ast::Leaf(item) => Some(vec![vec![item.clone()]]),
+        Ast::Concat(parts) => {
+            let mut acc: Vec<Vec<Item>> = vec![vec![]];
+            for part in parts {
+                let next = expand(part)?;
+                let mut combined = Vec::new();
+                for left in &acc {
+                    for right in &next {
+                        if combined.len() >= MAX_ALTERNATIVES {
+                            return None;
+                        }
+                        let mut row = left.clone();
+                        row.extend(right.iter().cloned());
+                        coalesce(&mut row);
+                        combined.push(row);
+                    }
+                }
+                acc = combined;
+            }
+            Some(acc)
+        }
+        Ast::Alt(parts) => {
+            let mut out = Vec::new();
+            for part in parts {
+                for seq in expand(part)? {
+                    if out.len() >= MAX_ALTERNATIVES {
+                        return None;
+                    }
+                    out.push(seq);
+                }
+            }
+            if out.is_empty() { None } else { Some(out) }
+        }
+    }
+}
+
+struct Parser {
+    chars: Vec<char>,
+    i: usize,
+}
+
+impl Parser {
+    fn peek(&self) -> Option<char> {
+        self.chars.get(self.i).copied()
+    }
+
+    fn bump(&mut self) -> Option<char> {
+        let c = self.peek()?;
+        self.i += 1;
+        Some(c)
+    }
+
+    /// `{n}`, `{n,}`, or `{n,m}` starting at `i`. `{,m}` is not a Ruby
+    /// quantifier — the brace stays a literal character.
+    fn brace_is_quantifier(&self) -> bool {
+        if self.peek() != Some('{') {
+            return false;
+        }
+        let mut j = self.i + 1;
+        if !self.chars.get(j).is_some_and(|c| c.is_ascii_digit()) {
+            return false;
+        }
+        while self.chars.get(j).is_some_and(|c| c.is_ascii_digit()) {
+            j += 1;
+        }
+        if self.chars.get(j) == Some(&',') {
+            j += 1;
+            while self.chars.get(j).is_some_and(|c| c.is_ascii_digit()) {
+                j += 1;
+            }
+        }
+        self.chars.get(j) == Some(&'}')
+    }
+
+    fn parse_number(&mut self) -> Option<u16> {
+        let mut n: u32 = 0;
+        let mut digits = 0u32;
+        while let Some(c) = self.peek() {
+            if !c.is_ascii_digit() {
+                break;
+            }
+            digits += 1;
+            self.bump();
+            n = n
+                .saturating_mul(10)
+                .saturating_add(u32::from(c as u8 - b'0'));
+        }
+        if digits == 0 {
+            return None;
+        }
+        u16::try_from(n).ok()
+    }
+
+    fn parse_brace(&mut self) -> Option<Rep> {
+        self.bump()?; // '{'
+        let lo = self.parse_number()?;
+        let rep = if self.peek() == Some(',') {
+            self.bump();
+            if self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                Rep::Between(lo, self.parse_number()?)
+            } else {
+                Rep::AtLeast(lo)
+            }
+        } else {
+            Rep::Exact(lo)
+        };
+        if self.bump() != Some('}') {
+            return None;
+        }
+        Some(rep)
+    }
+
+    fn parse_rep(&mut self) -> Option<(Rep, bool)> {
+        let rep = match self.peek() {
+            Some('+') => {
+                self.bump();
+                Rep::Plus
+            }
+            Some('*') => {
+                self.bump();
+                Rep::Star
+            }
+            Some('?') => {
+                self.bump();
+                Rep::Opt
+            }
+            Some('{') if self.brace_is_quantifier() => self.parse_brace()?,
+            _ => return Some((Rep::One, false)),
+        };
+        let lazy = if self.peek() == Some('?') {
+            self.bump();
+            true
+        } else {
+            false
+        };
+        Some((rep, lazy))
+    }
+
+    fn parse_escape(&mut self) -> Option<Ast> {
+        let escaped = self.bump()?;
+        if escaped == 'd' {
+            return Some(Ast::Leaf(class_item(('0'..='9').collect(), false, false)));
+        }
+        // `\h`, `\n`, `\w`, `\1`, and the rest are not "the character
+        // after the slash". Only a non-alphanumeric escape is literal.
+        if escaped.is_ascii_alphanumeric() {
+            return None;
+        }
+        Some(Ast::Leaf(literal_item(escaped.to_string())))
+    }
+
+    fn parse_atom(&mut self) -> Option<Ast> {
+        match self.peek()? {
+            '(' => {
+                self.bump();
+                // `(?:…)` groups. Every other `(?…)` form (lookaround,
+                // named captures, flags) is outside the subset.
+                if self.peek() == Some('?') {
+                    self.bump();
+                    if self.bump() != Some(':') {
+                        return None;
+                    }
+                }
+                let inner = self.parse_alt()?;
+                if self.bump() != Some(')') {
+                    return None;
+                }
+                Some(inner)
+            }
+            '[' => {
+                self.bump();
+                let (members, negated) = parse_bracket(&self.chars, &mut self.i)?;
+                Some(Ast::Leaf(class_item(members, negated, false)))
+            }
+            '.' => {
+                self.bump();
+                Some(Ast::Leaf(class_item(Vec::new(), false, true)))
+            }
+            '\\' => {
+                self.bump();
+                self.parse_escape()
+            }
+            '^' | '$' | ')' | '|' | '+' | '*' | '?' => None,
+            '{' if self.brace_is_quantifier() => None,
+            c => {
+                self.bump();
+                Some(Ast::Leaf(literal_item(c.to_string())))
+            }
+        }
+    }
+
+    fn parse_piece(&mut self) -> Option<Ast> {
+        let atom = self.parse_atom()?;
+        let (rep, lazy) = self.parse_rep()?;
+        apply_rep(atom, rep, lazy)
+    }
+
+    fn parse_concat(&mut self) -> Option<Ast> {
+        let mut parts = Vec::new();
+        loop {
+            match self.peek() {
+                None | Some('|' | ')') => break,
+                _ => parts.push(self.parse_piece()?),
+            }
+        }
+        match parts.len() {
+            0 => Some(Ast::Empty),
+            1 => parts.pop(),
+            _ => Some(Ast::Concat(parts)),
+        }
+    }
+
+    fn parse_alt(&mut self) -> Option<Ast> {
+        let mut alts = vec![self.parse_concat()?];
+        while self.peek() == Some('|') {
+            self.bump();
+            alts.push(self.parse_concat()?);
+        }
+        if alts.len() == 1 {
+            alts.pop()
+        } else {
+            Some(Ast::Alt(alts))
+        }
+    }
+}
+
+fn parse_pattern(src: &str) -> Option<Ast> {
+    let mut parser = Parser {
+        chars: src.chars().collect(),
+        i: 0,
+    };
+    let ast = parser.parse_alt()?;
+    if parser.i != parser.chars.len() {
+        return None;
+    }
+    Some(ast)
 }
 
 fn encode_item(item: &Item) -> String {
     match item {
-        Item::Literal { text, quant } => {
+        Item::Literal { text, quant, .. } => {
             format!("L{}00{}.{}", quant.code(), text.chars().count(), text)
         }
-        Item::Class { chars, negated, any, quant } => {
+        Item::Class {
+            chars,
+            negated,
+            any,
+            quant,
+            ..
+        } => {
             let neg = if *negated { '1' } else { '0' };
             let any_c = if *any { '1' } else { '0' };
             let set: String = chars.iter().collect();
-            format!("C{}{}{}{}.{}", quant.code(), neg, any_c, set.chars().count(), set)
+            format!(
+                "C{}{}{}{}.{}",
+                quant.code(),
+                neg,
+                any_c,
+                set.chars().count(),
+                set
+            )
         }
     }
 }
@@ -434,10 +705,50 @@ fn encode(items: &[Item]) -> String {
 /// segment-pattern form `router.rb`'s `segment_pattern_match` reads,
 /// or `None` when it needs more than the supported subset (the route
 /// using it must not be emitted — see `lower::routes`).
+fn encode_alternatives(alts: &[String]) -> String {
+    let mut out = String::from("A");
+    for alt in alts {
+        out.push_str(&alt.chars().count().to_string());
+        out.push('.');
+        out.push_str(alt);
+    }
+    out
+}
+
+/// A lazy quantifier only coincides with its greedy reading when
+/// nothing follows it — both are forced to consume the rest of the
+/// segment. A lazy flag on an earlier item is refused.
+fn lazy_is_terminal(items: &[Item]) -> bool {
+    let last = items.len().saturating_sub(1);
+    items
+        .iter()
+        .enumerate()
+        .all(|(idx, item)| !item.lazy() || idx == last)
+}
+
+/// An alternation of no sequences: the pattern no value matches
+/// (`segment_pattern_alt_match` tries none). `format: false` is the
+/// `(.:format)` requirement no extension meets.
+pub const NEVER: &str = "A";
+
 pub fn compile(src: &str) -> Option<String> {
-    let items = parse_items(src)?;
-    check_safe_adjacency(&items)?;
-    Some(encode(&items))
+    let ast = parse_pattern(src)?;
+    let seqs = expand(&ast)?;
+    if seqs.is_empty() || (seqs.len() == 1 && seqs[0].is_empty()) {
+        return None;
+    }
+    let mut encoded = Vec::with_capacity(seqs.len());
+    for seq in &seqs {
+        if !lazy_is_terminal(seq) {
+            return None;
+        }
+        check_safe_adjacency(seq)?;
+        encoded.push(encode(seq));
+    }
+    if encoded.len() == 1 {
+        return Some(encoded.pop()?);
+    }
+    Some(encode_alternatives(&encoded))
 }
 
 /// Combine a route's already-compiled `(param_name, encoded_pattern)`
@@ -470,7 +781,11 @@ mod tests {
     }
 
     fn refused(src: &str) {
-        assert!(compile(src).is_none(), "expected {src:?} to be refused, got {:?}", compile(src));
+        assert!(
+            compile(src).is_none(),
+            "expected {src:?} to be refused, got {:?}",
+            compile(src)
+        );
     }
 
     #[test]
@@ -519,8 +834,73 @@ mod tests {
     }
 
     #[test]
-    fn alternation_is_refused() {
-        refused(r"foo|bar");
+    fn alternation_of_literals_compiles_to_whole_segment_alternatives() {
+        assert_eq!(ok(r"foo|bar"), "A9.L1003.foo9.L1003.bar");
+    }
+
+    #[test]
+    fn grouped_alternation_distributes_over_an_exact_repeat() {
+        let enc = ok(r"(?:ABR|SNB)\d{12}");
+        assert!(enc.starts_with('A'), "{enc}");
+        assert!(enc.contains("ABR") && enc.contains("SNB"), "{enc}");
+        let digits = "C10010.0123456789";
+        assert_eq!(
+            enc.matches(digits).count(),
+            24,
+            "each branch repeats the class twelve times: {enc}"
+        );
+        // A capturing group is the same constraint: nothing reads the capture.
+        assert_eq!(ok(r"(ABR|SNB)\d{12}"), enc);
+    }
+
+    #[test]
+    fn an_exact_brace_repeat_is_copies_of_the_atom() {
+        let digits = "C10010.0123456789";
+        let enc = ok(r"SEE\d{12}");
+        assert!(enc.starts_with("L1003.SEE"), "{enc}");
+        assert_eq!(enc.matches(digits).count(), 12, "{enc}");
+        assert_eq!(ok(r"a{3}"), "L1003.aaa");
+    }
+
+    #[test]
+    fn a_closed_range_is_one_alternative_per_length() {
+        let enc = ok(r"a{2,4}");
+        assert!(
+            enc.contains("L1002.aa") && enc.contains("L1003.aaa") && enc.contains("L1004.aaaa"),
+            "{enc}"
+        );
+    }
+
+    #[test]
+    fn an_open_repeat_keeps_a_single_backtrack_free_sequence() {
+        let enc = ok(r"\d{2,}");
+        assert!(
+            !enc.starts_with('A'),
+            "a single class does not need alternatives: {enc}"
+        );
+        assert!(enc.contains("C+"), "{enc}");
+    }
+
+    #[test]
+    fn different_length_branches_stay_ordered_whole_matches() {
+        assert_eq!(ok(r"(?:a|ab)c"), "A8.L1002.ac9.L1003.abc");
+    }
+
+    #[test]
+    fn an_unclosed_brace_stays_a_literal() {
+        assert_eq!(ok(r"a{"), "L1002.a{");
+        assert_eq!(ok(r"a{,2}"), "L1005.a{,2}");
+    }
+
+    #[test]
+    fn unbounded_repetition_of_an_alternation_is_refused() {
+        refused(r"(?:a|b)+");
+        refused(r"(?:ab){2,}");
+    }
+
+    #[test]
+    fn a_reversed_brace_range_is_refused() {
+        refused(r"a{2,1}");
     }
 
     #[test]

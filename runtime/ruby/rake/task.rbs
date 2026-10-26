@@ -1,0 +1,17 @@
+module Rake
+  class Task
+    def self.define: (String name, Array[String] prerequisites, String kind) -> Task
+    def self.define_task: (Hash[String, Array[String]] args) ?{ () -> nil } -> nil
+    def self.[]: (String name) -> Task?
+    def self.task_defined?: (String name) -> bool
+    def self.find: (String name) -> Task?
+    def initialize: (String name, Array[String] prerequisites, String kind) -> void
+    def chain: (Task? rest) -> Task
+    def rest: () -> Task?
+    def name: () -> String
+    def reenable: () -> nil
+    def all_prerequisite_tasks: () -> Array[Task]
+    def collect_prerequisites: (Array[Task] out) -> nil
+    def invoke: () -> nil
+  end
+end

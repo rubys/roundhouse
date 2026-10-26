@@ -415,8 +415,13 @@ impl<'a> BodyTyper<'a> {
         let ExprNode::Lambda { params, .. } = &*block.node else {
             return new_ctx;
         };
-        for name in params { new_ctx.class_objects.remove(name); }
+        for name in params { new_ctx.class_objects.remove(name); new_ctx.query_class_objects.remove(name); }
         super::forget_class_object_writes(block, &mut new_ctx);
+        if class_object_receiver && matches!(method.as_str(), "tap" | "then" | "yield_self")
+            && !self.owns_operator(recv_ty, method, true)
+        {
+            if let Some(name) = params.first() { *self.block_class_param.borrow_mut() = Some(name.clone()); }
+        }
         // `form_with model: product do |form|` / `form_for @product do
         // |f|`: the builder is parameterized by the record the form is
         // for, so `form.object` (and `form.object.errors`) answer it.
@@ -587,6 +592,14 @@ impl<'a> BodyTyper<'a> {
                 elem: std::sync::Arc::new(elems.iter().cloned().reduce(union_of).unwrap_or(Ty::Untyped)),
             };
             return self.block_params_for(Some(&as_array), method, class_object_receiver);
+        }
+        // The controller's cookie jar iterates names and values, both
+        // Strings (runtime/ruby/action_controller/cookies.rb, `each` over
+        // `to_h`).
+        if matches!(recv_ty, Ty::Class { id, .. } if id.0.as_str() == "ActionDispatch::Cookies::CookieJar")
+            && method.as_str() == "each"
+        {
+            return Some(vec![Ty::Str, Ty::Str]);
         }
         match recv_ty {
             Ty::Str if method.as_str() == "bytes" => Some(vec![Ty::Int]),
@@ -1065,6 +1078,17 @@ impl<'a> BodyTyper<'a> {
         args: &[crate::expr::Expr],
         instance_receiver: bool,
     ) -> Ty {
+        // Not the stdlib's String form too: the port reads `other.octets`, which a String lacks.
+        if let Some(Ty::Class { id, .. }) = recv_ty
+            && id.0.as_str() == "IPAddr"
+            && instance_receiver
+            && method.as_str() == "include?"
+            && let [other] = args
+            && matches!(other.ty.as_ref(), Some(Ty::Class { id: o, .. }) if o.0.as_str() == "IPAddr")
+            && other.decisions & crate::expr::CLASS_OBJECT_VALUE == 0
+        {
+            return Ty::Bool;
+        }
         // `Parameters` is a Hash-shaped bag: what its own class does not
         // answer (`fetch`, `each`, `map`, `count`, ...) is the Hash
         // reading over Symbol -> param value. Done here,
@@ -1132,6 +1156,13 @@ impl<'a> BodyTyper<'a> {
             if id.0.as_str() == PARAM_VALUE {
                 return param_value_method(method, block_ret).unwrap_or_else(|| str_method(method));
             }
+        }
+        // Retain the nominal ancestry of class values derived from an
+        // exception owner, so a later/aliased constructor cannot erase its refusal.
+        if !instance_receiver
+            && let Some(ty) = self.derived_storage_class_value(recv_ty, method, args)
+        {
+            return ty;
         }
         // `obj.class` is receiver-aware: our type system flattens the
         // class object and instances onto the same `Ty::Class { id }`,
@@ -1257,7 +1288,7 @@ impl<'a> BodyTyper<'a> {
         // runtime site) answers the function's declared return. Only
         // a `Ty::Fn` receiver claims this; anything else keeps its
         // own `call` (a callable app class, an untyped proc).
-        if method.as_str() == "call" {
+        if matches!(method.as_str(), "call" | "[]") {
             if let Some(Ty::Fn { ret, .. }) = recv_ty {
                 // Not left a type variable: `call` is known, and what the body answers is the body's own sends' to report.
                 return match &**ret {
@@ -1283,6 +1314,13 @@ impl<'a> BodyTyper<'a> {
             && !self.owns_operator(recv_ty, method, !instance_receiver)
         {
             return block_ret.cloned().unwrap_or(Ty::Untyped);
+        }
+        // Not the block's value alone: a `throw` without a value leaves Kernel#catch answering nil.
+        if method.as_str() == "catch"
+            && (recv_ty.is_none() || !self.owns_operator(recv_ty, method, !instance_receiver))
+            && let Some(block) = block_ret
+        {
+            return union_of(block.clone(), Ty::Nil);
         }
         // `Model.transaction { … }` / `ActiveRecord::Base.transaction
         // { … }` returns its block's value (commit) — the registered
@@ -1422,6 +1460,12 @@ impl<'a> BodyTyper<'a> {
                 // (`SCORE_RANGE_TO_HIDE.include?(score)`, `.first`) and
                 // any other range value flowing through dispatch.
                 if id.0.as_str() == "Range" {
+                    if method.as_str() == "new" && args.is_empty() && (2..=3).contains(&call_args.len())
+                        && !call_args.iter().any(|a| matches!(&*a.node, ExprNode::Splat { .. }))
+                    {
+                        let elem = call_args[0].ty.clone().or_else(|| call_args[1].ty.clone()).unwrap_or(Ty::Untyped);
+                        return Ty::Class { id: id.clone(), args: vec![elem].into() };
+                    }
                     if let Some(ty) = range_method(method, args.first()) {
                         return ty;
                     }
@@ -1447,6 +1491,32 @@ impl<'a> BodyTyper<'a> {
                 }
                 if id.0.as_str() == "ActiveSupport" && method.as_str() == "parse_db_date" {
                     return Ty::Union { variants: vec![Ty::Date, Ty::Nil].into() };
+                }
+                // Interval-column reader. Storage is whole seconds of text;
+                // the value is the Ruby-family Duration class.
+                if id.0.as_str() == "ActiveSupport" && method.as_str() == "parse_db_interval" {
+                    return Ty::Union {
+                        variants: vec![
+                            Ty::Class {
+                                id: crate::ident::ClassId(crate::ident::Symbol::from("ActiveSupport::Duration")),
+                                args: vec![].into(),
+                            },
+                            Ty::Nil,
+                        ].into(),
+                    };
+                }
+                // Write side of an interval column: a Duration becomes its
+                // whole-second count. A string or nil can fail to parse.
+                if id.0.as_str() == "ActiveSupport" && method.as_str() == "format_db_interval" {
+                    let plain_duration = matches!(
+                        call_args.first().and_then(|a| a.ty.as_ref()),
+                        Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveSupport::Duration"
+                    );
+                    return if plain_duration {
+                        Ty::Int
+                    } else {
+                        Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() }
+                    };
                 }
                 // The Date calendar intrinsics `time_calendar` lowers to.
                 if id.0.as_str() == "ActiveSupport" {
@@ -1790,6 +1860,7 @@ impl<'a> BodyTyper<'a> {
                         // none. campfire's `Webhook#extract_text_from`
                         // is the shape.
                         "String" => return Ty::Str,
+                        "Time" => return Ty::Time,
                         _ => {}
                     }
                     return Ty::Class { id: id.clone(), args: args.clone() };
@@ -1849,7 +1920,14 @@ impl<'a> BodyTyper<'a> {
                     return block_ret.filter(|t| !matches!(t, Ty::Var { .. })).cloned().unwrap_or(Ty::Untyped);
                 }
                 if id.0.as_str() == "Time" {
-                    if let Some(ty) = time_method(method) {
+                    let ty = if instance_receiver && matches!(method.as_str(), "now" | "at") {
+                        Some(Ty::Time)
+                    } else if instance_receiver {
+                        time_method(method)
+                    } else {
+                        time_class_method(method)
+                    };
+                    if let Some(ty) = ty {
                         return ty;
                     }
                 }
@@ -2158,6 +2236,12 @@ impl<'a> BodyTyper<'a> {
                         return t;
                     }
                 }
+                // `a[start, length]` and `a[range]` answer a slice (nil past the end), not an element
+                if matches!(method.as_str(), "[]" | "slice")
+                    && (args.len() == 2 || args.first().is_some_and(|a| matches!(a.ty, Some(Ty::Class { ref id, .. }) if id.0.as_str() == "Range") || matches!(&*a.node, crate::expr::ExprNode::Range { .. })))
+                {
+                    return Ty::Union { variants: vec![Ty::Array { elem: std::sync::Arc::new(elem.clone()) }, Ty::Nil].into() };
+                }
                 array_method(method, elem, block_ret)
             }
             // Relation-typed receiver — a chain started from a scope
@@ -2337,7 +2421,7 @@ impl<'a> BodyTyper<'a> {
                 bigdecimal()
             }
             Some(Ty::Int) => int_method(method),
-            Some(Ty::Float) => float_method(method),
+            Some(Ty::Float) => float_method(method, args),
             Some(Ty::Bool) => bool_method(method),
             // Union dispatch: try each concrete (non-Nil, non-Var) variant
             // and union the resolved results. Covers the common
@@ -2593,20 +2677,27 @@ pub(super) fn range_method(method: &Symbol, elem: Option<&Ty>) -> Option<Ty> {
     Some(ty)
 }
 
+fn time_class_method(method: &Symbol) -> Option<Ty> {
+    match method.as_str() {
+        "now" | "current" | "at" | "utc" | "gm" | "local" | "mktime"
+        | "iso8601" | "xmlschema" | "httpdate" | "rfc2822" | "rfc822" | "strptime" => Some(Ty::Time),
+        _ => None,
+    }
+}
+
 /// Methods on a `Time` value — modeled as the first-class `Ty::Time`
 /// variant. AR datetime columns type as `Ty::Time` (see
 /// `ingest::model::ty_of_column`), so this is the surface a column read
-/// like `story.created_at.strftime(...)` dispatches against. The `Time`
-/// class constant (`Ty::Class{"Time"}`, the receiver of `Time.now`)
-/// flattens onto the same table, so the class-side constructors live
-/// here too. DateTime/time-of-day columns also use `Ty::Time`;
+/// like `story.created_at.strftime(...)` dispatches against. Class-side
+/// constructors and parsers use `time_class_method` instead.
+/// DateTime/time-of-day columns also use `Ty::Time`;
 /// date-only columns have their own table. Returns `None` for unmodeled methods so dispatch falls
 /// through to the parent-chain walk.
 pub(super) fn time_method(method: &Symbol) -> Option<Ty> {
     let time = || Ty::Time;
     let ty = match method.as_str() {
-        // Constructors, coercions, and Time-returning transforms.
-        "now" | "current" | "utc" | "local" | "at" | "today"
+        // Coercions and Time-returning transforms.
+        "utc" | "local" | "today"
         | "to_time" | "in_time_zone" | "localtime" | "getlocal" | "getutc"
         | "beginning_of_day" | "end_of_day" | "beginning_of_hour" | "end_of_hour"
         | "beginning_of_week" | "end_of_week" | "beginning_of_month" | "end_of_month"
@@ -2633,7 +2724,7 @@ pub(super) fn time_method(method: &Symbol) -> Option<Ty> {
             args: vec![time()].into(),
         },
         // String renderings.
-        "iso8601" | "rfc2822" | "rfc3339" | "to_s" | "to_fs" | "to_formatted_s"
+        "iso8601" | "xmlschema" | "rfc2822" | "rfc3339" | "to_s" | "to_fs" | "to_formatted_s"
         | "strftime" | "httpdate" | "rfc822" | "ctime" | "asctime" | "inspect"
         | "zone" => Ty::Str,
         // Integer components / epoch seconds / spaceship.
@@ -2938,6 +3029,7 @@ fn relation_return_on_array_repr(kind: crate::catalog::ReturnKind, elem: &Ty) ->
         },
         ReturnKind::ArrayOfSym => Ty::Array { elem: std::sync::Arc::new(Ty::Sym) },
         ReturnKind::Str => Ty::Str,
+        ReturnKind::StrOrNil => union_of(Ty::Str, Ty::Nil),
     }
 }
 
@@ -3306,12 +3398,15 @@ pub(super) fn hash_method(
         // non-nil form as `.get(k).cloned().unwrap_or(default)` — a
         // `V`, not an `Option` (`emit/rust/expr/send/index.rs:414`).
         //
-        // The one-arg form raises `KeyError` rather than answering
-        // nil, so `value` alone would be right; it stays `value | Nil`
-        // because the extra arm only costs a nil-check and every
-        // target's one-arg path is written against it.
-        "fetch" => match args.get(1).and_then(|a| a.ty.clone()) {
-            Some(default) if !default.is_open() => union_of(value.clone(), default),
+        // The one-arg form answers the value or raises `KeyError`, never
+        // nil, so it is `value`, as `Array#fetch(i)` is its element (#1014:
+        // a `value | Nil` made `RANKS.fetch(k) + 1` an incompatible_binop).
+        // Each strict target's one-arg path raises on a missing key. A
+        // block answers a miss with its value.
+        "fetch" => match (args.len(), args.get(1).and_then(|a| a.ty.clone()), block_ret) {
+            (1, _, None) => value.clone(),
+            (1, _, Some(missed)) if !missed.is_open() => union_of(value.clone(), missed.clone()),
+            (_, Some(default), _) if !default.is_open() => union_of(value.clone(), default),
             _ => Ty::Union { variants: vec![value.clone(), Ty::Nil].into() },
         },
         "merge" => Ty::Hash {
@@ -3600,12 +3695,14 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         // ActiveSupport String extensions. Pluralization/inflection
         // methods all return Str; comparison-style return Bool. Match
         // the surface of `ActiveSupport::Inflector` that real Rails
-        // code reaches for in views and helpers.
+        // code reaches for in views and helpers. `tableize` and
+        // `strip_heredoc` are not here: no runtime answers them, so
+        // they stay unknown and read as a `String extension` gap.
         "pluralize" | "singularize" | "camelize" | "camelcase"
         | "underscore" | "dasherize" | "titleize" | "titlecase"
         | "humanize" | "demodulize" | "deconstantize" | "classify"
-        | "tableize" | "foreign_key" | "parameterize" | "truncate"
-        | "squish" | "remove" | "indent" | "strip_heredoc"
+        | "foreign_key" | "parameterize" | "truncate"
+        | "squish" | "remove" | "indent"
         | "html_safe" | "to_query" | "to_param" => Ty::Str,
         "constantize" | "safe_constantize" => unknown(),
         // JSON encoding is provided by the Ruby runtime; the other
@@ -3747,14 +3844,12 @@ fn bigdecimal_method(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> 
     })
 }
 
-pub(super) fn float_method(method: &Symbol) -> Ty {
+pub(super) fn float_method(method: &Symbol, args: &[crate::expr::Expr]) -> Ty {
     match method.as_str() {
         "to_s" | "inspect" => Ty::Str,
         "to_d" => bigdecimal(),
-        // No-arg rounding returns Int (the common shape); with a digits
-        // arg it returns Float, but we don't see args here — Int is the
-        // safer default for the bare call.
-        "to_i" | "to_int" | "round" | "ceil" | "floor" | "truncate" => Ty::Int,
+        "round" | "ceil" | "floor" | "truncate" => float_rounding(args),
+        "to_i" | "to_int" => Ty::Int,
         "to_f" | "abs" | "fdiv" | "clamp" | "modulo" => Ty::Float,
         "div" => Ty::Int,
         "divmod" => Ty::Array { elem: std::sync::Arc::new(Ty::Float) },
@@ -3765,6 +3860,70 @@ pub(super) fn float_method(method: &Symbol) -> Ty {
         "+" | "-" | "*" | "/" | "%" | "**" => Ty::Float,
         "==" | "!=" | "<" | ">" | "<=" | ">=" | "<=>" | "eql?" | "equal?" => Ty::Bool,
         _ => unknown(),
+    }
+}
+
+/// CRuby picks `Float#round`/`floor`/`ceil`/`truncate`'s class from the digits value: Integer for none or <= 0, Float above.
+fn float_rounding(args: &[crate::expr::Expr]) -> Ty {
+    use crate::expr::{ExprNode, Literal};
+    // A trailing `half:` keyword hash is the tie-break mode, not a digit count.
+    let digits = match args {
+        [rest @ .., last] if matches!(&*last.node, ExprNode::Hash { kwargs: true, .. }) => rest,
+        all => all,
+    };
+    match digits {
+        [] => Ty::Int,
+        [n] => match &*n.node {
+            ExprNode::Lit { value: Literal::Int { value } } if *value > 0 => Ty::Float,
+            ExprNode::Lit { value: Literal::Int { .. } } => Ty::Int,
+            _ => Ty::Union { variants: vec![Ty::Int, Ty::Float].into() },
+        },
+        _ => unknown(),
+    }
+}
+
+#[cfg(test)]
+mod float_rounding_tests {
+    use super::*;
+
+    // Types `src` with `x` bound to a Float and `n` to an Integer.
+    fn ty_of(src: &str) -> Ty {
+        let parsed = ruby_prism::parse(src.as_bytes());
+        let program = parsed.node();
+        let stmt = program.as_program_node().unwrap().statements().body().iter().next().unwrap();
+        let mut expr = crate::ingest::expr::ingest_expr(&stmt, "probe.rb").unwrap();
+        let classes = std::collections::HashMap::new();
+        let mut ctx = super::super::Ctx::default();
+        ctx.local_bindings.insert(Symbol::from("x"), Ty::Float);
+        ctx.local_bindings.insert(Symbol::from("n"), Ty::Int);
+        super::super::BodyTyper::new(&classes).analyze_expr(&mut expr, &ctx)
+    }
+
+    #[test]
+    fn digits_literal_picks_float_or_integer_like_cruby() {
+        for m in ["round", "floor", "ceil", "truncate"] {
+            assert_eq!(ty_of(&format!("x.{m}")), Ty::Int, "{m}");
+            assert_eq!(ty_of(&format!("x.{m}(0)")), Ty::Int, "{m}(0)");
+            assert_eq!(ty_of(&format!("x.{m}(-1)")), Ty::Int, "{m}(-1)");
+            assert_eq!(ty_of(&format!("x.{m}(2)")), Ty::Float, "{m}(2)");
+        }
+    }
+
+    #[test]
+    fn half_keyword_is_not_a_digit_count() {
+        assert_eq!(ty_of("x.round(half: :even)"), Ty::Int);
+        assert_eq!(ty_of("x.round(1, half: :even)"), Ty::Float);
+        assert_eq!(ty_of("x.round(0, half: :up)"), Ty::Int);
+    }
+
+    #[test]
+    fn non_literal_digits_is_either_class() {
+        let either = Ty::Union { variants: vec![Ty::Int, Ty::Float].into() };
+        assert_eq!(ty_of("x.round(n)"), either);
+        assert_eq!(ty_of("x.round(n, half: :even)"), either);
+        // Integer#round never answers a Float, whatever the digits.
+        assert_eq!(ty_of("n.round(2)"), Ty::Int);
+        assert_eq!(ty_of("n.round(-1)"), Ty::Int);
     }
 }
 
@@ -3913,6 +4072,15 @@ pub(super) fn is_module_protocol(method: &Symbol) -> bool {
         | "method_defined?" | "public_method_defined?" | "private_method_defined?"
         | "const_defined?" | "include?" | "instance_methods" | "public_instance_methods"
         | "private_instance_methods" | "remove_method" | "undef_method")
+}
+
+/// The Module protocol names that only read a class, which a strict emit has no class object to answer.
+pub(super) fn is_module_query(method: &Symbol) -> bool {
+    matches!(method.as_str(),
+        "const_defined?" | "const_get" | "constants" | "method_defined?" | "public_method_defined?"
+        | "private_method_defined?" | "instance_method" | "public_instance_method" | "instance_methods"
+        | "public_instance_methods" | "private_instance_methods" | "include?" | "class_variable_get"
+        | "class_variable_defined?")
 }
 
 pub(super) fn object_protocol_method(

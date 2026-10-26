@@ -29,4 +29,32 @@ module Params
   def self.provided(sub : Hash(String, Roundhouse::ParamValue), key : String) : Bool
     sub[key]?.is_a?(String)
   end
+
+  # The scalar readers the params lowering emits, and its record of
+  # multiparameter keys. Those keys (`title(1)`) are modeled on the Ruby
+  # family only (runtime/ruby/params.rb); this target ignores them, as
+  # it always has, so these pass through.
+  def self.scalar_provided(sub : Hash(String, Roundhouse::ParamValue), key : String) : Bool
+    provided(sub, key)
+  end
+
+  def self.scalar(sub : Hash(String, Roundhouse::ParamValue), key : String) : String
+    str(sub, key, "")
+  end
+
+  def self.no_fields : Array(String)
+    [] of String
+  end
+
+  def self.multiparameter_fields(sub : Hash(String, Roundhouse::ParamValue), keys : Array(String)) : Array(String)
+    [] of String
+  end
+
+  def self.multiparameter_unsupported(sub : Hash(String, Roundhouse::ParamValue), keys : Array(String)) : Bool
+    false
+  end
+
+  def self.any_of(list : Array(String), names : Array(String)) : Bool
+    names.any? { |n| list.includes?(n) }
+  end
 end

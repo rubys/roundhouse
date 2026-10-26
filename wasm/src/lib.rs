@@ -810,6 +810,88 @@ pub unsafe extern "C" fn version(_input_ptr: *const u8, _input_len: u32) -> u64 
     pack(out.to_string())
 }
 
+// ── Fractal pass explorer ────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct FractalInput {
+    src: HashMap<String, String>,
+    /// The files to compile (`--file`), relative to the app root.
+    #[serde(default)]
+    files: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct FractalOutput {
+    #[serde(flatten)]
+    stages: roundhouse::emit::fractal::stages::Stages,
+    /// Ruby files under `app/` the explorer can offer to compile.
+    candidates: Vec<String>,
+    /// Ingest gaps, as `path: message`.
+    gaps: Vec<String>,
+}
+
+fn fractal_stages_inner(json_in: &str) -> String {
+    use roundhouse::emit::fractal;
+    let input: FractalInput = match serde_json::from_str(json_in) {
+        Ok(v) => v,
+        Err(e) => return error_json(&format!("invalid input JSON: {e}")),
+    };
+    let mut candidates: Vec<String> =
+        input.src.keys().filter(|p| p.starts_with("app/") && p.ends_with(".rb")).cloned().collect();
+    candidates.sort();
+    let lockfile = input.src.get("Gemfile.lock").cloned();
+    let mut sources: Vec<roundhouse::span::SourceFile> = input
+        .src
+        .iter()
+        .filter(|(path, _)| path.ends_with(".rb"))
+        .map(|(path, text)| roundhouse::span::SourceFile { path: path.clone(), text: text.clone() })
+        .collect();
+    sources.sort_by(|a, b| a.path.cmp(&b.path));
+    let tree: HashMap<PathBuf, Vec<u8>> =
+        input.src.into_iter().map(|(k, v)| (PathBuf::from(k), v.into_bytes())).collect();
+    roundhouse::ingest::survey::activate();
+    let (result, parse_diags) = roundhouse::ingest::prism::scope(|| ingest_app_from_tree(tree));
+    let gaps = roundhouse::ingest::survey::drain();
+    let mut app = match result {
+        Ok(app) => app,
+        Err(e) => return error_json(&format!("ingest: {e}")),
+    };
+    let mut untrusted: Vec<String> = Vec::new();
+    for d in parse_diags.iter().filter(|d| d.severity == Severity::Error) {
+        if let Some(source) = (d.span.file.0 as usize).checked_sub(1).and_then(|i| app.sources.get(i)) {
+            untrusted.push(source.path.clone());
+        }
+    }
+    let mut gaps_out = Vec::new();
+    for gap in &gaps {
+        if let roundhouse::ingest::IngestError::Unsupported { file, message }
+        | roundhouse::ingest::IngestError::Parse { file, message } = gap
+        {
+            untrusted.push(file.clone());
+            gaps_out.push(format!("{file}: {message}"));
+        }
+    }
+    Analyzer::new(&app).analyze(&mut app);
+    let passes = fractal::pass::registered();
+    let passes: Vec<&dyn fractal::Pass> = passes.iter().map(|p| p.as_ref()).collect();
+    let root = std::path::Path::new("");
+    let cx = fractal::Cx::in_memory(&app, root, sources, lockfile.as_deref());
+    match fractal::stages::stages(&app, &cx, &input.files, &untrusted, &passes) {
+        Ok(stages) => serde_json::to_string(&FractalOutput { stages, candidates, gaps: gaps_out })
+            .unwrap_or_else(|e| error_json(&format!("serialize: {e}"))),
+        Err(e) => error_json(&e),
+    }
+}
+
+/// The Fractal pass explorer's entry: input `{"src": {...}, "files": [...]}`,
+/// output the compiled files after each registered pass (see
+/// `roundhouse::emit::fractal::stages`), or `{"error": ...}`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fractal_stages(input_ptr: *const u8, input_len: u32) -> u64 {
+    let input = unsafe { std::slice::from_raw_parts(input_ptr, input_len as usize) };
+    pack(fractal_stages_inner(std::str::from_utf8(input).unwrap_or("{}")))
+}
+
 // ── C ABI exports ────────────────────────────────────────────────────
 
 /// Allocate a buffer of the given size in wasm linear memory and return

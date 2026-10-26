@@ -15,6 +15,9 @@
 # backend is wired.
 
 require_relative "active_support_reporters"
+require_relative "active_support_isolated_execution_state"
+require_relative "active_support_notifications"
+require_relative "active_support_configuration_file"
 
 module Rails
   class << self
@@ -335,6 +338,15 @@ module Rails
       value
     end
 
+    # Rails' `increment(name, amount = 1, expires_in:)`, the call
+    # `rate_limit` makes on the controller's `cache_store` — under that
+    # name, so a test stubbing the store's `increment` is heard. The
+    # counting is `increment_str`'s, which each store behind
+    # `Rails.cache` shards and locks its own way.
+    def increment(key, amount = 1, expires_in: 0)
+      increment_str(key.to_s, amount, expires_in.to_i)
+    end
+
     # A counter in the typed store: the value is the count as decimal
     # text, so the store stays `String → String` on every target. The
     # first increment in a window starts the window — the entry is
@@ -342,14 +354,14 @@ module Rails
     # is what `rate_limit`'s `within:` means (MemoryStore#increment does
     # the same). A whole-store flush at the cap resets every window;
     # that is the bound's shape, not a cost anything pays today.
-    def increment_str(key, ttl)
+    def increment_str(key, amount, ttl)
       k = key.to_s
       hit = read_str(k)
       if hit.nil?
-        write_str(k, "1", ttl)
-        1
+        write_str(k, amount.to_s, ttl)
+        amount
       else
-        n = hit.to_i + 1
+        n = hit.to_i + amount
         @entries[k] = n.to_s
         n
       end
@@ -448,9 +460,8 @@ module Rails
     # DEFAULT, not a stub for un-ingested app config: Rails always has a
     # session cookie name (it derives one from the app name when the app
     # declares none), and the dispatch has to know it before any app code
-    # runs. `config/initializers/session_store.rb`'s
-    # `config.session_store :cookie_store, key: "..."` is lifted at
-    # ingest into a `session_cookie_key` def on the app's
+    # runs. The application class name and `config.session_store`
+    # declarations are lifted at ingest into a `session_cookie_key` def on the app's
     # `Rails::Application` reopen, which is required right after this
     # file and so overrides this default.
     #
@@ -460,6 +471,10 @@ module Rails
     # disagreement clears the session on every request.
     def session_cookie_key
       "_session"
+    end
+
+    def propshaft_asset_path(source)
+      "/assets/#{source}"
     end
 
     # `config.action_controller.forgery_protection_verification_strategy`,
@@ -514,10 +529,11 @@ module Rails
 
     # `GlobalID.app` — the first segment of every `gid://<app>/<Model>/
     # <id>` URI this runtime mints. Rails derives it from the
-    # application's railtie name (`campfire_application` minus the
-    # suffix); ingest reads the module wrapping `class Application <
-    # Rails::Application` in config/application.rb and synthesizes an
-    # override here, exactly as it does for `session_cookie_key`.
+    # application's railtie name minus the `_application` suffix,
+    # dasherized (`my_app_application` -> "my-app"); ingest reads the
+    # class inheriting `Rails::Application` in config/application.rb
+    # and synthesizes an override here, exactly as it does for
+    # `session_cookie_key`.
     #
     # The default is deliberately generic: an app whose config/
     # application.rb ingest could not read still mints well-formed gids,
@@ -617,7 +633,10 @@ module Rails
     # masks (Rails' `rails new` initializer lists `:passw`, `:token`,
     # ...). Same framework-default shape as `config_time_zone` above:
     # Rails' default list is empty, and ingest lifts an app's Symbol and
-    # String filters, each as its String, into an override on the reopen.
+    # String filters, each as its String, and its Regexp literals as
+    # written, into an override on the reopen. The signature names
+    # Regexp too: Spinel compiles to the declared element type, and a
+    # Regexp filter typed as a String is silently never applied.
     def config_filter_parameters
       []
     end

@@ -76,3 +76,57 @@ puts "ALL OK"
     );
     assert!(out.status.success(), "driver exited {:?}", out.status.code());
 }
+
+/// The overlay routes the app's own `Digest::SHA256.hexdigest(string)` /
+/// `.digest(string)` through the per-thread OpenSSL digest: the same bytes
+/// as the digest gem for every encoding and size, and every other call
+/// shape left on the gem's path.
+#[test]
+fn an_apps_sha256_class_digests_go_through_openssl() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = r##"
+require "digest"
+gem_hex = ->(s) { Digest::SHA256.new.update(s).hexdigest }
+gem_raw = ->(s) { Digest::SHA256.new.update(s).digest }
+require_relative "runtime/spinel/base64"
+require_relative "runtime/spinel/message_digest_cruby"
+require_relative "runtime/ruby/action_controller/message_verifier"
+require_relative "runtime/spinel/scaffold/ruby_overlay/runtime/message_verifier_cruby"
+
+inputs = ["", "x", "héllo", "\xFF\x00".b, "a" * 400_000, "<div>#{"é" * 1000}</div>".encode("UTF-16LE")]
+inputs.each do |s|
+  h = Digest::SHA256.hexdigest(s)
+  raise "hex differs for #{s.bytesize} bytes" unless h == gem_hex.(s) && h.encoding == Encoding::US_ASCII
+  r = Digest::SHA256.digest(s)
+  raise "raw differs for #{s.bytesize} bytes" unless r == gem_raw.(s) && r.encoding == Encoding::BINARY
+end
+raise "the class call did not reach OpenSSL" unless Thread.current.thread_variable_get(:roundhouse_sha256).is_a?(OpenSSL::Digest)
+
+# A digest left mid-update by another caller on this thread does not leak in.
+ActionController::Base.sha256_digest.update("leftover")
+raise "state leaked" unless Digest::SHA256.hexdigest("x") == gem_hex.("x")
+
+# Other shapes keep the gem's own behaviour.
+begin
+  Digest::SHA256.hexdigest
+  raise "no-argument call should raise"
+rescue ArgumentError
+end
+sub = Class.new(String).new("sub")
+raise "String subclass" unless Digest::SHA256.hexdigest(sub) == gem_hex.("sub")
+puts "ALL OK"
+"##;
+    let out = Command::new("ruby")
+        .arg("-e")
+        .arg(script)
+        .current_dir(root)
+        .output()
+        .expect("ruby is on PATH");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("ALL OK"),
+        "OpenSSL SHA256 routing failed\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"
+    );
+    assert!(out.status.success(), "driver exited {:?}", out.status.code());
+}

@@ -26,6 +26,7 @@ use super::util::{
 };
 use super::{IngestError, IngestResult};
 
+use crate::ingest::prism_api::PrismLocation;
 /// Ingest the first class declaration, or return `None` if there is none.
 /// Custom Data blocks require plural ingestion because their lifted methods
 /// belong to additional library classes; reject them rather than lose that IR.
@@ -536,6 +537,14 @@ pub(super) fn library_class_and_struct_base(
         Some(_) => Some(struct_base_id(&owner)),
         None => parent,
     };
+    if parent.is_none() && class.superclass().is_some() {
+        super::prism::push(crate::diagnostic::Diagnostic::unsupported(
+            source_parent_span,
+            None,
+            "superclass",
+            format!("`{}`'s superclass is an expression evaluated when the class loads, not a constant, so the class is emitted without it", owner.0.as_str()),
+        ));
+    }
 
     let DeclBody {
         mut includes,
@@ -546,6 +555,14 @@ pub(super) fn library_class_and_struct_base(
         mut class_initializers,
         class_attributes: _,
     } = walk_decl_body(class.body(), &owner, file, DeclBodyMode::Instance)?;
+    // An alias of a builtin captured the superclass's method where the
+    // superclass defines it; the delegation can't tell (`OBJECT_BUILTINS`).
+    if class.superclass().is_some() && methods.iter().any(|m| delegates_to_builtin(&m.body)) {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "alias names a method this body has not defined".into(),
+        });
+    }
 
     // A `T::Struct` is a class GENERATOR, not an annotation: `const
     // :name, String` IS the constructor and the reader. Lower it into
@@ -1129,7 +1146,7 @@ fn sorbet_struct_members(body: Option<ruby_prism::Node<'_>>, file: &str) -> Vec<
         let Some(name) = args.next().and_then(|n| {
             let symbol = n.as_symbol_node()?;
             Some(Symbol::from(
-                String::from_utf8_lossy(symbol.value_loc()?.as_slice()).as_ref(),
+                String::from_utf8_lossy(symbol.unescaped()).as_ref(),
             ))
         }) else {
             continue;
@@ -1446,12 +1463,14 @@ fn struct_class(
     }
 }
 
-/// `Result = Struct.new(:a, :b, keyword_init: true) do … end` written
+/// `Result = Struct.new(:a, :b[, keyword_init: true]) do … end` written
 /// directly in a class or module body, read as the class it defines.
 struct StructConstant<'pr> {
     name: Symbol,
     members: Vec<Symbol>,
     keyword_init: bool,
+    /// `keyword_init: false` written out.
+    positional_written: bool,
     body: Option<ruby_prism::Node<'pr>>,
 }
 
@@ -1477,15 +1496,20 @@ fn struct_constant_spec<'pr>(value: &ruby_prism::Node<'pr>) -> Option<StructCons
     }
     let mut members = Vec::new();
     let mut keyword_init = false;
+    let mut positional_written = false;
     for arg in call.arguments()?.arguments().iter() {
         if let Some(options) = arg.as_keyword_hash_node() {
             let elements: Vec<_> = options.elements().iter().collect();
             let [pair] = elements.as_slice() else { return None };
             let pair = pair.as_assoc_node()?;
-            if symbol_value(&pair.key()).as_deref() != Some("keyword_init") || pair.value().as_true_node().is_none() {
+            // `keyword_init: false` is the positional form, written out.
+            if symbol_value(&pair.key()).as_deref() != Some("keyword_init")
+                || (pair.value().as_true_node().is_none() && pair.value().as_false_node().is_none())
+            {
                 return None;
             }
-            keyword_init = true;
+            keyword_init = pair.value().as_true_node().is_some();
+            positional_written = !keyword_init;
             continue;
         }
         let member = symbol_value(&arg)?;
@@ -1498,8 +1522,11 @@ fn struct_constant_spec<'pr>(value: &ruby_prism::Node<'pr>) -> Option<StructCons
         }
         members.push(Symbol::from(member));
     }
-    // Not the positional form: since Ruby 3.2 it takes keywords too, which a positional constructor would bind to its first member.
-    if members.is_empty() || !keyword_init {
+    // The positional form too: since Ruby 3.2 it also takes keywords, which
+    // the positional constructor would bind to its first member, so analysis
+    // refuses a keyword `new` on it (`positional_struct`), as for a
+    // `Struct.new(...)` superclass.
+    if members.is_empty() {
         return None;
     }
     let body = match call.block() {
@@ -1515,13 +1542,21 @@ fn struct_constant_spec<'pr>(value: &ruby_prism::Node<'pr>) -> Option<StructCons
                 if !statements.body().iter().all(|stmt| stmt.as_def_node().is_some()) {
                     return None;
                 }
+                // Not an `initialize` of its own: in Ruby the generated one is
+                // the anonymous Struct parent's, which its `super` reaches. Here
+                // both would sit in one class, and that `super` would miss.
+                if statements.body().iter().any(|stmt| {
+                    stmt.as_def_node().is_some_and(|def| def.receiver().is_none() && constant_id_str(&def.name()) == "initialize")
+                }) {
+                    return None;
+                }
             } else if body.is_some() {
                 return None;
             }
             body
         }
     };
-    Some(StructConstant { name: Symbol::from(""), members, keyword_init, body })
+    Some(StructConstant { name: Symbol::from(""), members, keyword_init, positional_written, body })
 }
 
 /// The classes `owner`'s body defines through `X = Struct.new(…)`, with
@@ -1594,6 +1629,7 @@ fn struct_constant_classes(
             crate::dialect::LibraryClassOrigin::StructConstant {
                 members: spec.members.clone(),
                 keyword_init: spec.keyword_init,
+                positional_written: spec.positional_written,
             },
         );
         if spec.body.is_some() {
@@ -1671,7 +1707,12 @@ fn take_class_ivar_initializers(calls: &mut Vec<Expr>) -> Vec<Expr> {
 enum DeclBodyMode {
     Instance,
     ClassMethods,
-    SingletonClass,
+    /// `class << self`. `included_hook` is set only for a module's own
+    /// singleton, where `def included(base)` is the same `Module#included`
+    /// hook as `def self.included(base)`; `has_class_methods` says whether
+    /// that module body also declares `module ClassMethods`, which the
+    /// singleton body itself cannot see.
+    SingletonClass { included_hook: bool, has_class_methods: bool },
 }
 
 impl DeclBodyMode {
@@ -1772,8 +1813,21 @@ impl DeclBody {
                 ExprNode::Assign { value, .. } => is_literal_value(value),
                 _ => false,
             });
+        let literal_inits = self.class_initializers.iter().all(|expr| match &*expr.node {
+            ExprNode::Assign { value, .. } => is_literal_value(value),
+            _ => false,
+        });
+        // Not `include`: an ancestor's `@@x` is shared with this body's. An extended module's methods read their own (rolify's `extend Configure` beside `@@resource_types = []`).
+        let mixins_only = self.unknown_calls.iter().all(|call| match &*call.node {
+            ExprNode::Send { recv: None, method, args, block: None, .. } => {
+                method.as_str() == "extend"
+                    && !args.is_empty()
+                    && args.iter().all(|a| matches!(&*a.node, ExprNode::Const { .. }))
+            }
+            _ => false,
+        });
         if has_source_ordered_init
-            && (!self.unknown_calls.is_empty()
+            && ((!self.unknown_calls.is_empty() && !(literal_inits && mixins_only))
                 || !self.includes.is_empty()
                 || (!self.constants.is_empty() && !order_independent))
         {
@@ -1922,8 +1976,9 @@ const POSITION_SENSITIVE_MARKERS: &[&str] = &[
 /// body metaprogramming as includer class methods (invariant 6).
 pub(super) fn included_hook_class_methods_body<'pr>(
     def: &ruby_prism::DefNode<'pr>,
+    in_singleton_class: bool,
 ) -> Option<ruby_prism::Node<'pr>> {
-    let param_name = included_hook_parameter(def)?;
+    let param_name = included_hook_parameter(def, in_singleton_class)?;
     let stmts = flatten_statements(def.body()?);
     let [stmt] = &stmts[..] else { return None };
     let sc = stmt.as_singleton_class_node()?;
@@ -1934,9 +1989,18 @@ pub(super) fn included_hook_class_methods_body<'pr>(
     sc.body()
 }
 
-fn included_hook_parameter(def: &ruby_prism::DefNode<'_>) -> Option<String> {
-    let receiver = def.receiver()?;
-    receiver.as_self_node()?;
+/// The single parameter of a `Module#included` hook. Ruby spells the hook
+/// two ways: `def self.included(base)` in the module body, or
+/// `def included(base)` inside the module's own `class << self`
+/// (`in_singleton_class`), as action_policy's policy modules do.
+fn included_hook_parameter(def: &ruby_prism::DefNode<'_>, in_singleton_class: bool) -> Option<String> {
+    match def.receiver() {
+        Some(receiver) if !in_singleton_class => {
+            receiver.as_self_node()?;
+        }
+        None if in_singleton_class => {}
+        _ => return None,
+    }
     if constant_id_str(&def.name()) != "included" {
         return None;
     }
@@ -1962,8 +2026,8 @@ fn included_hook_parameter(def: &ruby_prism::DefNode<'_>) -> Option<String> {
 /// replaces its only effect; retaining it would reference the nested
 /// module that ingestion flattened away. Extra statements are NOT safe
 /// to consume, nor is an extend of any other constant or receiver.
-fn is_class_methods_bridge(def: &ruby_prism::DefNode<'_>) -> bool {
-    let Some(param_name) = included_hook_parameter(def) else { return false };
+fn is_class_methods_bridge(def: &ruby_prism::DefNode<'_>, in_singleton_class: bool) -> bool {
+    let Some(param_name) = included_hook_parameter(def, in_singleton_class) else { return false };
     let Some(body) = def.body() else { return false };
     let stmts = flatten_statements(body);
     let [stmt] = &stmts[..] else { return false };
@@ -1979,6 +2043,36 @@ fn is_class_methods_bridge(def: &ruby_prism::DefNode<'_>) -> bool {
     let args: Vec<_> = args.arguments().iter().collect();
     matches!(args.as_slice(), [arg] if arg.as_constant_read_node()
         .is_some_and(|c| constant_id_str(&c.name()) == "ClassMethods"))
+}
+
+/// An `included` hook that does more than the bridge: its
+/// `base.extend ClassMethods` is the carrier splice's job, as in the
+/// complete bridge, and the rest of the hook still runs. AASM writes
+/// `base.extend AASM::ClassMethods` and then registers `base`.
+fn drop_class_methods_extend(
+    def: &ruby_prism::DefNode<'_>,
+    in_singleton_class: bool,
+    owner: &ClassId,
+    m: &mut MethodDef,
+) {
+    let Some(param) = included_hook_parameter(def, in_singleton_class) else { return };
+    let owner: Vec<&str> = owner.0.as_str().trim_start_matches("::").split("::").collect();
+    let is_redundant = |stmt: &Expr| {
+        let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*stmt.node else { return false };
+        if method.as_str() != "extend" || !matches!(&*recv.node, ExprNode::Var { name, .. } if name.as_str() == param) {
+            return false;
+        }
+        let [arg] = args.as_slice() else { return false };
+        let ExprNode::Const { path } = &*arg.node else { return false };
+        let path: Vec<&str> = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+        let Some((last, scope)) = path.split_last() else { return false };
+        *last == "ClassMethods" && owner.ends_with(scope)
+    };
+    if let ExprNode::Seq { exprs } = &mut *m.body.node {
+        exprs.retain(|stmt| !is_redundant(stmt));
+    } else if is_redundant(&m.body) {
+        m.body = Expr::new(m.body.span, ExprNode::Lit { value: Literal::Nil });
+    }
 }
 
 /// `if enabled; attr_reader :token; end` is a declaration this walk
@@ -2052,14 +2146,23 @@ fn walk_decl_body<'pr>(
 }
 
 /// A `class << self` an `included do` block may hoist: nothing in it but
-/// `def`s and visibility markers, which the decl walk keeps. Any other
-/// statement (`MAP.each { define_method … }`) the walk would drop.
+/// `def`s, visibility markers and `define_method` loops the decl walk
+/// unrolls (`define_method_loop`). Any other statement the walk would drop.
 fn only_defs(body: Option<ruby_prism::Node<'_>>) -> bool {
     body.is_none_or(|body| {
-        flatten_statements(body).iter().all(|stmt| {
+        // The walk unrolls a loop only before any bare visibility marker;
+        // one after it would be hoisted and then dropped.
+        let mut bare_marker = false;
+        let statements = flatten_statements(body);
+        let named = super::define_method_loop::named_visibility(&statements);
+        statements.iter().all(|stmt| {
+            if let Some(call) = stmt.as_call_node().filter(|c| visibility::marker(c)) {
+                bare_marker |= call.arguments().is_none();
+                return true;
+            }
             visibility::definition(stmt).is_some()
                 || stmt.as_def_node().is_some()
-                || stmt.as_call_node().is_some_and(|c| visibility::marker(&c))
+                || (!bare_marker && super::define_method_loop::unrollable(stmt, &named))
         })
     })
 }
@@ -2112,6 +2215,54 @@ fn walk_decl_body_with_visibility<'pr>(
     };
 
     let statements = flatten_statements(b);
+    // This body's literal constants, for the `define_method` loops in it
+    // and in the bodies it encloses (`class << self`, `included do`).
+    let _constants = super::define_method_loop::Scope::enter(super::define_method_loop::ConstTable::of(owner, &statements));
+    let mut bare_visibility_marker = false;
+    let named_visibility = super::define_method_loop::named_visibility(&statements);
+    // Instance method names the body defines anywhere, for an alias of a
+    // builtin: a `def`, an `attr_reader`/`attr_accessor`, a
+    // `define_method(:name)`, or an `alias`/`alias_method` to that name.
+    let defined_instance_methods: HashSet<String> = statements
+        .iter()
+        .flat_map(|stmt| {
+            let definition = visibility::definition(stmt).map(|d| d.as_node());
+            let node = definition.as_ref().unwrap_or(stmt);
+            let mut names = Vec::new();
+            if let Some(def) = node.as_def_node()
+                && def.receiver().is_none()
+            {
+                names.push(constant_id_str(&def.name()).to_string());
+            }
+            // `alias to_s to_s` rebinds the method it names: not a definition.
+            if let Some(alias) = node.as_alias_method_node()
+                && let Some(name) = alias_keyword_name(&alias.new_name())
+                && alias_keyword_name(&alias.old_name()) != Some(name.clone())
+            {
+                names.push(name.as_str().to_string());
+            }
+            if let Some(call) = node.as_call_node()
+                && call.receiver().is_none_or(|r| r.as_self_node().is_some())
+            {
+                let args: Vec<_> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+                match constant_id_str(&call.name()) {
+                    "attr_reader" | "attr_accessor" => names.extend(args.iter().filter_map(|a| symbol_value(a))),
+                    "define_method" | "alias_method" => names.extend(args.first().and_then(|a| symbol_value(a))),
+                    _ => {}
+                }
+            }
+            names
+        })
+        .collect();
+    // An `include`/`prepend` (or `self.include`) anywhere in the body: the module may define a
+    // builtin's name, so an alias of that builtin captured something the
+    // delegation can't reproduce.
+    let mixes_in = statements.iter().any(|stmt| {
+        stmt.as_call_node().is_some_and(|c| {
+            c.receiver().is_none_or(|r| r.as_self_node().is_some())
+                && matches!(constant_id_str(&c.name()), "include" | "prepend")
+        })
+    });
     if let Some(name) = super::util::hoisted_name_collision(&statements) {
         return Err(IngestError::Unsupported {
             file: file.into(),
@@ -2122,7 +2273,9 @@ fn walk_decl_body_with_visibility<'pr>(
         });
     }
     let has_class_methods = statements.iter().any(|stmt| stmt.as_module_node()
-        .is_some_and(|m| module_name_path(&m).as_deref() == Some(&["ClassMethods".to_string()])));
+        .is_some_and(|m| module_name_path(&m).as_deref() == Some(&["ClassMethods".to_string()])))
+        || matches!(mode, DeclBodyMode::SingletonClass { has_class_methods: true, .. });
+    let hook_in_singleton_class = matches!(mode, DeclBodyMode::SingletonClass { included_hook: true, .. });
     // An ActiveSupport::Concern's `included do def x … end end` defines `x`
     // on every includer. Hoisted into the module's own instance methods it
     // is found by the same lookup, unless the module also defines `x`
@@ -2193,7 +2346,26 @@ fn walk_decl_body_with_visibility<'pr>(
                 && matches!(constant_id_str(&call.name()), "public" | "protected" | "private")
             {
                 module_function_active = false;
+                bare_visibility_marker = true;
             }
+            continue;
+        }
+        // `MAP.each do |k, v| define_method(…) { … } end`: the `def`s it
+        // makes. Not after a bare visibility marker, whose reach into a
+        // block's `define_method` this does not model, nor under
+        // `module_function` / `extend self`.
+        if !bare_visibility_marker
+            && !module_function_active
+            && !extend_self_active
+            && let Some(methods) = super::define_method_loop::unroll(
+                &statement,
+                owner,
+                file,
+                if mode.is_class_side() { MethodReceiver::Class } else { MethodReceiver::Instance },
+                &named_visibility,
+            )
+        {
+            out.methods.extend(methods);
             continue;
         }
         // `enums do Fill = new("fill") end` — sorbet-runtime's `T::Enum`
@@ -2274,12 +2446,11 @@ fn walk_decl_body_with_visibility<'pr>(
         // has been walked. Non-nil initializers remain outside this slice.
         if stmt.as_class_variable_write_node().is_some() {
             let initializer = ingest_expr(&stmt, file)?;
-            if !matches!(&*initializer.node, ExprNode::Assign { value, .. }
-                if matches!(&*value.node, ExprNode::Lit { value: Literal::Nil }))
-            {
+            // Not any value: one that reads other state would observe the order the emitted body runs in
+            if !matches!(&*initializer.node, ExprNode::Assign { value, .. } if is_literal_value(value)) {
                 return Err(IngestError::Unsupported {
                     file: file.into(),
-                    message: "class-variable initializer with non-nil value".into(),
+                    message: "class-variable initializer with a non-literal value".into(),
                 });
             }
             out.class_initializers.push(initializer);
@@ -2291,14 +2462,17 @@ fn walk_decl_body_with_visibility<'pr>(
             // same class-receiver-methods bucket as `class_methods do`
             // / `module ClassMethods`, and (like those) contributes no
             // `included` method of its own.
-            if let Some(singleton_body) = included_hook_class_methods_body(&def) {
+            if let Some(singleton_body) = included_hook_class_methods_body(&def, hook_in_singleton_class) {
                 out.extend(walk_decl_body_with_visibility(Some(singleton_body), owner, file, DeclBodyMode::ClassMethods, visibility)?);
                 continue;
             }
-            if has_class_methods && is_class_methods_bridge(&def) {
+            if has_class_methods && is_class_methods_bridge(&def, hook_in_singleton_class) {
                 continue;
             }
             let mut m = ingest_library_method(&def, owner, file)?;
+            if has_class_methods {
+                drop_class_methods_extend(&def, hook_in_singleton_class, owner, &mut m);
+            }
             visibility.apply(&statement, &mut m);
             if module_function_active && m.receiver == MethodReceiver::Instance {
                 // The retained singleton copy is public even if the original
@@ -2370,7 +2544,11 @@ fn walk_decl_body_with_visibility<'pr>(
         // `class << self ... end` — singleton class block. Body
         // defines class-level methods on the enclosing scope.
         if let Some(sc) = stmt.as_singleton_class_node() {
-            out.extend(walk_decl_body_with_visibility(sc.body(), owner, file, DeclBodyMode::SingletonClass, visibility)?);
+            let mode = DeclBodyMode::SingletonClass {
+                included_hook: mode == DeclBodyMode::Instance,
+                has_class_methods: mode == DeclBodyMode::Instance && has_class_methods,
+            };
+            out.extend(walk_decl_body_with_visibility(sc.body(), owner, file, mode, visibility)?);
             continue;
         }
         // `module ClassMethods … end` — ActiveSupport::Concern's OTHER
@@ -2406,6 +2584,32 @@ fn walk_decl_body_with_visibility<'pr>(
             let from = alias_keyword_name(&alias.old_name());
             let receiver = if mode.is_class_side() { MethodReceiver::Class } else { MethodReceiver::Instance };
             if let Some((to, from)) = to.zip(from) {
+                // `alias read_attribute_for_serialization send`: a method
+                // every object answers, unless the body defines that name
+                // or mixes in a module, or the class has a superclass
+                // (`library_class_and_struct_base`). Ruby's alias captured
+                // the method as it stood, and a delegation would reach the
+                // body's, the module's or the superclass's definition.
+                // `alias to_s to_s` rebinds the method it names: a no-op.
+                if to == from && OBJECT_BUILTINS.iter().any(|(name, _, _)| *name == from.as_str()) {
+                    continue;
+                }
+                if receiver == MethodReceiver::Instance
+                    && !mixes_in
+                    && OBJECT_BUILTINS.iter().any(|(name, _, _)| *name == from.as_str())
+                    && !out.methods.iter().any(|method| method.name.as_str() == from && method.receiver == receiver)
+                    && !defined_instance_methods.contains(from.as_str())
+                {
+                    let span = Span {
+                        file: super::sources::file_id(file),
+                        start: alias.location().start_offset() as u32,
+                        end: alias.location().end_offset() as u32,
+                    };
+                    let mut method = builtin_alias_method(to.as_str(), from.as_str(), owner, file, span)?;
+                    visibility.apply(&statement, &mut method);
+                    out.methods.push(method);
+                    continue;
+                }
                 if let Some(source) = out.methods.iter().rposition(|method| method.name.as_str() == from && method.receiver == receiver) {
                     let mut copy = copy_aliased_method(&out.methods[source], to.as_str());
                     copy.name_span = Span {
@@ -2476,7 +2680,8 @@ fn walk_decl_body_with_visibility<'pr>(
                                 })
                             })
                         {
-                            out.extend(walk_decl_body_with_visibility(sc.body(), owner, file, DeclBodyMode::SingletonClass, visibility)?);
+                            let mode = DeclBodyMode::SingletonClass { included_hook: false, has_class_methods: false };
+                            out.extend(walk_decl_body_with_visibility(sc.body(), owner, file, mode, visibility)?);
                             hoisted.push((inner.location().start_offset() as u32, inner.location().end_offset() as u32));
                             continue;
                         }
@@ -2520,7 +2725,7 @@ fn walk_decl_body_with_visibility<'pr>(
                     "include" => {
                         if let Some(args) = call.arguments() {
                             let args: Vec<_> = args.arguments().iter().collect();
-                            if mode == DeclBodyMode::SingletonClass
+                            if matches!(mode, DeclBodyMode::SingletonClass { .. })
                                 && args.iter().all(|arg| constant_path_of(arg).is_some())
                             {
                                 let mut expr = ingest_expr(&stmt, file)?;
@@ -2585,7 +2790,7 @@ fn walk_decl_body_with_visibility<'pr>(
                         }
                     }
                     "send" | "public_send"
-                        if mode == DeclBodyMode::SingletonClass
+                        if matches!(mode, DeclBodyMode::SingletonClass { .. })
                             && call.arguments().is_some_and(|args| {
                                 args.arguments().iter().next().is_some_and(|arg| {
                                     symbol_value(&arg).as_deref() == Some("include")
@@ -2989,6 +3194,72 @@ pub(super) fn alias_source(
 /// eligible, and for the alias span and visibility. A body that calls
 /// `super` is still copied; model ingest refuses that case first,
 /// because a renamed copy would reach its own super method.
+/// Methods every Ruby object answers (Ruby 4.0.7's `Object` / `Kernel`
+/// public instance methods), which an `alias` may name without the class
+/// defining them. Each has a row in `tests/alias_builtin.rs`.
+/// Each with its parameters and the call's arguments, the builtin's own
+/// arity (`Object.instance_method(:to_s).arity` is 0, so `label(1)`
+/// raises as `to_s(1)` does).
+pub(crate) const OBJECT_BUILTINS: &[(&str, &str, &str)] = &[
+    ("send", "*args, &block", "*args, &block"),
+    ("public_send", "*args, &block", "*args, &block"),
+    ("__send__", "*args, &block", "*args, &block"),
+    ("to_s", "", ""),
+    ("inspect", "", ""),
+    ("class", "", ""),
+    ("itself", "", ""),
+    ("object_id", "", ""),
+    ("hash", "", ""),
+    ("frozen?", "", ""),
+    ("nil?", "", ""),
+    ("equal?", "other", "other"),
+    ("is_a?", "klass", "klass"),
+    ("kind_of?", "klass", "klass"),
+    ("instance_of?", "klass", "klass"),
+    ("respond_to?", "name, include_all = false", "name, include_all"),
+];
+
+/// Whether a synthesized builtin alias's call is in `e` (`BUILTIN_ALIAS`).
+fn delegates_to_builtin(e: &Expr) -> bool {
+    if e.decisions & crate::expr::BUILTIN_ALIAS != 0 {
+        return true;
+    }
+    let mut found = false;
+    e.node.for_each_child(&mut |c| found = found || delegates_to_builtin(c));
+    found
+}
+
+/// `alias to from` for a builtin `from`: `def to(<params>) =
+/// self.from(<args>)` with the builtin's own arity, every span the alias's,
+/// and the call marked `BUILTIN_ALIAS`. Through the `send` family, keyword
+/// arguments reach the target as a trailing Hash (library methods do not
+/// keep `**`/`...`).
+fn builtin_alias_method(to: &str, from: &str, owner: &ClassId, file: &str, span: Span) -> IngestResult<MethodDef> {
+    let (_, params, args) = OBJECT_BUILTINS.iter().find(|(name, _, _)| *name == from).expect("a builtin");
+    // `self.`: a bare `class(…)` is the keyword.
+    let source = format!("def {to}({params})\n  self.{from}({args})\nend\n");
+    let parsed = super::prism::parse_silent(source.as_bytes());
+    let def = parsed
+        .node()
+        .as_program_node()
+        .and_then(|program| program.statements().body().iter().next())
+        .and_then(|stmt| stmt.as_def_node())
+        .ok_or_else(|| IngestError::Unsupported { file: file.into(), message: "alias names a method this body has not defined".into() })?;
+    let mut method = ingest_library_method(&def, owner, file)?;
+    method.name_span = span;
+    fn respan(e: &mut Expr, span: Span, from: &str) {
+        e.span = span;
+        if let crate::expr::ExprNode::Send { method, .. } = &*e.node
+            && method.as_str() == from
+        {
+            e.decisions |= crate::expr::BUILTIN_ALIAS;
+        }
+        e.node.for_each_child_mut(&mut |c| respan(c, span, from));
+    }
+    respan(&mut method.body, span, from);
+    Ok(method)
+}
+
 pub(crate) fn copy_aliased_method(source: &MethodDef, new_name: &str) -> MethodDef {
     let mut copy = source.clone();
     copy.name = Symbol::from(new_name);
@@ -3414,7 +3685,7 @@ pub(super) fn ingest_library_method_with_keywords(
     // the runtime_src split (see runtime_src::method_params).
     let block_param = def
         .parameters()
-        .and_then(|pn| pn.block())
+        .and_then(|pn| super::prism_api::block_parameter(&pn))
         .map(|block| {
             let name = block
                 .name()
@@ -3497,6 +3768,13 @@ fn declares_abstract_class(class: &ruby_prism::ClassNode<'_>) -> bool {
 #[derive(Debug, Default, Clone)]
 pub struct ModelBases {
     names: std::collections::HashSet<String>,
+    /// Tableless models a subclass extends on the model path (see
+    /// `record_tableless`).
+    tableless: std::collections::HashSet<String>,
+    /// Every `class X < Y` under `app/models`: the child, its lexical
+    /// scope, the parent as written, and whether the child writes its
+    /// own `initialize`.
+    tableless_pairs: Vec<(String, Vec<String>, Vec<String>, bool)>,
 }
 
 impl ModelBases {
@@ -3513,7 +3791,7 @@ impl ModelBases {
         // resolution classify that class as a model rather than a
         // library class that emits `class Markdown < Record`.
         names.insert("ActionText::Record".to_string());
-        Self { names }
+        Self { names, ..Self::default() }
     }
 
     /// Is `name` (possibly after lexical qualification) an AR base?
@@ -3614,6 +3892,80 @@ impl ModelBases {
         }
     }
 
+    /// One `app/models` file's tableless model or `class X < Y` pair, for
+    /// `close_over_tableless`.
+    ///
+    /// A superclass-less class that includes `ActiveModel::Model` (or
+    /// `Validations`) is a tableless model (`classify_class_file`), and so
+    /// is a subclass of one: Rails' child inherits the parent's
+    /// attributes, validations and constructor
+    /// (`class Admin::AccountAction < Admin::BaseAction`). Ingested as a
+    /// library class, the child dropped its own `attribute` and
+    /// `validates`.
+    ///
+    /// A class that writes its own `initialize` is no parent here: its
+    /// child's synthesized constructor would shadow the inherited one.
+    pub fn record_tableless(&mut self, source: &[u8]) {
+        let result = parse(source);
+        let root = result.node();
+        // The file's primary class only: it is the one `classify_class_file`
+        // routes to the model path.
+        let Some((scope, class)) = super::util::primary_class_with_scope(&root) else { return };
+        let Some(path) = class_name_path(&class) else { return };
+        let mut full = scope.clone();
+        full.extend(path);
+        let own_initialize = defines_initialize(&class);
+        match class.superclass().and_then(|n| constant_path_of(&n)) {
+            None if includes_active_model(&class) && !own_initialize => {
+                self.tableless.insert(full.join("::"));
+            }
+            None => {}
+            Some(parent) => self.tableless_pairs.push((full.join("::"), scope, parent, own_initialize)),
+        }
+    }
+
+    /// Close the tableless set over subclasses, at any depth and in any
+    /// file order.
+    pub fn close_over_tableless(&mut self) {
+        loop {
+            let mut added = false;
+            for (child, scope, parent, own_initialize) in &self.tableless_pairs {
+                if !*own_initialize
+                    && !self.tableless.contains(child)
+                    && self.resolve_tableless(scope, parent).is_some()
+                {
+                    self.tableless.insert(child.clone());
+                    added = true;
+                }
+            }
+            if !added {
+                break;
+            }
+        }
+    }
+
+    /// The tableless model `parent_path` names from `scope`, resolved the
+    /// way Ruby's constant lookup walks the enclosing modules.
+    pub fn resolve_tableless(&self, scope: &[String], parent_path: &[String]) -> Option<String> {
+        let joined = parent_path.join("::");
+        if parent_path.len() == 1 {
+            let mut segs = scope.to_vec();
+            while !segs.is_empty() {
+                let candidate = format!("{}::{}", segs.join("::"), joined);
+                if self.tableless.contains(&candidate) {
+                    return Some(candidate);
+                }
+                segs.pop();
+            }
+        }
+        self.tableless.contains(&joined).then_some(joined)
+    }
+
+    /// Is `name` a tableless model a subclass extends on the model path?
+    pub fn is_tableless(&self, name: &str) -> bool {
+        self.tableless.contains(name)
+    }
+
     fn parent_is_known_base(&self, child: &str, parent: &str) -> bool {
         if self.names.contains(parent) {
             return true;
@@ -3699,7 +4051,25 @@ pub fn classify_class_file(source: &[u8], bases: &ModelBases) -> Option<ClassKin
         // the model path lowers its `validates` DSL and synthesizes
         // `valid?`/`errors`; the library-class path would drop them.
         None if includes_active_model(&class) => ClassKind::Model,
+        // A subclass of a tableless model is one too (`record_tableless`).
+        Some(_)
+            if class
+                .superclass()
+                .and_then(|n| constant_path_of(&n))
+                .is_some_and(|p| bases.resolve_tableless(&scope, &p).is_some()) =>
+        {
+            ClassKind::Model
+        }
         _ => ClassKind::LibraryClass,
+    })
+}
+
+/// `def initialize` in the class body.
+fn defines_initialize(class: &ruby_prism::ClassNode<'_>) -> bool {
+    let Some(body) = class.body() else { return false };
+    let Some(stmts) = body.as_statements_node() else { return false };
+    stmts.body().iter().any(|stmt| {
+        stmt.as_def_node().is_some_and(|d| d.receiver().is_none() && d.name().as_slice() == b"initialize")
     })
 }
 
@@ -3860,6 +4230,8 @@ pub fn ingest_concern_class_method_spans(
     fn defs_in(body: Option<ruby_prism::Node<'_>>, file: &str, out: &mut Vec<Span>) {
         let Some(body) = body else { return };
         for stmt in flatten_statements(body) {
+            // A `define_method` loop's methods carry its name argument's span.
+            out.extend(super::define_method_loop::name_spans(&stmt, file));
             if let Some(def) = visibility::definition(&stmt) {
                 // The carrier's instance definitions become includer
                 // class methods. Its own singletons do not cross.
@@ -3885,6 +4257,7 @@ pub fn ingest_concern_class_method_spans(
         let id = ClassId(Symbol::from(full_path.join("::")));
 
         let Some(body) = module.body() else { continue };
+        let _constants = super::define_method_loop::Scope::enter(super::define_method_loop::ConstTable::of(&id, &flatten_statements(module.body().unwrap())));
         let mut spans: Vec<Span> = Vec::new();
         let mut bridges: Vec<Span> = Vec::new();
         let mut has_nested_carrier = false;
@@ -3965,13 +4338,34 @@ pub fn ingest_concern_class_method_spans(
                 // is not this node and stays on the module.
                 if singleton.expression().as_self_node().is_some() {
                     defs_in(singleton.body(), file, &mut spans);
+                    // Except the module's own `def included(base)`: that
+                    // hook runs when the module is included and is not
+                    // copied onto includers, the same as
+                    // `def self.included(base)` in the module body.
+                    let hooks: Vec<_> = singleton.body().map(flatten_statements).unwrap_or_default()
+                        .iter()
+                        .filter_map(|stmt| visibility::definition(stmt))
+                        .filter(|def| included_hook_parameter(def, true).is_some())
+                        .collect();
+                    for def in hooks {
+                        let hook = super::util::def_name_span(&def, file);
+                        spans.retain(|span| *span != hook);
+                        if is_class_methods_bridge(&def, true) {
+                            bridges.push(hook);
+                        }
+                        // `class << base` inside the hook defines includer
+                        // class methods, as in the `def self.included` form.
+                        if let Some(singleton_body) = included_hook_class_methods_body(&def, true) {
+                            defs_in(Some(singleton_body), file, &mut spans);
+                        }
+                    }
                 }
             }
             if let Some(def) = super::visibility::definition(&stmt) {
-                if let Some(singleton_body) = included_hook_class_methods_body(&def) {
+                if let Some(singleton_body) = included_hook_class_methods_body(&def, false) {
                     defs_in(Some(singleton_body), file, &mut spans);
                 }
-                if is_class_methods_bridge(&def) {
+                if is_class_methods_bridge(&def, false) {
                     bridges.push(super::util::def_name_span(&def, file));
                 }
             }
@@ -4568,12 +4962,19 @@ fn walk_dsl_stmts<'pr>(body: ruby_prism::Node<'pr>, out: &mut Vec<ruby_prism::No
 pub(super) fn included_has_accessor(body: ruby_prism::Node<'_>, owner: &ClassId, file: &str) -> bool {
     let mut stmts = Vec::new();
     walk_dsl_stmts(body, &mut stmts);
-    super::survey::without_recording(|| {
-        stmts.iter().any(|stmt| {
-            super::model::ingest_model_body_items(stmt, owner, file, Vec::new(), None)
-                .is_ok_and(|items| items.iter().any(super::concern_accessors::is_candidate))
+    // A probe: what it builds is discarded, so is what it reports. Its
+    // gaps would otherwise be recorded (and printed) a second time per
+    // includer, with no constants to fold, for statements the concern
+    // walk lowers.
+    let (has, _probe_diags) = super::prism::scope(|| {
+        super::survey::without_recording(|| {
+            stmts.iter().any(|stmt| {
+                super::model::ingest_model_body_items(stmt, owner, file, Vec::new(), None, &super::model::ClassConsts::default())
+                    .is_ok_and(|items| items.iter().any(super::concern_accessors::is_candidate))
+            })
         })
-    })
+    });
+    has
 }
 
 /// Instance methods a concern's `included do` block (re)defines on every
@@ -4672,7 +5073,14 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
         };
 
         let Some(body) = module.body() else { continue };
+        // `included do` runs in the includer, but its constants resolve
+        // lexically, from this module (`DESCRIPTION_LIMIT = 150` in the
+        // concern wins over an includer's own, and an includer-only one
+        // is a NameError there): the module body's constants, under the
+        // class-body folding rules.
+        let concern_consts = super::model::ClassConsts::collect(&flatten_statements(module.body().unwrap()), file);
         let block_visibility = super::visibility::Visibility::resolve(Some(&body), file, Some(&id)).ok();
+        let _constants = super::define_method_loop::Scope::enter(super::define_method_loop::ConstTable::of(&id, &flatten_statements(module.body().unwrap())));
         let mut items: Vec<ModelBodyItem> = Vec::new();
         let mut enums: Vec<ConcernEnumDecl> = Vec::new();
         let is_concern = flatten_statements(module.body().unwrap()).iter().any(|stmt| {
@@ -4710,7 +5118,7 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
                 // today's handling as a whole.
                 if let Some((guard, stmts)) = includer_guarded_stmts(&inner, file) {
                     let parsed: Option<Vec<ModelBodyItem>> = stmts.iter().try_fold(Vec::new(), |mut acc, stmt| {
-                        let parsed = super::model::ingest_model_body_items(stmt, &id, file, Vec::new(), None).ok()?;
+                        let parsed = super::model::ingest_model_body_items(stmt, &id, file, Vec::new(), None, &concern_consts).ok()?;
                         let claimed = !parsed.is_empty()
                             && parsed.iter().all(|item| matches!(item,
                                 ModelBodyItem::Association { .. }
@@ -4742,7 +5150,7 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
                         &call,
                         file,
                         &[],
-                        &super::model::ClassConsts::default(),
+                        &concern_consts,
                         &resolve_constant,
                     ) {
                         Ok(Some(super::model::ClassBodyExpansion::DelegatedType(expanded))) => {
@@ -4783,7 +5191,7 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
                 {
                     continue;
                 }
-                match super::model::ingest_model_body_items(&inner, &id, file, Vec::new(), None) {
+                match super::model::ingest_model_body_items(&inner, &id, file, Vec::new(), None, &concern_consts) {
                     Ok(parsed) => {
                         for mut item in parsed {
                             match item {
@@ -4804,7 +5212,7 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
                                 ModelBodyItem::Unknown { .. } => {
                                     if is_candidate(&item) {
                                         if !is_supported(&item) {
-                                            decline(&mut item, "unsupported accessor shape: only direct, nonempty, literal-Symbol attr_accessor is modeled");
+                                            decline(&mut item, "unsupported accessor shape: only direct, nonempty, literal-Symbol attr_accessor, attr_reader or attr_writer is modeled");
                                         } else if !is_direct {
                                             decline(&mut item, "inside with_options is not modeled");
                                         }

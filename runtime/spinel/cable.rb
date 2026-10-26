@@ -371,7 +371,33 @@ module Cable
       end
       slice += 1
     end
+    Cable.app_beats
     n
+  end
+
+  # Rails' heartbeat calls every connection's `beat`; campfire's override
+  # looks its session up again now and then and closes once it is gone.
+  # After the cycle's pings, under a database lease (the override reads
+  # the database). An app error is the app's: logged, and the beat goes
+  # on to the next connection.
+  def self.app_beats
+    registry = @beats
+    return 0 if registry.nil?
+    handlers = registry.snapshot
+    i = 0
+    while i < handlers.length
+      handler = handlers[i]
+      i += 1
+      begin
+        Db.with_connection do
+          handler.connection.beat
+          true
+        end
+      rescue StandardError => e
+        $stderr.puts "[cable] beat: " + e.message
+      end
+    end
+    0
   end
 
   # The sleep between slices, as its own method so a test can run a whole
@@ -555,6 +581,7 @@ module Cable
 
     def handle_event(evt)
       Cable.unregister(@msg.ws)
+      Cable.beats.remove(@msg)
       Db.with_connection do
         @msg.unsubscribe_all
       end
@@ -630,6 +657,12 @@ module Cable
     cb_msg.req = req
     cb_msg.connection = conn
     drv.set_on_message(cb_msg)
+    # `close(reason:)` closes this socket, and the heartbeat calls the
+    # connection's `beat` (`Cable.app_beats`).
+    sock = Cable::Socket.new
+    sock.ws = drv
+    conn.transport = sock
+    Cable.beats.add(cb_msg)
 
     cb_close = Cable::WsClose.new
     cb_close.msg = cb_msg
@@ -674,6 +707,27 @@ module Cable
     nil
   end
 
+  # Rails' connection `socket` over the driver, the two calls
+  # `ActionCable::Connection::Base` hands it: `close` tells the client
+  # why and whether to come back and closes (the client's close reply
+  # runs the driver's ordinary teardown), and `perform_work` runs inline
+  # under the heartbeat's database lease.
+  class Socket
+    attr_accessor :ws
+
+    def close_with_reason(reason, reconnect)
+      drv = @ws
+      drv.text(ActionCable.disconnect_json(reason, reconnect))
+      drv.close(1000, "")
+      nil
+    end
+
+    def perform_work(receiver)
+      receiver.call
+      nil
+    end
+  end
+
   # Broadcasts transport: Broadcasts.record calls broadcast(stream,
   # fragment) on every after-commit hook. Wrap the fragment in the
   # Action Cable message envelope (echoing the subscriber's identifier)
@@ -692,5 +746,59 @@ module Cable
       Tep::Broadcast.publish(stream, envelope)
       nil
     end
+  end
+
+  # The connections the heartbeat calls `beat` on, beside the drivers it
+  # pings: one `WsMessage` per socket, which holds the app's connection.
+  # Under the drivers' registry lock.
+  class BeatRegistry
+    def initialize
+      @handlers = [Cable::WsMessage.new]
+      @handlers.pop
+    end
+
+    def add(handler)
+      Tep::APP.cable_conns_lock.synchronize do
+        @handlers.push(handler)
+      end
+      nil
+    end
+
+    def remove(handler)
+      Tep::APP.cable_conns_lock.synchronize do
+        i = @handlers.length - 1
+        while i >= 0
+          @handlers.delete_at(i) if @handlers[i].equal?(handler)
+          i -= 1
+        end
+      end
+      nil
+    end
+
+    def snapshot
+      out = [Cable::WsMessage.new]
+      out.pop
+      Tep::APP.cable_conns_lock.synchronize do
+        @handlers.each { |h| out.push(h) }
+      end
+      out
+    end
+  end
+
+  # Made on the first upgrade, not as this file loads: its seed is a
+  # `WsMessage`, whose own seed is a cookie jar.
+  @beats = nil
+
+  # Under the registry lock: two upgrades on two request threads would
+  # otherwise each make one, and the loser's connections would never beat.
+  def self.beats
+    registry = @beats
+    return registry unless registry.nil?
+    Tep::APP.cable_conns_lock.synchronize do
+      if @beats.nil?
+        @beats = BeatRegistry.new
+      end
+    end
+    @beats
   end
 end

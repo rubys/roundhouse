@@ -34,6 +34,9 @@
 //! runtime_gems:
 //!   - {constant: "Widget", gem: "widgets"}
 //!   - {any_text: ["Widget::Cache."], gem: "widget-cache"}
+//! # Gems whose installed lib/ is compiled with the app, as a PATH gem's is.
+//! source_gems:
+//!   - {gem: "widgets"}
 //! ```
 //!
 //! These facts also select locked gems' RBIs, including infrastructure and
@@ -89,6 +92,8 @@ pub struct Extensions {
     pub runtime_gems: Vec<RuntimeGem>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attribute_macros: Vec<AttributeMacro>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_gems: Vec<String>,
 }
 
 /// A `lock_gated_requires` row.
@@ -148,6 +153,7 @@ impl Extensions {
             && self.rails_dependent.is_empty()
             && self.runtime_gems.is_empty()
             && self.attribute_macros.is_empty()
+            && self.source_gems.is_empty()
     }
 
     /// Whether an extension says requiring `gem` reaches Rails.
@@ -182,6 +188,13 @@ struct GemsFile {
     lock_gated_requires: Vec<LockGatedRow>,
     rails_dependent: Vec<RailsDependentRow>,
     runtime_gems: Vec<RuntimeGemRow>,
+    source_gems: Vec<SourceGemRow>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceGemRow {
+    gem: String,
 }
 
 #[derive(Deserialize)]
@@ -355,6 +368,16 @@ fn load_gems(
         loads.push(Origin { gem: row.gem.clone(), key: "runtime_gems", file: file.to_string() });
         loaded.runtime_gems.push(RuntimeGem { demand, gem: row.gem });
     }
+    for row in gems.source_gems {
+        if row.gem.is_empty() {
+            return Err(bad("source_gems rows need a gem".into()));
+        }
+        if loaded.source_gems.contains(&row.gem) {
+            return Err(bad(format!("source_gems lists {:?} twice", row.gem)));
+        }
+        refused.push(Origin { gem: row.gem.clone(), key: "source_gems", file: file.to_string() });
+        loaded.source_gems.push(row.gem);
+    }
     Ok(())
 }
 
@@ -364,6 +387,9 @@ fn validate(loads: &[Origin], refused: &[Origin]) -> Result<(), ExtensionError> 
     for row in refused {
         let gem = &row.gem;
         let conflict = |message: String| ExtensionError { file: row.file.clone(), message };
+        if let Some(other) = refused.iter().find(|other| other.gem == *gem && other.key != row.key) {
+            return Err(conflict(format!("{gem:?} is {} but also {} in {}", row.key, other.key, other.file)));
+        }
         if let Some(load) = loads.iter().find(|load| load.gem == *gem) {
             return Err(conflict(format!(
                 "{gem:?} is {} but the tree also loads it ({} in {})",
@@ -579,5 +605,25 @@ runtime_gems:
         assert!(err.message.contains("\"kaminari\" is rails_dependent but the compiler stands in for it (a modeled gem)"), "{err}");
         let err = load_one(&[("ext/gems.yml", "rails_dependent:\n  - {gem: actionpack, why: w}\n")]).unwrap_err();
         assert!(err.message.contains("(a framework gem)"), "{err}");
+    }
+
+    #[test]
+    fn source_gems_load_and_contradictions_are_refused() {
+        let loaded = load_one(&[("ext/gems.yml", "source_gems:\n  - {gem: pundit}\n")]).unwrap();
+        assert_eq!(loaded.source_gems, vec!["pundit".to_string()]);
+
+        let err = load_one(&[("ext/gems.yml", "source_gems:\n  - {gem: pundit}\n  - {gem: pundit}\n")]).unwrap_err();
+        assert!(err.message.contains("lists \"pundit\" twice"), "{err}");
+
+        let text = "source_gems:\n  - {gem: g}\nlock_gated_requires:\n  - {require: g, gem: g}\n";
+        let err = load_one(&[("ext/gems.yml", text)]).unwrap_err();
+        assert!(err.message.contains("\"g\" is source_gems but the tree also loads it"), "{err}");
+
+        let text = "source_gems:\n  - {gem: g}\nrails_dependent:\n  - {gem: g, why: w}\n";
+        let err = load_one(&[("ext/gems.yml", text)]).unwrap_err();
+        assert!(err.message.contains("but also"), "{err}");
+
+        let err = load_one(&[("ext/gems.yml", "source_gems:\n  - {gem: kaminari}\n")]).unwrap_err();
+        assert!(err.message.contains("the compiler stands in for it (a modeled gem)"), "{err}");
     }
 }

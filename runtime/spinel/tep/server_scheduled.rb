@@ -54,7 +54,7 @@ module Tep
         @app = app
       end
 
-      def run(port, workers, quiet)
+      def run(port, workers, quiet, unix = UnixListener.new(""))
         sfd = Sock.sphttp_listen_on(Tep::APP.bind_host, port, workers > 1 ? 1 : 0)
         if sfd < 0
           # Loud + nonzero exit: the one plausible cause on a sane host
@@ -63,6 +63,7 @@ module Tep
           # binary look like it started and immediately vanished.
           $stderr.puts Tep.display_name + ": cannot bind to port " +
                        port.to_s + " (already in use?)"
+          unix.close
           exit(1)
         end
         Sock.sphttp_set_nonblock(sfd)
@@ -86,29 +87,28 @@ module Tep
         Sock.sphttp_install_term_handlers
 
         if workers > 1
+          pids = [0]
+          pids.pop
           i = 0
           while i < workers
             pid = Sock.sphttp_fork
             if pid == 0
-              Tep::Server::Scheduled.run_worker(sfd)
+              Tep::Server::Scheduled.run_worker(sfd, unix.unix_fd)
+              unix.close
               Sock.sphttp_exit(0)
             end
+            pids.push(pid) if pid > 0
             i += 1
           end
           # Reap children until none remain. After all workers exit,
           # emit the single aggregated run_end (see #128 / Tep::Events
           # #run_end_aggregated).
-          loop do
-            gone = Sock.sphttp_wait_any
-            if gone < 0
-              break
-            end
-          end
+          Tep.reap_workers(pids)
           if Sock.sphttp_shutdown_requested != 0
             Tep.on_shutdown
           end
         else
-          Tep::Server::Scheduled.run_worker(sfd)
+          Tep::Server::Scheduled.run_worker(sfd, unix.unix_fd)
           # Single-process: this IS the parent; emit run_end here.
           if Sock.sphttp_shutdown_requested != 0
             Tep.on_shutdown
@@ -116,9 +116,16 @@ module Tep
           # Exit outright, as the threaded server does: the scaffold's
           # job-loop green thread is parked on its queue, and spinel runs
           # every remaining green thread to completion when main returns.
+          unix.close
+          Sock.sphttp_close(sfd)
           Sock.sphttp_exit(0)
         end
-        0
+        unix.close
+        Sock.sphttp_close(sfd)
+        Sock.sphttp_exit(0)
+      ensure
+        unix.close
+        Sock.sphttp_close(sfd) if sfd >= 0
       end
 
       # Spawn the accept fiber + pump the scheduler. Called inside
@@ -127,9 +134,14 @@ module Tep
       # indefinitely -- run_until_empty bails when no fiber is ready
       # to resume THIS pass; we need to keep polling so parked
       # accept-on-sfd fibers get woken when a connection arrives.
-      def self.run_worker(sfd)
-        f = Fiber.new { Tep::Server::Scheduled.accept_loop(sfd) }
+      def self.run_worker(sfd, ufd = -1)
+        f = Fiber.new { Tep::Server::Scheduled.accept_loop(sfd, "tcp") }
         Tep::Scheduler.spawn_fiber(f)
+        if ufd >= 0
+          Sock.sphttp_set_nonblock(ufd)
+          unix_accept = Fiber.new { Tep::Server::Scheduled.accept_loop(ufd, "unix") }
+          Tep::Scheduler.spawn_fiber(unix_accept)
+        end
         while Tep::Scheduler.alive_count > 0
           # Shutdown is the WORKER's exit condition, not the fibers'.
           # The accept fiber honours the term flag and dies, but any
@@ -148,7 +160,7 @@ module Tep
 
       # Accept loop. Each accepted connection becomes its own fiber
       # that closes over the just-accepted `client` fd.
-      def self.accept_loop(sfd)
+      def self.accept_loop(sfd, transport = "tcp")
         while true
           # SIGTERM/SIGINT: sphttp's term flag is set by the signal
           # handler; check before parking on io_wait so we don't sleep
@@ -170,7 +182,7 @@ module Tep
             next
           end
           Sock.sphttp_set_nonblock(client)
-          conn = Fiber.new { Tep::Server::Scheduled.handle_connection(client) }
+          conn = Fiber.new { Tep::Server::Scheduled.handle_connection(client, transport) }
           Tep::Scheduler.spawn_fiber(conn)
         end
       end
@@ -184,11 +196,11 @@ module Tep
       # upward (idle 2 MB -> multi-GB under sustained keep-alive load).
       # Mirrors the Tep::Server#handle_one fix (210a5f6) for the prefork
       # server; this Scheduled server is the one the blog actually runs.
-      def self.handle_connection(client)
+      def self.handle_connection(client, transport = "tcp")
         input = InputBuffer.new
         keep_going = true
         while keep_going
-          keep_going = Tep::Server::Scheduled.handle_one(client, input)
+          keep_going = Tep::Server::Scheduled.handle_one(client, input, transport)
         end
         Sock.sphttp_close(client)
         0
@@ -196,7 +208,7 @@ module Tep
 
       # Process exactly one request on `client`. Returns true to keep the
       # connection open for the next keep-alive request, false to close.
-      def self.handle_one(client, input = InputBuffer.new)
+      def self.handle_one(client, input = InputBuffer.new, transport = "tcp")
         blob = Tep::Server::Scheduled.read_request_blob(client, KEEPALIVE_TIMEOUT, input)
         if blob.length == 0
           return false
@@ -206,6 +218,7 @@ module Tep
           Tep::Server::Scheduled.send_simple(client, 400, "bad request")
           return false
         end
+        req.listener_transport = transport
 
         # Before the drain, which is what held the bytes (Request#body_refusal).
         refusal = req.body_refusal(Tep.max_body_bytes)

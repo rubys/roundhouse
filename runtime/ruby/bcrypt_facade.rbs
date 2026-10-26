@@ -14,5 +14,6 @@ module BCrypt
     def initialize: (String _digest) -> void
     def ==: (String _other) -> bool
     def to_s: () -> String
+    def salt: () -> String
   end
 end

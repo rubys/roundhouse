@@ -47,7 +47,7 @@ fn statement_stats_are_opt_in_and_count_cached_transient_and_bound_reads() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let dir = reserve_scratch();
     let _cleanup = ScratchDir(dir.clone());
-    for name in ["db.rb", "active_support_time_parsing.rb"] {
+    for name in ["db.rb", "active_support_time_parsing.rb", "active_support_interval.rb", "active_support_duration.rb"] {
         std::fs::copy(root.join("runtime/spinel").join(name), dir.join(name)).unwrap();
     }
     std::fs::copy(

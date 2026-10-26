@@ -31,6 +31,11 @@ VOLATILE = [
   [/data-sort-value="\d+"/, 'data-sort-value="TS"'],
   [/name="authenticity_token" value="[^"]*"/, 'name="authenticity_token" value="CSRF"'],
   [/name="csrf-token" content="[^"]*"/, 'name="csrf-token" content="CSRF"'],
+  # campfire's push_subscription_session_marker (c8f74a0's layout) hashes
+  # the signed-in session's id and created_at, and each lane signs in on
+  # its own, so the two sessions never share a creation time. The emit's
+  # value is that formula over its own session row.
+  [/data-push-subscription-sync-session-value="[0-9a-f]{64}"/, 'data-push-subscription-sync-session-value="SESSION"'],
   # Signed blobs: avatar sgids and stream signatures verify against each
   # lane's own secret; the CONTENT equivalence claim is about everything
   # around them.

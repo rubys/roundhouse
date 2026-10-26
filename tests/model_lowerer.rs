@@ -183,6 +183,7 @@ fn article_lowers_with_schema_methods() {
         "_hydrate_all",
         // #818: class-side name table for `reflect_on_association`.
         "_association_names",
+        "schema_column_types",
     ];
     for m in &lc.methods {
         let n = m.name.as_str();
@@ -616,6 +617,20 @@ fn body_stmts(m: &roundhouse::dialect::MethodDef) -> Vec<roundhouse::Expr> {
     }
 }
 
+/// `!self.persisted?`: the `on: :create` guard a validation callback gets.
+/// `self.persisted?` rather than a bare `new_record?`, which the rust and
+/// go structs don't inherit.
+fn assert_not_self_persisted(cond: &roundhouse::Expr) {
+    match &*cond.node {
+        roundhouse::ExprNode::Send { recv: Some(inner), method, .. } if method.as_str() == "!" => match &*inner.node {
+            roundhouse::ExprNode::Send { recv: Some(r), method, .. }
+                if method.as_str() == "persisted?" && matches!(&*r.node, roundhouse::ExprNode::SelfRef) => {}
+            other => panic!("expected self.persisted?; got {other:?}"),
+        },
+        other => panic!("expected !self.persisted?; got {other:?}"),
+    }
+}
+
 /// The method name of a receiverless self-call statement.
 fn self_call_name(e: &roundhouse::Expr) -> &str {
     match &*e.node {
@@ -671,7 +686,7 @@ end
     );
     assert!(!names.contains(&"after_commit"), "{names:?}");
 
-    // `before_validation ..., on: :create` guards on new_record? —
+    // `before_validation ..., on: :create` guards on `!self.persisted?`:
     // accurate at validation time (the insert hasn't happened yet).
     let bv = lc
         .methods
@@ -680,7 +695,7 @@ end
         .expect("before_validation");
     match &*body_stmts(bv)[0].node {
         roundhouse::ExprNode::If { cond, then_branch, .. } => {
-            assert_eq!(self_call_name(cond), "new_record?");
+            assert_not_self_persisted(cond);
             let then_stmts = match &*then_branch.node {
                 roundhouse::ExprNode::Seq { exprs } => exprs.clone(),
                 _ => vec![then_branch.clone()],
@@ -690,7 +705,7 @@ end
                 vec!["assign_initial_attributes"]
             );
         }
-        other => panic!("expected new_record? guard; got {other:?}"),
+        other => panic!("expected !self.persisted? guard; got {other:?}"),
     }
 
     // `after_save :log_hat_use, if: :hat_selected?` lowers with the
@@ -750,7 +765,7 @@ end
     let lc = lower_model_to_library_class(&model, &Schema::default());
     let names = method_names(&lc);
 
-    // Validation hook keeps its name and gains the `new_record?` guard.
+    // Validation hook keeps its name and gains the `!self.persisted?` guard.
     let bv = lc
         .methods
         .iter()
@@ -758,7 +773,7 @@ end
         .expect("before_validation");
     match &*body_stmts(bv)[0].node {
         roundhouse::ExprNode::If { cond, then_branch, .. } => {
-            assert_eq!(self_call_name(cond), "new_record?");
+            assert_not_self_persisted(cond);
             let then_stmts = match &*then_branch.node {
                 roundhouse::ExprNode::Seq { exprs } => exprs.clone(),
                 _ => vec![then_branch.clone()],
@@ -768,7 +783,7 @@ end
                 vec!["create_rss_token"]
             );
         }
-        other => panic!("expected new_record? guard; got {other:?}"),
+        other => panic!("expected !self.persisted? guard; got {other:?}"),
     }
 
     // after_commit retargets the per-lifecycle runtime hook.

@@ -218,7 +218,7 @@ fn only_the_enqueue_arm_changes() {
 #[test]
 fn the_registry_writes_and_reads_each_payload_job() {
     let app = app();
-    let src = registry_source(&app.job_plans);
+    let src = registry_source(&app.job_plans, false);
 
     assert!(src.contains("def self.payload_push_job(room, message)"), "{src}");
     // The wrapper hands its rest parameter over as one Array.
@@ -256,7 +256,7 @@ fn the_registry_writes_and_reads_each_payload_job() {
 
 #[test]
 fn an_app_without_jobs_keeps_an_empty_registry() {
-    let src = registry_source(&[]);
+    let src = registry_source(&[], false);
     assert_eq!(
         src,
         "  def self.perform(job_class, args)\n    false\n  end\n\n  def self.discards_deserialization_error(job_class)\n    false\n  end\n"
@@ -306,7 +306,7 @@ fn unattributable_calls_and_tableless_models_keep_the_proc() {
 #[test]
 fn the_rest_reader_calls_only_runtime_readers() {
     let app = app();
-    let src = registry_source(&app.job_plans);
+    let src = registry_source(&app.job_plans, false);
 
     assert!(
         src.contains("(from...ActiveJob::Arguments.arg_count(args)).map { |j| locate_message_at(args, j) }"),

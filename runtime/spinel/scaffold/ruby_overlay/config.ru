@@ -40,6 +40,8 @@ Db.checkpoint_in_background!
 # thread in each serving process instead of running it inside the
 # request (ActiveJob.drain_in_background!).
 ActiveJob.drain_in_background!
+# Under queue_adapter :sidekiq jobs go to Redis instead; say where.
+SidekiqPush.announce if JobRegistry.sidekiq?
 
 # Register the Cable registry as the broadcasts transport: every
 # `Broadcasts.record` call from model callbacks now also fans out

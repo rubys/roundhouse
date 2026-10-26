@@ -306,6 +306,13 @@ pub(super) fn dispatch_method_by_recv_ty(
         }
         None => false,
     };
+    // Not the narrowed read's type: a param the signature renders as a Value stays a Value where the read emits as the bare name
+    let bound_value_ty = var_name
+        .filter(|n| raw_recv_s.trim_end_matches(".clone()") == *n)
+        .and_then(super::super::param_ty)
+        .filter(|t| super::super::super::ty::rust_ty(t) == "serde_json::Value")
+        .filter(|_| recv_ty.is_some_and(|t| super::super::super::ty::rust_ty(t) != "serde_json::Value"));
+    let recv_ty = if bound_value_ty.is_some() { bound_value_ty.as_ref() } else { recv_ty };
     let recv_s = if binding_is_option {
         // `.clone().unwrap()` is a method chain — already a primary
         // form. The outer wrap was historically defensive against
@@ -334,6 +341,11 @@ pub(super) fn dispatch_method_by_recv_ty(
             "first" if args.is_empty() => Some(format!("{recv_s}.first().cloned()")),
             "last" if args.is_empty() => Some(format!("{recv_s}.last().cloned()")),
             "to_a" if args.is_empty() => Some(recv_s.clone()),
+            // `ary.index(x)`: the first position holding x, or nil
+            "index" if args.len() == 1 => Some(format!(
+                "{recv_s}.iter().position(|__x| *__x == {}).map(|__i| __i as i64)",
+                args_s[0]
+            )),
             // `reverse` / `sort` return new arrays in Ruby. Clone-
             // then-mutate keeps the receiver intact and produces an
             // owned Vec the caller can pass on.
@@ -473,6 +485,10 @@ pub(super) fn dispatch_method_by_recv_ty(
         // compare rust.
         Some(ty) if super::super::super::ty::rust_value_shaped(ty) => match method {
             "to_s" if args.is_empty() => Some(ruby_to_s_emit(recv, &recv_s, true)),
+            // Ruby's to_f on an Integer, a Float, or a String's leading number; nil and the rest are 0.0
+            "to_f" if args.is_empty() => Some(format!(
+                "{{ let __v = {recv_s}; match &__v {{ serde_json::Value::String(__s) => __s.trim().parse::<f64>().unwrap_or(0.0), _ => __v.as_f64().unwrap_or(0.0) }} }}"
+            )),
             _ => None,
         },
         Some(Ty::Hash { .. }) => match method {

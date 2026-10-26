@@ -52,6 +52,7 @@ public static class Server
         Func<string, string?, string?, string> layout)
     {
         ViewHelpers.ResetSlotsBang();
+        I18nHost.BeginRequest();
 
         var reqMethod = ctx.Request.Method;
         // The raw request target, still percent-encoded, minus its query:

@@ -147,6 +147,14 @@ pub fn apply_association_new_lowering(app: &mut App) {
                         rewrite(condition, &assocs, None);
                     }
                 }
+                ModelBodyItem::Validation { validation, .. } => {
+                    if let Some(cond) = &mut validation.if_cond {
+                        rewrite(cond, &assocs, None);
+                    }
+                    if let Some(cond) = &mut validation.unless_cond {
+                        rewrite(cond, &assocs, None);
+                    }
+                }
                 ModelBodyItem::Unknown { expr, .. } => rewrite(expr, &assocs, None),
                 _ => {}
             }

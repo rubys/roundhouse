@@ -28,6 +28,8 @@ mod broadcasts;
 mod inertia;
 mod process_action;
 pub mod params;
+mod params_values;
+mod params_sources;
 mod permit_splat;
 mod typed_update;
 pub mod params_wrapper;
@@ -244,6 +246,10 @@ pub fn lower_controllers_with_arel_views_and_assocs(
 pub struct LowerControllerOptions<'a> {
     /// Ruby-family nullable read values; strict-target defaults stay unchanged.
     pub ruby_read_values: bool,
+    /// Carry non-scalar permitted keys (`k: [[:a]]`, `k: {}`) as
+    /// `Roundhouse::ParamValue` members read by `Params.nested` (ruby
+    /// family); elsewhere they are dropped with a warning.
+    pub carry_nested_params: bool,
     /// The selected Db shim supports typed positional binds for read predicates.
     pub param_binds: bool,
     /// App `Schema` — enables the Arel SQL-chain lowering pass.
@@ -303,6 +309,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
 ) -> Vec<LibraryClass> {
     let LowerControllerOptions {
         ruby_read_values,
+        carry_nested_params,
         param_binds,
         schema,
         views,
@@ -331,6 +338,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // rewrite controller bodies + register the class with the typer.
     let mut params_specs = self::params::collect_specs(controllers);
     params_specs.mark_file_fields(models);
+    params_specs.carry_nested(carry_nested_params, true);
     self::typed_update::mark_model_resources(&mut params_specs, models, schema);
     let params_lcs = self::params::synthesize_params_classes(&params_specs);
     // What `@parent.<assoc>.build` / `.find` expand to: the same
@@ -641,6 +649,12 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
                 // The companion presence slot each value slot carries.
                 params_ivars.insert(self::params::provided_field(f), Ty::Bool);
             }
+            // The request's multiparameter record.
+            params_ivars.insert(
+                self::params::multiparameter_fields_field(),
+                Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
+            );
+            params_ivars.insert(self::params::multiparameter_unsupported_field(), Ty::Bool);
         }
         for method in &mut params_lc.methods {
             crate::lower::typing::type_method_body(method, &classes, &params_ivars);
@@ -2595,13 +2609,13 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
 }
 
 /// `rescue_from <Class>[, <Class>] { … }` / `rescue_from <Class>, with:
-/// :handler` — the controller's exception handlers, ITS OWN first and
-/// then each ancestor's.
+/// :handler` — the controller's exception handlers, ancestors first
+/// then the controller's own declarations.
 ///
 /// Rails registers them on `process_action`, so they cover the filter
 /// chain as well as the action; and it walks the registry in REVERSE,
 /// so a subclass's handler wins over the one it inherits. Order here is
-/// declaration order (own, then nearer ancestors, then further);
+/// declaration order (furthest ancestor through the subclass);
 /// `synthesize_process_action` reverses it into Ruby's source-order
 /// `rescue` matching.
 ///
@@ -2623,8 +2637,10 @@ fn collect_rescue_handlers(
     format_breadth: FormatBreadth,
 ) -> Vec<RescueHandler> {
     let mut out: Vec<RescueHandler> = Vec::new();
-    let mut chain: Vec<&Controller> = vec![controller];
-    chain.extend(ancestor_chain(controller, all_controllers));
+    // ancestor_chain is already ordered from the furthest ancestor.
+    // Inherited declarations precede subclass declarations; last wins.
+    let mut chain = ancestor_chain(controller, all_controllers);
+    chain.push(controller);
     for c in chain {
         let handler_arity = |name: &Symbol| -> Option<usize> {
             c.actions().find(|a| &a.name == name).map(|a| a.params.fields.len())
@@ -2903,7 +2919,7 @@ fn action_to_method(
         Ty::Str
     } else if !is_public && method_name.ends_with("_params") {
         let spec = self::params::first_permit_in(&a.body)
-            .and_then(|(resource, fields)| params_specs.find(&resource, &fields));
+            .and_then(|(resource, fields, nested)| params_specs.find(&resource, &fields, &nested));
         if let Some(spec) = spec {
             Ty::Class { id: spec.class_id.clone(), args: vec![].into() }
         } else {
@@ -3212,7 +3228,10 @@ fn lower_action_body(
     // polymorphic location form without runtime class dispatch.
     let with_response_location = rewrite_response_location_kwarg(&with_render);
     let with_response_location = inertia::encode_inertia_values(&with_response_location);
-    let with_params = rewrite_params(&with_response_location);
+    let with_nested_params = self::params::rewrite_nested_lookups(
+        &with_response_location, params_privs, params_specs,
+    );
+    let with_params = rewrite_params(&with_nested_params);
     // After bare `params.expect(...)` / `params.require(:r).permit(...)`
     // canonicalize via `rewrite_params`, replace each permit chain with
     // the typed factory `<Resource>Params.from_raw(@params)`. The
@@ -3338,8 +3357,7 @@ fn flatten_seqs(expr: &Expr) -> Expr {
             ty: e.ty.clone(),
             effects: e.effects.clone(),
             leading_blank_line: e.leading_blank_line,
-            diagnostic: e.diagnostic.clone(),
-            hint: e.hint,
+            cold: e.cold.clone(),
             decisions: e.decisions,
         }
     }

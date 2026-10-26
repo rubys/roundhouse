@@ -123,7 +123,11 @@ module SidekiqPush
     first = StandardError.new("")
     jobs.each do |j|
       begin
-        enqueue(j.job_class, j.queue, j.at, j.aj_json)
+        # `queue` is an attr-reader String; push only reads it (SADD /
+        # LPUSH key material). Concatenating "" is a new string so
+        # Spinel's share analysis does not hand the shared handle into
+        # those calls.
+        enqueue(j.job_class, j.queue + "", j.at, j.aj_json)
       rescue StandardError => e
         if !failed
           failed = true

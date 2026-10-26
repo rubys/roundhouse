@@ -1,0 +1,19 @@
+module ActiveRecord
+  module Type
+    class Value
+      @type: Symbol?
+      def type: () -> Symbol?
+      def initialize: (Symbol? type) -> void
+    end
+
+    class String
+      def cast: (untyped value) -> String?
+      def deserialize: (untyped value) -> String?
+    end
+
+    class Integer
+      def cast: (untyped value) -> Integer?
+      def deserialize: (untyped value) -> Integer?
+    end
+  end
+end

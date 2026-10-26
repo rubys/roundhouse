@@ -1,0 +1,4 @@
+module AppRakeTasks
+  def self.install!: () -> nil
+  def self.run: (String name) -> nil
+end

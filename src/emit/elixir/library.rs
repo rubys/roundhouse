@@ -44,6 +44,17 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
     // Register the Ruby class name for `Module#name` reflection
     // (`#{name}` in a class method resolves to this string).
     expr::set_current_class_name(class.name.0.as_str());
+    expr::set_process_wide_ivars(load_once_ivars(class));
+    // Not a plain module: a raise of it must carry its class, which only an exception module does
+    let parent = class.parent.as_ref().map(|p| p.0.as_str()).unwrap_or("");
+    let core_error = matches!(
+        parent.rsplit("::").next().unwrap_or(parent),
+        "StandardError" | "RuntimeError" | "ArgumentError" | "TypeError" | "NameError" | "KeyError" | "IndexError"
+    );
+    if (core_error || expr::is_error_module(parent)) && class.methods.is_empty() {
+        expr::register_error_module(class.name.0.as_str(), &v2_name);
+        return Ok(format!("defmodule {v2_name} do\n  defexception message: \"\"\nend\n"));
+    }
     let body = emit_class_body(class, &v2_name)?;
     Ok(format!("defmodule {v2_name} do\n{body}end\n"))
 }
@@ -595,6 +606,16 @@ pub(super) fn elixir_fn_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_load_once_method_s_ivars_are_process_wide_and_a_toggled_flag_s_are_not() {
+        let src = b"module Cache\n  def self.table\n    load unless @loaded == true\n    @table\n  end\n\n  def self.load\n    @table = { \"a\" => 1 }\n    @loaded = true\n  end\n\n  def self.render\n    @rendering = true\n    @frame = 1\n    @rendering = false\n  end\n\n  def self.rendering?\n    @rendering == true\n  end\n\n  def self.stamp\n    @memo = 1\n    @stamped = true\n  end\n\n  def self.rules\n    load_rules unless @rules_loaded\n    @rules\n  end\n\n  def self.load_rules\n    @rules = [1]\n    @rules_loaded = true\n  end\nend\n";
+        let classes = crate::ingest::ingest_library_classes(src, "cache.rb").expect("ingest");
+        let names = load_once_ivars(&classes[0]);
+        let mut names: Vec<&str> = names.iter().map(String::as_str).collect();
+        names.sort();
+        assert_eq!(names, ["loaded", "rules", "rules_loaded", "table"]);
+    }
     use crate::ident::{Symbol, VarId};
     use crate::span::Span;
 
@@ -653,4 +674,68 @@ mod tests {
         assert_eq!(elixir_fn_name("[]=__loop"), "put__loop");
         assert_eq!(elixir_fn_name("title="), "set_title");
     }
+}
+
+/// The ivars a load-once method fills: one that sets `@flag = true`
+/// where nothing sets `@flag` to anything else and it is read only as
+/// `@flag == true`, so it runs once per process in Ruby, and its ivars
+/// are what every later request reads.
+fn load_once_ivars(class: &LibraryClass) -> std::collections::HashSet<String> {
+    use crate::expr::{ExprNode, LValue, Literal};
+    fn writes(e: &crate::expr::Expr, out: &mut Vec<(String, bool)>) {
+        if let ExprNode::Assign { target: LValue::Ivar { name }, value } = &*e.node {
+            out.push((name.as_str().to_string(), matches!(&*value.node, ExprNode::Lit { value: Literal::Bool { value: true } })));
+        }
+        e.node.for_each_child(&mut |c| writes(c, out));
+    }
+    // Reads of `@name` other than as the left of `== true`, and how many of those guards there are
+    fn other_reads(e: &crate::expr::Expr, name: &str, found: &mut bool, guards: &mut usize) {
+        if let ExprNode::Send { recv: Some(r), method, args, .. } = &*e.node
+            && method.as_str() == "=="
+            && matches!(&*r.node, ExprNode::Ivar { name: n } if n.as_str() == name)
+            && matches!(args.as_slice(), [a] if matches!(&*a.node, ExprNode::Lit { value: Literal::Bool { value: true } }))
+        {
+            *guards += 1;
+            return;
+        }
+        // `load unless @loaded`: the flag read bare, or negated, as the condition of a branch
+        if let ExprNode::If { cond, then_branch, else_branch } = &*e.node {
+            let is_flag = |x: &crate::expr::Expr| matches!(&*x.node, ExprNode::Ivar { name: n } if n.as_str() == name);
+            let bare = is_flag(cond)
+                || matches!(&*cond.node, ExprNode::Send { recv: Some(r), method, args, .. } if method.as_str() == "!" && args.is_empty() && is_flag(r));
+            if bare {
+                *guards += 1;
+                other_reads(then_branch, name, found, guards);
+                other_reads(else_branch, name, found, guards);
+                return;
+            }
+        }
+        if matches!(&*e.node, ExprNode::Ivar { name: n } if n.as_str() == name) {
+            *found = true;
+        }
+        e.node.for_each_child(&mut |c| other_reads(c, name, found, guards));
+    }
+    let mut all_writes = Vec::new();
+    for m in &class.methods {
+        writes(&m.body, &mut all_writes);
+    }
+    let mut out = std::collections::HashSet::new();
+    for m in &class.methods {
+        let mut w = Vec::new();
+        writes(&m.body, &mut w);
+        let flags: Vec<&String> = w.iter().filter(|(_, t)| *t).map(|(n, _)| n).collect();
+        let once = flags.iter().any(|flag| {
+            let mut found = all_writes.iter().any(|(n, t)| n == *flag && !t);
+            let mut guards = 0;
+            for other in &class.methods {
+                other_reads(&other.body, flag, &mut found, &mut guards);
+            }
+            // Not a flag nothing reads: without a guard, the method runs on every request
+            !found && guards > 0
+        });
+        if once {
+            out.extend(w.into_iter().map(|(n, _)| n));
+        }
+    }
+    out
 }

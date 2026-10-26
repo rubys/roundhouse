@@ -109,6 +109,7 @@ thread_local! {
     /// Reassigned locals a terminal nil-guard proved non-nil (`emit_stmts`).
     /// Not in `NONNULL_PROPS`: an ivar of the same camelCased name was not proven.
     static NARROWED_LOCALS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    static LET_OPTIONALS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
     /// Closure-nesting depth — `next` is a closure `return` inside an
     /// iterator block, `continue` in a loop.
     static IN_LAMBDA: RefCell<usize> = const { RefCell::new(0) };
@@ -146,6 +147,12 @@ pub(super) fn reset_registries() {
     ERROR_CLASSES.with(|m| m.borrow_mut().clear());
     METHOD_PARAMS.with(|m| m.borrow_mut().clear());
     CLASS_INITS.with(|m| m.borrow_mut().clear());
+    for (name, parent) in super::primitives::CORE_ERROR_CLASSES {
+        match parent {
+            Some(p) => register_class_parent(name.to_string(), p.to_string()),
+            None => register_error_class(name.to_string()),
+        }
+    }
 }
 
 /// Register a module/object-level accessor property ("Type.prop") whose
@@ -506,6 +513,10 @@ pub(super) fn register_class_props(class: String, props: HashSet<String>) {
 /// Set the class currently being emitted.
 pub(super) fn set_current_class(name: &str) {
     CURRENT_CLASS.with(|c| *c.borrow_mut() = name.to_string());
+}
+
+pub(super) fn current_class() -> String {
+    CURRENT_CLASS.with(|c| c.borrow().clone())
 }
 
 /// Is `name` a stored property anywhere in the ANCESTOR chain of
@@ -1146,7 +1157,33 @@ fn children(e: &Expr) -> Vec<&Expr> {
             v.push(right);
         }
         ExprNode::Return { value } | ExprNode::Raise { value } => v.push(value),
+        ExprNode::Let { value, body, .. } => {
+            v.push(value);
+            v.push(body);
+        }
         ExprNode::Lambda { body, .. } => v.push(body),
+        // Not skipped: a literal's elements and an interpolation's parts are calls like any other
+        ExprNode::Array { elements, .. } => v.extend(elements.iter()),
+        ExprNode::Hash { entries, .. } => {
+            for (k, val) in entries {
+                v.push(k);
+                v.push(val);
+            }
+        }
+        ExprNode::StringInterp { parts } => {
+            for p in parts {
+                if let crate::expr::InterpPart::Expr { expr } = p {
+                    v.push(expr);
+                }
+            }
+        }
+        // Not skipped: a `begin` body throws, hoists and writes like any other statement list
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            v.push(body);
+            v.extend(rescues.iter().map(|r| &r.body));
+            v.extend(else_branch.iter());
+            v.extend(ensure.iter());
+        }
         _ => {}
     }
     v
@@ -1171,7 +1208,7 @@ pub fn emit_expr(e: &Expr) -> String {
 /// append is amortized O(1)); mirrors `kotlin::expr::try_string_builder`.
 /// Non-hinted sites fall through to the normal walkers.
 fn try_string_builder(e: &Expr) -> Option<String> {
-    match e.hint? {
+    match e.hint().as_ref()? {
         crate::expr::IrHint::MutableStringLiteral => None, // emitted as the plain literal
         crate::expr::IrHint::StringBuilderInit => {
             if let ExprNode::Assign { target: LValue::Var { name, .. }, .. } = &*e.node {
@@ -1278,6 +1315,7 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
             let n = camel(name.as_str());
             if NONNULL_PROPS.with(|s| s.borrow().contains(&n))
                 || NARROWED_LOCALS.with(|s| s.borrow().contains(&n))
+                || (LET_OPTIONALS.with(|s| s.borrow().contains(&n)) && e.ty.as_ref().is_some_and(|t| t.is_scalar()))
             {
                 format!("{n}!")
             } else {
@@ -1425,14 +1463,55 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
             }
         }
         ExprNode::Break { .. } => "break".to_string(),
-        // No throwing yet (Phase 3 `throws` pass), so the rescue-modifier
-        // fallback shape degrades to just the expression — visible TODO.
-        ExprNode::RescueModifier { expr, fallback } => format!(
-            "{} /* TODO rescue-modifier fallback: {} */",
-            emit_expr(expr),
-            emit_expr(fallback)
-        ),
-        other => format!("/* TODO {} */", other.kind_str()),
+        // Not reported when it throws: a Swift error is what `try?` catches, as Ruby's modifier catches a StandardError
+        // Not `(try? e) ?? fallback`: a call that answers nil without throwing would take the fallback
+        ExprNode::RescueModifier { expr, fallback } if body_throws(expr, &current_class()) => {
+            // Not `return` before a raise: Swift's `throw` is a statement, so a raising branch is the statement alone
+            let branch = |x: &Expr, try_it: bool| {
+                let s = emit_expr(x);
+                if is_raise_expr(x) {
+                    s
+                } else if try_it && !s.starts_with("try ") {
+                    format!("return try {s}")
+                } else {
+                    format!("return {s}")
+                }
+            };
+            let try_kw = if body_throws(fallback, &current_class()) { "try " } else { "" };
+            format!("({try_kw}{{ do {{ {} }} catch {{ {} }} }}())", branch(expr, true), branch(fallback, false))
+        }
+        // Not the bare expression: what it raises is a fatalError, which no Swift catch reaches
+        ExprNode::RescueModifier { .. } => {
+            let stub = crate::emit::diagnostics::report_unsupported(e.span, "swift", "RescueModifier", "an expression whose raise traps rather than throws");
+            if IN_TEST_CLASS.with(|f| *f.borrow()) { stub.replacen("fatalError(", "throw XCTSkip(", 1) } else { stub }
+        }
+        ExprNode::Yield { args } => format!("block({})", args.iter().map(emit_expr).collect::<Vec<_>>().join(", ")),
+        // Not an `if` expression: Swift allows one only as a whole statement's value, and this binding sits inside an expression
+        ExprNode::Let { body, .. } => {
+            let ret = e.ty.as_ref().map(super::ty::swift_ty).unwrap_or_else(|| "Any?".to_string());
+            let try_kw = if body_throws(e, &current_class()) { "try " } else { "" };
+            let ExprNode::Let { name, value, .. } = n else { unreachable!() };
+            format!("({try_kw}{{ () throws -> {ret} in\n{}\n{}\n}}())", indent(&bind_let(name.as_str(), value)), indent(&wrap_return(body)))
+        }
+        // Not `rescue` too: a Swift raise is a fatalError or a typed throw, which a Ruby rescue clause does not map onto
+        ExprNode::BeginRescue { body, rescues, else_branch: None, ensure: None, .. } if rescues.is_empty() => emit_expr(body),
+        ExprNode::BeginRescue { body, rescues, else_branch: None, ensure: Some(en), .. } if rescues.is_empty() => {
+            emit_ensure_only(&emit_expr(body), en)
+        }
+        ExprNode::BeginRescue { body, rescues, else_branch: None, ensure, .. }
+            if !rescues.is_empty() && rescues.iter().all(rescue_catches_throw) =>
+        {
+            emit_do_catch(&emit_expr(body), rescues, ensure.as_ref(), false)
+        }
+        other => {
+            let stub = crate::emit::diagnostics::report_unsupported(e.span, "swift", other.kind_str(), "no Swift form for this construct here");
+            // Not a trap in a test: XCTest reports a skip by name, where a fatalError would end the whole run
+            if IN_TEST_CLASS.with(|f| *f.borrow()) {
+                stub.replacen("fatalError(", "throw XCTSkip(", 1)
+            } else {
+                stub
+            }
+        }
     }
 }
 
@@ -1453,9 +1532,67 @@ fn emit_literal(lit: &Literal) -> String {
         Literal::Str { value } => format!("\"{}\"", escape_str(value)),
         // No symbol type in Swift → string.
         Literal::Sym { value } => format!("\"{}\"", escape_str(value.as_str())),
-        Literal::Regex { pattern, .. } => {
-            format!("try! NSRegularExpression(pattern: \"{}\")", escape_str(pattern))
+        Literal::Regex { pattern, flags } => {
+            let options = swift_regex_options(flags);
+            if options.is_empty() {
+                format!("try! NSRegularExpression(pattern: \"{}\")", escape_str(pattern))
+            } else {
+                format!(
+                    "try! NSRegularExpression(pattern: \"{}\", options: [{options}])",
+                    escape_str(pattern)
+                )
+            }
         }
+    }
+}
+
+/// Ruby regex flags this build can reproduce exactly: `i` →
+/// `.caseInsensitive`. Ruby's `m` (dot-matches-newline) is
+/// `.dotMatchesLineSeparators`. Ruby's `^`/`$` are always line
+/// anchors, so a flagged `m` also adds `.anchorsMatchLines`. Any
+/// other flag character stays an ingest-time gap, so none reaches
+/// here.
+fn swift_regex_options(flags: &str) -> String {
+    let bits = crate::emit::shared::regex_literal::parse_ruby_regex_flags(flags);
+    let mut parts: Vec<&str> = Vec::new();
+    if bits.ignore_case {
+        parts.push(".caseInsensitive");
+    }
+    if bits.dot_matches_newline {
+        parts.push(".dotMatchesLineSeparators");
+        parts.push(".anchorsMatchLines");
+    }
+    parts.join(", ")
+}
+
+#[cfg(test)]
+mod regex_flag_tests {
+    #[test]
+    fn rubys_m_keeps_line_anchors_as_well_as_dotall() {
+        assert_eq!(swift_regex_options("m"), ".dotMatchesLineSeparators, .anchorsMatchLines");
+    }
+
+    use super::{emit_literal, swift_regex_options};
+    use crate::expr::Literal;
+
+    #[test]
+    fn no_flags_drop_the_options_argument() {
+        let lit = Literal::Regex { pattern: "a.b".into(), flags: "".into() };
+        assert_eq!(emit_literal(&lit), r#"try! NSRegularExpression(pattern: "a.b")"#);
+    }
+
+    #[test]
+    fn ignore_case_maps_to_case_insensitive() {
+        assert_eq!(swift_regex_options("i"), ".caseInsensitive");
+    }
+
+    #[test]
+    fn ignore_case_and_dot_matches_newline_combine_in_the_options_array() {
+        let lit = Literal::Regex { pattern: "a.b".into(), flags: "im".into() };
+        assert_eq!(
+            emit_literal(&lit),
+            r#"try! NSRegularExpression(pattern: "a.b", options: [.caseInsensitive, .dotMatchesLineSeparators, .anchorsMatchLines])"#
+        );
     }
 }
 
@@ -1877,7 +2014,8 @@ fn emit_case(scrutinee: &Expr, arms: &[Arm], returning: bool) -> String {
                 lines.push(format!("case {}:\n{body}", emit_literal(value)));
             }
             other => {
-                lines.push(format!("/* TODO pattern {other:?} */ default:\n{body}"));
+                let stub = crate::emit::diagnostics::report_unsupported(arm.body.span, "swift", "case pattern", format!("{other:?}").split([' ', '(', '{']).next().unwrap_or("").to_string());
+                lines.push(format!("default:\n{stub}"));
                 has_default = true;
             }
         }
@@ -2237,8 +2375,26 @@ fn branch_is_terminal(e: &Expr) -> bool {
 /// branches of a two-armed `If` (multi-statement Swift `if` branches
 /// aren't expressions either). Terminal/valueless statements pass
 /// through unprefixed.
+fn bind_let(name: &str, value: &Expr) -> String {
+    let n = camel(name);
+    if matches!(value.ty, Some(crate::ty::Ty::Union { .. })) {
+        LET_OPTIONALS.with(|s| s.borrow_mut().insert(n.clone()));
+    }
+    format!("let {n} = {}", emit_expr(value))
+}
+
 pub(super) fn wrap_return(e: &Expr) -> String {
     match &*e.node {
+        ExprNode::BeginRescue { body, rescues, else_branch: None, ensure: None, .. } if rescues.is_empty() => wrap_return(body),
+        ExprNode::BeginRescue { body, rescues, else_branch: None, ensure: Some(en), .. } if rescues.is_empty() => {
+            emit_ensure_only(&wrap_return(body), en)
+        }
+        ExprNode::BeginRescue { body, rescues, else_branch: None, ensure, .. }
+            if !rescues.is_empty() && rescues.iter().all(rescue_catches_throw) =>
+        {
+            emit_do_catch(&wrap_return(body), rescues, ensure.as_ref(), true)
+        }
+        ExprNode::Let { name, value, body, .. } => format!("{}\n{}", bind_let(name.as_str(), value), wrap_return(body)),
         ExprNode::Seq { exprs } if !exprs.is_empty() => emit_stmts(exprs, true),
         ExprNode::Case { scrutinee, arms } => emit_case(scrutinee, arms, true),
         ExprNode::If { cond, then_branch, else_branch } if !is_empty_branch(else_branch) => {
@@ -2337,6 +2493,22 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
                         return format!("{kw} {n}: {ct} = {lit}");
                     }
                 }
+                // An association build's owner temp (`rh_build_owner_0 =
+                // @article`) stands in for the `@article.x` it replaced, which
+                // unwrapped the implicitly-unwrapped ivar (`var article:
+                // Article!`). Inferred, the temp is an `Article?`; given the
+                // ivar's own type it unwraps as that read did. Only this temp,
+                // which lowering marks: a user's local from an ivar may well
+                // hold its nil.
+                if value.decisions & crate::expr::BUILD_OWNER != 0
+                    && let ExprNode::Ivar { name } = &*value.node
+                    && let Some(ty) = instance_prop_ty(name.as_str()).or_else(|| value.ty.clone())
+                {
+                    let st = swift_ty(&ty);
+                    if !st.ends_with('?') && !st.contains("Any") {
+                        return format!("{kw} {n}: {st} = {val}");
+                    }
+                }
                 format!("{kw} {n} = {val}")
             }
         }
@@ -2426,11 +2598,7 @@ pub(super) fn is_raise_expr(e: &Expr) -> bool {
 pub(super) fn body_throws(e: &Expr, cls: &str) -> bool {
     let direct = match &*e.node {
         ExprNode::Send { recv: None, method, args, .. } if method.as_str() == "raise" => {
-            args.first().map_or(false, |a| {
-                matches!(&*a.node, ExprNode::Const { path }
-                    if is_error_class_name(&super::naming::type_name(
-                        &path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::"))))
-            })
+            args.first().map_or(false, |a| raised_error_class(a).is_some())
         }
         ExprNode::Raise { value } => match &*value.node {
             ExprNode::Const { path } => is_error_class_name(&super::naming::type_name(
@@ -2452,13 +2620,21 @@ pub(super) fn body_throws(e: &Expr, cls: &str) -> bool {
                 &camel(method.as_str()),
             ),
             ExprNode::SelfRef => !cls.is_empty() && throws_lookup(cls, &camel(method.as_str())),
-            _ => false,
+            // Not left out: a typed receiver's call is emitted with `try` when its method throws, so it throws here too
+            _ => match r.ty.as_ref().map(|t| t.peel_nilable()) {
+                Some(crate::ty::Ty::Class { id, .. }) => throws_lookup(&super::naming::type_name(id.0.as_str()), &camel(method.as_str())),
+                _ => false,
+            },
         },
         ExprNode::Send { recv: None, method, .. } => {
             !cls.is_empty() && throws_lookup(cls, &camel(method.as_str()))
         }
         _ => false,
     };
+    // Not the rescued expression: what it throws the modifier catches
+    if let ExprNode::RescueModifier { fallback, .. } = &*e.node {
+        return body_throws(fallback, cls);
+    }
     direct || children(e).into_iter().any(|c| body_throws(c, cls))
 }
 
@@ -2585,7 +2761,15 @@ fn emit_send(
     args: &[Expr],
     block: Option<&Expr>,
 ) -> String {
-    let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+    if let Some(recv) = crate::emit::shared::fn_call::function_receiver(recv, method, block) {
+        let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+        return format!("{}({})", emit_expr(recv), args_s.join(", "));
+    }
+    // Not each argument rendered as it is: a Range has no Swift value here, and the slice paths below read its bounds instead
+    let args_s: Vec<String> = args
+        .iter()
+        .map(|a| if matches!(&*a.node, ExprNode::Range { .. }) { String::new() } else { emit_expr(a) })
+        .collect();
 
     // Temporal reader intrinsic: `ActiveSupport.parse_db_time(s)` parses a
     // stored ISO-8601 `String` into a native `Date`. Renders to the Swift
@@ -2660,6 +2844,13 @@ fn emit_send(
     // Error-conforming class throws; everything else is a "never
     // happens" fatalError.
     if method == "raise" && recv.is_none() && !args.is_empty() {
+        if matches!(&*args[0].node, ExprNode::Send { .. }) && let Some(cls) = raised_error_class(&args[0]) {
+            // Not the constructed error with a second argument: Ruby's message argument replaces its message
+            return match args_s.get(1) {
+                Some(msg) => format!("throw {cls}({msg})"),
+                None => format!("throw {}", args_s[0]),
+            };
+        }
         if let ExprNode::Const { path } = &*args[0].node {
             let joined = path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::");
             let cls = super::naming::type_name(&joined);
@@ -2819,7 +3010,15 @@ fn emit_send(
             if matches!(&*args[0].node, ExprNode::Lit { value: Literal::Int { value: -1 } }) {
                 return format!("{}.last", emit_expr(r));
             }
+            // Not `s[i]`: Swift has no Int subscript on String; the analyzer reads String#[] as a String, so a miss is ""
+            if matches!(r.ty.as_ref().map(|t| t.peel_nilable()), Some(crate::ty::Ty::Str)) {
+                return format!("(RhString.at({}, {}) ?? \"\")", emit_expr(r), args_s[0]);
+            }
             return format!("{}[{}]", emit_expr(r), args_s[0]);
+        }
+        // Not `.index(x)`: Swift names the first position of a value `firstIndex(of:)`
+        if method == "index" && matches!(r.ty.as_ref().map(|t| t.peel_nilable()), Some(crate::ty::Ty::Array { .. })) {
+            return format!("{}.firstIndex(of: {})", emit_expr(r), args_s[0]);
         }
         // Hash key test (Swift dictionaries have no containsKey; the
         // index-vs-nil test is the idiom).
@@ -2933,6 +3132,9 @@ fn emit_send(
         }
         // Ruby `str[start, len]` positional slice.
         if method == "[]" {
+            if matches!(r.ty.as_ref().map(|t| t.peel_nilable()), Some(crate::ty::Ty::Array { .. })) {
+                return format!("RhString.listSlice({}, {}, {})", emit_expr(r), args_s[0], args_s[1]);
+            }
             return format!(
                 "String({}.dropFirst({}).prefix({}))",
                 emit_expr(r),
@@ -2960,7 +3162,9 @@ fn emit_send(
             // A receiver that is statically nil (a Void call: `assert_nil
             // controller.head(:no_content)`) is evaluated, and is nil.
             "nil?" if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Nil)) => {
-                return format!("({{ _ = {rs}; return true }}())")
+                // Not a bare call of the closure: one that holds a `try` throws, and its call needs a `try` too
+                let try_kw = if rs.starts_with("try ") { "try " } else { "" };
+                return format!("({try_kw}{{ _ = {rs}; return true }}())")
             }
             "nil?" => return format!("({rs} == nil)"),
             // `to_s`: identity on a String; plain interpolation for
@@ -2982,8 +3186,9 @@ fn emit_send(
             // `action_name.to_sym` renders as a `.toSym` property read
             // that resolves to nothing.
             "to_sym" => return rs,
-            "to_i" => return format!("Int(\"\\({rs})\")!"),
-            "to_f" => return format!("Double(\"\\({rs})\")!"),
+            "to_i" => return format!("(Int(RhString.s({rs})) ?? 0)"),
+            // Not `"\(x)"`: an Optional interpolates as "Optional(1)", and Ruby's to_f answers 0.0 for what does not parse
+            "to_f" => return format!("(Double(RhString.s({rs})) ?? 0.0)"),
             "empty?" => return format!("{rs}.isEmpty"),
             "any?" => return format!("!{rs}.isEmpty"),
             // An element that is never nil or false makes `none?` mean no elements at all
@@ -2994,6 +3199,8 @@ fn emit_send(
             "length" | "size" => return format!("{rs}.count"),
             "upcase" => return format!("{rs}.uppercased()"),
             "downcase" => return format!("{rs}.lowercased()"),
+            "lstrip" => return format!("String({rs}.drop(while: {{ $0.isWhitespace }}))"),
+            "rstrip" => return format!("String({rs}.reversed().drop(while: {{ $0.isWhitespace }}).reversed())"),
             "strip" => {
                 return format!("{rs}.trimmingCharacters(in: .whitespacesAndNewlines)")
             }
@@ -3047,7 +3254,12 @@ fn emit_send(
             return format!("{try_kw}{rs}.{name}()");
         }
         if is_known_instance_method(r, method) {
-            return format!("{rs}.{}()", camel(method));
+            let name = camel(method);
+            let try_kw = match r.ty.as_ref().map(|t| t.peel_nilable()) {
+                Some(crate::ty::Ty::Class { id, .. }) if throws_lookup(&super::naming::type_name(id.0.as_str()), &name) => "try ",
+                _ => "",
+            };
+            return format!("{try_kw}{rs}.{name}()");
         }
         // A typed receiver reading a property the class (or an ancestor)
         // declares — including collapsed predicate readers
@@ -3070,7 +3282,12 @@ fn emit_send(
 
     // Block → Swift trailing closure (`.each` → `.forEach`).
     if let Some(b) = block {
-        let sw_method = if method == "each" { "forEach".to_string() } else { camel(method) };
+        // Not `.find` / `.detect`: Swift's sequence API spells the first match `first(where:)`
+        let sw_method = match method {
+            "each" => "forEach".to_string(),
+            "find" | "detect" => "first".to_string(),
+            _ => camel(method),
+        };
         let lam = emit_expr(b);
         let base = match recv {
             // Hash#each iterates SORTED by key: Ruby hashes are
@@ -3092,6 +3309,9 @@ fn emit_send(
         // — `expectations.each { |sym, code| assert_equal … }` — are
         // exactly that shape.
         let try_kw = if block_body_throws(b) { "try " } else { "" };
+        if matches!(method, "find" | "detect") && args_s.is_empty() {
+            return format!("{try_kw}{base}(where: {lam})");
+        }
         if args_s.is_empty() {
             return format!("{try_kw}{base} {lam}");
         }
@@ -3283,4 +3503,78 @@ mod nil_or_narrowing_tests {
         let out = emit_expr(&or(call(optional_str("a"), "empty?"), call(optional_str("vary"), "empty?")));
         assert!(!out.contains("vary!"), "{out}");
     }
+}
+
+// Not a fatalError-raised class: only an Error-conforming class is thrown, so a rescue of anything else could never fire
+fn rescue_catches_throw(r: &crate::expr::RescueClause) -> bool {
+    r.classes.iter().all(|c| match &*c.node {
+        ExprNode::Const { path } => {
+            let joined = path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::");
+            is_error_class_name(&super::naming::type_name(&joined))
+        }
+        _ => false,
+    })
+}
+
+fn emit_do_catch(body: &str, rescues: &[crate::expr::RescueClause], ensure: Option<&Expr>, returning: bool) -> String {
+    let mut out = String::from("do {\n");
+    out.push_str(&indent(body));
+    out.push_str("\n}");
+    let mut catch_all = false;
+    for r in rescues {
+        let bind = r.binding.as_ref().map(|b| camel(b.as_str()));
+        let rbody = indent(&if returning { wrap_return(&r.body) } else { emit_expr(&r.body) });
+        let classes: Vec<String> = r
+            .classes
+            .iter()
+            .filter_map(|c| match &*c.node {
+                ExprNode::Const { path } => Some(super::naming::type_name(
+                    &path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::"),
+                )),
+                _ => None,
+            })
+            .collect();
+        let all = classes.is_empty() || classes.iter().any(|c| c == "StandardError" || c == "Exception");
+        if all {
+            catch_all = true;
+            match &bind {
+                Some(b) => out.push_str(&format!(" catch let {b} {{\n{rbody}\n}}")),
+                None => out.push_str(&format!(" catch {{\n{rbody}\n}}")),
+            }
+            break;
+        }
+        for c in classes {
+            match &bind {
+                Some(b) => out.push_str(&format!(" catch let {b} as {c} {{\n{rbody}\n}}")),
+                None => out.push_str(&format!(" catch is {c} {{\n{rbody}\n}}")),
+            }
+        }
+    }
+    // Not left non-exhaustive: an uncaught class must keep propagating, as Ruby's does
+    if !catch_all {
+        out.push_str(" catch {\n    throw error\n}");
+    }
+    // Not a `defer` inside the `do`: that runs when the `do` block exits, before a `catch`, where Ruby runs ensure after rescue
+    match ensure {
+        Some(en) => format!("do {{\n    defer {{\n{}\n    }}\n{}\n}}", indent(&indent(&emit_expr(en))), indent(&out)),
+        None => out,
+    }
+}
+
+fn emit_ensure_only(body: &str, ensure: &Expr) -> String {
+    format!("do {{\n    defer {{\n{}\n    }}\n{}\n}}", indent(&indent(&emit_expr(ensure))), indent(body))
+}
+
+/// The Error-conforming class a raise's first argument names: `raise K` or `raise K.new(...)`.
+fn raised_error_class(a: &Expr) -> Option<String> {
+    let path = match &*a.node {
+        ExprNode::Const { path } => path,
+        ExprNode::Send { recv: Some(r), method, .. } if method.as_str() == "new" => match &*r.node {
+            ExprNode::Const { path } => path,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let cls = super::naming::type_name(&path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::"));
+    is_error_class_name(&cls).then_some(cls)
 }

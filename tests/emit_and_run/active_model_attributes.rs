@@ -88,13 +88,17 @@ fn active_model_attributes_read_nil_and_cast_on_write_on_spinel() {
 }
 
 /// A declaration this lowering does not reproduce leaves the class as
-/// written, and `check` still reports the include. Options, a block, a
-/// receiver, a trailing `#:`, and any other `include` are each enough,
-/// including when the class also has one plain `attribute :name, :string`.
+/// written, and `check` still reports the include. An option other than
+/// `default:` (or a default it can't read: a lambda that takes a
+/// parameter, a computed value), a block, a receiver, a trailing `#:`, and
+/// any other `include` are each enough, including when the class also has
+/// one plain `attribute :name, :string`.
 #[test]
 fn active_model_attributes_with_options_stay_reported() {
     let bodies = [
-        "attribute :event_name, :string, default: \"view\"\n",
+        "attribute :event_name, :string, limit: 3\n",
+        "attribute :event_name, :string, default: ->(record) { record }\n",
+        "attribute :event_name, :string, default: [\"a\"].first\n",
         "attribute :event_name, :string do\n  end\n",
         "self.attribute :event_name, :string\n",
         "attribute :event_name, :string #: String\n",
@@ -170,4 +174,74 @@ fn active_model_attributes_are_clean_without_finite() {
             "{target:?} dropped the class without saying so: {errors:?}"
         );
     }
+}
+
+const DEFAULTS: &str = r#"class SettingsEvent
+  include ActiveModel::Attributes
+
+  CALLS = []
+
+  attribute :notify, :boolean, default: true
+  attribute :limit, :integer, default: 10
+  attribute :label, :string, default: "none"
+  attribute :cleared, :integer, default: nil
+  attribute :parsed, :integer, default: "12"
+  attribute :off, :boolean, default: "f"
+  attribute :stamp, :integer, default: -> { CALLS << :call; CALLS.size }
+  attribute :origin, :string, default: -> { name }
+end
+"#;
+
+/// `attribute :x, :type, default: …` (Rails 8.1.4): the default is cast as
+/// an assigned value is; a lambda is called on the attribute's first read,
+/// with the class as `self`, and kept; a write before that read skips it;
+/// a String default is a fresh String per instance; `default: nil` is no
+/// default.
+const DEFAULTS_SCRIPT: &str = r##"
+require_relative "app/models/settings_event"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+s = SettingsEvent.new
+check("boolean", s.notify, true)
+check("integer", s.limit, 10)
+check("string", s.label, "none")
+check("nil", s.cleared, nil)
+check("cast integer", s.parsed, 12)
+check("cast boolean", s.off, false)
+s.notify = "0"
+check("write casts", s.notify, false)
+s.limit = nil
+check("nil overrides", s.limit, nil)
+check("fresh string", SettingsEvent.new.label.equal?(SettingsEvent.new.label), false)
+SettingsEvent::CALLS.clear
+a = SettingsEvent.new
+b = SettingsEvent.new
+check("lambda not called by new", SettingsEvent::CALLS.size, 0)
+check("lambda on first read", [b.stamp, a.stamp], [1, 2])
+check("lambda kept", [a.stamp, a.stamp], [2, 2])
+c = SettingsEvent.new
+c.stamp = 5
+check("write before read", [c.stamp, SettingsEvent::CALLS.size], [5, 2])
+check("lambda self is the class", SettingsEvent.new.origin, "SettingsEvent")
+puts "ActiveModel::Attributes defaults passed"
+"##;
+
+fn settings() -> emit_and_run::Overlay {
+    emit_and_run::real_blog().write("app/models/settings_event.rb", DEFAULTS)
+}
+
+#[test]
+fn active_model_attributes_defaults() {
+    let run = settings().run_ruby(DEFAULTS_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("ActiveModel::Attributes defaults passed"), "{}", run.stdout);
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn active_model_attributes_defaults_on_spinel() {
+    let run = settings().run_spinel(DEFAULTS_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("ActiveModel::Attributes defaults passed"), "{}", run.stdout);
 }

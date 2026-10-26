@@ -201,6 +201,31 @@ module Db
     records
   end
 
+  # The work `current_transaction.after_commit` holds for the COMMIT
+  # (ActiveRecord::Base._after_commit), beside the records above.
+  def self._txn_callbacks
+    work = Fiber[:ar_txn_callbacks]
+    if work.nil?
+      work = []
+      Fiber[:ar_txn_callbacks] = work
+    end
+    work
+  end
+
+  # The tables whose model is inside `Model.unscoped { … }` on this
+  # thread (relation.rb's `Relation.unscoped_tables`). `Thread.current`,
+  # not `Fiber[]` as the transaction state: fiber storage is copied into
+  # a thread started from this one, and the copy would share this Array,
+  # so a block on one thread would lift the scope on the other.
+  def self._unscoped_tables
+    tables = Thread.current[:ar_unscoped_tables]
+    if tables.nil?
+      tables = []
+      Thread.current[:ar_unscoped_tables] = tables
+    end
+    tables
+  end
+
   # Request-scoped connection lease. Mirrors db_cruby.rb: checks out a
   # Conn under @mutex (parking on @cv while the pool is momentarily
   # exhausted), binds it to fiber-storage so `current_dbh` resolves to it
@@ -285,6 +310,7 @@ module Db
       return result
     end
     conn = nil
+    lease_all = nil
     @mutex.synchronize do
       while @free.empty?
         if @missing_connections > 0
@@ -294,6 +320,7 @@ module Db
         end
       end
       conn = @free.pop
+      lease_all = @all
     end
     Fiber[:db_handle] = conn
     Fiber[:db_owner] = Thread.current
@@ -306,20 +333,27 @@ module Db
       raise
     ensure
       cleanup_error = nil
+      closed = conn.raw.is_closed
       begin
-        release_open_statements(conn)
+        release_open_statements(conn) unless closed
       rescue StandardError => e
         cleanup_error = e
       ensure
         Fiber[:db_handle] = nil
         Fiber[:db_owner] = nil
         begin
-          if conn.open_statements.empty?
+          # `Db.close` inside the lease closes `conn` and `configure`
+          # replaces `@all`. Pushing that handle onto the new `@free`
+          # would make the next checkout a closed JDBC connection.
+          same_pool = !closed && !lease_all.nil? && !@all.nil? && @all.equal?(lease_all)
+          if same_pool && conn.open_statements.empty?
             @mutex.synchronize do
-              @free.push(conn)
-              @cv.signal
+              if !conn.raw.is_closed && !@free.nil? && !@all.nil? && @all.equal?(lease_all)
+                @free.push(conn)
+                @cv.signal
+              end
             end
-          else
+          elsif same_pool
             quarantine_connection(conn)
           end
         rescue StandardError => e
@@ -377,6 +411,12 @@ module Db
   end
 
   def self.close
+    # Same as db_cruby.rb. This shim's live handle is the fiber lease.
+    # Schema switch closes that checkout too: leaving it set makes the
+    # next statement keep using the JDBC connection we just closed.
+    Fiber[:db_handle] = nil
+    Fiber[:db_owner] = nil
+    Fiber[:db_txn_pin] = false
     return if @all.nil?
     error = nil
     @all.each do |conn|
@@ -1034,6 +1074,9 @@ module Db
 
   def self.record_query(sql)
     @query_log.push(sql) unless @query_log.nil?
+    if defined?(ActiveSupport::Notifications) && ActiveSupport::Notifications.respond_to?(:sql)
+      ActiveSupport::Notifications.sql(sql)
+    end
   end
 
   # SQL-value escaping primitives — copied verbatim from db_cruby.rb.

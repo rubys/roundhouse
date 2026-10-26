@@ -11,6 +11,7 @@ use crate::ident::ClassId;
 use super::util::{constant_id_str, flatten_statements, module_name_path, symbol_or_string_value};
 use super::{IngestError, IngestResult};
 
+use crate::ingest::prism_api::PrismLocation;
 const PRIVATE_HOOKS: &[&str] = &[
     "initialize", "initialize_copy", "initialize_dup", "initialize_clone",
 ];
@@ -182,7 +183,10 @@ impl Visibility {
         source: &str,
         file: &str,
     ) -> HashMap<usize, MethodVisibility> {
-        let parsed = ruby_prism::parse(source.as_bytes());
+        // Classification re-parse: primary ingest already reported syntax
+        // errors via `prism::parse`. Reporting again under the same
+        // `prism::scope` would duplicate located Parse diagnostics.
+        let parsed = super::prism::parse_silent(source.as_bytes());
         let root = parsed.node();
         let mut defaults = HashMap::new();
         let bodies = super::util::find_all_classes_with_scope(&root)
@@ -194,7 +198,9 @@ impl Visibility {
                     .filter_map(|(_, module)| module.body()),
             );
         for body in bodies {
-            if let Ok(visibility) = Self::resolve(Some(&body), file, None) {
+            // Not `resolve`: forem's `private :has_role?` names a method rolify defines, which
+            // refuses the class body there but leaves the default at every later line known.
+            if let Ok(visibility) = Self::resolve_carrying_inherited(Some(&body), file, None) {
                 defaults.extend(visibility.defaults);
             }
             for statement in flatten_statements(body) {
@@ -634,7 +640,10 @@ impl Visibility {
                 }
             }
             if let Some(def) = def {
-                if let Some(inner) = super::library_class::included_hook_class_methods_body(&def) {
+                // The module's own `class << self` (not a ClassMethods
+                // carrier) is where `def included(base)` is the hook.
+                let in_singleton_class = class_side && !self.carrier;
+                if let Some(inner) = super::library_class::included_hook_class_methods_body(&def, in_singleton_class) {
                     self.walk_carrier(Some(inner), file)?;
                     continue;
                 }

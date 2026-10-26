@@ -26,6 +26,8 @@ use crate::app::App;
 use crate::diagnostic::Diagnostic;
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::Symbol;
+use crate::lower::typing::with_ty;
+use crate::ty::Ty;
 
 /// Inline block-form `create`/`create!` sends across every hook body.
 /// Returns the residue ledger: block-carrying factory calls left in
@@ -70,6 +72,8 @@ fn rewrite_create_block(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
         return;
     }
     let span = expr.span;
+    // Analysis typed the `create` call as the record it builds.
+    let created_ty = expr.ty.clone();
     let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
     let ExprNode::Send { recv, method, args, block: Some(block), .. } = node else {
         unreachable!()
@@ -82,7 +86,18 @@ fn rewrite_create_block(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     // Reuse the block body's own VarId for the binding so the body's
     // reads reference the local we assign.
     let var_id = find_var_id(&body, &name).unwrap_or(crate::ident::VarId(0));
-    let var = |sp| Expr::new(sp, ExprNode::Var { id: var_id, name: name.clone() });
+    // This runs after analysis, so what it builds is typed here: the
+    // record (the `create` call's type, else the block parameter's) and
+    // `save`'s Bool. An untyped `X.new` reads to the post-lowering
+    // diagnostics as a method the class does not have.
+    let record_ty = created_ty
+        .filter(|t| matches!(t, Ty::Class { .. }))
+        .or_else(|| find_var_ty(&body, &name));
+    let typed = |e: Expr, ty: Option<Ty>| match ty {
+        Some(t) => with_ty(e, t),
+        None => e,
+    };
+    let var = |sp| typed(Expr::new(sp, ExprNode::Var { id: var_id, name: name.clone() }), record_ty.clone());
 
     // In a class-method body `self.new` and bare `new` are identical
     // Ruby; emit the bare form (spinel's explicit-self dispatch fix
@@ -107,15 +122,27 @@ fn rewrite_create_block(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
             ),
         },
     );
-    let save = Expr::new(
-        span,
-        ExprNode::Send {
-            recv: Some(var(span)),
-            method: Symbol::from("save"),
-            args: vec![],
-            block: None,
-            parenthesized: false,
-        },
+    let assign = match (assign, &record_ty) {
+        (mut a, Some(t)) => {
+            if let ExprNode::Assign { value, .. } = &mut *a.node {
+                value.ty = Some(t.clone());
+            }
+            with_ty(a, t.clone())
+        }
+        (a, None) => a,
+    };
+    let save = with_ty(
+        Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(var(span)),
+                method: Symbol::from("save"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        ),
+        Ty::Bool,
     );
     let save_step = if method.as_str() == "create!" {
         // raise ActiveRecord::RecordInvalid, kv unless kv.save
@@ -151,7 +178,23 @@ fn rewrite_create_block(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
         save
     };
     *expr.node = ExprNode::Seq { exprs: vec![assign, body, save_step, var(span)] };
-    expr.ty = None;
+    expr.ty = record_ty;
+}
+
+/// The type analysis gave a read of the local `name` in `e`.
+fn find_var_ty(e: &Expr, name: &Symbol) -> Option<Ty> {
+    if let ExprNode::Var { name: n, .. } = &*e.node {
+        if n == name && e.ty.is_some() {
+            return e.ty.clone();
+        }
+    }
+    let mut found = None;
+    e.node.for_each_child(&mut |c| {
+        if found.is_none() {
+            found = find_var_ty(c, name);
+        }
+    });
+    found
 }
 
 pub(crate) fn find_var_id(e: &Expr, name: &Symbol) -> Option<crate::ident::VarId> {

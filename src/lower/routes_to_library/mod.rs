@@ -97,6 +97,22 @@ pub fn lower_routes_to_dispatch_functions(app: &App) -> Vec<LibraryFunction> {
 
     if let Some(r) = root_routes.first() {
         let root_body = build_route_new(r, &route_class_id, &route_ty);
+        // Where the root was declared among the table's routes: route
+        // generation (the test helper's `assert_generates`) breaks a
+        // tie by declaration order, so `root "articles#index"` declared
+        // first generates "/" for articles#index, as in Rails.
+        let position = root_index.unwrap_or(table_routes.len()) as i64;
+        out.push(LibraryFunction {
+            module_path: module_path.clone(),
+            name: Symbol::from("root_position"),
+            params: Vec::new(),
+            unsupported_formals: None,
+            has_anonymous_block: false,
+            body: with_ty(Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Int { value: position } }), Ty::Int),
+            signature: Some(fn_sig(vec![], Ty::Int)),
+            effects: EffectSet::default(),
+            is_async: false,
+        });
         out.push(LibraryFunction {
             module_path,
             name: Symbol::from("root"),

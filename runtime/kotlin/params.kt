@@ -29,4 +29,26 @@ object Params {
 
     @JvmStatic
     fun provided(sub: MutableMap<String, Any?>, key: String): Boolean = sub[key] is String
+
+    // The scalar readers the params lowering emits, and its record of
+    // multiparameter keys. Those keys (`title(1)`) are modeled on the
+    // Ruby family only (runtime/ruby/params.rb); this target ignores
+    // them, as it always has, so these pass through.
+    @JvmStatic
+    fun scalarProvided(sub: MutableMap<String, Any?>, key: String): Boolean = provided(sub, key)
+
+    @JvmStatic
+    fun scalar(sub: MutableMap<String, Any?>, key: String): String = str(sub, key, "")
+
+    @JvmStatic
+    fun noFields(): MutableList<String> = mutableListOf()
+
+    @JvmStatic
+    fun multiparameterFields(sub: MutableMap<String, Any?>, keys: MutableList<String>): MutableList<String> = mutableListOf()
+
+    @JvmStatic
+    fun multiparameterUnsupported(sub: MutableMap<String, Any?>, keys: MutableList<String>): Boolean = false
+
+    @JvmStatic
+    fun anyOf(list: MutableList<String>, names: MutableList<String>): Boolean = names.any { it in list }
 }

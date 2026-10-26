@@ -81,9 +81,15 @@ pub(super) fn push(d: Diagnostic) {
 
 /// Retain parse metadata without reporting context-only syntax errors.
 /// Compiled ERB and typed runtime sources keep their own diagnostic policy.
+///
+/// **Ingest policy:** production ingest call sites that need
+/// [`sources::line_at_parse`] / parse-line tables must go through
+/// [`parse`] or [`parse_silent`] (both call [`sources::register_parse_result`]).
+/// Raw `ruby_prism::parse` is for unit probes and non-ingest callers that
+/// never ask the parse-line registry.
 pub(crate) fn parse_silent(source: &[u8]) -> ParseResult<'_> {
     let result = ruby_prism::parse(source);
-    sources::register_parse(result.source());
+    sources::register_parse_result(&result);
     result
 }
 
@@ -93,6 +99,9 @@ pub(crate) fn parse_silent(source: &[u8]) -> ParseResult<'_> {
 /// unchanged. `file` is the source path used to resolve each
 /// diagnostic's [`Span`] against the [`sources`] registry; pass `""`
 /// (or any unregistered path) to get a message-only diagnostic.
+///
+/// Prefer this (or [`parse_silent`]) over raw `ruby_prism::parse` inside
+/// `src/ingest/` so Prism `line_offsets` reach the sources registry.
 pub fn parse<'pr>(source: &'pr [u8], file: &str) -> ParseResult<'pr> {
     let result = parse_silent(source);
     let errors = result.errors();
@@ -103,12 +112,16 @@ pub fn parse<'pr>(source: &'pr [u8], file: &str) -> ParseResult<'pr> {
         let file_id = sources::file_id(file);
         for err in errors {
             let loc = err.location();
+            let (start, end) = super::prism_api::span_offsets(&loc);
             let span = Span {
                 file: file_id,
-                start: loc.start_offset() as u32,
-                end: loc.end_offset() as u32,
+                start,
+                end,
             };
-            push(Diagnostic::parse(span, err.message()));
+            push(Diagnostic::parse(
+                span,
+                super::prism_api::diagnostic_message(&err),
+            ));
         }
     }
     result

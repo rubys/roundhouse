@@ -74,6 +74,21 @@ pub fn emit_method(m: &MethodDef) -> String {
 
     let mut out = String::new();
     writeln!(out, "def {prefix}{}{params}{ret_clause}", m.name).unwrap();
+    // Return-ty back-prop for empty `{}` / `[]` tails: when the
+    // declared return is `Hash(K, V)` / `Array(E)` and the body-typer
+    // left the literal as `Hash<Var, Var>`, stamp the declared shape
+    // before emit so `emit_expr` renders `{} of K => V` rather than
+    // the String=>String default. Same contract as Go's
+    // `backprop_return_ty_to_tail` and the runtime_src pre-type stamp
+    // — without it, `default_url_options : Hash(Symbol, String)` with
+    // body `{}` fails Crystal typecheck (FV compare-extra crystal).
+    let body = if let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() {
+        let mut body = m.body.clone();
+        crate::analyze::stamp_expected_on_empty_return_tail(&mut body, ret);
+        body
+    } else {
+        m.body.clone()
+    };
     // Synth `[]` index reader body: per-arm `@field` reads must NOT
     // get the auto-`.not_nil!` Ivar bridge — fresh-from-`.new` records
     // have unset ivars, and the bridge would crash on lookup. Crystal
@@ -83,9 +98,9 @@ pub fn emit_method(m: &MethodDef) -> String {
     let body_text = if m.name.as_str() == "[]"
         && matches!(m.receiver, MethodReceiver::Instance)
     {
-        super::expr::with_suppressed_ivar_not_nil(|| emit_expr(&m.body))
+        super::expr::with_suppressed_ivar_not_nil(|| emit_expr(&body))
     } else {
-        emit_expr(&m.body)
+        emit_expr(&body)
     };
     // Crystal disallows `@ivar` references inside `def self.X` (class
     // methods on a metaclass). Ruby's `module_function` shares ivars
@@ -110,7 +125,8 @@ pub fn emit_method(m: &MethodDef) -> String {
 }
 
 fn rewrite_ivars_to_class_vars(body: &str) -> String {
-    let mut out = String::with_capacity(body.len());
+    // Not pushed byte by byte into a String: a byte above 0x7f is half a UTF-8 character, not a char
+    let mut out: Vec<u8> = Vec::with_capacity(body.len());
     let bytes = body.as_bytes();
     let mut i = 0;
     // Track whether we're inside a string literal (`"..."`). The
@@ -124,7 +140,7 @@ fn rewrite_ivars_to_class_vars(body: &str) -> String {
     while i < bytes.len() {
         let c = bytes[i];
         if in_string {
-            out.push(c as char);
+            out.push(c);
             i += 1;
             if string_escape {
                 string_escape = false;
@@ -137,7 +153,7 @@ fn rewrite_ivars_to_class_vars(body: &str) -> String {
         }
         if c == b'"' {
             in_string = true;
-            out.push('"');
+            out.push(b'"');
             i += 1;
             continue;
         }
@@ -145,22 +161,22 @@ fn rewrite_ivars_to_class_vars(body: &str) -> String {
             let next = bytes[i + 1];
             // Already `@@` — emit as-is, advance past both.
             if next == b'@' {
-                out.push('@');
-                out.push('@');
+                out.push(b'@');
+                out.push(b'@');
                 i += 2;
                 continue;
             }
             // `@<ident>` — promote to `@@<ident>`.
             if next.is_ascii_alphabetic() || next == b'_' {
-                out.push_str("@@");
+                out.extend_from_slice(b"@@");
                 i += 1;
                 continue;
             }
         }
-        out.push(c as char);
+        out.push(c);
         i += 1;
     }
-    out
+    String::from_utf8(out).expect("the rewrite only adds ASCII to UTF-8 text")
 }
 
 fn render_params(m: &MethodDef, annotate: bool) -> String {
@@ -220,5 +236,110 @@ fn returns_enclosing_class(ret: &Ty, enclosing: Option<&crate::ident::Symbol>) -
             .iter()
             .any(|v| returns_enclosing_class(v, Some(enclosing))),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod empty_hash_return_tests {
+    use super::*;
+    use crate::dialect::MethodDef;
+    use crate::expr::{Expr, ExprNode};
+    use crate::ident::Symbol;
+    use crate::span::Span;
+    use std::sync::Arc;
+
+    fn empty_hash_method(ret: Ty) -> MethodDef {
+        let body = Expr::new(
+            Span::synthetic(),
+            ExprNode::Hash {
+                entries: vec![],
+                kwargs: false,
+            },
+        );
+        MethodDef {
+            name: Symbol::from("default_url_options"),
+            receiver: MethodReceiver::Instance,
+            visibility: Default::default(),
+            params: vec![],
+            unsupported_formals: None,
+            has_anonymous_block: false,
+            block_param: None,
+            name_span: Span::synthetic(),
+            body,
+            signature: Some(Ty::Fn {
+                params: vec![].into(),
+                block: None,
+                ret: Arc::new(ret),
+                effects: Default::default(),
+            }),
+            effects: Default::default(),
+            enclosing_class: Some(Symbol::from("ActionController::Base")),
+            kind: Default::default(),
+            is_async: false,
+            mutates_self: false,
+        }
+    }
+
+    #[test]
+    fn empty_hash_return_emits_of_declared_key_and_value() {
+        let ret = Ty::Hash {
+            key: Arc::new(Ty::Sym),
+            value: Arc::new(Ty::Str),
+        };
+        let out = emit_method(&empty_hash_method(ret));
+        assert!(
+            out.contains("def default_url_options : Hash(Symbol, String)"),
+            "missing annotated signature:\n{out}"
+        );
+        assert!(
+            out.contains("{} of Symbol => String"),
+            "empty hash must honor declared return, not String=>String default:\n{out}"
+        );
+        assert!(
+            !out.contains("{} of String => String"),
+            "must not emit the untyped empty-hash default:\n{out}"
+        );
+    }
+
+    /// Trailing `if cond; {}; else; {}; end` must stamp both arms so
+    /// Crystal does not fall back to `{} of String => String`.
+    #[test]
+    fn empty_hash_if_branch_return_emits_of_declared_key_and_value() {
+        let ret = Ty::Hash {
+            key: Arc::new(Ty::Sym),
+            value: Arc::new(Ty::Str),
+        };
+        let empty = || {
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Hash {
+                    entries: vec![],
+                    kwargs: false,
+                },
+            )
+        };
+        let mut m = empty_hash_method(ret);
+        m.body = Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Lit {
+                        value: crate::expr::Literal::Bool { value: true },
+                    },
+                ),
+                then_branch: empty(),
+                else_branch: empty(),
+            },
+        );
+        let out = emit_method(&m);
+        assert!(
+            out.contains("{} of Symbol => String"),
+            "If-arm empty hash must honor declared return:\n{out}"
+        );
+        assert!(
+            !out.contains("{} of String => String"),
+            "must not emit String-keyed default from If arms:\n{out}"
+        );
     }
 }

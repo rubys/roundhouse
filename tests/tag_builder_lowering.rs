@@ -169,8 +169,10 @@ fn the_legacy_function_form_self_closes() {
 #[test]
 fn the_legacy_form_qualifies_its_escape_receiver() {
     let (out, _) = helper(r#"tag(:meta, name: "x", content: value)"#);
+    // A run-time value renders through `tag_attr` (nil omits it, and the
+    // value is evaluated once); the receiver is the qualified one.
     assert!(
-        out.contains("ActionView::ViewHelpers.html_escape"),
+        out.contains("ActionView::ViewHelpers.tag_attr(\"content\", value)"),
         "the escape receiver is qualified:\n{out}"
     );
 }

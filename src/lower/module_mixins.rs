@@ -64,6 +64,27 @@ pub fn apply_module_mixins_lowering(app: &mut App) -> Vec<Diagnostic> {
             diags.push(d);
         }
     }
+    // A header filter needs only the seam, not a mixin: the runtime writes
+    // the header itself. Not dropped to a warning like a `before_action`,
+    // because the ledger counts the statement as read.
+    let headers = std::mem::take(&mut app.initializer_response_headers);
+    for header in headers {
+        let target = header.target.as_str();
+        if RUNTIME_FILTER_SEAMS.contains(&target) {
+            app.initializer_response_headers.push(header);
+            continue;
+        }
+        diags.push(Diagnostic::unsupported(
+            Span::synthetic(),
+            None,
+            "initializer after_action",
+            format!(
+                "`{target}.after_action` writing `{}` is not supported: {target} is not a framework \
+                 controller this tree runs initializer filters on, so its responses would go out without the header.",
+                header.name,
+            ),
+        ));
+    }
     if app.module_mixins.is_empty() && app.initializer_filters.is_empty() {
         return diags;
     }
@@ -239,9 +260,10 @@ const RUNTIME_MIXIN_TARGETS: [&str; 5] = [
 ];
 
 /// The runtime controllers whose `process_action` asks
-/// `initializer_filters(action_name)` before the action — the seam an
-/// initializer's `before_action` is written into (`project::
-/// apply_module_mixins`). A mixin target without the seam can take the
+/// `initializer_filters(action_name)` before the action and
+/// `initializer_after_filters(action_name)` after it — the seams an
+/// initializer's `before_action` and `after_action` are written into
+/// (`project::apply_module_mixins`). A mixin target without the seam can take the
 /// module but not the filter, so this list is separate.
 const RUNTIME_FILTER_SEAMS: [&str; 2] =
     ["ActiveStorage::DirectUploadsController", "ActiveStorage::DiskController"];

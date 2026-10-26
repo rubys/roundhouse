@@ -4,7 +4,9 @@
 Two gates: merge-gate is the Ruby floor (BASE) plus any focus lanes the
 author made required; the Full/extra ledger can stay red without holding
 merge. Extra-language SDKs need a path owner, a focus label, `ci:full`,
-or scheduled full validation. Unknown inputs keep the Ruby floor plus
+or scheduled full validation. Spinel follows the same path/focus/Full
+ladder on PRs and on pushes to main — there is no always-on full Spinel
+suite for unrelated main merges. Unknown inputs keep the Ruby floor plus
 advisory Spinel (unless a focus label is already set).
 """
 
@@ -75,6 +77,7 @@ SPINEL_TESTS = [
     "date_columns_spinel",
     "framework_tests_spinel",
     "spinel_web_push_crypto",
+    "sponge_random",
     "spinel_db_lease",
     *PARAM_BIND_TESTS,
     "spinel_stmt_cache_lru",
@@ -86,12 +89,14 @@ SPINEL_TESTS = [
     "spinel_pg_db",
     "generated_columns_spinel",
     "postgres_json_types_spinel",
+    "array_column_storage_spinel",
     "pessimistic_locking",
     "not_found_parity_spinel",
     "spinel_transaction_connection",
     "routes_segment_pattern_spinel",
     "open_telemetry_stub_spinel",
     "around_block_filter_spinel",
+    "after_initialize_bare_new_spinel",
     "before_action_return_spinel",
     "plain_class_optional_keywords_spinel",
     "jbuilder_array_value_spinel",
@@ -103,6 +108,12 @@ SPINEL_TESTS = [
     "storage_proxy_path_spinel",
     "filter_block_params_spinel",
     "sidekiq_push",
+    "sidekiq_worker",
+    "model_queries_spinel",
+    "default_scope_spinel",
+    "default_scope_dynamic_spinel",
+    "typed_writer_cast_spinel",
+    "pundit_source_spinel",
 ]
 # Inputs of the Sidekiq push gate (tests/sidekiq_push.rs): the files its
 # driver loads beside it.
@@ -115,11 +126,19 @@ SIDEKIQ_PUSH_INPUTS = {
     "runtime/spinel/sidekiq_redis.rb",
     "runtime/spinel/job_registry.rb",
 }
-# Inputs of the live Sidekiq gate (tests/sidekiq_push_live.rs, the
-# sidekiq-live job): the push runtime, its real Redis client, and the gate.
-SIDEKIQ_LIVE_INPUTS = (SIDEKIQ_PUSH_INPUTS - {"runtime/spinel/sidekiq_redis.rb"}) | {
+# Inputs of the Sidekiq worker gate (tests/sidekiq_worker.rs): the push
+# runtime its drivers load, plus the envelope and the worker role.
+SIDEKIQ_WORKER_INPUTS = SIDEKIQ_PUSH_INPUTS | {
+    "runtime/spinel/sidekiq_envelope.rb",
+    "runtime/spinel/sidekiq/sidekiq_worker.rb",
+}
+# Inputs of the live Sidekiq gates (tests/sidekiq_push_live.rs and
+# tests/sidekiq_worker_live.rs, the sidekiq-live job): the push runtime,
+# the worker, their real Redis client, and the gates.
+SIDEKIQ_LIVE_INPUTS = (SIDEKIQ_WORKER_INPUTS - {"runtime/spinel/sidekiq_redis.rb"}) | {
     "runtime/spinel/sidekiq/sidekiq_redis.rb",
     "tests/sidekiq_push_live.rs",
+    "tests/sidekiq_worker_live.rs",
 }
 # Seconds each suite took in spinel-framework (main run 38936441376, its
 # test binary's compile included), for balancing its shards; a suite not
@@ -158,6 +177,7 @@ SPINEL_TEST_SECONDS = {
             "rails_compat_vectors_spinel",
             "active_job_payload",
             "sidekiq_push",
+            "sidekiq_worker",
         ],
         5,
     ),
@@ -232,7 +252,22 @@ JSON_TYPES_SPINEL_INPUTS = {
     "src/lower/model_to_library/schema.rs",
 }
 
-SPINEL11 = [
+# The stored PostgreSQL array column: its pass, storage and runtime seam.
+ARRAY_COLUMN_SPINEL_INPUTS = {
+    "src/schema.rs",
+    "src/ingest/schema.rs",
+    "src/ingest/model.rs",
+    "src/lower/array_columns.rs",
+    "src/emit/shared/schema_sql.rs",
+    "src/lower/model_to_library/mod.rs",
+    "src/lower/model_to_library/schema.rs",
+    "runtime/spinel/array_column.rb",
+    "runtime/spinel/array_column.rbs",
+}
+
+# Bulk advisory Spinel suite (unknown-input spinel_lane, ruby-family
+# project.rs, and Full). Membership drifts — the name is not a job count.
+SPINEL = [
     "spinel-build",
     "spinel-framework",
     "campfire-spinel-build",
@@ -242,20 +277,16 @@ SPINEL11 = [
     "spinel-compare",
     "spinel-smoke",
     "campfire-archive-build",
-    "campfire-smoke",
     "campfire-smoke-docker",
-    "sidekiq-live",
 ]
-# Main-push / unknown-input Spinel suite (advisory). PR `ci:spinel` uses the
+# Path-owned or Full-only; not in the bulk SPINEL / spinel_lane suite.
+SPINEL_FULL_OR_PATH = ("campfire-smoke", "sidekiq-live")
+# Unknown-input / explicit spinel_lane advisory suite. PR `ci:spinel` uses the
 # narrower CORE focus lane (built in focus_plan) and makes those jobs required.
-# campfire-latest runs where the advisory Spinel suite does (main push,
-# unknown inputs) and on Full: a same-day signal after every merge. A pull
-# request never plans it, `ci:full` and unknown inputs included
-# (`select(campfire_latest=False)`): the PR's own diff cannot move it.
-SPINEL_LANE = [*BASE, *SPINEL11, "build-site", "archive-results", "campfire-latest"]
-# campfire-latest tracks basecamp/once-campfire main unpinned: it reports
-# how far main is from CAMPFIRE_SHA and never gates (see the workflow).
-ADVISORY = (set(SPINEL11) - {"campfire-archive-build"}) | {"campfire-latest"}
+# Main pushes no longer force this lane: path ownership, `ci:spinel`, or Full
+# (`full-ci` / `ci:full` / `[ci full]`) select Spinel instead.
+SPINEL_LANE = [*BASE, *SPINEL, "build-site", "archive-results"]
+ADVISORY = (set(SPINEL) | set(SPINEL_FULL_OR_PATH)) - {"campfire-archive-build"}
 # Extra-language ledger jobs: advisory on Full/path unless a focus label
 # makes them required for a fix round.
 LEDGER_EXTRAS = {"compare-extra", "smoke-extra"}
@@ -341,7 +372,7 @@ def focus_plan(extras=(), jruby=False, spinel=False, compare_targets=()):
 
     Focused extras / jruby / rust / typescript / CORE Spinel are
     merge-gate required for the fix round. Unrelated extras, WASM, and
-    the heavy Spinel11 Campfire suite stay off. `ci:rust` and
+    the heavy Spinel Campfire suite stay off. `ci:rust` and
     `ci:typescript` add only that language's `compare` and floor `smoke`.
     """
     extra = [t for t in EXTRA_COMPARE_TARGETS if t in extras]
@@ -441,6 +472,8 @@ def native_coverage(path):
         suites.add("generated_columns_spinel")
     if path in JSON_TYPES_SPINEL_INPUTS:
         suites.add("postgres_json_types_spinel")
+    if path in ARRAY_COLUMN_SPINEL_INPUTS or path.startswith("src/lower/model_to_library/adapter_emit/"):
+        suites.add("array_column_storage_spinel")
     # Gate drivers stay flat beside their Rust harness. Match the most
     # specific suite first (e.g. param_binds_values before param_binds).
     if path == "tests/param_binds_text_cleanup.rb":
@@ -464,6 +497,13 @@ def native_coverage(path):
     if path.startswith(("runtime/spinel/", "runtime/ruby/")) and not interpreter_only:
         name = path.rsplit("/", 1)[-1]
         owned_tests = set()
+        if path in {
+            "runtime/spinel/facades/sponge.rb",
+            "runtime/spinel/facades/sponge.rbs",
+            "runtime/spinel/secure_random_stub.rb",
+            "runtime/spinel/secure_random_stub.rbs",
+        }:
+            owned_tests.add("sponge_random")
         if name == "statement_cache_cases.rb":
             owned_tests.add("param_binds")
         if any(word in name for word in ("web_push", "base64")):
@@ -527,6 +567,8 @@ def native_coverage(path):
         suites.add("active_job_payload")
     if path in SIDEKIQ_PUSH_INPUTS or path.startswith("tests/sidekiq_push/"):
         suites.add("sidekiq_push")
+    if path in SIDEKIQ_WORKER_INPUTS or path.startswith("tests/sidekiq_worker/"):
+        suites.add("sidekiq_worker")
     if (
         path.startswith(("tests/rails_compat/", "tests/params_vectors/"))
         or path == "tests/rails_compat_vectors.rb"
@@ -592,7 +634,6 @@ def select(
     focus_compare=(),
     publish=False,
     project_scope=None,
-    campfire_latest=True,
 ):
     focus_extras = tuple(focus_extras or ())
     focus_compare = tuple(focus_compare or ())
@@ -600,13 +641,13 @@ def select(
     # (focus / main Spinel) can silently drop publish=True.
     if publish and not full:
         raise ValueError("publication requires full validation mode")
-    # Focus labels narrow the plan before path ownership or main-push Spinel.
-    # ci:full still falls through to the full ledger below.
+    # Focus labels narrow the plan before path ownership or unknown-input
+    # Spinel. ci:full still falls through to the full ledger below.
     if not full and (focus_extras or focus_jruby or focus_spinel or focus_compare):
         return focus_plan(focus_extras, focus_jruby, focus_spinel, focus_compare)
     if spinel_lane and not full:
         return finish(
-            [j for j in SPINEL_LANE if campfire_latest or j != "campfire-latest"],
+            list(SPINEL_LANE),
             [],
             [],
             False,
@@ -625,7 +666,7 @@ def select(
             smoke.update(("ruby", "jruby"))
             if project_scope == "ruby-family":
                 spinel = True
-                jobs_selected.update(SPINEL11)
+                jobs_selected.update(SPINEL)
                 spinel_tests.update(SPINEL_TESTS)
             reasons.append(f"{path}: proven {project_scope} assembly bodies only")
             continue
@@ -651,7 +692,7 @@ def select(
             jobs_selected.update(CORE)
         if native:
             reasons.append(f"{path}: native Spinel core")
-        if path in SIDEKIQ_LIVE_INPUTS or path.startswith("tests/sidekiq_push_live/"):
+        if path in SIDEKIQ_LIVE_INPUTS or path.startswith(("tests/sidekiq_push_live/", "tests/sidekiq_worker_live/")):
             spinel = True
             jobs_selected.add("sidekiq-live")
             reasons.append(f"{path}: live Sidekiq gate")
@@ -716,9 +757,8 @@ def select(
         smoke.update(TARGETS)
         wasm = site = spinel = True
         reasons.append("full validation requested")
-        jobs_selected.update(SPINEL11)
-        if campfire_latest:
-            jobs_selected.add("campfire-latest")
+        jobs_selected.update(SPINEL)
+        jobs_selected.update(SPINEL_FULL_OR_PATH)
         spinel_tests.update(SPINEL_TESTS)
     if spinel:
         jobs_selected.add("spinel-build")
@@ -752,7 +792,9 @@ def select(
     if "build-site" in jobs or {"build-site", "campfire-archive-build"} & jobs_selected:
         jobs_selected.add("archive-results")
     jobs.extend(
-        j for j in [*SPINEL11, "archive-results", "campfire-latest"] if j in jobs_selected
+        j
+        for j in [*SPINEL, *SPINEL_FULL_OR_PATH, "archive-results"]
+        if j in jobs_selected
     )
     if publish:
         if not full:
@@ -908,7 +950,7 @@ def finish(
         ]
     )
     # ci:spinel focus selects build-site / archive-results without spinel-smoke
-    # (Campfire Spinel11 stays off). Still emit the spinel browse archive so
+    # (Campfire Spinel suite stays off). Still emit the spinel browse archive so
     # `roundhouse --archives` is never called with an empty list (#592).
     if hard_spinel and "build-site" in jobs and "spinel" not in archives:
         archives = [*archives, "spinel"]
@@ -1212,16 +1254,10 @@ def main():
     focus_spinel = coverage.focus_spinel
     focus_compare = coverage.focus_compare
     any_focus = bool(focus_extras or focus_jruby or focus_spinel or focus_compare)
-    # Main-push / unknown-input advisory Spinel suite (not the PR focus lane).
+    # Advisory full Spinel suite for unknown changed inputs only (not every
+    # main push). Ordinary main/PR runs use path ownership; Full / ci:full /
+    # [ci full] still select the broad suite. PR `ci:spinel` is focus_plan.
     spinel_lane = False
-    if (
-        event_name == "push"
-        and os.environ.get("GITHUB_REF") == "refs/heads/main"
-        and not pr
-        and not full
-    ):
-        # Extra-language SDKs are the scheduled full-ci ledger, not every merge.
-        spinel_lane = True
     reason = None
     try:
         # project_scope only narrows path selection; full / focus / spinel
@@ -1265,7 +1301,6 @@ def main():
         focus_compare=focus_compare,
         publish=publish,
         project_scope=project_scope,
-        campfire_latest=not pr,
     )
     if reason:
         plan["reasons"].append(reason)
@@ -1289,20 +1324,6 @@ def main():
             )
     if spinel and spinel != "master" and not SHA.fullmatch(spinel):
         raise ValueError("invalid Spinel revision")
-    campfire = ""
-    if "campfire-latest" in plan["jobs"]:
-        try:
-            campfire = subprocess.check_output(
-                ["gh", "api", "repos/basecamp/once-campfire/commits/main", "--jq", ".sha"],
-                text=True,
-            ).strip()
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            campfire = "main"
-            plan["reasons"].append(
-                "Campfire main lookup unavailable: campfire-latest fetches the branch tip"
-            )
-    if campfire and campfire != "main" and not SHA.fullmatch(campfire):
-        raise ValueError("invalid Campfire revision")
     write_outputs(
         {
             "plan": plan,
@@ -1321,7 +1342,6 @@ def main():
             "site": plan["site"],
             "publish": plan["publish"],
             "spinel-revision": spinel,
-            "campfire-latest-revision": campfire,
         }
     )
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):

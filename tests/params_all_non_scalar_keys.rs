@@ -1,5 +1,7 @@
-//! A permit list whose keys are ALL non-scalar — `permit(widget_ids: [])`,
-//! no bare symbol anywhere in the list.
+//! A permit list whose keys are ALL non-scalar and dropped —
+//! `permit(widgets: [:name, tags: []])`, no bare symbol anywhere in the
+//! list. (A spec that deep stays dropped on every target; `widget_ids: []`
+//! itself is carried on the ruby family since #1338.)
 //!
 //! Every non-scalar key is already dropped from the synthesized params
 //! record, with a `lower_residue` warning (see
@@ -53,7 +55,7 @@ const CONTROLLER: &str = r#"class WidgetBatchesController < ApplicationControlle
   private
 
   def widget_batch_params
-    params.require(:widget_batch).permit(widget_ids: [])
+    params.require(:widget_batch).permit(widgets: [:name, tags: []])
   end
 end
 "#;
@@ -81,7 +83,7 @@ fn emitted(suffix: &str) -> String {
 /// `source` parses as Ruby; the message names `path`.
 fn assert_parses(source: &str, path: &str) {
     let result = ruby_prism::parse(source.as_bytes());
-    let errors: Vec<String> = result.errors().map(|e| e.message().to_string()).collect();
+    let errors: Vec<String> = result.errors().map(|e| String::from_utf8_lossy(e.message()).into_owned()).collect();
     assert!(errors.is_empty(), "{path} does not parse: {errors:?}\n{source}");
 }
 
@@ -90,7 +92,7 @@ fn a_permit_list_with_no_surviving_scalar_key_still_emits_a_params_record() {
     let params = emitted("app/models/widget_batch_params.rb");
     assert_parses(&params, "app/models/widget_batch_params.rb");
     assert!(
-        !params.contains("widget_ids"),
+        !params.contains("widgets"),
         "the only (non-scalar) key has no slot in the record:\n{params}"
     );
 }
@@ -113,7 +115,7 @@ fn dropping_the_only_key_still_files_a_residue_warning() {
         ruby::emit_lowered_controllers(&app)
     });
     assert!(
-        diags.iter().any(|d| d.message.contains("permitted key `widget_ids`")
+        diags.iter().any(|d| d.message.contains("permitted key `widgets`")
             && d.message.contains("non-scalar")),
         "the dropped key is on the ledger, not silent: {:?}",
         diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>(),

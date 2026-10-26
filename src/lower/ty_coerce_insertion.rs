@@ -398,8 +398,7 @@ fn rewrite_expr(expr: &Expr, registry: &CalleeRegistry, class_name: &str) -> Exp
         ty: expr.ty.clone(),
         effects: expr.effects.clone(),
         leading_blank_line: expr.leading_blank_line,
-        diagnostic: expr.diagnostic.clone(),
-        hint: expr.hint,
+        cold: expr.cold.clone(),
         decisions: expr.decisions,
     }
 }
@@ -633,8 +632,7 @@ fn wrap_in_cast(arg: &Expr, target_ty: &Ty) -> Expr {
         ty: Some(target_ty.clone()),
         effects: arg.effects.clone(),
         leading_blank_line: arg.leading_blank_line,
-        diagnostic: None,
-        hint: None,
+        cold: None,
         decisions: 0,
     }
 }

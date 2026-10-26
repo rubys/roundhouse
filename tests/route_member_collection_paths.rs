@@ -103,6 +103,50 @@ fn namespaced_collection_route_does_not_shadow_later_routes() {
 }
 
 #[test]
+fn a_singular_resource_member_route_has_no_id_segment() {
+    // A singular `resource` has no `:id`, and neither do the member
+    // routes inside it. Rails 8.1.4 (`bin/rails routes`):
+    //
+    //   preview_profile        GET /profile/preview
+    //   badge_profile          GET /profile/badge
+    //   history_profile        GET /profile/history
+    //   stats_profile          GET /profile/stats
+    //   preview_admin_profile  GET /admin/profile/preview
+    //
+    // all served by `ProfilesController`, like the resource's own `show`.
+    // The member arm added `/:id` unconditionally (`/profile/:id/preview`),
+    // so a request to `/profile/preview` matched nothing and the helper
+    // took an id Rails' does not; and every route written in the block
+    // went to a singular `ProfileController`.
+    let r = routes(
+        r#"
+  resource :profile, only: %i[show] do
+    member { get :preview }
+    get :badge, on: :member
+    collection { get :history }
+    get :stats
+  end
+  namespace :admin do
+    resource :profile, only: %i[show] do
+      member { get :preview }
+    end
+  end
+"#,
+    );
+    assert_eq!(
+        paths(&r, "preview"),
+        vec!["ProfilesController /profile/preview", "Admin::ProfilesController /admin/profile/preview"],
+        "{r:?}"
+    );
+    assert_eq!(paths(&r, "badge"), vec!["ProfilesController /profile/badge"], "{r:?}");
+    assert_eq!(paths(&r, "history"), vec!["ProfilesController /profile/history"], "{r:?}");
+    assert_eq!(paths(&r, "stats"), vec!["ProfilesController /profile/stats"], "{r:?}");
+    for route in r.iter().filter(|x| ["preview", "badge"].contains(&x.action.as_str())) {
+        assert!(route.path_params.is_empty(), "no path params expected: {route:?}");
+    }
+}
+
+#[test]
 fn emitted_router_dispatches_structured_member_and_collection_paths() {
     emit_and_run::real_blog()
         .write(

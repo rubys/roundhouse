@@ -28,7 +28,11 @@ export const DEFAULT_CDN = {
   // (runtime/typescript/minitest-async.ts). esm.sh ships linkedom with
   // its transitive deps (htmlparser2, css-select) pre-bundled into one
   // worker-safe ESM, so it resolves as an external URL like the others.
-  "linkedom": "https://esm.sh/linkedom@0.18",
+  // Pinned exactly: 0.18.14 swapped `cssom` for the CommonJS `@acemir/cssom`
+  // and imports `{ parse }` from it; esm.sh exposes only a default export
+  // for that package, so the module fails to link and every test worker
+  // dies before it runs (2026-10-21).
+  "linkedom": "https://esm.sh/linkedom@0.18.13",
 };
 
 // The worker-profile entry points (relative to the emitted project root).

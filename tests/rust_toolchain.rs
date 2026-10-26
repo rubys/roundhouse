@@ -20,6 +20,13 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "support/emit_and_run.rs"]
+#[allow(dead_code)]
+mod emit_and_run;
+#[path = "support/i18n_locales_app.rs"]
+#[allow(dead_code)]
+mod i18n_locales_app;
+
 use roundhouse::emit::rust;
 use roundhouse::ingest::ingest_app;
 
@@ -394,5 +401,134 @@ fn filters_that_read_action_name_compile() {
          \n=== stderr ===\n{}",
         scratch.display(),
         String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+#[ignore]
+fn real_blog_i18n_locales_run() {
+    // The answers `emit_and_run::i18n_locales` checks on CRuby.
+    let (emitted, errors) = i18n_locales_app::probe_app()
+        .edit("app/models/article.rb", i18n_locales_app::IN_LOCALE, "")
+        .emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::create_dir_all(emitted.join("tests")).expect("tests dir");
+    std::fs::write(
+        emitted.join("tests/i18n_probe.rs"),
+        r#"use app::errors_ext::Raised;
+use app::i18n_locale::I18n;
+use app::models::Article;
+use serde_json::Value;
+
+#[test]
+fn i18n_locales_probe() {
+    assert_eq!(Article::lookups(), ["Hello", "Hi <x>", "1 item", "2 items", "Translation missing: en.probe.nope", "Cześć", "fallback 3", "en"]);
+    assert_eq!(Article::polish(), ["1 rzecz", "5 rzeczy", "English only", "Cześć", "Translation missing: pl.probe.nope", "Cześć", "Hi Ola", "pl"]);
+    assert_eq!(I18n::locale(), "en");
+    assert_eq!([Article::named(Value::from("pl")), Article::named(Value::from("en")), Article::named(Value::Null)], ["Cześć", "Hello", "Hello"]);
+    assert_eq!([Article::probe_key(Value::from("greet")), Article::only_key(Value::from("xx"))], ["Hello", "Translation missing: en.probe.only_xx"]);
+    let raised = std::panic::catch_unwind(|| Article::named(Value::from("de"))).expect_err("named de raises");
+    let raised = raised.downcast_ref::<Raised>().expect("a Raised payload");
+    assert_eq!((raised.class, raised.message.as_str()), ("I18n::InvalidLocale", "\"de\" is not a valid locale"));
+}
+"#,
+    )
+    .expect("write probe");
+    let output = Command::new("cargo")
+        .args(["test", "--test", "i18n_probe"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run cargo test");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore]
+fn real_blog_begin_rescue_runs() {
+    // CRuby answers ["ok a", "rescued empty", "other"] and re-raises the TypeError.
+    let (emitted, errors) = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true\n\n  def self.guarded(s)\n    t = s.to_s\n    begin\n      raise ArgumentError, \"empty\" if t.empty?\n      raise TypeError, \"bad\" if t == \"bad\"\n      raise IndexError, \"other\" if t == \"other\"\n      \"ok \" + t\n    rescue ArgumentError => e\n      \"rescued \" + e.message\n    rescue IndexError, KeyError\n      \"other\"\n    end\n  end\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::create_dir_all(emitted.join("tests")).expect("tests dir");
+    std::fs::write(
+        emitted.join("tests/begin_rescue.rs"),
+        r#"use app::errors_ext::Raised;
+use app::models::Article;
+
+#[test]
+fn rescue_clauses_answer_as_ruby() {
+    let g = |s: &str| Article::guarded(serde_json::Value::from(s));
+    assert_eq!([g("a"), g(""), g("other")], ["ok a", "rescued empty", "other"]);
+    let raised = std::panic::catch_unwind(|| g("bad")).expect_err("an unrescued class is raised again");
+    let raised = raised.downcast_ref::<Raised>().expect("a Raised payload");
+    assert_eq!((raised.class, raised.message.as_str()), ("TypeError", "bad"));
+}
+"#,
+    )
+    .expect("write test");
+    let output = Command::new("cargo")
+        .args(["test", "--test", "begin_rescue"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run cargo test");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore]
+fn real_blog_rescue_from_runs() {
+    // Rails answers a missing article with the handler's 404 and an empty body.
+    let (emitted, errors) = emit_and_run::real_blog()
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "class ArticlesController < ApplicationController\n",
+            "class ArticlesController < ApplicationController\n  rescue_from(ActiveRecord::RecordNotFound) { head :not_found }\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::create_dir_all(emitted.join("tests")).expect("tests dir");
+    std::fs::write(
+        emitted.join("tests/rescue_from.rs"),
+        r#"use app::db::{self, Db};
+use app::{router, schema_sql};
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_record_is_rescued_to_404() {
+    db::setup_test_db(schema_sql::CREATE_TABLES);
+    Db::exec("INSERT INTO articles (title, body, created_at, updated_at) VALUES ('A', 'Long enough body text', '2026-01-02 03:04:05', '2026-01-03 00:00:00')");
+    let server = axum_test::TestServer::new(router::router()).unwrap();
+    assert_eq!(server.get("/articles/1").await.status_code(), 200);
+    let missing = server.get("/articles/999").await;
+    assert_eq!(missing.status_code(), 404);
+    assert_eq!(missing.text(), "");
+}
+"#,
+    )
+    .expect("write test");
+    let output = Command::new("cargo")
+        .args(["test", "--test", "rescue_from"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run cargo test");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 }

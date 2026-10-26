@@ -32,8 +32,13 @@ pub(super) fn emit_send(
     recv: Option<&Expr>,
     method: &str,
     args: &[Expr],
+    block: Option<&Expr>,
     outer_ty: Option<&crate::ty::Ty>,
 ) -> String {
+    if let Some(recv) = crate::emit::shared::fn_call::function_receiver(recv, method, block) {
+        let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+        return format!("{}({})", emit_expr(recv), args_s.join(", "));
+    }
     // Ruby implicit-self resolves a bare identifier to the enclosing
     // method's parameter when one shares the name (e.g. view partial
     // `def self.article(article, ...)` body references `article` as
@@ -206,6 +211,17 @@ pub(super) fn emit_send(
         // spellings of the same Ruby end up as the same Rust.
         if method == "raise" && args.len() == 1 {
             return format!("panic!(\"{{}}\", {})", args_s[0]);
+        }
+        // Not the payload-dropping `raise(KIND, payload)` when the message is a String: a rescuer reads `e.message`, and a class the runtime has no kind for is named as Ruby names it
+        if method == "raise" && args.len() == 2 && args[1].ty.as_ref().is_some_and(|t| t.is_stringish()) {
+            if let ExprNode::Const { path } = &*args[0].node {
+                let last = path.last().map(|s| s.as_str()).unwrap_or("");
+                let msg = format!("({}).to_string()", args_s[1]);
+                if matches!(last, "NotImplementedError" | "RecordNotFound" | "RecordInvalid" | "ArgumentError" | "RuntimeError" | "IndexError") {
+                    return format!("crate::errors_ext::raise_msg(crate::errors_ext::{last}, {msg})");
+                }
+                return format!("crate::errors_ext::raise_class({:?}, {msg})", raised_class_name(path));
+            }
         }
         return format!("{}({})", rewritten_method, args_s.join(", "));
     }
@@ -772,4 +788,21 @@ pub(crate) fn is_array_index_read(arg: &Expr) -> bool {
         && args.len() == 1
         && matches!(r.ty.as_ref(), Some(Ty::Array { .. }))
         && matches!(args[0].ty.as_ref(), Some(Ty::Int))
+}
+
+/// A raised constant's Ruby name, nested in the class being emitted when
+/// written bare inside it (`raise InvalidLocale` inside `I18n`).
+fn raised_class_name(path: &[crate::ident::Symbol]) -> String {
+    let joined = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+    if path.len() > 1 {
+        return joined;
+    }
+    match super::current_ruby_class_name() {
+        Some(owner) if !owner.is_empty() && !is_core_exception(&joined) => format!("{owner}::{joined}"),
+        _ => joined,
+    }
+}
+
+fn is_core_exception(name: &str) -> bool {
+    matches!(name, "StandardError" | "Exception" | "TypeError" | "NameError" | "NoMethodError" | "KeyError" | "RangeError" | "ZeroDivisionError" | "FrozenError" | "StopIteration")
 }

@@ -156,7 +156,7 @@ module ActionText
     @canonicalize: bool
     @plain_text: String?
     @fragment: ActionText::Fragment?
-    def initialize: (?String html, ?canonicalize: bool) -> void
+    def initialize: (?(String | ActionText::Fragment) html, ?canonicalize: bool) -> void
     def fragment: () -> ActionText::Fragment
     def to_html: () -> String
     def to_s: () -> String

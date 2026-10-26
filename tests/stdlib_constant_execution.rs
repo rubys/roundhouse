@@ -446,3 +446,25 @@ fn open3_and_find_constants_execute_in_native_spinel() {
     stdlib_app().write("app/models/process_and_tree_probe.rb", OPEN3_AND_FIND_SOURCE)
         .run_spinel(OPEN3_AND_FIND_SCRIPT).assert_passes();
 }
+
+const FLOAT_DOMAIN_SOURCE: &str = r#"class FloatDomainProbe
+  def self.round(value)
+    value.round
+  rescue FloatDomainError
+    "domain"
+  end
+end
+"#;
+
+const FLOAT_DOMAIN_SCRIPT: &str = r#"
+raise "FloatDomainError rescue lost" unless FloatDomainProbe.round(1.0 / 0) == "domain"
+raise "a finite Float still rounds" unless FloatDomainProbe.round(2.4) == 2
+raise "FloatDomainError hierarchy changed" unless FloatDomainError.superclass == RangeError
+puts "FloatDomainError execution passed"
+"#;
+
+#[test]
+fn float_domain_error_constant_executes_after_emission() {
+    stdlib_app().write("app/services/float_domain_probe.rb", FLOAT_DOMAIN_SOURCE)
+        .run_ruby(FLOAT_DOMAIN_SCRIPT).assert_passes();
+}

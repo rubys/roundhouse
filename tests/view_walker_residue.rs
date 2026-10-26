@@ -184,31 +184,38 @@ end
         .find(|f| f.path.to_string_lossy().ends_with("app/views/articles/index.rb"))
         .map(|f| f.content.clone())
         .expect("index.rb");
+    // Rails' collection cache: each element is its own key, under the
+    // controller's combined_fragment_cache_key, read in one read_multi.
     assert!(
-        body.contains("views/coll/"),
-        "collection cache key:\n{body}"
+        body.contains("collection_fragment_key(\"articles/_article\", __ck_item_"),
+        "each element keys its own fragment, as an object:\n{body}"
     );
     assert!(
-        body.contains("articles/article"),
-        "collection cache key includes the partial:\n{body}"
+        body.contains("collection_fragment_read_multi"),
+        "warm path is one multi-read:\n{body}"
     );
-    assert!(
-        body.contains("fragment_read"),
-        "warm path is one store read:\n{body}"
-    );
-    assert!(
-        body.contains("cache_key_with_version"),
-        "key walks each record:\n{body}"
-    );
+    // Nothing is preloaded before the lookup; only the misses are.
+    let read = body.find("collection_fragment_read_multi").unwrap();
+    let preload_misses = body.find("preload_associations __ck_misses_").unwrap_or_else(|| panic!("misses preloaded:\n{body}"));
+    assert!(read < preload_misses, "misses are preloaded after the lookup:\n{body}");
+    let cached = &body[..read];
     let gate = roundhouse::lower::MAX_UNCACHED_COLLECTION_LENGTH;
+    let gate_at = body.find(&format!(".length > {gate}")).unwrap_or_else(|| panic!("small collections skip the store (cost gate):\n{body}"));
     assert!(
-        body.contains(&format!(".length > {gate}")),
-        "small collections skip the store (cost gate):\n{body}"
+        !cached[gate_at..].contains("preload_associations"),
+        "the cached path preloads nothing before its lookup:\n{body}"
     );
     assert!(
-        body.contains("__cc_collection_"),
+        body.contains("__ck_c_"),
         "collection expression is bound once before the gate:\n{body}"
     );
+    // The uncached paths preload the collection's records, never the
+    // collection: `preload_associations` takes an Array, and the Spinel
+    // build read a Relation handed to it as one (campfire's sidebar crashed).
+    for (at, _) in body.match_indices(".preload_associations ") {
+        let arg = body[at + ".preload_associations ".len()..].split(|c: char| c == ' ' || c == '\n').next().unwrap_or("");
+        assert!(arg.starts_with("__ck_misses_") || arg.ends_with(".to_a"), "preload_associations takes records, got `{arg}`:\n{body}");
+    }
     assert!(
         residues(&diags).is_empty(),
         "cached: true is not residue: {diags:?}"
@@ -217,9 +224,8 @@ end
 
 /// The key walk's block ends with `nil`. `each` drops the block's value,
 /// but Spinel still builds it when the collection is a Relation (the
-/// block compiles to a proc): with `__cc_key << …` last, that value is a
-/// copy of the whole key, made once per record. The key grows with every
-/// record, so a 10k-row sidebar copied the key 10k times.
+/// block compiles to a proc): with `keys << …` last, that value is the
+/// whole keys array, boxed once per record.
 #[test]
 fn a_cached_true_collection_key_walk_yields_nil() {
     let tree = tree(&[
@@ -257,17 +263,17 @@ end
         .map(|f| f.content.clone())
         .expect("index.rb");
     let open = body
-        .find("|__cc_r_")
+        .find("|__ck_item_")
         .unwrap_or_else(|| panic!("key walk over the collection:\n{body}"));
-    let n: String = body[open + "|__cc_r_".len()..]
+    let n: String = body[open + "|__ck_item_".len()..]
         .chars()
         .take_while(char::is_ascii_digit)
         .collect();
-    let append = format!("__cc_key_{n} << \"/\" << __cc_r_{n}.cache_key_with_version");
+    let append = format!("__ck_keys_{n} << ActionView::ViewHelpers.collection_fragment_key(\"articles/_article\", __ck_item_{n})");
     let after_append = body[open..]
         .find(&append)
         .map(|i| open + i + append.len())
-        .unwrap_or_else(|| panic!("key walk appends each record's version:\n{body}"));
+        .unwrap_or_else(|| panic!("key walk appends each element's key:\n{body}"));
     let tail = body[after_append..].trim_start_matches(|c: char| c.is_whitespace() || c == ';');
     let closes_after_nil = tail
         .strip_prefix("nil")
@@ -275,7 +281,7 @@ end
         .is_some_and(|t| t.starts_with("end") || t.starts_with('}'));
     assert!(
         closes_after_nil,
-        "the key walk's last expression must be nil, not the key buffer:\n{body}"
+        "the key walk's last expression must be nil, not the keys array:\n{body}"
     );
 }
 

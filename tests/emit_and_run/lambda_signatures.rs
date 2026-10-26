@@ -8,6 +8,20 @@ fn lambdas_with_optional_and_keyword_parameters_run() {
     contract::overlay().run_ruby(&contract::assertions()).assert_passes();
 }
 
+/// A lambda stored in a local, whose result is the method's result.
+/// `n` is typed from `.call(4)`, and the emitted program returns 8.
+#[test]
+fn a_local_lambda_call_result_runs() {
+    super::emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  def self.plain_lambda\n    double = ->(n) { n * 2 }\n    double.call(4)\n  end\n",
+        )
+        .run_ruby("got = Article.plain_lambda\nraise \"expected 8, got #{got.inspect}\" unless got == 8\nputs \"ok\"\n")
+        .assert_passes();
+}
+
 /// A form builder block with an optional parameter has no lowering; the
 /// emit reports it instead of rendering the form as nothing.
 #[test]

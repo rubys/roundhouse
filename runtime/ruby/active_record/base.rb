@@ -381,7 +381,12 @@ module ActiveRecord
     # exactly once; before this it also ran on the empty shell, where
     # `new_record?` is true and every column is blank. A distinct object
     # from EMPTY_ATTRS, which is also what a bare `Model.new` receives.
-    HYDRATE_ATTRS = {}.freeze
+    # `Hash.new`, NOT a `{}` literal: CRuby compiles `{}.freeze` to one
+    # shared frozen empty Hash, so two constants spelled that way are
+    # the same object and a bare `new` would be taken for hydration.
+    # The transpiled targets read a bare `Hash.new` constant as `{}`
+    # (`runtime_src::is_bare_hash_new`).
+    HYDRATE_ATTRS = Hash.new.freeze
 
     # `attrs = {}` keeps Base's constructor signature compatible
     # with subclasses that take attrs (`def initialize(attrs = {})`).
@@ -892,9 +897,11 @@ module ActiveRecord
     # ---- Instance lifecycle ------------------------------------------
 
     def save
-      before_validation
+      # Here and not in before_validation, which valid? runs: a
+      # direct valid? would write an unsaved belongs_to target, and
+      # Rails' does not (it autosaves in before_save).
+      _autosave_belongs_to
       ok = valid?
-      after_validation
       return false unless ok
 
       save_after_validation
@@ -910,14 +917,14 @@ module ActiveRecord
       was_new = new_record?
       if was_new
         before_create
-        fill_timestamps(true)
+        fill_timestamps(true) if stamps_timestamps?
         self.id = _adapter_insert
         @persisted = true
         __track_saved_changes(was_new)
         after_create
       else
         before_update
-        fill_timestamps(false)
+        fill_timestamps(false) if stamps_timestamps?
         _adapter_update
         __track_saved_changes(was_new)
         after_update
@@ -961,7 +968,7 @@ module ActiveRecord
     # so loading the message fixtures left the fixture users with unread
     # rooms Rails never gives them.
     def _insert_row
-      fill_timestamps(true)
+      fill_timestamps(true) if stamps_timestamps?
       self.id = _adapter_insert
       @persisted = true
       _note_hydrated
@@ -1191,6 +1198,15 @@ module ActiveRecord
       true
     end
 
+    # `touch_later` — what Rails' `belongs_to …, touch: true` calls.
+    # Rails defers the write to just before the transaction's COMMIT and
+    # stamps each record once, however many children asked; the
+    # ruby-family reopen (connection.rb) does that. A strict target has
+    # no transaction to wait on, so here it is `touch`.
+    def touch_later
+      touch
+    end
+
     # `touch` after a call-site column write (`touch :connected_at`,
     # `increment!(:connections, touch: true)`): the whole row, so the
     # assigned column is written with the timestamp.
@@ -1202,12 +1218,11 @@ module ActiveRecord
     end
 
     # `destroy!` — Rails raises `RecordNotDestroyed` when a
-    # `before_destroy` callback throws `:abort`. This runtime has no
-    # abort channel (`before_destroy` returns into the void and
-    # `destroy` always completes), so the bang form is the same
-    # operation. Written out rather than aliased for the strict
-    # targets, and kept as its own method so the raise lands here when
-    # an abort channel does exist.
+    # `before_destroy` callback throws `:abort`. The strict targets have
+    # no abort channel (`throw` is reported as Ruby-only there), so the
+    # bang form is the same operation; the Ruby targets' connection.rb
+    # catches the abort and raises. Written out rather than aliased for
+    # the strict targets.
     def destroy!
       destroy
     end
@@ -1275,6 +1290,9 @@ module ActiveRecord
     def after_initialize;  end
     def before_validation; end
     def after_validation;  end
+    # Saves each unsaved belongs_to target and takes its id into the
+    # foreign key. The ruby family fills it (`apply_belongs_to_autosave`).
+    def _autosave_belongs_to; end
     def before_save;       end
     def after_save;        end
     def before_create;     end
@@ -1326,6 +1344,11 @@ module ActiveRecord
     # `fill_timestamps({"creating" => true})` and fails to match the
     # method's `bool` param. Positional sidesteps that — TS/Crystal
     # accept either shape, Rust gets the simpler one.
+    # Not a check of the class switch: only the ruby family's connection.rb keeps one, and answers it there
+    def stamps_timestamps?
+      true
+    end
+
     def fill_timestamps(creating)
       cols = self.class.schema_columns
       now = ActiveSupport.db_now
@@ -1333,11 +1356,21 @@ module ActiveRecord
       self[:created_at] = now if creating && cols.include?(:created_at)
     end
 
+    # Rails runs the validation callbacks inside `valid?`
+    # (`run_validations!` wraps the validation chain), so a direct
+    # `valid?` runs them too, not only `save`. The answer is taken
+    # before `after_validation`, as Rails' is: an error that callback
+    # adds is on the record but does not change what `valid?` returns.
+    # The ruby family restates this in connection.rb so that a
+    # before_validation `throw :abort` halts it.
     def valid?
       @errors = []
       @error_details = []
+      before_validation
       validate
-      @errors.empty?
+      ok = @errors.empty?
+      after_validation
+      ok
     end
 
     # ---- Equality ---------------------------------------------------

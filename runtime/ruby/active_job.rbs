@@ -24,6 +24,14 @@ module ActiveJob
 
   class DeserializationError < StandardError
   end
+
+  class EnqueueError < StandardError
+  end
+
+  module Continuable
+    @completed_steps: Array[String]?
+    def step: (String | Symbol name) { () -> untyped } -> untyped
+  end
   HELD_NAMES: Array[String]
   HELD: Array[^() -> nil]
   def self.hold: (String job_name, ^() -> nil work) -> nil

@@ -41,7 +41,8 @@
 # minted under, which is why it is passed to the binary too.
 #
 # Usage: scripts/campfire-cable-sweep --bin PATH --db PATH [--cpus 0-3]
-#        [--lane binary|ruby|rails] [--emit DIR] [--oracle DIR] [--threads 5]
+#        [--lane binary|ruby|rails|tobi] [--emit DIR] [--oracle DIR] [--threads 5]
+#        [--tobi DIR]
 #        [--workers 4] [--sizes "10 30 100 300 1000"] [--per-room 50]
 #        [--idle 20] [--messages 30] [--rate 2] [--out DIR] [--port 19800]
 #        [--cookies FILE] [--secret KEY] [--no-presence] [--env K=V ...]
@@ -50,7 +51,7 @@ set -uo pipefail
 BIN=""; DB=""; CPUS="0-3"; WORKERS=4; SIZES="10 30 100 300 1000"; PER_ROOM=50
 IDLE=20; MESSAGES=30; RATE=2; OUT=""; PORT=19800; BIG_ROOM=""
 LANE=binary; ORACLE=""; THREADS=5; COOKIES=""; PRESENCE=1; EXTRA_ENV=(); PACE=""
-EMIT=""
+EMIT=""; TOBI=""
 SECRET="${SECRET_KEY_BASE:-campfire-oracle-benchmark-secret-not-a-deployment}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -59,7 +60,7 @@ while [[ $# -gt 0 ]]; do
     --idle) IDLE="$2"; shift 2 ;; --messages) MESSAGES="$2"; shift 2 ;; --rate) RATE="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;; --port) PORT="$2"; shift 2 ;; --big-room) BIG_ROOM="$2"; shift 2 ;;
     --lane) LANE="$2"; shift 2 ;; --oracle) ORACLE="$2"; shift 2 ;; --threads) THREADS="$2"; shift 2 ;;
-    --emit) EMIT="$2"; shift 2 ;;
+    --emit) EMIT="$2"; shift 2 ;; --tobi) TOBI="$2"; shift 2 ;;
     --cookies) COOKIES="$2"; shift 2 ;; --secret) SECRET="$2"; shift 2 ;;
     --no-presence) PRESENCE=0; shift ;;
     # A/B ONE BINARY AGAINST ITSELF. The runtime knob that decides a
@@ -96,6 +97,14 @@ elif [[ "$LANE" == ruby ]]; then
     echo "Broadcasts.set_transport, which is not implemented. Re-run with --workers 1." >&2
     exit 2
   fi
+elif [[ "$LANE" == tobi ]]; then
+  # tobi/campfire-once-ruby-ractor: the hand port, one process, worker
+  # Ractors joined by an in-process Bus Ractor, so --workers N is a shape
+  # it can actually deploy. It verifies the same Rails-envelope session
+  # cookie under the same SECRET_KEY_BASE, and with DISABLE_SSL=1 accepts
+  # writes without Sec-Fetch-Site (its pages carry no csrf-token meta).
+  [[ -d "$TOBI" ]] || { echo "need --tobi DIR (a bundled campfire-once-ruby-ractor checkout) on the tobi lane" >&2; exit 2; }
+  TOBI="$(cd "$TOBI" && pwd)"
 else
   [[ -d "$ORACLE" ]] || { echo "no oracle at $ORACLE — scripts/campfire-oracle prepare" >&2; exit 2; }
   command -v redis-cli >/dev/null && redis-cli ping >/dev/null 2>&1 \
@@ -147,7 +156,7 @@ for c in /usr/local/lib/libjemalloc.so /usr/lib/x86_64-linux-gnu/libjemalloc.so.
          /opt/homebrew/lib/libjemalloc.dylib; do
     [[ -e "$c" ]] && { JEMALLOC="$c"; break; }
 done
-[[ "$LANE" == rails || "$LANE" == ruby ]] && echo "sweep: $LANE lane allocator: ${JEMALLOC:-stock malloc (no jemalloc found)}"
+[[ "$LANE" != binary ]] && echo "sweep: $LANE lane allocator: ${JEMALLOC:-stock malloc (no jemalloc found)}"
 # The pin is the whole point of a tier — but a Mac has no taskset, and a
 # harness that only runs where it publishes cannot be smoke-tested before
 # it gets there. Absent, the run says so rather than silently measuring
@@ -188,6 +197,18 @@ start_server() {   # $1 = label
         DB_PATH=storage/development.sqlite3 SECRET_KEY_BASE="$SECRET" \
         RAILS_LOG_LEVEL="${RAILS_LOG_LEVEL:-warn}" \
         "${PIN[@]}" bundle exec puma -p "$PORT" -w 1 -t "$THREADS:$THREADS" config.ru \
+        > "$OUT/server-$label.log" 2>&1 ) &
+  elif [[ "$LANE" == tobi ]]; then
+    # As its Dockerfile runs it (and bench-campfire's tobi lane):
+    # `ruby --yjit bin/campfire`, jemalloc preloaded, WORKERS worker
+    # Ractors and as many job Ractors in one process.
+    mkdir -p "$TOBI/storage/db" "$TOBI/storage/files"
+    [[ "$DB" -ef "$TOBI/storage/db/production.sqlite3" ]] || cp "$DB" "$TOBI/storage/db/production.sqlite3"
+    rm -f "$TOBI/storage/db/production.sqlite3-wal" "$TOBI/storage/db/production.sqlite3-shm"
+    ( cd "$TOBI" && exec env SECRET_KEY_BASE="$SECRET" DISABLE_SSL=1 HTTP_PORT="$PORT" \
+        WEB_CONCURRENCY="$WORKERS" JOB_CONCURRENCY="$WORKERS" \
+        CAMPFIRE_STORAGE_PATH="$TOBI/storage" ${JEMALLOC:+LD_PRELOAD="$JEMALLOC"} \
+        "${PIN[@]}" bundle exec ruby --yjit bin/campfire \
         > "$OUT/server-$label.log" 2>&1 ) &
   else
     # AS ONCE DEPLOYS IT. WEB_CONCURRENCY is what campfire's config/puma.rb

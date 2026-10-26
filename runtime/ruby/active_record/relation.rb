@@ -31,7 +31,11 @@ module ActiveRecord
   # without the receiver's cache (or, for `order`, a sorted copy of it),
   # and the receiver keeps its own.
   class Relation
-    def initialize(model)
+    # `scoped` false is `Model.unscoped`: no default scope. Otherwise the
+    # model's `default_scope { where(…) }` is added here, when the
+    # relation is built, as Rails evaluates it — every query root on a
+    # model is a `Relation.new`, so this is the one place it applies.
+    def initialize(model, scoped = true)
       @model = model
       @table = model._table_sql
       @wheres = []
@@ -49,6 +53,8 @@ module ActiveRecord
       # hit the database. Chain methods call `unload_records`, which keeps
       # an empty loaded cache when `@null` is set so terminals stay quiet.
       @null = false
+      # `none` itself, apart from the `(1 = 0)` it adds: `unscope(:where)` keeps it, as Rails' NullRelation does.
+      @none = false
       @records = nil
       @scope_attributes = {}
       @where_cols = []
@@ -62,18 +68,58 @@ module ActiveRecord
       @ctes = []
       @shared_lists = false
       @friendly = false
+      apply_default_scope! if scoped
+    end
+
+    # Rails' `default_scope`: the model's conditions (`{}` for a model
+    # with none), skipped inside the model's `unscoped { … }` block.
+    # Added with `where!`, so they are attributed to their columns:
+    # `unscope(where: :col)` and `rewhere` lift them, and a record built
+    # through the relation starts with them.
+    def apply_default_scope!
+      return if Relation.unscoped_tables.include?(@table)
+      conditions = @model._default_scope_where
+      where!(conditions) unless conditions.empty?
+      nil
+    end
+
+    # The tables whose model is inside `Model.unscoped { … }`, innermost
+    # last. Per thread, as Rails' scope registry is: a request served on
+    # another thread meanwhile keeps the scope. Held by the Db shim, as
+    # the transaction state is, so the list is typed `Array[String]`.
+    def self.unscoped_tables
+      Db._unscoped_tables
     end
 
     # Drop the loaded-records memo. A null relation keeps `[]` so a later
     # `to_a` / `ids` / `exists?` does not re-query through `(1 = 0)`.
+    #
+    # Also drops `@cache_keys`/`@cache_versions` (roundhouse #1034,
+    # CodeRabbit): `cache_key`/`cache_version` memoize by timestamp
+    # column, keyed off `to_sql` at the time of the FIRST call. Chain
+    # methods (`where`, `order`, …) mutate this same relation object in
+    # place and call `unload_records`, but until now never touched
+    # those two memos — `rel.cache_key; rel.where(...); rel.cache_key`
+    # answered the OLD digest, over SQL the relation no longer runs, on
+    # every one of those chain methods. `unload_records` already runs
+    # on exactly the chain methods that change `bound_sql`, so clearing
+    # the memos here (rather than duplicating that same call list) keeps
+    # them invalidated together by construction.
     def unload_records
       @records = @null ? [] : nil
+      @cache_keys = nil
+      @cache_versions = nil
     end
 
     # Rails NullRelation — set only from `none` / a lasting non-negated
     # empty-IN `where`, never from the pure predicate builder.
     def null_relation?
       @null
+    end
+
+    # Set by `none` alone, which `unscope(:where)` does not undo.
+    def explicit_none?
+      @none
     end
 
     def mark_null!
@@ -405,6 +451,27 @@ module ActiveRecord
       spawn.unscope!(where: where)
     end
 
+    # Rails' `unscope(:where)`: every WHERE condition goes, whatever
+    # built it (a hash, raw SQL, a merge), and the create attributes
+    # those conditions seeded. A `none` stays.
+    def unscope_where
+      spawn.unscope_where!
+    end
+
+    def unscope_where!
+      own_lists
+      @wheres = []
+      @where_cols = []
+      @where_null = []
+      @opaque_wheres = false
+      # A record built through the relation took these from the WHEREs just dropped.
+      @scope_attributes = {}
+      @null = @none
+      push_where_cols("(1 = 0)", [], true) if @none
+      unload_records
+      self
+    end
+
     def unscope!(where: nil)
       own_lists
       @records = nil
@@ -496,8 +563,19 @@ module ActiveRecord
     # its own rows and order.
     def order_parts!(parts)
       own_lists
-      terms = parts.map { |p| order_term(p) }
+      # Rails drops a blank part: ancestry's `reorder(column, order)` passes a nil `order`.
+      terms = parts.compact.map { |p| order_term(p) }
       terms.each { |t| @orders << t }
+      # `@orders` just changed `to_sql`, so any `cache_key`/`cache_version`
+      # memo taken before this call is for the OLD ordering (roundhouse
+      # #1034, CodeRabbit — the same stale-memo problem `unload_records`
+      # fixes for `@wheres`/`@limit`/etc, but this method does not always
+      # reach `unload_records`: the `loaded.nil?` branch returns early
+      # below, and the in-memory resort branch further down keeps
+      # `@records` without calling it either). Cleared unconditionally,
+      # before either branch, rather than duplicated in both.
+      @cache_keys = nil
+      @cache_versions = nil
       loaded = @records
       return self if loaded.nil?
       # An explicit copy rather than `dup`: built by pushes, the copy has
@@ -549,6 +627,11 @@ module ActiveRecord
     def clear_ordering
       @orders = []
       @records = nil
+      # Same stale-memo fix as `order_parts!`, same reason: this changes
+      # `to_sql` (drops the ORDER BY) without going through
+      # `unload_records`.
+      @cache_keys = nil
+      @cache_versions = nil
       self
     end
 
@@ -1047,6 +1130,7 @@ module ActiveRecord
         @opaque_wheres = true
       end
       mark_null! if other.null_relation?
+      @none = true if other.explicit_none?
       self
     end
 
@@ -1071,6 +1155,7 @@ module ActiveRecord
       own_lists
       unload_records
       push_where_cols("(1 = 0)", [], true)
+      @none = true
       mark_null!
       self
     end
@@ -1128,6 +1213,239 @@ module ActiveRecord
     def klass
       @model
     end
+
+    # Rails' relation answers its model's class methods; ancestry reads
+    # `scope.primary_key` off the relation it is handed.
+    def primary_key
+      @model.primary_key
+    end
+
+    # ---- cache_key / cache_version / cache_key_with_version ---------
+    #
+    # Rails' "Collection Caching" (`active_record/relation.rb`): the
+    # fragment-cache key a jbuilder `json.cache!` wraps around a whole
+    # collection (`lower::jbuilder_to_library::walk_cached_template`,
+    # roundhouse 981ce8e30). Jbuilder's `cache!(key=nil, options={})`
+    # takes `key` as a plain positional parameter
+    # (`jbuilder/jbuilder_template.rb`), so Ruby evaluates the key
+    # expression as an ordinary method-call ARGUMENT before `cache!`
+    # ever reads `@context.controller.perform_caching` — a call like
+    # `json.cache!([@widgets.cache_key_with_version], …) do … end` must
+    # answer a String whether or not
+    # `ActionView::ViewHelpers.jbuilder_caching?` is true that render.
+    # Without these three methods the call raised `NoMethodError` on
+    # every render of a view whose `cache!` key touches a collection,
+    # caching on or off.
+    #
+    # NOT byte-identical to Rails' digest. Rails hashes `to_sql` with
+    # `ActiveSupport::Digest` (OpenSSL SHA-256 by a Rails 7+ app's
+    # default) — a value no SQL text generated by THIS runtime could
+    # ever reproduce anyway, since the query strings differ from
+    # Arel's. There is also no PLAIN hexdigest primitive here shared by
+    # every target that actually runs a Rails app (the ruby family and
+    # spinel; ActiveRecord has no runtime at all under the strict
+    # targets — see the module comment): `MessageDigest`
+    # (`message_digest.rbs`), ruby-family/spinel only too, exposes only
+    # KEYED HMACs. `query_digest_hex` below keys `hmac_sha256_hex` with
+    # a FIXED, public constant instead of inventing a non-cryptographic
+    # hash — real SHA-256, collision-resistant, no new runtime
+    # primitive, costs the strict targets nothing (they have no
+    # ActiveRecord runtime to pay it in).
+    #
+    # The version string is `"<count>-<max-updated-at-seconds.fraction>"`
+    # rather than Rails' `<count>-<timestamp.to_fs(:usec)>`: `strftime`
+    # with a microsecond directive and `Time#usec` are not proven on
+    # every Time this runtime ships (Spinel's own Time is a compiler
+    # built-in, outside this tree). `Time#to_f` IS — confirmed directly
+    # against the installed Spinel compiler (roundhouse #1034,
+    # CodeRabbit: `to_i` truncates to whole seconds, so two writes
+    # inside the same second answered the same version where Rails'
+    # finer timestamp would differ) — and keeps sub-second precision
+    # `to_i` dropped, at the cost of the digits past the decimal point
+    # not matching Rails' own `to_fs(:usec)` rendering (still not exact
+    # parity; just no longer the SAME second colliding).
+    def cache_key(timestamp_column = "updated_at")
+      timestamp_column = timestamp_column.to_s
+      @cache_keys ||= {}
+      tbl = @model.table_name
+      digest = query_digest_hex(to_sql)
+      # `+ ""` hands the caller a fresh String, not the memo's own
+      # (Spinel refuses a typed String container whose Strings another
+      # name can change in place, matz/spinel#9258; the same copy-out
+      # idiom as #1115). Ruby answers the same characters either way.
+      (@cache_keys[timestamp_column] ||= "#{tbl}/query-#{digest}") + ""
+    end
+
+    def cache_version(timestamp_column = "updated_at")
+      timestamp_column = timestamp_column.to_s
+      @cache_versions ||= {}
+      # Fresh copy out of the memo, as `cache_key` above.
+      (@cache_versions[timestamp_column] ||= compute_cache_version(timestamp_column)) + ""
+    end
+
+    # Guards `@model.schema_columns.include?` BEFORE calling `maximum`
+    # (roundhouse #1034, CodeRabbit): `maximum` (`extreme`) raises
+    # `ArgumentError` for a column the model's schema doesn't have,
+    # which is exactly the "no updated_at column" case this method's
+    # own `cache_version` doc comment already promises answers nil —
+    # a model with no timestamp column raised on every
+    # `cache_key_with_version` call instead, caching on or off (`cache!`
+    # evaluates its key eagerly either way). Rails answers a count-only
+    # version here; `size.to_s` is that.
+    #
+    # A GROUPED relation refuses rather than silently answering a wrong
+    # version (roundhouse #1034, CodeRabbit): `maximum` on a grouped
+    # relation answers a Hash (`extreme` -> `grouped_extreme`, one
+    # extreme per group), and `Hash#to_f` raises `NoMethodError` below
+    # — not useful by itself, but also not something to paper over.
+    # Real Rails' `compute_cache_version` has no GROUP BY case either:
+    # its own aggregate SQL would answer one row PER GROUP and its
+    # `rows.first` picks an arbitrary one, which is not a contract
+    # worth reproducing (which group "wins" depends on the database's
+    # own unspecified row order). `cache_key_with_version` is a
+    # whole-collection identity; a grouped relation does not have one.
+    #
+    # A LIMITED/OFFSET relation answers over the WINDOW, not the whole
+    # relation (roundhouse #1034, CodeRabbit): `count` here explicitly
+    # drops LIMIT/OFFSET (`bound_count_sql`'s own comment: "page totals
+    # see the unpaginated result set", matching Rails' own `size`), and
+    # `maximum`'s aggregate collapses to one row regardless of a LIMIT
+    # on the OUTER query — neither answers "how many rows, and the
+    # latest timestamp, ON THIS PAGE". Real Rails' own
+    # `compute_cache_version` special-cases exactly this
+    # (`has_limit_or_offset?` wraps the window in a subquery first);
+    # `windowed_cache_version` below is the same idea.
+    def compute_cache_version(timestamp_column)
+      if @groups.length > 0
+        raise ArgumentError, "cache_version does not support a grouped relation"
+      end
+      has_column = @model.schema_columns.include?(timestamp_column.to_sym)
+      return windowed_cache_version(timestamp_column, has_column) unless @limit.nil? && @offset.nil?
+      size = count
+      return size.to_s unless has_column
+      timestamp = maximum(timestamp_column.to_sym)
+      return size.to_s if timestamp.nil?
+      epoch = timestamp.to_f
+      "#{size}-#{epoch}"
+    end
+    private :compute_cache_version
+
+    # `compute_cache_version`'s LIMIT/OFFSET case. `@orders` stays ON
+    # the inner select — unlike `size`'s own windowed count (which
+    # only needs how MANY rows are in the window and drops ordering as
+    # a pure optimization), WHICH rows LIMIT/OFFSET keeps depends on
+    # the order they are consumed in; computed in some other order,
+    # the "latest" timestamp found would not actually be on this page.
+    # `has_column` decides the projection up front — not a schema check
+    # after the query runs, which would mean this already interpolated
+    # a nonexistent column name into the SQL.
+    #
+    # Projects through `select(...)` (a spawned copy), not
+    # `select_sql_with` on `self` directly: `select_sql_with` keeps an
+    # EXISTING explicit `@select_sql` over the `default_cols` it is
+    # handed, so calling it directly here would silently drop the
+    # window projection on a relation that already had its own
+    # `.select(...)` — the same reason `extreme` (`maximum`'s own
+    # windowing) spawns through `select(projection)` instead of
+    # touching `self`. DISTINCT gets the same primary-key substitution
+    # `size`'s own windowed count already uses (`cols = @distinct ?
+    # "<table>.<pk>" : "1 AS …"`): projecting only the timestamp under
+    # DISTINCT would count distinct TIMESTAMPS, not distinct ROWS.
+    #
+    # Two shapes refuse rather than silently answering a wrong window
+    # (roundhouse #1034, CodeRabbit round 3), same bounded policy as
+    # the GROUP BY refusal above:
+    #
+    # - A custom FROM source (`from("widgets AS recent")`): the
+    #   projection below always qualifies against `@table`, the
+    #   model's REAL table name. Once `from` aliases it, nothing in
+    #   the query's own FROM clause still answers to that name —
+    #   `widgets.updated_at` against a FROM of `widgets AS recent`
+    #   fails with an unknown-column error. Resolving it against
+    #   whatever arbitrary alias (or subquery) the caller wrote is not
+    #   worth the complexity. (`maximum`/`extreme` has this same
+    #   `@table`-vs-`from_source` mistake for a custom `from` with NO
+    #   window too — pre-existing, general-purpose code outside this
+    #   PR; filed separately rather than folded in here.)
+    # - An explicit `select(...)` combined with DISTINCT
+    #   (`select(:name).distinct.order(:id).limit(2)`): the pk+
+    #   timestamp substitution above replaces the caller's own
+    #   projection, so DISTINCT no longer collapses on the SAME
+    #   columns the real query would — a pk is already unique, so the
+    #   substituted DISTINCT is a no-op and the window silently covers
+    #   different rows than the real, narrower-projected query would
+    #   return. (Distinct with NO explicit select is unaffected: the
+    #   real projection is already the whole row, so collapsing on pk
+    #   alone changes nothing.)
+    def windowed_cache_version(timestamp_column, has_column)
+      unless @from.nil?
+        raise ArgumentError, "cache_version does not support a custom FROM source under a limit/offset window"
+      end
+      if @distinct && !@select_sql.nil?
+        raise ArgumentError, "cache_version does not support an explicit select with distinct under a limit/offset window"
+      end
+      return "0" if @null
+      unless has_column
+        cols = @distinct ? "#{@table}.#{@model.primary_key}" : "1 AS __rh_cache_one"
+        scoped = select(cols)
+        sql = "SELECT COUNT(*) AS n FROM (#{scoped.bound_sql}) AS __rh_cache_window"
+        rows = ActiveRecord.adapter.select_rows(sql)
+        return "0" if rows.length == 0
+        return rows[0]["n"].to_i.to_s
+      end
+      quoted = ActiveRecord.adapter.quote_column_name(timestamp_column)
+      ts_select = "#{@table}.#{quoted} AS __rh_cache_ts"
+      ts_select = "#{@table}.#{@model.primary_key}, #{ts_select}" if @distinct
+      scoped = select(ts_select)
+      sql = "SELECT COUNT(*) AS n, MAX(__rh_cache_ts) AS maxts FROM (#{scoped.bound_sql}) AS __rh_cache_window"
+      rows = ActiveRecord.adapter.select_rows(sql)
+      return "0" if rows.length == 0
+      size = rows[0]["n"].to_i
+      raw = rows[0]["maxts"]
+      return size.to_s if raw.nil?
+      timestamp = cast_schema_value(raw, timestamp_column.to_sym)
+      return size.to_s if timestamp.nil?
+      "#{size}-#{timestamp.to_f}"
+    end
+    private :windowed_cache_version
+
+    # Rails' `cache_key_with_version`: both halves joined. `cache_key`
+    # already carries no count/timestamp (this runtime always takes
+    # Rails 7's `collection_cache_versioning = true` shape), so the net
+    # string is `"<table>/query-<digest>-<count>-<epoch>"` either way.
+    def cache_key_with_version
+      "#{cache_key}-#{cache_version}"
+    end
+
+    # A FIXED, PUBLIC key — not a secret, and must never change (see
+    # `query_digest_hex` below). Scoped to this one use so a future
+    # HMAC elsewhere in the runtime never reuses it by accident.
+    CACHE_KEY_DIGEST_KEY = "roundhouse.active_record.relation.cache_key"
+
+    # A collision-resistant digest, hex-encoded, over `str` (`to_sql`).
+    #
+    # Earlier this was a bounded multiply-add ROLLING hash (`h = (h *
+    # 31 + byte) % modulus`), dropped for a real reason, not merely
+    # style (roundhouse #1034, CodeRabbit): it collided trivially.
+    # `"Aa"` and `"BB"` hash identically — `65 * 31 + 97 == 66 * 31 +
+    # 66` — so two equal-length queries differing only by those filter
+    # VALUES answered the same `cache_key`, and if their versions also
+    # matched (plausible for two single-row lookups on a table with no
+    # `updated_at`), `cache_key_with_version` served one query's cached
+    # fragment for the other — silently wrong data, not a crash.
+    #
+    # `MessageDigest.hmac_sha256_hex` (`message_digest.rbs`) is the only
+    # digest both CRuby and Spinel ship here (OpenSSL / `sp_crypto`
+    # FFI respectively), but it is a KEYED HMAC with no plain-hexdigest
+    # sibling — so this keys it with the FIXED public constant above
+    # rather than inventing a non-cryptographic hash. SHA-256 under a
+    # constant key has no practical collisions at fragment-cache sizes
+    # (unlike the rolling hash above, which had one in two bytes), and
+    # needs no new runtime primitive on either target.
+    def query_digest_hex(str)
+      MessageDigest.hmac_sha256_hex(CACHE_KEY_DIGEST_KEY, str)
+    end
+    private :query_digest_hex
 
     # ---- terminals --------------------------------------------------
 
@@ -1595,8 +1913,8 @@ module ActiveRecord
     # column typing here, ledgered when one appears.
     def sum(expr)
       return 0.0 if @null
-      term = expr.is_a?(Symbol) ? "#{@table}.#{expr}" : expr.to_s
-      sql = "SELECT COALESCE(SUM(#{term}), 0) AS n FROM #{@table}"
+      term = expr.is_a?(Symbol) ? aggregate_column(expr.to_s) : expr.to_s
+      sql = "#{cte_prefix}SELECT COALESCE(SUM(#{term}), 0) AS n FROM #{from_source}"
       sql = "#{sql} #{@joins.join(" ")}" if @joins.length > 0
       sql = "#{sql} WHERE #{@wheres.join(" AND ")}" if @wheres.length > 0
       rows = ActiveRecord.adapter.select_rows(sql)
@@ -1621,7 +1939,7 @@ module ActiveRecord
       column = expr.to_s.to_sym
       raise ArgumentError, "unknown aggregate column: #{expr}" unless @model.schema_columns.include?(column)
       return grouped_extreme(column.to_s, function) if @groups.length > 0
-      projection = "#{function}(#{@table}.#{ActiveRecord.adapter.quote_column_name(column)}) AS value"
+      projection = "#{function}(#{aggregate_column(column.to_s)}) AS value"
       projection = "#{@select_sql}, #{projection}" if @havings.length > 0 && !@select_sql.nil?
       scoped = select(projection)
       scoped.clear_ordering
@@ -1643,7 +1961,7 @@ module ActiveRecord
         names << name
         selects << "#{group} AS #{name}"
       end
-      selects << "#{function}(#{@table}.#{ActiveRecord.adapter.quote_column_name(column)}) AS value"
+      selects << "#{function}(#{aggregate_column(column)}) AS value"
       selects.unshift(@select_sql) if @havings.length > 0 && !@select_sql.nil?
       scoped = select(selects.join(", "))
       scoped.clear_ordering
@@ -2046,10 +2364,10 @@ module ActiveRecord
       ensure
         @select_sql = prior
       end
-      return rows.map { |row| row["v0"] } if columns.length == 1
+      return rows.map { |row| @model.decode_plucked(columns[0], row["v0"]) } if columns.length == 1
       rows.map do |row|
         values = []
-        columns.each_with_index { |_col, index| values << row["v#{index}"] }
+        columns.each_with_index { |col, index| values << @model.decode_plucked(col, row["v#{index}"]) }
         values
       end
     end
@@ -2423,6 +2741,10 @@ module ActiveRecord
       @model.new(scope_attributes.merge(conditions))
     end
 
+    def build(conditions)
+      @model.new(scope_attributes.merge(conditions))
+    end
+
     # ---- SQL composition --------------------------------------------
 
     # Rails' `to_sql`: the SELECT with every value written in, which is
@@ -2571,6 +2893,48 @@ module ActiveRecord
       src.nil? ? @table : src
     end
 
+    # A calculation's column, as Rails' `aggregate_column` writes it: on
+    # this model's table when the FROM source is (or names) that table,
+    # else bare, so a subquery source (`from("(SELECT …) AS hi")`)
+    # aggregates its own column.
+    def aggregate_column(column)
+      quoted = ActiveRecord.adapter.quote_column_name(column)
+      from_names_table? ? "#{@table}.#{quoted}" : quoted
+    end
+
+    # Rails' `table_name_matches?(from)`: the source names this table, as
+    # `widgets` or `"widgets"` at the start or after whitespace that does
+    # not follow `FROM` (so a subquery's own `FROM widgets` doesn't
+    # count), and not as a `widgets.` qualifier. Case-insensitive, like
+    # Rails' regexp, written out with `index` rather than a lookbehind.
+    def from_names_table?
+      return true if @from.nil?
+      src = @from.to_s.downcase
+      table = @table.to_s.downcase
+      [table, "\"#{table}\""].each do |name|
+        at = src.index(name)
+        until at.nil?
+          after = at + name.length
+          bounded_left = name.start_with?("\"") || at == 0 || !word_char?(src[at - 1])
+          bounded_right = name.start_with?("\"") || after >= src.length || !word_char?(src[after])
+          not_qualifier = after >= src.length || src[after] != "."
+          if bounded_left && bounded_right && not_qualifier
+            return true if at == 0
+            if src[at - 1].match?(/\s/)
+              before = src[0, at - 1]
+              return true unless before.end_with?("from")
+            end
+          end
+          at = src.index(name, at + 1)
+        end
+      end
+      false
+    end
+
+    def word_char?(char)
+      char.match?(/\A[a-z0-9_]\z/)
+    end
+
     # A hash of conditions ANDed: `{is_deleted: false, user_id: 3}` ->
     # `is_deleted = 0 AND user_id = 3`. Array value -> `IN`, nil ->
     # `IS NULL`, nested Hash -> qualified `table.col = ...`.
@@ -2626,9 +2990,13 @@ module ActiveRecord
         ids = val.map { |x| x.is_a?(Base) ? x._primary_key_value : x }
         if ids.empty?
           "1=0"
+        elsif ids.any? { |x| x.is_a?(Range) }
+          array_with_ranges_predicate(qcol, ids)
         else
           "#{qcol} IN (#{escape_list(ids)})"
         end
+      elsif val.is_a?(Range)
+        range_predicate(qcol, val)
       elsif val.nil?
         "#{qcol} IS NULL"
       elsif val.is_a?(Base)
@@ -2641,6 +3009,57 @@ module ActiveRecord
       else
         "#{qcol} = #{bind_literal(val)}"
       end
+    end
+
+    # Rails' Range condition: `where(score: 5..9)` is `>=` and `<=`, an
+    # exclusive end (`5...9`) is `<`, and an endless or beginless range
+    # (`5..`, `..9`, `...9`) is the one comparison it has. An infinite
+    # Float end is no bound, as in Rails, and a range with neither bound
+    # matches every row (`1=1`). Rails writes `BETWEEN` for the inclusive
+    # pair; `>= AND <=` is the same predicate and what the lowered
+    # call sites already write. The bounds bind like a scalar's value.
+    def range_predicate(qcol, range)
+      op = range.exclude_end? ? "<" : "<="
+      lo = range_bound_sql(range.begin)
+      hi = range_bound_sql(range.end)
+      if lo.nil?
+        return "1=1" if hi.nil?
+        return "#{qcol} #{op} #{hi}"
+      end
+      return "#{qcol} >= #{lo}" if hi.nil?
+      "(#{qcol} >= #{lo} AND #{qcol} #{op} #{hi})"
+    end
+
+    # One end's bound literal, or nil for no bound (nil or an infinite
+    # Float).
+    def range_bound_sql(bound)
+      return nil if bound.nil?
+      return nil if bound.is_a?(Float) && bound.abs == Float::INFINITY
+      bind_literal(bound)
+    end
+
+    # Rails' Array value holding a Range (`where(score: [3, 6..9])`):
+    # the scalars as one IN list, a `nil` as IS NULL, and each Range as
+    # its own comparison, ORed. An Array with no Range keeps the IN
+    # list above.
+    def array_with_ranges_predicate(qcol, vals)
+      scalars = []
+      arms = []
+      has_nil = false
+      range_arms = []
+      vals.each do |x|
+        if x.nil?
+          has_nil = true
+        elsif x.is_a?(Range)
+          range_arms << range_predicate(qcol, x)
+        else
+          scalars << x
+        end
+      end
+      arms << "#{qcol} IN (#{escape_list(scalars)})" unless scalars.empty?
+      arms << "#{qcol} IS NULL" if has_nil
+      range_arms.each { |r| arms << r }
+      "(#{arms.join(" OR ")})"
     end
 
     # For positional binds, split only the original `?` placeholders,
@@ -2987,9 +3406,13 @@ module ActiveRecord
     # for a table-qualified column (campfire's direct-room sidebar).
     # Nested values go through `sql_ident` + `order_direction` so a
     # request-steered hash cannot splice SQL.
+    # A node is the caller's opt-in (`Arel.sql` with binds, a `Case`).
+    # Its text is the ordering. A String still has to be a column name.
     def order_term(p)
       if p.is_a?(Hash)
         format_order_hash(p)
+      elsif p.is_a?(Arel::Nodes::Node) || p.is_a?(Arel::Attribute)
+        p.to_s
       else
         order_string(p.to_s)
       end

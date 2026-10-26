@@ -7,22 +7,89 @@
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/i18n_locales_app.rs"]
+#[allow(dead_code)]
+mod i18n_locales_app;
+#[path = "support/pundit_app.rs"]
+mod pundit_app;
+#[path = "emit_and_run/session_cookie_key.rs"]
+mod session_cookie_key;
+#[path = "emit_and_run/inertia_runtime_props.rs"]
+mod inertia_runtime_props;
+#[path = "emit_and_run/form_builder_fields.rs"]
+mod form_builder_fields;
+#[path = "emit_and_run/multiparameter_params.rs"]
+mod multiparameter_params;
+#[path = "emit_and_run/session_options_key.rs"]
+mod session_options_key;
+#[path = "emit_and_run/httpdate_from_now.rs"]
+mod httpdate_from_now;
+#[path = "emit_and_run/cookie_jar_each.rs"]
+mod cookie_jar_each;
+#[path = "emit_and_run/create_block.rs"]
+mod create_block;
+#[path = "emit_and_run/active_model_attribute_alias.rs"]
+mod active_model_attribute_alias;
 #[path = "emit_and_run/active_model_attributes.rs"]
 mod active_model_attributes;
+#[path = "emit_and_run/active_model_attributes_form.rs"]
+mod active_model_attributes_form;
+#[path = "emit_and_run/active_model_superclass.rs"]
+mod active_model_superclass;
+#[path = "emit_and_run/arel_nodes.rs"]
+mod arel_nodes;
+#[path = "emit_and_run/permit_private_writer.rs"]
+mod permit_private_writer;
+#[path = "emit_and_run/database_tasks.rs"]
+mod database_tasks;
+#[path = "emit_and_run/framework_exceptions.rs"]
+mod framework_exceptions;
+#[path = "emit_and_run/active_storage_exceptions.rs"]
+mod active_storage_exceptions;
+#[path = "emit_and_run/rescue_surface.rs"]
+mod rescue_surface;
+#[path = "emit_and_run/preloader_runtime.rs"]
+mod preloader_runtime;
+#[path = "emit_and_run/framework_surface_rest.rs"]
+mod framework_surface_rest;
 #[path = "emit_and_run/date_calendar_duration.rs"]
 mod date_calendar_duration;
+#[path = "emit_and_run/interval_columns.rs"]
+mod interval_columns;
 #[path = "emit_and_run/branch_local_join.rs"]
 mod branch_local_join;
 #[path = "emit_and_run/utc_zone_time.rs"]
 mod utc_zone_time;
+#[path = "emit_and_run/rspec_specs.rs"]
+mod rspec_specs;
 #[path = "emit_and_run/discard.rs"]
 mod discard;
+#[path = "emit_and_run/callback_abort.rs"]
+mod callback_abort;
+#[path = "emit_and_run/pundit_source.rs"]
+mod pundit_source;
+#[path = "emit_and_run/ancestry_source.rs"]
+mod ancestry_source;
+#[path = "emit_and_run/acts_as_follower_source.rs"]
+mod acts_as_follower_source;
+#[path = "emit_and_run/hook_macro_source.rs"]
+mod hook_macro_source;
+#[path = "emit_and_run/model_callbacks.rs"]
+mod model_callbacks;
+#[path = "emit_and_run/gem_class_macros.rs"]
+mod gem_class_macros;
+#[path = "emit_and_run/source_gem_autoload.rs"]
+mod source_gem_autoload;
 #[path = "emit_and_run/pay_exceptions.rs"]
 mod pay_exceptions;
 #[path = "emit_and_run/net_http_patch.rs"]
 mod net_http_patch;
+#[path = "emit_and_run/stdlib_psych_rexml_erb.rs"]
+mod stdlib_psych_rexml_erb;
 #[path = "emit_and_run/temporal_index_assign.rs"]
 mod temporal_index_assign;
+#[path = "emit_and_run/file_mtime_time.rs"]
+mod file_mtime_time;
 #[path = "support/class_attribute.rs"]
 mod class_attribute;
 #[path = "support/string_truncate.rs"]
@@ -67,12 +134,22 @@ mod helper_translate;
 mod helper_escape;
 #[path = "emit_and_run/helper_escape_args.rs"]
 mod helper_escape_args;
+#[path = "emit_and_run/controller_view_assigns.rs"]
+mod controller_view_assigns;
+#[path = "emit_and_run/controller_test_case.rs"]
+mod controller_test_case;
+#[path = "emit_and_run/assert_recognizes.rs"]
+mod assert_recognizes;
+#[path = "emit_and_run/assert_routing.rs"]
+mod assert_routing;
 #[path = "emit_and_run/class_new_constants.rs"]
 mod class_new_constants;
 #[path = "emit_and_run/i18n_subtree.rs"]
 mod i18n_subtree;
 #[path = "emit_and_run/i18n_values.rs"]
 mod i18n_values;
+#[path = "emit_and_run/i18n_locale_tag.rs"]
+mod i18n_locale_tag;
 #[path = "emit_and_run/i18n_plural_rules.rs"]
 mod i18n_plural_rules;
 #[path = "emit_and_run/rails_i18n_locales.rs"]
@@ -107,6 +184,8 @@ mod erb_template;
 mod representable_decorator;
 #[path = "emit_and_run/representable.rs"]
 mod representable;
+#[path = "emit_and_run/instance_extend.rs"]
+mod instance_extend;
 
 #[path = "support/class_configuration.rs"]
 mod class_configuration;
@@ -178,6 +257,8 @@ mod relation_projections;
 mod pluck_projection_semantics;
 #[path = "emit_and_run/response_redirect.rs"]
 mod response_redirect;
+#[path = "emit_and_run/api_response_fidelity.rs"]
+mod api_response_fidelity;
 #[path = "emit_and_run/constructor_unrelated_mutations.rs"]
 mod constructor_unrelated_mutations;
 #[path = "emit_and_run/render_to_string_partial_ivar.rs"]
@@ -188,6 +269,8 @@ mod active_support_extensions;
 mod routing_redirect_host;
 #[path = "emit_and_run/time_find_zone.rs"]
 mod time_find_zone;
+#[path = "emit_and_run/time_zone_missing_zonefile.rs"]
+mod time_zone_missing_zonefile;
 #[path = "emit_and_run/time_to_date.rs"]
 mod time_to_date;
 #[path = "emit_and_run/concurrent_map.rs"]
@@ -234,6 +317,8 @@ mod inline_filter_guard;
 mod before_action_return;
 #[path = "emit_and_run/sti_global_id.rs"]
 mod sti_global_id;
+#[path = "emit_and_run/global_id_app.rs"]
+mod global_id_app;
 #[path = "support/campfire_caches.rs"]
 mod campfire_caches_contract;
 #[path = "emit_and_run/campfire_caches.rs"]
@@ -242,6 +327,8 @@ mod campfire_caches;
 mod action_text_markdown;
 #[path = "emit_and_run/ordinalize.rs"]
 mod ordinalize;
+#[path = "emit_and_run/float_round_digits.rs"]
+mod float_round_digits;
 #[path = "emit_and_run/autoload_once_paths.rs"]
 mod autoload_once_paths;
 #[path = "emit_and_run/config_require_relative.rs"]
@@ -256,6 +343,80 @@ mod sidekiq_adapter;
 mod silent_lowerings;
 #[path = "emit_and_run/validates_options.rs"]
 mod validates_options;
+#[path = "emit_and_run/validates_uniqueness.rs"]
+mod validates_uniqueness;
+#[path = "emit_and_run/validates_inclusion_constants.rs"]
+mod validates_inclusion_constants;
+#[path = "emit_and_run/uniqueness_default_scoped.rs"]
+mod uniqueness_default_scoped;
+#[path = "emit_and_run/uniqueness_association_attribute.rs"]
+mod uniqueness_association_attribute;
+#[path = "emit_and_run/default_scope_static.rs"]
+mod default_scope_static;
+#[path = "emit_and_run/default_scope_dynamic.rs"]
+mod default_scope_dynamic;
+#[path = "emit_and_run/validates_integer_constants.rs"]
+mod validates_integer_constants;
+#[path = "emit_and_run/validation_callback_on.rs"]
+mod validation_callback_on;
+#[path = "emit_and_run/validates_on_context.rs"]
+mod validates_on_context;
+#[path = "emit_and_run/relation_from_aggregates.rs"]
+mod relation_from_aggregates;
+#[path = "emit_and_run/validates_exclusion.rs"]
+mod validates_exclusion;
+#[path = "emit_and_run/validates_lambda_conditions.rs"]
+mod validates_lambda_conditions;
+#[path = "emit_and_run/validates_format_flags.rs"]
+mod validates_format_flags;
+#[path = "emit_and_run/concern_included_constants.rs"]
+mod concern_included_constants;
+#[path = "emit_and_run/validates_rule_on.rs"]
+mod validates_rule_on;
+#[path = "emit_and_run/validates_presence_allow_nil.rs"]
+mod validates_presence_allow_nil;
+#[path = "emit_and_run/validates_custom_message.rs"]
+mod validates_custom_message;
+#[path = "emit_and_run/presence_rails_blank.rs"]
+mod presence_rails_blank;
+#[path = "emit_and_run/allow_blank_unicode_space.rs"]
+mod allow_blank_unicode_space;
+#[path = "emit_and_run/regex_string_interpolation.rs"]
+mod regex_string_interpolation;
+#[path = "emit_and_run/format_allow_nil_blank.rs"]
+mod format_allow_nil_blank;
+#[path = "emit_and_run/format_value_to_s.rs"]
+mod format_value_to_s;
+#[path = "emit_and_run/validates_acceptance.rs"]
+mod validates_acceptance;
+#[path = "emit_and_run/attribute_api_boolean_cast.rs"]
+mod attribute_api_boolean_cast;
+#[path = "emit_and_run/hash_fetch_one_arg.rs"]
+mod hash_fetch_one_arg;
+#[path = "emit_and_run/numericality_unknown_option.rs"]
+mod numericality_unknown_option;
+#[path = "emit_and_run/belongs_to_nil_writer.rs"]
+mod belongs_to_nil_writer;
+#[path = "emit_and_run/inclusion_duration_literals.rs"]
+mod inclusion_duration_literals;
+#[path = "emit_and_run/validates_constant_splat.rs"]
+mod validates_constant_splat;
+#[path = "emit_and_run/cross_class_constants.rs"]
+mod cross_class_constants;
+#[path = "emit_and_run/regex_literal_hash_guard.rs"]
+mod regex_literal_hash_guard;
+#[path = "emit_and_run/numericality_allow_nil_blank.rs"]
+mod numericality_allow_nil_blank;
+#[path = "emit_and_run/stdlib_email_regexp.rs"]
+mod stdlib_email_regexp;
+#[path = "emit_and_run/constant_arithmetic_bounds.rs"]
+mod constant_arithmetic_bounds;
+#[path = "emit_and_run/validates_symbol_or_conditions.rs"]
+mod validates_symbol_or_conditions;
+#[path = "emit_and_run/stdlib_uri_make_regexp.rs"]
+mod stdlib_uri_make_regexp;
+#[path = "emit_and_run/validates_inclusion_hash_constants.rs"]
+mod validates_inclusion_hash_constants;
 
 #[test]
 fn markdown_templates_render_with_their_mime_type_and_erb_escaping() {
@@ -1121,6 +1282,406 @@ end
 "##,
         )
         .run_test("test/models/destroy_batch_commit_test.rb")
+        .assert_passes();
+}
+
+/// `belongs_to …, touch: true` is Rails' `touch_later`: inside a
+/// transaction the parent's row is stamped just before the COMMIT, not
+/// in the middle of the save; outside one a save still stamps it, and a
+/// rollback stamps nothing. A required `belongs_to` is
+/// checked through its reader, so a missing parent still fails the save.
+/// (campfire's message save, whose rich text and message both touch the
+/// room inside one transaction.)
+#[test]
+fn a_belongs_to_touch_waits_for_the_commit_and_lands_once() {
+    emit_and_run::real_blog()
+        .edit("app/models/comment.rb", "  belongs_to :article\n", "  belongs_to :article, touch: true\n")
+        .write(
+            "test/models/deferred_touch_test.rb",
+            r##"require "test_helper"
+
+class DeferredTouchTest < ActiveSupport::TestCase
+  def stored(article)
+    Article.find(article.id).updated_at.to_i
+  end
+
+  def parent(title)
+    travel_to Time.utc(2026, 1, 1, 12, 0, 0)
+    article = Article.create!(title: title, body: "A sufficiently long article body.")
+    travel_to Time.utc(2026, 1, 2, 12, 0, 0)
+    article
+  end
+
+  teardown { travel_back }
+
+  test "children saved in one transaction touch the parent at the commit" do
+    article = parent("Parent")
+    before = stored(article)
+    Article.transaction do
+      article.comments.create!(commenter: "Ann", body: "First comment")
+      article.comments.create!(commenter: "Bob", body: "Second comment")
+      assert_equal before, stored(article)
+    end
+    assert_equal Time.utc(2026, 1, 2, 12, 0, 0).to_i, stored(article)
+  end
+
+  test "a save outside a transaction still touches the parent" do
+    article = parent("Single")
+    article.comments.create!(commenter: "Ann", body: "Only comment")
+    assert_equal Time.utc(2026, 1, 2, 12, 0, 0).to_i, stored(article)
+  end
+
+  test "a rolled back transaction touches nothing" do
+    article = parent("Undone")
+    before = stored(article)
+    Article.transaction do
+      article.comments.create!(commenter: "Ann", body: "Dropped comment")
+      raise ActiveRecord::Rollback
+    end
+    assert_equal before, stored(article)
+  end
+
+  test "a comment on an article that does not exist is invalid" do
+    comment = Comment.new(commenter: "Ann", body: "Nobody home", article_id: 999_999)
+    assert_not comment.save
+    assert_includes comment.errors.full_messages, "Article must exist"
+  end
+end
+"##,
+        )
+        .run_test("test/models/deferred_touch_test.rb")
+        .assert_passes();
+}
+
+/// `Model.uncached { ... }` (campfire's password-digest and push-endpoint
+/// reads past the query cache): the block runs with the query cache off,
+/// the cache comes back after it, and the call answers the block's value.
+#[test]
+fn a_model_uncached_block_reads_past_the_query_cache() {
+    emit_and_run::real_blog()
+        .write(
+            "test/models/uncached_test.rb",
+            r##"require "test_helper"
+
+class UncachedTest < ActiveSupport::TestCase
+  test "the block reads past the query cache and answers its value" do
+    article = Article.create!(title: "Cached", body: "A sufficiently long article body.")
+    Db.query_cache_begin
+    begin
+      inside = Article.uncached { Db.query_cache_enabled? }
+      assert_equal false, inside
+      assert Db.query_cache_enabled?
+      assert_equal "Cached", Article.uncached { Article.where(id: article.id).pick(:title) }
+    ensure
+      Db.query_cache_end
+    end
+  end
+end
+"##,
+        )
+        .run_test("test/models/uncached_test.rb")
+        .assert_passes();
+}
+
+/// `current_transaction.after_commit { ... }` (Rails 7.2; campfire's
+/// password change closes the user's connections this way): the block
+/// runs once the transaction it was registered in commits, never for one
+/// that rolls back, and at once where no transaction can hold it.
+#[test]
+fn current_transaction_after_commit_waits_for_the_commit() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true
+
+  LOG = []
+  after_update :note_on_commit
+
+  def self.note_now
+    current_transaction.after_commit { LOG << \"now\" }
+  end
+
+  private
+    def note_on_commit
+      self.class.current_transaction.after_commit { LOG << \"committed #{title}\" }
+    end
+
+  public
+",
+        )
+        .write(
+            "test/models/after_commit_test.rb",
+            r##"require "test_helper"
+
+class AfterCommitTest < ActiveSupport::TestCase
+  setup do
+    @article = Article.create!(title: "Start", body: "A sufficiently long article body.")
+    Article::LOG.clear
+  end
+
+  test "a save's own transaction runs the block once it commits" do
+    @article.update!(title: "Saved")
+    assert_equal [ "committed Saved" ], Article::LOG
+  end
+
+  test "an enclosing transaction holds the block until its commit" do
+    Article.transaction do
+      @article.update!(title: "Held")
+      assert_equal [], Article::LOG
+    end
+    assert_equal [ "committed Held" ], Article::LOG
+  end
+
+  test "a rolled back transaction never runs the block" do
+    Article.transaction do
+      @article.update!(title: "Undone")
+      raise ActiveRecord::Rollback
+    end
+    assert_equal [], Article::LOG
+  end
+
+  test "with no transaction to hold it the block runs at once" do
+    Article.note_now
+    assert_equal [ "now" ], Article::LOG
+  end
+end
+"##,
+        )
+        .run_test("test/models/after_commit_test.rb")
+        .assert_passes();
+}
+
+/// A module's `mattr_accessor` (campfire's
+/// `InlineScriptHashes.last_script_sources`, once-campfire#370) keeps its
+/// value in the module's own instance variable rather than a class
+/// variable: the same reads and writes on the Ruby tree, and nothing
+/// Spinel refuses (it has no class variables).
+#[test]
+fn a_modules_mattr_storage_is_its_own_instance_variable() {
+    let module = "module MemoStore\n  mattr_accessor :last\nend\n";
+    emit_and_run::real_blog()
+        .write("app/models/memo_store.rb", module)
+        .write(
+            "test/models/memo_store_test.rb",
+            r##"require "test_helper"
+
+class MemoStoreTest < ActiveSupport::TestCase
+  test "the module attribute starts nil and holds what it is given" do
+    assert_nil MemoStore.last
+    MemoStore.last = [ "key", "value" ]
+    assert_equal [ "key", "value" ], MemoStore.last
+    MemoStore.last = nil
+  end
+end
+"##,
+        )
+        .run_test("test/models/memo_store_test.rb")
+        .assert_passes();
+
+    let (_tree, errors) = emit_and_run::real_blog()
+        .write("app/models/memo_store.rb", module)
+        .write("app/models/memo_reader.rb", "class MemoReader\n  def self.read\n    MemoStore.last\n  end\nend\n")
+        .emit(roundhouse::project::BuildTarget::Spinel);
+    let refused: Vec<&String> = errors
+        .iter()
+        .filter(|e| e.contains("class variable") || e.contains("defined? query"))
+        .collect();
+    assert!(refused.is_empty(), "spinel refused the module's storage: {refused:?}");
+}
+
+/// `generates_token_for` declared in a concern's `included` block with
+/// an expiry the concern names as a constant, and a value built with
+/// `String#last` over a safe navigation (campfire's
+/// `User::Transferable`: `expires_in: TRANSFER_LINK_EXPIRY_DURATION do
+/// password_salt&.last(10) end`). The token round-trips, stops verifying
+/// when the value changes, and a finder reached through a scope finds
+/// only what the scope holds (`User.active.find_by_transfer_id`). The
+/// scoped call is the app's, as campfire's is (a test body's call site is
+/// not part of the survey that threads the relation).
+#[test]
+fn a_concerns_token_for_round_trips_within_its_scope() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/article/shareable.rb",
+            r##"module Article::Shareable
+  extend ActiveSupport::Concern
+
+  SHARE_LINK_EXPIRY = 2.hours
+
+  included do
+    generates_token_for :share, expires_in: SHARE_LINK_EXPIRY do
+      title&.last(5)
+    end
+  end
+
+  class_methods do
+    def find_by_share_id(id)
+      find_by_token_for(:share, id)
+    end
+  end
+
+  def share_id
+    generate_token_for(:share)
+  end
+end
+"##,
+        )
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true\n  include Article::Shareable\n  scope :greetings, -> { where(title: \"Hello world\") }\n\n  def self.greeting_shared_by(token)\n    Article.greetings.find_by_share_id(token)\n  end\n",
+        )
+        .write(
+            "test/models/article_share_test.rb",
+            r##"require "test_helper"
+
+class ArticleShareTest < ActiveSupport::TestCase
+  setup do
+    @hello = Article.create!(title: "Hello world", body: "A sufficiently long article body.")
+    @other = Article.create!(title: "Another one", body: "A sufficiently long article body.")
+  end
+
+  test "a share id finds its article" do
+    assert_equal @hello, Article.find_by_share_id(@hello.share_id)
+  end
+
+  test "a share id stops working when the value it is bound to changes" do
+    token = @hello.share_id
+    @hello.update!(title: "Hello there")
+    assert_nil Article.find_by_share_id(token)
+  end
+
+  test "a share id finds only articles in scope" do
+    assert_equal @hello, Article.greeting_shared_by(@hello.share_id)
+    assert_nil Article.greeting_shared_by(@other.share_id)
+    assert_equal @other, Article.find_by_share_id(@other.share_id)
+  end
+end
+"##,
+        )
+        .run_test("test/models/article_share_test.rb")
+        .assert_passes();
+}
+
+/// An association parked in an ivar by a `before_action` (campfire's
+/// `@push_subscriptions = Current.user.push_subscriptions`) answers
+/// `find_or_initialize_by(<params>)` as a relation scoped to its owner,
+/// with the params object as the condition hash, and the same ivar read
+/// again in a private helper the action calls answers `find_by` the same
+/// way.
+#[test]
+fn a_parked_association_finds_or_initializes_and_a_helper_reads_it() {
+    emit_and_run::real_blog()
+        .write(
+            "app/controllers/comments_controller.rb",
+            r##"class CommentsController < ApplicationController
+  before_action :set_article
+  before_action :set_comments
+
+  def create
+    @comment = @comments.find_or_initialize_by(comment_params)
+    if @comment.persisted? || @comment.save
+      redirect_to @article, notice: posted_notice
+    else
+      redirect_to @article, alert: "Could not create comment."
+    end
+  end
+
+  def destroy
+    @comment = @article.comments.find(params.expect(:id))
+    @comment.destroy
+    redirect_to @article, notice: "Comment was successfully deleted."
+  end
+
+  private
+
+    def set_article
+      @article = Article.find(params.expect(:article_id))
+    end
+
+    def set_comments
+      @comments = @article.comments
+    end
+
+    def posted_notice
+      @comments.find_by(commenter: "Twice") ? "Posted by Twice." : "Comment was successfully created."
+    end
+
+    def comment_params
+      params.expect(comment: [ :commenter, :body ])
+    end
+end
+"##,
+        )
+        .write(
+            "test/controllers/comments_find_or_initialize_controller_test.rb",
+            r##"require "test_helper"
+
+class CommentsFindOrInitializeControllerTest < ActionDispatch::IntegrationTest
+  setup do
+    @article = articles(:one)
+    @other = Article.create!(title: "Other article", body: "A sufficiently long article body.")
+  end
+
+  test "the same comment posted twice is one comment, on its own article" do
+    params = { comment: { commenter: "Twice", body: "Said it once." } }
+    assert_difference("Comment.count", 1) do
+      post article_comments_url(@article), params: params
+      post article_comments_url(@article), params: params
+    end
+    comment = Comment.find_by(commenter: "Twice")
+    assert_equal @article.id, comment.article_id
+    follow_redirect!
+    assert_includes response.body, "Posted by Twice."
+  end
+
+  test "another article's comments are another scope" do
+    params = { comment: { commenter: "Twice", body: "Said it once." } }
+    post article_comments_url(@article), params: params
+    assert_difference("Comment.count", 1) do
+      post article_comments_url(@other), params: params
+    end
+    assert_equal [ @article.id, @other.id ].sort, Comment.where(commenter: "Twice").map(&:article_id).sort
+  end
+end
+"##,
+        )
+        .run_test("test/controllers/comments_find_or_initialize_controller_test.rb")
+        .assert_passes();
+}
+
+/// A params helper that ends `permit(…).compact.merge(k: v)` (campfire's
+/// `Users::ProfilesController#user_params`, which always adds the
+/// password challenge) is still the permit list's typed record with the
+/// merged key on it, so `update(<that>)` takes the typed update. The
+/// `.compact` between them hid the merge, and the update called the
+/// record's `title_provided` on the Hash the merge answered instead.
+#[test]
+fn a_compacted_permit_list_merges_into_its_typed_update() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "      params.expect(article: [ :title, :body ])\n",
+            "      params.require(:article).permit(:title).compact.merge(body: \"Merged by the controller, not the form.\")\n",
+        )
+        .write(
+            "test/controllers/articles_compact_merge_controller_test.rb",
+            r##"require "test_helper"
+
+class ArticlesCompactMergeControllerTest < ActionDispatch::IntegrationTest
+  test "the permitted field and the merged one both reach the record" do
+    article = articles(:one)
+    patch article_url(article), params: { article: { title: "Updated Title", body: "From the form" } }
+    assert_redirected_to article_url(article)
+    article.reload
+    assert_equal "Updated Title", article.title
+    assert_equal "Merged by the controller, not the form.", article.body
+  end
+end
+"##,
+        )
+        .run_test("test/controllers/articles_compact_merge_controller_test.rb")
         .assert_passes();
 }
 
@@ -3178,6 +3739,13 @@ puts "public files contract passed"
 }
 
 #[test]
+fn class_configuration_shares_a_name_with_an_instance_method() {
+    let run = class_configuration::same_name_overlay().run_ruby(class_configuration::SAME_NAME_ASSERTIONS);
+    run.assert_passes();
+    assert!(run.stdout.contains("class and instance configuration names passed"));
+}
+
+#[test]
 fn finite_concern_class_configuration_runs_without_replaying_rails() {
     for (overlay, assertions) in [
         (class_configuration::overlay(), class_configuration::ASSERTIONS),
@@ -3510,6 +4078,625 @@ fn oj_target_errors_and_text(
         .collect();
     let files = files.unwrap_or_default().into_iter().collect();
     (errors, files)
+}
+
+const FARADAY_LIB: &str = "class PingClient
+  def self.fetch(base, path)
+    conn = Faraday.new(url: base) do |c|
+      c.response :raise_error
+      c.options.timeout = 5
+      c.adapter Faraday.default_adapter
+    end
+    response = conn.get(path)
+    [response.status, response.body, response.success?]
+  rescue Faraday::ResourceNotFound => e
+    [e.response_status, :not_found]
+  rescue Faraday::Error => e
+    [nil, e.class.name]
+  end
+end
+";
+
+/// Ruby runs the real faraday gem: a connection with middleware, a
+/// response, and the error hierarchy it raises, against a local server.
+#[test]
+fn faraday_runs_as_the_real_gem_on_ruby() {
+    emit_and_run::real_blog()
+        .write("app/models/ping_client.rb", FARADAY_LIB)
+        .run_ruby(
+            r#"require "socket"
+server = TCPServer.new("127.0.0.1", 0)
+port = server.addr[1]
+Thread.new do
+  loop do
+    client = server.accept
+    line = client.gets.to_s
+    while (header = client.gets) && header != "\r\n"; end
+    if line.include?("/ok")
+      client.write "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+    else
+      client.write "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    end
+    client.close
+  end
+end
+base = "http://127.0.0.1:#{port}"
+r = PingClient.fetch(base, "/ok")
+raise r.inspect unless r == [200, "ok", true]
+r = PingClient.fetch(base, "/missing")
+raise r.inspect unless r == [404, :not_found]
+closed = TCPServer.new("127.0.0.1", 0)
+closed_port = closed.addr[1]
+closed.close
+r = PingClient.fetch("http://127.0.0.1:#{closed_port}", "/x")
+raise r.inspect unless r == [nil, "Faraday::ConnectionFailed"]"#,
+        )
+        .assert_passes();
+}
+
+/// faraday-multipart and faraday-retry run too: their middleware is named
+/// by a symbol, and the Gemfile declares the gems it needs.
+#[test]
+fn faraday_multipart_and_retry_run_as_the_real_gems_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "lib/uploader.rb",
+            "class Uploader
+  def self.upload(base, text)
+    conn = Faraday.new(url: base) do |c|
+      c.request :multipart
+      c.adapter Faraday.default_adapter
+    end
+    part = Faraday::Multipart::FilePart.new(StringIO.new(text), \"text/plain\", \"a.txt\")
+    conn.post(\"/upload\", { file: part }).body
+  end
+
+  def self.flaky(base)
+    conn = Faraday.new(url: base) do |c|
+      c.request(:retry, max: 2, interval: 0, retry_statuses: [503])
+      c.adapter Faraday.default_adapter
+    end
+    conn.get(\"/flaky\").body
+  end
+end
+",
+        )
+        .run_ruby(
+            r#"require "socket"
+require "stringio"
+server = TCPServer.new("127.0.0.1", 0)
+port = server.addr[1]
+hits = 0
+Thread.new do
+  loop do
+    client = server.accept
+    line = client.gets.to_s
+    headers = {}
+    while (header = client.gets) && header != "\r\n"
+      name, value = header.split(":", 2)
+      headers[name.downcase] = value.strip
+    end
+    body = client.read(headers["content-length"].to_i)
+    reply = if line.include?("/upload")
+      headers["content-type"].start_with?("multipart/form-data") && body.include?("filename=\"a.txt\"") && body.include?("hello") ? "multipart" : "plain"
+    else
+      hits += 1
+      hits == 1 ? nil : "recovered"
+    end
+    if reply
+      client.write "HTTP/1.1 200 OK\r\nContent-Length: #{reply.bytesize}\r\nConnection: close\r\n\r\n#{reply}"
+    else
+      client.write "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    end
+    client.close
+  end
+end
+base = "http://127.0.0.1:#{port}"
+r = Uploader.upload(base, "hello")
+raise r.inspect unless r == "multipart"
+r = Uploader.flaky(base)
+raise [r, hits].inspect unless r == "recovered" && hits == 2"#,
+        );
+    run.assert_passes();
+    let gemfile = std::fs::read_to_string(run.emitted.join("Gemfile")).expect("Gemfile");
+    for gem in ["faraday", "faraday-multipart", "faraday-retry"] {
+        assert!(gemfile.contains(&format!("gem {gem:?}")), "Gemfile does not declare {gem}:\n{gemfile}");
+    }
+}
+
+/// A bare `Faraday` value (assignment / pass-through) still demands the
+/// gem on Ruby — `names_constant` would miss it; the RUNTIME_GEMS needle
+/// does not.
+#[test]
+fn faraday_as_a_value_declares_the_gem_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/models/http_client_holder.rb",
+            "class HttpClientHolder\n  CLIENT = Faraday\n  def self.client\n    CLIENT\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"c = HttpClientHolder.client
+raise c.inspect unless c.equal?(Faraday)"#,
+        );
+    run.assert_passes();
+    let gemfile = std::fs::read_to_string(run.emitted.join("Gemfile")).expect("Gemfile");
+    assert!(
+        gemfile.contains("gem \"faraday\""),
+        "Gemfile does not declare faraday for a bare Faraday value:\n{gemfile}"
+    );
+}
+
+/// An identifier that merely starts with `Faraday` must not demand the gem.
+#[test]
+fn faraday_holder_name_does_not_declare_the_gem_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/models/faraday_holder.rb",
+            "class FaradayHolder\n  def self.label\n    \"FaradayHolder\"\n  end\nend\n",
+        )
+        .run_ruby(r#"raise FaradayHolder.label.inspect unless FaradayHolder.label == "FaradayHolder""#);
+    run.assert_passes();
+    let gemfile = std::fs::read_to_string(run.emitted.join("Gemfile")).expect("Gemfile");
+    assert!(
+        !gemfile.contains("gem \"faraday\""),
+        "Gemfile declared faraday for FaradayHolder alone:\n{gemfile}"
+    );
+}
+
+/// A superclass that is only `Faraday::…` (no call in a body) is refused
+/// off the shipping targets — `gem_refusal` used to see only emit bodies.
+#[test]
+fn faraday_superclass_is_refused_off_ruby_and_jruby() {
+    let dir = std::env::temp_dir().join(format!("rh-faraday-super-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, text) in [
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"title\"\n  end\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  get \"/posts\", to: \"posts#index\"\nend\n"),
+        ("app/models/post.rb", "class Post < ApplicationRecord\nend\n"),
+        (
+            "app/models/ping_client.rb",
+            "class PingClient < Faraday::Connection\nend\n",
+        ),
+        (
+            "app/controllers/posts_controller.rb",
+            "class PostsController < ApplicationController\n  def index\n    render plain: PingClient.name\n  end\nend\n",
+        ),
+    ] {
+        let full = dir.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    }
+    let mut app = roundhouse::ingest::ingest_app(&dir).expect("ingest");
+    let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(
+        lower_diags.iter().all(|d| d.severity != roundhouse::diagnostic::Severity::Error),
+        "check is not clean: {lower_diags:?}"
+    );
+    for target in [roundhouse::project::BuildTarget::Ruby, roundhouse::project::BuildTarget::Jruby] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        assert!(!errors.iter().any(|e| e.contains("Faraday")), "{target:?} refused a superclass it ships:\n{}", errors.join("\n"));
+        assert!(
+            files.get("Gemfile").is_some_and(|g| g.contains("gem \"faraday\"")),
+            "{target:?} Gemfile does not declare faraday for Faraday::Connection superclass"
+        );
+    }
+    for target in [
+        roundhouse::project::BuildTarget::Spinel,
+        roundhouse::project::BuildTarget::Roda,
+        roundhouse::project::BuildTarget::Python,
+    ] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        assert!(
+            errors.iter().any(|e| e.contains("`Faraday::Connection`") && e.contains("only the ruby and jruby trees ship")),
+            "{target:?} did not refuse Faraday::Connection superclass:\n{}",
+            errors.join("\n")
+        );
+        let hits: Vec<_> = files
+            .iter()
+            .filter(|(path, text)| !path.ends_with(".map") && path.contains("ping_client") && text.contains("Faraday"))
+            .map(|(path, _)| path.clone())
+            .collect();
+        assert!(hits.is_empty(), "{target:?} emitted a Faraday superclass in {hits:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A controller sibling (or the controller itself) whose only Faraday
+/// reference is the superclass is refused off the shipping targets —
+/// those parents live on `Controller`, not on a LibraryClass yet.
+#[test]
+fn faraday_controller_superclass_is_refused_off_ruby_and_jruby() {
+    let dir = std::env::temp_dir().join(format!("rh-faraday-ctrl-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, text) in [
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"title\"\n  end\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  get \"/posts\", to: \"posts#index\"\nend\n"),
+        ("app/models/post.rb", "class Post < ApplicationRecord\nend\n"),
+        (
+            "app/controllers/posts_controller.rb",
+            "class ApiBoom < Faraday::Error; end\nclass PostsController < ApplicationController\n  def index\n    render plain: ApiBoom.name\n  end\nend\n",
+        ),
+    ] {
+        let full = dir.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    }
+    let mut app = roundhouse::ingest::ingest_app(&dir).expect("ingest");
+    let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(
+        lower_diags.iter().all(|d| d.severity != roundhouse::diagnostic::Severity::Error),
+        "check is not clean: {lower_diags:?}"
+    );
+    for target in [roundhouse::project::BuildTarget::Ruby, roundhouse::project::BuildTarget::Jruby] {
+        let (errors, _) = oj_target_errors_and_text(&app, &dir, target);
+        assert!(!errors.iter().any(|e| e.contains("Faraday")), "{target:?} refused a sibling superclass it ships:\n{}", errors.join("\n"));
+    }
+    for target in [
+        roundhouse::project::BuildTarget::Spinel,
+        roundhouse::project::BuildTarget::Typescript,
+    ] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        assert!(
+            errors.iter().any(|e| e.contains("`Faraday::Error`") && e.contains("only the ruby and jruby trees ship")),
+            "{target:?} did not refuse Faraday::Error sibling superclass:\n{}",
+            errors.join("\n")
+        );
+        let hits: Vec<_> = files
+            .iter()
+            .filter(|(path, text)| !path.ends_with(".map") && text.contains("Faraday"))
+            .map(|(path, _)| path.clone())
+            .collect();
+        assert!(hits.is_empty(), "{target:?} emitted a Faraday sibling superclass in {hits:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A test class whose only Faraday reference is the superclass (or an
+/// include / inner class) is refused on Spinel — test modules are not
+/// LibraryClasses.
+#[test]
+fn faraday_test_module_superclass_is_refused_on_spinel() {
+    let dir = std::env::temp_dir().join(format!("rh-faraday-tm-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, text) in [
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"title\"\n  end\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  get \"/posts\", to: \"posts#index\"\nend\n"),
+        ("app/models/post.rb", "class Post < ApplicationRecord\nend\n"),
+        (
+            "app/controllers/posts_controller.rb",
+            "class PostsController < ApplicationController\n  def index\n    render plain: \"ok\"\n  end\nend\n",
+        ),
+        (
+            "test/models/post_test.rb",
+            "require \"test_helper\"\nclass PostTest < Faraday::Error\n  include Faraday::FlatParamsEncoder\n  class Boom < Faraday::Error; end\n  test \"name\" do\n    assert_equal \"PostTest\", PostTest.name\n  end\nend\n",
+        ),
+    ] {
+        let full = dir.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    }
+    let mut app = roundhouse::ingest::ingest_app(&dir).expect("ingest");
+    let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(
+        lower_diags.iter().all(|d| d.severity != roundhouse::diagnostic::Severity::Error),
+        "check is not clean: {lower_diags:?}"
+    );
+    let (errors, files) = oj_target_errors_and_text(
+        &app,
+        &dir,
+        roundhouse::project::BuildTarget::Spinel,
+    );
+    for site in ["`Faraday::Error`", "`Faraday::FlatParamsEncoder`"] {
+        assert!(
+            errors.iter().any(|e| e.contains(site) && e.contains("only the ruby and jruby trees ship")),
+            "Spinel did not refuse test-module {site}:\n{}",
+            errors.join("\n")
+        );
+    }
+    let hits: Vec<_> = files
+        .iter()
+        .filter(|(path, text)| !path.ends_with(".map") && path.contains("post_test") && text.contains("Faraday"))
+        .map(|(path, _)| path.clone())
+        .collect();
+    assert!(hits.is_empty(), "Spinel emitted Faraday in test module {hits:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+const RETRYABLE_LIB: &str = "class Contact
+  def self.flaky(failures)
+    attempts = 0
+    value = Retryable.retryable(tries: 3, on: ArgumentError, sleep: 0) do
+      attempts += 1
+      raise ArgumentError, \"again\" if attempts <= failures
+      :done
+    end
+    [value, attempts]
+  rescue ArgumentError
+    [:gave_up, attempts]
+  end
+end
+";
+
+/// Retryable runs as the real gem on Ruby, as Faraday does: the block is
+/// retried on the exceptions `on:` names, and its value is the call's.
+#[test]
+fn retryable_runs_as_the_real_gem_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .write("lib/contact.rb", RETRYABLE_LIB)
+        .run_ruby(
+            r#"r = Contact.flaky(2)
+raise r.inspect unless r == [:done, 3]
+r = Contact.flaky(5)
+raise r.inspect unless r == [:gave_up, 3]"#,
+        );
+    run.assert_passes();
+    let gemfile = std::fs::read_to_string(run.emitted.join("Gemfile")).expect("Gemfile");
+    assert!(gemfile.contains("gem \"retryable\""), "Gemfile does not declare retryable:\n{gemfile}");
+}
+
+/// Off Ruby and JRuby, each Retryable reference is refused.
+#[test]
+fn retryable_is_refused_off_ruby_and_jruby() {
+    let dir = std::env::temp_dir().join(format!("rh-retryable-targets-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, text) in [
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"title\"\n  end\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  get \"/posts\", to: \"posts#index\"\nend\n"),
+        ("app/models/post.rb", "class Post < ApplicationRecord\nend\n"),
+        ("app/models/contact.rb", RETRYABLE_LIB),
+        (
+            "app/controllers/posts_controller.rb",
+            "class PostsController < ApplicationController\n  def index\n    render plain: Contact.flaky(1).inspect\n  end\nend\n",
+        ),
+    ] {
+        let full = dir.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    }
+    let mut app = roundhouse::ingest::ingest_app(&dir).expect("ingest");
+    let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(
+        lower_diags.iter().all(|d| d.severity != roundhouse::diagnostic::Severity::Error),
+        "check is not clean: {lower_diags:?}"
+    );
+    for target in [roundhouse::project::BuildTarget::Ruby, roundhouse::project::BuildTarget::Jruby] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        assert!(
+            !errors.iter().any(|e| e.contains("Retryable")),
+            "{target:?} refused a gem it ships:\n{}",
+            errors.join("\n")
+        );
+        let gemfile = files.get("Gemfile").map(String::as_str).unwrap_or("");
+        assert!(gemfile.contains("gem \"retryable\""), "{target:?} Gemfile:\n{gemfile}");
+    }
+    for target in [
+        roundhouse::project::BuildTarget::Spinel,
+        roundhouse::project::BuildTarget::Roda,
+        roundhouse::project::BuildTarget::Python,
+        roundhouse::project::BuildTarget::Crystal,
+        roundhouse::project::BuildTarget::Typescript,
+        roundhouse::project::BuildTarget::Rust,
+        roundhouse::project::BuildTarget::Go,
+        roundhouse::project::BuildTarget::Elixir,
+        roundhouse::project::BuildTarget::CSharp,
+        roundhouse::project::BuildTarget::Kotlin,
+        roundhouse::project::BuildTarget::Swift,
+    ] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        for site in ["`Retryable.retryable`"] {
+            assert!(
+                errors.iter().any(|e| e.contains(site) && e.contains("only the ruby and jruby trees ship")),
+                "{target:?} did not refuse {site}:\n{}",
+                errors.join("\n")
+            );
+        }
+        let hits: Vec<_> = files
+            .iter()
+            .filter(|(path, text)| {
+                !path.ends_with(".map") && path.contains("contact") && text.contains("Retryable")
+            })
+            .map(|(path, _)| path.clone())
+            .collect();
+        assert!(hits.is_empty(), "{target:?} emitted a Retryable reference in {hits:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+const JWT_LIB: &str = "class Token
+  SECRET = \"s3cret\"
+
+  def self.issue(user_id, exp)
+    JWT.encode({ user_id: user_id, exp: exp }, SECRET, \"HS256\")
+  end
+
+  def self.read(token, key = SECRET)
+    payload, _header = JWT.decode(token, key, true, { algorithm: \"HS256\" })
+    payload[\"user_id\"]
+  rescue JWT::ExpiredSignature
+    :expired
+  rescue JWT::VerificationError
+    :forged
+  rescue JWT::DecodeError
+    :malformed
+  end
+end
+";
+
+/// JWT runs as the real gem on Ruby: a token round-trips, and a wrong key,
+/// an expired token and garbage each raise their own `JWT::DecodeError`.
+#[test]
+fn jwt_runs_as_the_real_gem_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .write("lib/token.rb", JWT_LIB)
+        .run_ruby(
+            r#"fresh = Token.issue(7, Time.now.to_i + 60)
+raise "round trip" unless Token.read(fresh) == 7
+raise "forged" unless Token.read(fresh, "other") == :forged
+raise "expired" unless Token.read(Token.issue(7, Time.now.to_i - 60)) == :expired
+raise "malformed" unless Token.read("not-a-token") == :malformed"#,
+        );
+    run.assert_passes();
+    let gemfile = std::fs::read_to_string(run.emitted.join("Gemfile")).expect("Gemfile");
+    assert!(gemfile.contains("gem \"jwt\""), "Gemfile does not declare jwt:\n{gemfile}");
+}
+
+/// Off Ruby and JRuby, each JWT reference is refused.
+#[test]
+fn jwt_is_refused_off_ruby_and_jruby() {
+    let dir = std::env::temp_dir().join(format!("rh-jwt-targets-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, text) in [
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"title\"\n  end\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  get \"/posts\", to: \"posts#index\"\nend\n"),
+        ("app/models/post.rb", "class Post < ApplicationRecord\nend\n"),
+        ("app/models/token.rb", JWT_LIB),
+        (
+            "app/controllers/posts_controller.rb",
+            "class PostsController < ApplicationController\n  def index\n    render plain: Token.read(Token.issue(1, 0)).inspect\n  end\nend\n",
+        ),
+    ] {
+        let full = dir.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    }
+    let mut app = roundhouse::ingest::ingest_app(&dir).expect("ingest");
+    let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(
+        lower_diags.iter().all(|d| d.severity != roundhouse::diagnostic::Severity::Error),
+        "check is not clean: {lower_diags:?}"
+    );
+    for target in [roundhouse::project::BuildTarget::Ruby, roundhouse::project::BuildTarget::Jruby] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        assert!(!errors.iter().any(|e| e.contains("JWT")), "{target:?} refused a gem it ships:\n{}", errors.join("\n"));
+        let gemfile = files.get("Gemfile").map(String::as_str).unwrap_or("");
+        assert!(gemfile.contains("gem \"jwt\""), "{target:?} Gemfile:\n{gemfile}");
+    }
+    for target in [
+        roundhouse::project::BuildTarget::Spinel,
+        roundhouse::project::BuildTarget::Roda,
+        roundhouse::project::BuildTarget::Python,
+        roundhouse::project::BuildTarget::Crystal,
+        roundhouse::project::BuildTarget::Typescript,
+        roundhouse::project::BuildTarget::Rust,
+        roundhouse::project::BuildTarget::Go,
+        roundhouse::project::BuildTarget::Elixir,
+        roundhouse::project::BuildTarget::CSharp,
+        roundhouse::project::BuildTarget::Kotlin,
+        roundhouse::project::BuildTarget::Swift,
+    ] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        for site in ["`JWT.encode`", "`JWT.decode`", "`JWT::ExpiredSignature`", "`JWT::DecodeError`"] {
+            assert!(
+                errors.iter().any(|e| e.contains(site) && e.contains("only the ruby and jruby trees ship")),
+                "{target:?} did not refuse {site}:\n{}",
+                errors.join("\n")
+            );
+        }
+        let hits: Vec<_> = files
+            .iter()
+            .filter(|(path, text)| !path.ends_with(".map") && path.contains("token") && text.contains("JWT"))
+            .map(|(path, _)| path.clone())
+            .collect();
+        assert!(hits.is_empty(), "{target:?} emitted a JWT reference in {hits:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ActiveSupport's `Digest::UUID.uuid_v4` runs as `SecureRandom.uuid`: a
+/// fresh random (version 4) uuid on each call.
+#[test]
+fn digest_uuid_v4_runs_as_a_random_uuid() {
+    emit_and_run::real_blog()
+        .write("lib/correlation.rb", "class Correlation\n  def self.id\n    ::Digest::UUID.uuid_v4\n  end\nend\n")
+        .run_ruby(
+            "a = Correlation.id\nb = Correlation.id\n\
+             raise a.inspect unless a.match?(/\\A\\h{8}-\\h{4}-4\\h{3}-[89ab]\\h{3}-\\h{12}\\z/)\n\
+             raise \"repeated\" if a == b",
+        )
+        .assert_passes();
+}
+
+/// No other target has an HTTP client behind `Faraday`: each call and
+/// constant is refused there, and no `Faraday` reference is emitted.
+#[test]
+fn faraday_is_refused_off_ruby_and_jruby() {
+    let dir = std::env::temp_dir().join(format!("rh-faraday-targets-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, text) in [
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"title\"\n  end\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  get \"/posts\", to: \"posts#index\"\nend\n"),
+        ("app/models/post.rb", "class Post < ApplicationRecord\nend\n"),
+        ("app/models/ping_client.rb", FARADAY_LIB),
+        (
+            "app/controllers/posts_controller.rb",
+            "class PostsController < ApplicationController\n  def index\n    render plain: PingClient.fetch(\"http://example.test\", \"/ok\").inspect\n  end\nend\n",
+        ),
+    ] {
+        let full = dir.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    }
+    let mut app = roundhouse::ingest::ingest_app(&dir).expect("ingest");
+    let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(
+        lower_diags.iter().all(|d| d.severity != roundhouse::diagnostic::Severity::Error),
+        "check is not clean: {lower_diags:?}"
+    );
+    for target in [roundhouse::project::BuildTarget::Ruby, roundhouse::project::BuildTarget::Jruby] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        assert!(!errors.iter().any(|e| e.contains("Faraday")), "{target:?} refused the gem it ships:\n{}", errors.join("\n"));
+        assert!(
+            files.get("Gemfile").is_some_and(|g| g.contains("gem \"faraday\"")),
+            "{target:?} Gemfile does not declare faraday"
+        );
+    }
+    for target in [
+        roundhouse::project::BuildTarget::Spinel,
+        roundhouse::project::BuildTarget::Roda,
+        roundhouse::project::BuildTarget::Python,
+        roundhouse::project::BuildTarget::Crystal,
+        roundhouse::project::BuildTarget::Typescript,
+        roundhouse::project::BuildTarget::Rust,
+        roundhouse::project::BuildTarget::Go,
+        roundhouse::project::BuildTarget::Elixir,
+        roundhouse::project::BuildTarget::CSharp,
+        roundhouse::project::BuildTarget::Kotlin,
+        roundhouse::project::BuildTarget::Swift,
+    ] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        for site in ["`Faraday.new`", "`Faraday::ResourceNotFound`", "`Faraday::Error`"] {
+            assert!(
+                errors.iter().any(|e| e.contains(site) && e.contains("only the ruby and jruby trees ship")),
+                "{target:?} did not refuse {site}:\n{}",
+                errors.join("\n")
+            );
+        }
+        let hits: Vec<_> = files
+            .iter()
+            .filter(|(path, text)| !path.ends_with(".map") && path.contains("ping_client") && text.contains("Faraday"))
+            .map(|(path, _)| path.clone())
+            .collect();
+        assert!(hits.is_empty(), "{target:?} emitted a Faraday reference in {hits:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// `/(?<name>..)/ =~ str` assigns each named group to a local (nil when
@@ -4534,6 +5721,198 @@ end
         )
         .run_test("test/controllers/renders_controller_test.rb")
         .assert_passes();
+}
+
+/// The positional `Result = Struct.new(:a, :b)` in a class body is the
+/// class it defines too: members in order, a missing one nil, writers,
+/// and the methods its block adds. Expected values are Ruby's own.
+#[test]
+fn a_positional_struct_constant_runs_as_its_class() {
+    emit_and_run::real_blog()
+        .write(
+            "app/services/phone_check.rb",
+            r#"class PhoneCheck
+  Normalized = Struct.new(:number, :valid, :error)
+  Point = Struct.new(:x, :y) do
+    def sum
+      x + y
+    end
+  end
+
+  def self.call(raw)
+    return Normalized.new(nil, false, "blank") if raw.empty?
+    Normalized.new(raw.delete("-"), true)
+  end
+
+  def self.point
+    Point.new(1, 2)
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"ok = PhoneCheck.call("912-345")
+raise ok.to_s unless ok.number == "912345" && ok.valid == true && ok.error.nil?
+bad = PhoneCheck.call("")
+raise bad.to_s unless bad.number.nil? && bad.valid == false && bad.error == "blank"
+point = PhoneCheck.point
+point.y = 40
+raise point.sum.to_s unless point.sum == 41"#,
+        )
+        .assert_passes();
+}
+
+/// `CONST.each do |k[, v]| define_method(…) { … } end` over a literal
+/// constant is the `def`s it makes: an Array's names, a Hash's names and
+/// values (read back from the constant), instance and class side, and a
+/// literal Array written in place. Expected values are Ruby's own.
+#[test]
+fn define_method_loops_over_literal_constants_run() {
+    emit_and_run::real_blog()
+        .write(
+            "app/services/labels.rb",
+            r##"class Labels
+  KINDS = %i[draft live].freeze
+  PREFIXES = { short: "S", long: "L" }.freeze
+
+  KINDS.each do |kind|
+    define_method(:"#{kind}?") do
+      @kind == kind
+    end
+  end
+
+  %w[red blue].each do |color|
+    define_method("#{color}_label") do |text|
+      "#{color}:#{text}"
+    end
+  end
+
+  class << self
+    PREFIXES.each do |slug, prefix|
+      define_method(:"#{slug}_prefix") do
+        "#{prefix}-#{slug}"
+      end
+    end
+  end
+
+  def initialize(kind)
+    @kind = kind
+  end
+end
+"##,
+        )
+        .run_ruby(
+            r##"draft = Labels.new(:draft)
+raise "draft?" unless draft.draft? && !draft.live?
+raise draft.red_label("x") unless draft.red_label("x") == "red:x" && draft.blue_label(1) == "blue:1"
+raise Labels.short_prefix unless Labels.short_prefix == "S-short" && Labels.long_prefix == "L-long""##,
+        )
+        .assert_passes();
+}
+
+/// Since Ruby 3.2 a positional Struct also takes keywords, by member name,
+/// which the emitted positional constructor would bind to its first
+/// member: refused. A block defining its own `initialize` is not read as
+/// the class at all: its `super` reaches the Struct parent in Ruby, which
+/// the synthesized class does not have.
+#[test]
+fn a_positional_struct_constant_refuses_keyword_construction() {
+    let errors = emit_and_run::real_blog()
+        .write(
+            "app/services/phone_check.rb",
+            "class PhoneCheck\n  Normalized = Struct.new(:number, :valid)\n\n  def self.call(raw)\n    Normalized.new(number: raw, valid: true)\n  end\nend\n",
+        )
+        .check_errors();
+    assert!(errors.iter().any(|e| e.contains("Struct keyword construction")), "{errors:?}");
+
+    // `keyword_init: false` written out: Ruby passes the keywords as one Hash
+    // to the first member, which inference does not model: refused too.
+    let errors = emit_and_run::real_blog()
+        .write(
+            "app/services/phone_check.rb",
+            "class PhoneCheck\n  Normalized = Struct.new(:number, :valid, keyword_init: false)\n\n  def self.call(raw)\n    Normalized.new(number: raw, valid: true)\n  end\nend\n",
+        )
+        .check_errors();
+    assert!(errors.iter().any(|e| e.contains("Struct keyword construction")), "{errors:?}");
+
+    // A subclass with a class-side `new` of its own decides what `new` takes.
+    let errors = emit_and_run::real_blog()
+        .write(
+            "app/services/phone_check.rb",
+            "class PhoneCheck\n  Normalized = Struct.new(:number, :valid)\n\n  class Named < Normalized\n    def self.new(number:, valid:)\n      super(number, valid)\n    end\n  end\n\n  def self.call(raw)\n    Named.new(number: raw, valid: true)\n  end\nend\n",
+        )
+        .check_errors();
+    assert!(!errors.iter().any(|e| e.contains("Struct keyword construction")), "{errors:?}");
+
+    let errors = emit_and_run::real_blog()
+        .write(
+            "app/services/phone_check.rb",
+            "class PhoneCheck\n  Normalized = Struct.new(:number, :valid) do\n    def initialize(number:, valid:)\n      super(number, valid)\n    end\n  end\n\n  def self.call(raw)\n    Normalized.new(number: raw, valid: true)\n  end\nend\n",
+        )
+        .check_errors();
+    assert!(!errors.is_empty(), "a Struct block with its own initialize checked clean");
+}
+
+/// The same loop in a concern's `included do class << self … end` is the
+/// includer's class methods, beside the block's plain `def`s.
+#[test]
+fn define_method_loops_in_an_included_class_body_reach_the_includer() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/lookups.rb",
+            r##"module Lookups
+  extend ActiveSupport::Concern
+
+  MAP = { short: "S", long: "L" }.freeze
+
+  included do
+    class << self
+      MAP.each do |slug, value|
+        define_method(:"#{slug}_code") do
+          "#{value}#{value}"
+        end
+      end
+
+      def plain
+        "p"
+      end
+    end
+  end
+end
+"##,
+        )
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < ApplicationRecord\n  include Lookups\n")
+        .run_ruby(r##"raise [Article.short_code, Article.long_code, Article.plain].inspect unless [Article.short_code, Article.long_code, Article.plain] == ["SS", "LL", "p"]"##)
+        .assert_passes();
+}
+
+/// A loop whose body the substitution cannot keep is not unrolled: no
+/// `def` is invented for it.
+#[test]
+fn define_method_loops_the_substitution_cannot_keep_are_not_unrolled() {
+    for body in [
+        // writes the loop parameter
+        "KINDS.each do |kind|\n    define_method(:\"#{kind}?\") do\n      kind = :other\n      kind\n    end\n  end",
+        // reads a local outside the loop
+        "suffix = \"!\"\n  KINDS.each do |kind|\n    define_method(:\"#{kind}?\") do\n      suffix\n    end\n  end",
+        // yields the defining method's block
+        "KINDS.each do |kind|\n    define_method(:\"#{kind}?\") do\n      yield\n    end\n  end",
+        // a constant whose value is not a literal
+        "LIST.each do |kind|\n    define_method(:\"#{kind}?\") do\n      kind\n    end\n  end",
+        // `next` at the block's own level does not parse inside a `def`
+        "KINDS.each do |kind|\n    define_method(:\"#{kind}?\") do\n      next false if kind == :draft\n      true\n    end\n  end",
+        // a named visibility marker sets a generated method's visibility
+        "def draft?\n    true\n  end\n\n  KINDS.each do |kind|\n    define_method(:\"#{kind}?\") do\n      kind\n    end\n  end\n  private :draft?",
+    ] {
+        let (emitted, _errors) = emit_and_run::real_blog()
+            .write(
+                "app/services/labels.rb",
+                &format!("class Labels\n  KINDS = %i[draft live].freeze\n  LIST = KINDS.map(&:itself)\n\n  {body}\nend\n"),
+            )
+            .emit(roundhouse::project::BuildTarget::Ruby);
+        let labels = std::fs::read_to_string(emitted.join("app/models/labels.rb")).expect("labels.rb");
+        assert!(!labels.contains("def live?"), "{body}:\n{labels}");
+    }
 }
 
 /// `Float#to_d` / `Integer#to_d` build a BigDecimal without
@@ -6400,6 +7779,53 @@ puts "sanitize_sql_array passed"
         .assert_passes();
 }
 
+/// `sanitize_sql_for_order` on a String is the fragment as written, and
+/// orders a relation through `Arel.sql`.
+#[test]
+fn sanitize_sql_for_order_is_supported() {
+    sanitize_sql_array_app()
+        .write(
+            "app/models/widget.rb",
+            r#"class Widget < ApplicationRecord
+  def self.quoted(value)
+    ActiveRecord::Base.sanitize_sql_array(["SELECT ? AS v", value])
+  end
+
+  def self.by_fragment
+    order(Arel.sql(ActiveRecord::Base.sanitize_sql_for_order("length(name) DESC"))).map(&:name)
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"
+%w[bb a ccc].each { |n| Widget.create!(name: n) }
+raise Widget.by_fragment.inspect unless Widget.by_fragment == %w[ccc bb a]
+"#,
+        )
+        .assert_passes();
+}
+
+/// Rails' Array form of `sanitize_sql_for_order` is not modeled: Rails 8.1
+/// raises for a `?` fragment there. It keeps a refusal at check.
+#[test]
+fn sanitize_sql_for_order_refuses_the_array_form() {
+    // On Base, and on a model through implicit self.
+    for receiver in ["ActiveRecord::Base.", ""] {
+        let errors = sanitize_sql_array_app()
+            .edit(
+                "app/models/widget.rb",
+                "class Widget < ApplicationRecord\n",
+                &format!("class Widget < ApplicationRecord\n  def self.first_named(name)\n    order(Arel.sql({receiver}sanitize_sql_for_order([\"CASE WHEN name = ? THEN 0 ELSE 1 END\", name])))\n  end\n"),
+            )
+            .check_errors();
+        assert!(
+            errors.iter().any(|e| e.contains("sanitize_sql_for_order is modeled on a String only")),
+            "{receiver:?}: {errors:?}"
+        );
+    }
+}
+
 /// Relation#ids must preserve uuid / named string keys (#310).
 fn relation_ids_uuid_app() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
@@ -8071,6 +9497,153 @@ fn a_concern_included_from_an_included_block_reaches_the_model() {
         .assert_passes();
 }
 
+/// real-blog with `ApplicationController` including the `Outer` concern
+/// (`outer`), the extra concern files in `modules`, and a
+/// `StampedController` (`body`) at `/stamped/:id` and `/stamped/:id/plain`.
+fn controller_concern_app(outer: &str, modules: &[(&str, &str)], body: &str, test: &str) -> emit_and_run::Overlay {
+    let mut app = emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/stamped/:id\", to: \"stamped#show\"\n  get \"/stamped/:id/plain\", to: \"stamped#plain\"\n",
+        )
+        .write("app/controllers/concerns/outer.rb", outer)
+        .edit(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n",
+            "class ApplicationController < ActionController::Base\n  include Outer\n",
+        )
+        .write("app/controllers/stamped_controller.rb", body)
+        .write(
+            "test/controllers/stamped_controller_test.rb",
+            &format!("require \"test_helper\"\n\nclass StampedControllerTest < ActionDispatch::IntegrationTest\n{test}end\n"),
+        );
+    for (path, source) in modules {
+        app = app.write(path, source);
+    }
+    app
+}
+
+/// `Outer`'s `included do` includes `Guard`, the way action_policy's setup
+/// includes `ActionPolicy::Controller`. The controller gets `Guard`'s
+/// method, and `Guard`'s `class_methods` filter macro runs.
+#[test]
+fn a_concern_included_from_an_included_block_reaches_the_controller() {
+    controller_concern_app(
+        "module Outer\n  extend ActiveSupport::Concern\n\n  included do\n    include Guard\n  end\nend\n",
+        &[(
+            "app/controllers/concerns/guard.rb",
+            "module Guard\n  extend ActiveSupport::Concern\n\n  def guarded_title\n    \"guarded\"\n  end\n\n  def stamp\n    @stamp = \"stamped\"\n  end\n\n  class_methods do\n    def stamp_before(**options)\n      before_action :stamp, options\n    end\n  end\nend\n",
+        )],
+        "class StampedController < ApplicationController\n  stamp_before only: :show\n\n  def show\n    render plain: \"#{guarded_title} #{@stamp}\"\n  end\n\n  def plain\n    render plain: \"#{guarded_title} #{@stamp.inspect}\"\n  end\nend\n",
+        "  test \"Guard's method and filter macro reach the controller\" do\n    get \"/stamped/1\"\n    assert_equal \"guarded stamped\", response.body\n    get \"/stamped/2/plain\"\n    assert_equal \"guarded nil\", response.body\n  end\n",
+    )
+    .run_test("test/controllers/stamped_controller_test.rb")
+    .assert_passes();
+}
+
+/// `Guard` sits ahead of `Outer`, so its `guarded_title` wins, as in Ruby.
+#[test]
+fn an_include_from_an_included_block_takes_precedence_on_the_controller() {
+    controller_concern_app(
+        "module Outer\n  extend ActiveSupport::Concern\n\n  included do\n    include Guard\n  end\n\n  def guarded_title\n    \"outer\"\n  end\nend\n",
+        &[(
+            "app/controllers/concerns/guard.rb",
+            "module Guard\n  extend ActiveSupport::Concern\n\n  def guarded_title\n    \"guard\"\n  end\nend\n",
+        )],
+        "class StampedController < ApplicationController\n  def show\n    render plain: guarded_title\n  end\n\n  def plain\n    render plain: guarded_title\n  end\nend\n",
+        "  test \"Guard's method wins over Outer's\" do\n    get \"/stamped/1\"\n    assert_equal \"guard\", response.body\n  end\n",
+    )
+    .run_test("test/controllers/stamped_controller_test.rb")
+    .assert_passes();
+}
+
+/// `include First, Second` in an `included do` block puts `First` ahead
+/// of `Second`, as Ruby does, so `First`'s `guarded_title` wins.
+#[test]
+fn a_multi_module_include_in_an_included_block_keeps_its_order_on_the_controller() {
+    controller_concern_app(
+        "module Outer\n  extend ActiveSupport::Concern\n\n  included do\n    include First, Second\n  end\nend\n",
+        &[
+            (
+                "app/controllers/concerns/first.rb",
+                "module First\n  extend ActiveSupport::Concern\n\n  def guarded_title\n    \"first\"\n  end\nend\n",
+            ),
+            (
+                "app/controllers/concerns/second.rb",
+                "module Second\n  extend ActiveSupport::Concern\n\n  def guarded_title\n    \"second\"\n  end\nend\n",
+            ),
+        ],
+        "class StampedController < ApplicationController\n  def show\n    render plain: guarded_title\n  end\n\n  def plain\n    render plain: guarded_title\n  end\nend\n",
+        "  test \"First's method wins over Second's\" do\n    get \"/stamped/1\"\n    assert_equal \"first\", response.body\n  end\n",
+    )
+    .run_test("test/controllers/stamped_controller_test.rb")
+    .assert_passes();
+}
+
+/// `include Guard` written inside `module Outer` names `Outer::Guard`, as
+/// Ruby's lexical lookup finds it.
+#[test]
+fn an_included_block_include_resolves_in_its_concerns_namespace() {
+    controller_concern_app(
+        "module Outer\n  extend ActiveSupport::Concern\n\n  included do\n    include Guard\n  end\nend\n",
+        &[(
+            "app/controllers/concerns/outer/guard.rb",
+            "module Outer\n  module Guard\n    extend ActiveSupport::Concern\n\n    def guarded_title\n      \"namespaced\"\n    end\n  end\nend\n",
+        )],
+        "class StampedController < ApplicationController\n  def show\n    render plain: guarded_title\n  end\n\n  def plain\n    render plain: guarded_title\n  end\nend\n",
+        "  test \"Outer::Guard's method reaches the controller\" do\n    get \"/stamped/1\"\n    assert_equal \"namespaced\", response.body\n  end\n",
+    )
+    .run_test("test/controllers/stamped_controller_test.rb")
+    .assert_passes();
+}
+
+/// On a model too, `include Codes` written inside `module Signing` names
+/// `Signing::Codes`.
+#[test]
+fn an_included_block_include_resolves_in_its_concerns_namespace_on_the_model() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/signing.rb",
+            "module Signing\n  extend ActiveSupport::Concern\n\n  included do\n    include Codes\n  end\nend\n",
+        )
+        .write(
+            "app/models/concerns/signing/codes.rb",
+            "module Signing::Codes\n  extend ActiveSupport::Concern\n\n  def shout\n    title.upcase\n  end\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  include Signing\n",
+        )
+        .run_ruby(
+            "a = Article.create!(title: \"Hi\", body: \"Body text here\")\nraise a.shout unless a.shout == \"HI\"",
+        )
+        .assert_passes();
+}
+
+/// `Guard`'s own `included do` include, `Deep`, reaches the controller too.
+#[test]
+fn an_include_two_included_blocks_deep_reaches_the_controller() {
+    controller_concern_app(
+        "module Outer\n  extend ActiveSupport::Concern\n\n  included do\n    include Guard\n  end\nend\n",
+        &[
+            (
+                "app/controllers/concerns/guard.rb",
+                "module Guard\n  extend ActiveSupport::Concern\n\n  included do\n    include Deep\n  end\nend\n",
+            ),
+            (
+                "app/controllers/concerns/deep.rb",
+                "module Deep\n  extend ActiveSupport::Concern\n\n  def deep_title\n    \"deep\"\n  end\nend\n",
+            ),
+        ],
+        "class StampedController < ApplicationController\n  def show\n    render plain: deep_title\n  end\n\n  def plain\n    render plain: deep_title\n  end\nend\n",
+        "  test \"Deep's method reaches the controller\" do\n    get \"/stamped/1\"\n    assert_equal \"deep\", response.body\n  end\n",
+    )
+    .run_test("test/controllers/stamped_controller_test.rb")
+    .assert_passes();
+}
+
 /// Ruby's lookup order for a module included from `included do`: the
 /// block runs on the includer after the outer module is appended, so
 /// the inner module sits AHEAD of the outer one and its method wins.
@@ -8094,6 +9667,45 @@ fn an_include_from_an_included_block_takes_precedence_over_its_concern() {
             "a = Article.create!(title: \"Hi\", body: \"Body text here\")\nraise a.shout unless a.shout == \"inner\"",
         )
         .assert_passes();
+}
+
+/// `connected_to(role: :writing)` runs its block on the primary, the one
+/// connection an emitted app has: the call is its block.
+#[test]
+fn connected_to_the_writing_role_runs_its_block() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  def self.retitle(id, title)\n    ::ActiveRecord::Base.connected_to(role: :writing) do\n      article = find(id)\n      article.update!(title: title)\n      article.title\n    end\n  end\n",
+        )
+        .run_ruby(
+            "a = Article.create!(title: \"Hi\", body: \"Body text here\")\n\
+             raise \"value\" unless Article.retitle(a.id, \"New\") == \"New\"\n\
+             raise \"write\" unless Article.find(a.id).title == \"New\"",
+        )
+        .assert_passes();
+}
+
+/// A reading role refuses writes in Rails, and a shard is another
+/// database; neither, nor a block whose `next` the call gives meaning,
+/// is the plain block.
+#[test]
+fn connected_to_other_than_the_writing_role_stays_unsupported() {
+    for call in [
+        "ActiveRecord::Base.connected_to(role: :reading) do\n      count\n    end",
+        "ActiveRecord::Base.connected_to(role: :writing, shard: :other) do\n      count\n    end",
+        "ActiveRecord::Base.connected_to(role: :writing) do\n      next 0 if none?\n      count\n    end",
+    ] {
+        let errors = emit_and_run::real_blog()
+            .edit(
+                "app/models/article.rb",
+                "class Article < ApplicationRecord\n",
+                &format!("class Article < ApplicationRecord\n  def self.tally\n    {call}\n  end\n"),
+            )
+            .check_errors();
+        assert!(errors.iter().any(|e| e.contains("connected_to")), "{call}: {errors:?}");
+    }
 }
 
 /// `def`s in a concern's `included do` are includer methods, instance and
@@ -8131,7 +9743,8 @@ fn included_block_defs_that_would_lose_their_precedence_stay_refused() {
     for concern in [
         "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    def shout\n      \"block\"\n    end\n  end\n\n  def shout\n    \"module\"\n  end\nend\n",
         "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    include Comparable\n    def shout\n      \"block\"\n    end\n  end\nend\n",
-        "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    class << self\n      %i[a b].each { |n| define_method(n) { n } }\n      def shout\n        \"block\"\n      end\n    end\n  end\nend\n",
+        "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    class << self\n      %i[a b].each { |n| define_method(n) { yield } }\n      def shout\n        \"block\"\n      end\n    end\n  end\nend\n",
+        "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    class << self\n      private\n      %i[a b].each { |n| define_method(n) { n } }\n      def shout\n        \"block\"\n      end\n    end\n  end\nend\n",
         "module Shouty\n  extend ActiveSupport::Concern\n  class_methods do\n    def loud\n      \"carrier\"\n    end\n  end\n  included do\n    def self.loud\n      \"block\"\n    end\n  end\nend\n",
         "module Shouty\n  extend ActiveSupport::Concern\n  module ClassMethods\n    def loud\n      \"carrier\"\n    end\n  end\n  included do\n    class << self\n      def loud\n        \"block\"\n      end\n    end\n  end\nend\n",
     ] {
@@ -8966,6 +10579,37 @@ fn on_the_index(overlay: emit_and_run::Overlay, calls: &str, assertions: &str) -
         .edit(INDEX_VIEW, INDEX_HEADING, &format!("{INDEX_HEADING}\n{calls}"))
         .edit(CONTROLLER_TEST, INDEX_ASSERTION, &format!("{INDEX_ASSERTION}{assertions}"))
         .run_test(CONTROLLER_TEST)
+}
+
+/// A `tag.*` attribute whose value is a method call runs the call once,
+/// as Rails does: campfire's layout passes `href: fresh_account_logo_path`,
+/// which reads `Current.account` (a query) and formats a timestamp, and
+/// the emit's nil guard spelled the value twice, so each tag ran it twice.
+/// A value that answers nil still leaves the attribute out.
+#[test]
+fn a_tag_attribute_value_is_evaluated_once() {
+    let run = on_the_index(
+        emit_and_run::real_blog().write(
+            "app/helpers/application_helper.rb",
+            "module ApplicationHelper\n  \
+               CALLS = []\n\n  \
+               def counted_logo_path\n    \
+                 CALLS << 1\n    \
+                 \"/logo.png?v=1\"\n  \
+               end\n\n  \
+               def missing_logo_path\n    \
+                 CALLS << 1\n    \
+                 nil\n  \
+               end\n\
+             end\n",
+        ),
+        "<i id=\"once\"><%= tag.link rel: \"icon\", href: counted_logo_path %></i>\n\
+         <i id=\"nil\"><%= tag.link rel: \"apple-touch-icon\", href: missing_logo_path %></i>\n",
+        "    assert_match(/<i id=\"once\"><link rel=\"icon\" href=\"\\/logo.png\\?v=1\"><\\/i>/, response.body)\n    \
+             assert_match(/<i id=\"nil\"><link rel=\"apple-touch-icon\"><\\/i>/, response.body)\n    \
+             assert_equal 2, ApplicationHelper::CALLS.length\n",
+    );
+    run.assert_passes();
 }
 
 /// B1 in NEXUS_BUGS.md: a helper keyword named `class`, read with the
@@ -10623,6 +12267,180 @@ end
         .assert_passes();
 }
 
+/// #293: `classify`, `camelize` and `dasherize` were typed as Strings and
+/// emitted onto a String no runtime reopens, so the action answered 500.
+/// The request is the issue's own; `issue_inflections` repeats it outside
+/// a controller, `namespaced_inflections` adds the aliases, namespaces,
+/// a schema prefix and the remaining Inflector bodies, and
+/// `nullable_inflections` reads them on a `String | nil` receiver.
+fn string_inflections_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/widgets\", to: \"widgets#index\"\n",
+        )
+        .write(
+            "app/controllers/widgets_controller.rb",
+            r#"class WidgetsController < ApplicationController
+  def index
+    kind = "gear_boxes"
+    render plain: [kind.classify, kind.camelize, kind.singularize, kind.humanize, kind.dasherize].join(" ")
+  end
+end
+"#,
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  def self.issue_inflections
+    kind = "gear_boxes"
+    [kind.classify, kind.camelize, kind.singularize, kind.humanize, kind.dasherize].join(" ")
+  end
+
+  def self.namespaced_inflections
+    path = "admin/gear_boxes"
+    name = "Admin::GearBox"
+    [path.camelcase, path.classify, "shop.gear_boxes".classify, "gear_boxes".titlecase, path.dasherize,
+     name.deconstantize, name.foreign_key, "Admin::APIKey".foreign_key].join("|")
+  end
+
+  def self.nullable_path(flag)
+    flag ? "admin/gear_boxes" : nil
+  end
+
+  def self.nullable_name(flag)
+    flag ? "Admin::GearBox" : nil
+  end
+
+  def self.nullable_inflections
+    path = nullable_path(true)
+    name = nullable_name(true)
+    [path.camelize, path.classify, path.dasherize, name.deconstantize, name.foreign_key].join("|")
+  end
+
+  def self.nil_camelize
+    nullable_path(false).camelize
+  end
+
+  def self.nil_classify
+    nullable_path(false).classify
+  end
+
+  def self.nil_dasherize
+    nullable_path(false).dasherize
+  end
+
+  def self.nil_deconstantize
+    nullable_name(false).deconstantize
+  end
+
+  def self.nil_foreign_key
+    nullable_name(false).foreign_key
+  end
+
+  def self.nil_camelcase
+    nullable_path(false).camelcase
+  end
+
+  def self.nil_titlecase
+    nullable_path(false).titlecase
+  end"#,
+        )
+}
+
+/// Rails 8.1's answers (ActiveSupport 8.1.4).
+const ISSUE_INFLECTIONS: &str = "GearBox GearBoxes gear_box Gear boxes gear-boxes";
+const NAMESPACED_INFLECTIONS: &str =
+    "Admin::GearBoxes|Admin::GearBox|GearBox|Gear Boxes|admin/gear-boxes|Admin|gear_box_id|api_key_id";
+/// A `String | nil` receiver: the String arm answers, nil raises as in Rails.
+const NULLABLE_INFLECTIONS: &str = "Admin::GearBoxes|Admin::GearBox|admin/gear-boxes|Admin|gear_box_id";
+
+#[test]
+fn string_inflections_with_an_inflector_body_run() {
+    string_inflections_app()
+        .write(
+            "test/controllers/widgets_controller_test.rb",
+            &format!(
+                r#"require "test_helper"
+
+class WidgetsControllerTest < ActionDispatch::IntegrationTest
+  test "the inflections answer as ActiveSupport does" do
+    get "/widgets"
+    assert_equal "{ISSUE_INFLECTIONS}", response.body
+    assert_equal "{ISSUE_INFLECTIONS}", Article.issue_inflections
+    assert_equal "{NAMESPACED_INFLECTIONS}", Article.namespaced_inflections
+    assert_equal "{NULLABLE_INFLECTIONS}", Article.nullable_inflections
+    assert_equal "undefined method 'camelize' for nil", assert_raises(NoMethodError) {{ Article.nil_camelize }}.message
+    assert_equal "undefined method 'classify' for nil", assert_raises(NoMethodError) {{ Article.nil_classify }}.message
+    assert_equal "undefined method 'dasherize' for nil", assert_raises(NoMethodError) {{ Article.nil_dasherize }}.message
+    assert_equal "undefined method 'deconstantize' for nil", assert_raises(NoMethodError) {{ Article.nil_deconstantize }}.message
+    assert_equal "undefined method 'foreign_key' for nil", assert_raises(NoMethodError) {{ Article.nil_foreign_key }}.message
+    assert_equal "undefined method 'camelcase' for nil", assert_raises(NoMethodError) {{ Article.nil_camelcase }}.message
+    assert_equal "undefined method 'titlecase' for nil", assert_raises(NoMethodError) {{ Article.nil_titlecase }}.message
+  end
+end
+"#
+            ),
+        )
+        .run_test("test/controllers/widgets_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn string_inflections_with_an_inflector_body_run_on_spinel() {
+    let run = string_inflections_app().run_spinel(&format!(
+        r#"raise "issue: " + Article.issue_inflections unless Article.issue_inflections == "{ISSUE_INFLECTIONS}"
+raise "namespaced: " + Article.namespaced_inflections unless Article.namespaced_inflections == "{NAMESPACED_INFLECTIONS}"
+raise "nullable: " + Article.nullable_inflections unless Article.nullable_inflections == "{NULLABLE_INFLECTIONS}"
+def nil_message
+  yield
+  "nothing raised"
+rescue NoMethodError => e
+  e.message
+end
+raise "nil camelize" unless nil_message {{ Article.nil_camelize }} == "undefined method 'camelize' for nil"
+raise "nil classify" unless nil_message {{ Article.nil_classify }} == "undefined method 'classify' for nil"
+raise "nil dasherize" unless nil_message {{ Article.nil_dasherize }} == "undefined method 'dasherize' for nil"
+raise "nil deconstantize" unless nil_message {{ Article.nil_deconstantize }} == "undefined method 'deconstantize' for nil"
+raise "nil foreign_key" unless nil_message {{ Article.nil_foreign_key }} == "undefined method 'foreign_key' for nil"
+raise "nil camelcase" unless nil_message {{ Article.nil_camelcase }} == "undefined method 'camelcase' for nil"
+raise "nil titlecase" unless nil_message {{ Article.nil_titlecase }} == "undefined method 'titlecase' for nil"
+puts "string inflections passed"
+"#
+    ));
+    run.assert_passes();
+    assert!(run.stdout.contains("string inflections passed"), "{}", run.stdout);
+}
+
+/// #293: `tableize` needs Rails' plural rules, which the runtime does not
+/// carry (its `pluralize_word` keeps a word that ends in "s", where Rails
+/// answers "statuses"), and `strip_heredoc` has no runtime body. Both are
+/// refused at check time, not emitted onto a String no runtime reopens.
+#[test]
+fn string_extensions_without_a_runtime_body_are_refused() {
+    for (call, method) in [
+        (r#""Status".tableize"#, "tableize"),
+        (r#""  gear\n  boxes\n".strip_heredoc"#, "strip_heredoc"),
+    ] {
+        let errors = emit_and_run::real_blog()
+            .edit(
+                "app/models/article.rb",
+                "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+                &format!(
+                    "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n\n  def self.probe\n    {call}\n  end"
+                ),
+            )
+            .check_errors();
+        let gap = format!("{method} lacks a shared runtime/lowering implementation");
+        assert!(errors.iter().any(|e| e.contains(&gap)), "{method}: {errors:?}");
+    }
+}
+
 /// The exact inclusion bridge and its carrier can be in different
 /// reopenings. Consuming the bridge must follow the carrier's identity,
 /// not whether both declarations happened to share a source file.
@@ -10676,6 +12494,164 @@ raise "split packet field" unless packet.size == 11
 raise "split packet freeze" unless packet.frozen?
 raise "split label consumer" unless SplitFactoryConsumer.label == "SPLIT"
 raise "split size consumer" unless SplitFactoryConsumer.size == 33
+"#)
+            .assert_passes();
+    }
+}
+
+/// A hook that extends its carrier and then does more, as AASM's and
+/// flag_shih_tzu's do. The extend is the carrier splice's job; the rest of
+/// the hook must still run for each includer.
+#[test]
+fn an_included_hook_that_extends_its_carrier_and_more_runs() {
+    emit_and_run::real_blog()
+        .write("app/services/tracking.rb", r#"module Tracking
+  INCLUDERS = []
+
+  def self.included(base)
+    base.extend Tracking::ClassMethods
+    INCLUDERS << base.name
+  end
+
+  module ClassMethods
+    def tracked_label
+      "tracked " + name
+    end
+  end
+end
+"#)
+        .write("app/services/labelled.rb", r#"module Labelled
+  def self.included(base)
+    base.extend Labelled::ClassMethods
+  end
+
+  module ClassMethods
+    def label_text
+      "label " + name
+    end
+  end
+end
+"#)
+        .write("app/services/reading.rb", r#"class Reading
+  include Tracking
+  include Labelled
+end
+"#)
+        .run_ruby(r#"
+raise "carrier method: #{Reading.tracked_label.inspect}" unless Reading.tracked_label == "tracked Reading"
+raise "qualified bridge: #{Reading.label_text.inspect}" unless Reading.label_text == "label Reading"
+raise "hook body: #{Tracking::INCLUDERS.inspect}" unless Tracking::INCLUDERS == ["Reading"]
+"#)
+        .assert_passes();
+}
+
+/// The same `included` hooks written inside the module's own
+/// `class << self`, as action_policy's policy modules do. Ruby runs
+/// `def included(base)` there exactly like `def self.included(base)`, so
+/// each includer gets the carrier's methods and the rest of the hook
+/// still runs.
+#[test]
+fn an_included_hook_in_class_self_that_extends_its_carrier_runs() {
+    emit_and_run::real_blog()
+        .write("app/services/factory.rb", r#"module Factory
+  class << self
+    def included(base)
+      base.extend ClassMethods
+    end
+  end
+
+  module ClassMethods
+    def build_label
+      "built " + name
+    end
+  end
+end
+"#)
+        .write("app/services/tracking.rb", r#"module Tracking
+  INCLUDERS = []
+
+  class << self
+    def included(base)
+      base.extend ClassMethods
+      INCLUDERS << base.name
+    end
+  end
+
+  module ClassMethods
+    def tracked_label
+      "tracked " + name
+    end
+  end
+end
+"#)
+        .write("app/services/reading.rb", r#"class Reading
+  include Factory
+  include Tracking
+end
+"#)
+        .run_ruby(r#"
+raise "bridge: #{Reading.build_label.inspect}" unless Reading.build_label == "built Reading"
+raise "carrier method: #{Reading.tracked_label.inspect}" unless Reading.tracked_label == "tracked Reading"
+raise "hook body: #{Tracking::INCLUDERS.inspect}" unless Tracking::INCLUDERS == ["Reading"]
+"#)
+        .assert_passes();
+}
+
+/// A `class << self` hook that opens `class << base` instead of extending
+/// a carrier, the same shape `included_hook_class_methods_run` covers for
+/// `def self.included`.
+#[test]
+fn an_included_hook_in_class_self_that_opens_the_includer_singleton_runs() {
+    emit_and_run::real_blog()
+        .write("app/services/factory.rb", r#"module Factory
+  class << self
+    def included(base)
+      class << base
+        def build_label
+          "built " + name
+        end
+      end
+    end
+  end
+end
+"#)
+        .write("app/services/reading.rb", "class Reading\n  include Factory\nend\n")
+        .write("app/services/reading_label.rb", "class ReadingLabel\n  def self.text = Reading.build_label.upcase\nend\n")
+        .run_ruby(r#"
+raise "includer method: #{Reading.build_label.inspect}" unless Reading.build_label == "built Reading"
+raise "typed caller: #{ReadingLabel.text.inspect}" unless ReadingLabel.text == "BUILT READING"
+"#)
+        .assert_passes();
+}
+
+/// The `class << self` bridge and its `ClassMethods` carrier in different
+/// reopenings, in either file order.
+#[test]
+fn a_class_self_included_bridge_runs_with_its_carrier_in_another_file() {
+    for (bridge, carrier) in [
+        ("app/services/factory.rb", "app/services/factory_extension.rb"),
+        ("app/services/factory_bridge.rb", "app/services/factory.rb"),
+    ] {
+        emit_and_run::real_blog()
+            .write(bridge, r#"module Factory
+  class << self
+    def included(base)
+      base.extend ClassMethods
+    end
+  end
+end
+"#)
+            .write(carrier, r#"module Factory
+  module ClassMethods
+    def build_label
+      "built " + name
+    end
+  end
+end
+"#)
+            .write("app/services/reading.rb", "class Reading\n  include Factory\nend\n")
+            .run_ruby(r#"
+raise "split bridge: #{Reading.build_label.inspect}" unless Reading.build_label == "built Reading"
 "#)
             .assert_passes();
     }
@@ -12547,6 +14523,59 @@ raise "random_bytes: #{byte.inspect}" unless byte.is_a?(String) && byte.bytesize
     run.assert_passes();
 }
 
+/// `URI::RFC2396_PARSER.escape(url)` (lobsters' webmention job) and its
+/// siblings are the uri library's parsers: they run on the ruby family,
+/// and a strict target, with no uri runtime, reports the call.
+fn uri_parser_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "app/models/linker.rb",
+            r#"class Linker
+  def self.rfc2396(url)
+    URI::RFC2396_PARSER.escape(url.to_s)
+  end
+
+  def self.rfc3986(url)
+    URI::RFC3986_PARSER.unescape(url.to_s)
+  end
+
+  def self.default(url)
+    URI::DEFAULT_PARSER.escape(url.to_s)
+  end
+end
+"#,
+        )
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema[8.1].define(version: 2026_01_01_000000) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n",
+        )
+}
+
+#[test]
+fn uri_parser_constants_escape_on_the_ruby_family() {
+    uri_parser_app()
+        .run_ruby(
+            r##"raise "rfc2396" unless Linker.rfc2396("a b/é") == "a%20b/%C3%A9"
+raise "rfc3986" unless Linker.rfc3986("a%20b") == "a b"
+raise "default" unless Linker.default("a b") == "a%20b"
+"##,
+        )
+        .assert_passes();
+}
+
+#[test]
+fn uri_parser_calls_are_reported_on_a_strict_target() {
+    let (_emitted, errors) = uri_parser_app().emit(roundhouse::project::BuildTarget::Rust);
+    for call in ["URI::RFC2396_Parser#escape", "URI::RFC3986_Parser#unescape", "URI::RFC3986_Parser#escape"] {
+        assert!(errors.iter().any(|e| e.contains(&format!("{call} not supported (rust)"))), "{call}: {errors:#?}");
+    }
+    assert!(!errors.iter().any(|e| e.contains("constant not supported")), "{errors:#?}");
+}
+
 /// `module_function :name` promotes the def to the module, and ingest
 /// retargets the sibling bare call to `Owner.name`. That receiver is
 /// generated, not written, so it must resolve rather than emit a refusal
@@ -13063,6 +15092,138 @@ end
 "#,
         )
         .run_test("test/models/article_password_writer_test.rb")
+        .assert_passes();
+}
+
+/// `validate :m` with Rails 7.1's password-change guard shape: a Symbol
+/// dirty predicate as `if:` and a lambda as `unless:` (campfire's
+/// `password_challenge_matches`), `on: :create` (campfire's Session),
+/// `password_challenge` assigned through `update`, and an empty password
+/// leaving the digest as it was. Each assignment stays off bcrypt (CI's
+/// unit job does not install it).
+#[test]
+fn validate_guards_and_the_password_challenge_run() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.string \"password_digest\"",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+  has_secure_password validations: false
+  validate :challenge_matches, if: :will_save_change_to_title?, unless: -> { password_challenge.nil? }
+  validate :body_free, on: :create
+
+  def challenge_matches
+    errors.add(:password_challenge, :invalid) unless password_challenge == "ok"
+  end
+
+  def body_free
+    errors.add(:body, "is taken") if body == "only on create"
+  end"#,
+        )
+        .write(
+            "test/models/article_validate_guards_test.rb",
+            r#"require "test_helper"
+
+class ArticleValidateGuardsTest < ActiveSupport::TestCase
+  test "the challenge is checked only when the guarded column changes and a challenge is given" do
+    id = articles(:one).id
+    assert_not Article.find(id).update(title: "A new title", password_challenge: "wrong")
+    assert Article.find(id).update(title: "A new title", password_challenge: "ok")
+    assert Article.find(id).update(title: "Another title")
+    assert Article.find(id).update(body: "A different long body", password_challenge: "wrong")
+  end
+
+  test "on: :create runs before the first save only" do
+    assert_not Article.new(title: "Fresh", body: "only on create").save
+    assert articles(:one).update(body: "only on create")
+  end
+
+  test "an empty password leaves the digest as it was" do
+    article = articles(:one)
+    article.update!(password_digest: "stored digest")
+    article.update!(password: "")
+    assert_equal "stored digest", Article.find(article.id).password_digest
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_validate_guards_test.rb")
+        .assert_passes();
+}
+
+/// `flash` in an integration test is the last request's flash, read
+/// after a redirect the test does not follow (campfire's profile tests:
+/// `assert_equal "✓", flash[:notice]`).
+#[test]
+fn an_integration_test_reads_the_last_requests_flash() {
+    emit_and_run::real_blog()
+        .write(
+            "test/controllers/articles_flash_controller_test.rb",
+            r#"require "test_helper"
+
+class ArticlesFlashControllerTest < ActionDispatch::IntegrationTest
+  test "the redirect's notice is the flash" do
+    post articles_url, params: { article: { title: "Flashed", body: "A sufficiently long article body." } }
+    assert_redirected_to article_url(Article.find_by(title: "Flashed"))
+    assert_equal "Article was successfully created.", flash[:notice]
+    assert_nil flash[:alert]
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/articles_flash_controller_test.rb")
+        .assert_passes();
+}
+
+/// A model class method a scope reaches (`titled.find_by_slug(s)`)
+/// takes the relation as a trailing `__rel`, so the call carries one
+/// argument more than the test's `stubs(...).with(s)` names; the ruby
+/// lanes' mocha replay still matches it (campfire's
+/// `User.stubs(:find_by_transfer_id).with(transfer_id)` against
+/// `User.active.find_by_transfer_id(params[:id])`), and the named
+/// argument still tells two stubs apart.
+#[test]
+#[ignore = "requires the mocha gem"]
+fn a_stub_with_args_matches_a_scope_reached_class_method() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+  scope :titled, -> { where.not(title: nil) }
+
+  def self.find_by_slug(slug)
+    where(title: slug).first
+  end
+
+  def self.titled_slug(slug)
+    titled.find_by_slug(slug)
+  end"#,
+        )
+        .write(
+            "test/models/article_scoped_stub_test.rb",
+            r#"require "test_helper"
+
+class ArticleScopedStubTest < ActiveSupport::TestCase
+  test "the stub answers the scoped call it names" do
+    other = articles(:two)
+    Article.stubs(:find_by_slug).with("a-slug").returns(other)
+    Article.stubs(:find_by_slug).with("another").returns(articles(:one))
+    assert_equal other.id, Article.titled_slug("a-slug").id
+    assert_equal other.id, Article.find_by_slug("a-slug").id
+    assert_equal articles(:one).id, Article.titled_slug("another").id
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_scoped_stub_test.rb")
         .assert_passes();
 }
 
@@ -14518,6 +16679,129 @@ end
     assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));
     emit_and_run::real_blog()
         .write("app/services/nested_destructure_probe.rb", SOURCE)
+        .run_ruby(ASSERTIONS).assert_passes();
+}
+
+/// A splat inside a nested destructure: `(month, *row)` from
+/// `each_with_object`, plus the nearby shapes (anonymous splat, a
+/// trailing name, a scalar element, a deeper group). The emitted Ruby
+/// has to bind what MRI binds; a quiet ingest is not that claim.
+#[test]
+fn nested_destructure_splat_binds_the_tail() {
+    const SOURCE: &str = r#"class AryBox
+  def to_ary
+    [7, 8, 9]
+  end
+end
+
+class NestedSplatProbe
+  def self.each_with_object
+    [[1, 2, 3, 4], [5]].each_with_object({}) { |(month, *row), map| map[month] = row }
+  end
+  def self.anonymous
+    out = []
+    [[1, 2, 3]].each { |(month, *)| out << month }
+    out
+  end
+  def self.only_rest
+    out = []
+    [[1, 2]].map { |(*row)| out << row }
+    out
+  end
+  def self.post
+    a, (b, *c, d) = [1, [2, 3, 4, 5]]
+    [a, b, c, d]
+  end
+  def self.short_post
+    a, (b, *c, d) = [1, [2]]
+    [a, b, c, d]
+  end
+  def self.scalar
+    a, (b, *c) = [1, 5]
+    [a, b, c]
+  end
+  def self.coerced
+    a, (b, *c) = [1, AryBox.new]
+    [a, b, c]
+  end
+  def self.deep
+    a, (b, (c, *d)) = [1, [2, [3, 4, 5]]]
+    [a, b, c, d]
+  end
+  def self.beside
+    (a, *b), c = [[1, 2, 3], 9]
+    [a, b, c]
+  end
+  def self.ivars
+    _head, (@month, *@row) = [0, [4, 5, 6]]
+    [@month, @row]
+  end
+  def self.expression
+    (a, (b, *c) = [1, [2, 3, 4]])
+  end
+  def self.lambda_param
+    unpack = ->((month, *row)) { [month, row] }
+    unpack.call([1, 2, 3])
+  end
+  def self.empty_block
+    [[1, 2, 3]].map { |(month, *row)| }
+  end
+  def self.private_to_ary
+    a, (b, *c) = [0, PrivateBox.new([4, 5])]
+    [a, b, c]
+  end
+  def self.basic_object
+    bare = BareElement.new
+    a, (b, *c) = [0, bare]
+    [a, b.equal?(bare), c]
+  end
+end
+
+class PrivateBox
+  def initialize(values)
+    @values = values
+  end
+
+  def to_ary
+    @values
+  end
+  private :to_ary
+end
+
+class BareElement < BasicObject
+end
+"#;
+    const ASSERTIONS: &str = r##"
+expected = {
+  each_with_object: {1 => [2, 3, 4], 5 => []},
+  anonymous: [1],
+  only_rest: [[1, 2]],
+  post: [1, 2, [3, 4], 5],
+  short_post: [1, 2, [], nil],
+  scalar: [1, 5, []],
+  coerced: [1, 7, [8, 9]],
+  deep: [1, 2, 3, [4, 5]],
+  beside: [1, [2, 3], 9],
+  ivars: [4, [5, 6]],
+  expression: [1, [2, 3, 4]],
+  lambda_param: [1, [2, 3]],
+  empty_block: [nil],
+  private_to_ary: [0, 4, [5]],
+  basic_object: [0, true, []]
+}
+expected.each do |method, want|
+  got = NestedSplatProbe.public_send(method)
+  raise "#{method}: #{got.inspect}, expected #{want.inspect}" unless got == want
+end
+"##;
+    let native = std::process::Command::new("ruby").arg("-e")
+        .arg(format!("{SOURCE}\n{ASSERTIONS}"))
+        .output().expect("CRuby control");
+    assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));
+    emit_and_run::empty_app()
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("db/schema.rb", "ActiveRecord::Schema.define(version: 1) do\nend\n")
+        .write("app/helpers/nested_splat_probe.rb", SOURCE)
         .run_ruby(ASSERTIONS).assert_passes();
 }
 
@@ -17474,6 +19758,18 @@ puts "nokogiri html5 helper passed"
 }
 #[path = "emit_and_run/proc_new_and_std_streams.rs"]
 mod proc_new_and_std_streams;
+#[path = "emit_and_run/core_constants.rs"]
+mod core_constants;
+#[path = "emit_and_run/module_protocol_receivers.rs"]
+mod module_protocol_receivers;
+#[path = "emit_and_run/ipaddr_include.rs"]
+mod ipaddr_include;
+#[path = "emit_and_run/hash_subclass_include.rs"]
+mod hash_subclass_include;
+#[path = "emit_and_run/guarded_declarations.rs"]
+mod guarded_declarations;
+#[path = "emit_and_run/lock_versions.rs"]
+mod lock_versions;
 #[path = "emit_and_run/helper_diagnostics.rs"]
 mod helper_diagnostics;
 #[path = "emit_and_run/value_seq_order.rs"]
@@ -17492,9 +19788,63 @@ mod console_only_definitions;
 mod open_classes;
 #[path = "emit_and_run/parameterized_mailer.rs"]
 mod parameterized_mailer;
+#[path = "emit_and_run/model_delegate_to_reader.rs"]
+mod model_delegate_to_reader;
 #[path = "emit_and_run/private_calls.rs"]
 mod private_calls;
 #[path = "emit_and_run/inherited_visibility.rs"]
 mod inherited_visibility;
 #[path = "emit_and_run/class_side_relations.rs"]
 mod class_side_relations;
+#[path = "emit_and_run/dynamic_where_forms.rs"]
+mod dynamic_where_forms;
+#[path = "emit_and_run/enum_cross_class_mapping.rs"]
+mod enum_cross_class_mapping;
+#[path = "emit_and_run/jbuilder_record_values.rs"]
+mod jbuilder_record_values;
+#[path = "emit_and_run/nil_operand.rs"]
+mod nil_operand;
+
+/// `ActiveSupport::JSON.encode(value, escape: false)` — Rails' document
+/// without the HTML-entity escaping, which campfire's fragment keys can
+/// digest instead of the escaped one — lowers to the runtime's
+/// `encode_without_escape`, keyword or braced, and plain `encode` keeps
+/// its escaping.
+#[test]
+fn json_encode_with_escape_false_runs() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  def plain_doc
+    ActiveSupport::JSON.encode([ "<b>&</b>", { title: title, n: 2 } ], escape: false)
+  end
+
+  def braced_doc
+    ActiveSupport::JSON.encode([ "<i>" ], { escape: false })
+  end
+
+  def escaped_doc
+    ActiveSupport::JSON.encode([ "<b>&</b>" ])
+  end"#,
+        )
+        .write(
+            "test/models/article_json_escape_test.rb",
+            r#"require "test_helper"
+
+class ArticleJsonEscapeTest < ActiveSupport::TestCase
+  test "escape: false leaves the entities alone" do
+    article = Article.new(title: "A <title> & more", body: "A sufficiently long article body.")
+    assert_equal %q(["<b>&</b>",{"title":"A <title> & more","n":2}]), article.plain_doc
+    assert_equal %q(["<i>"]), article.braced_doc
+    assert_equal %(["\\u003cb\\u003e\\u0026\\u003c/b\\u003e"]), article.escaped_doc
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_json_escape_test.rb")
+        .assert_passes();
+}

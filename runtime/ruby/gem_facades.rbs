@@ -63,6 +63,7 @@ module ROTP
     def verify: (String _code) -> bool
     def provisioning_uri: (String _account) -> String
     def secret: () -> String
+    def interval: () -> Integer
   end
 
   module Base32

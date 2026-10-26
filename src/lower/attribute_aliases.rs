@@ -18,6 +18,14 @@ pub fn apply_attribute_alias_lowering(app: &mut App) {
                         rewrite(cond, &models, true);
                     }
                 }
+                ModelBodyItem::Validation { validation, .. } => {
+                    if let Some(cond) = &mut validation.if_cond {
+                        rewrite(cond, &models, true);
+                    }
+                    if let Some(cond) = &mut validation.unless_cond {
+                        rewrite(cond, &models, true);
+                    }
+                }
                 ModelBodyItem::Unknown { expr, .. } => rewrite(expr, &models, true),
                 ModelBodyItem::Association { assoc: Association::HasMany { extension, .. }, .. } => {
                     for m in extension.iter_mut() {

@@ -780,13 +780,13 @@ mod tests {
         assert_eq!(last["detail"], "redirect · render show · render new · render json");
     }
 
-    /// An unknown gem's surface, used from an action and read in the
-    /// view: the dispatch failure and the ivar it feeds are labeled
-    /// coverage notes naming the gem, not errors; `gems` lists the gem
+    /// An unknown gem's helper, used from an action and read in the
+    /// view: the call is refused, as no target defines it, and the ivar
+    /// it feeds is a coverage note naming the gem; `gems` lists the gem
     /// with its count. Witnessed on a copy of real-blog with `pundit`
     /// added to the lock and `policy_scope` used.
     #[test]
-    fn unknown_gem_surface_is_attributed_not_accused() {
+    fn unknown_gem_helper_is_refused_and_what_it_feeds_attributed() {
         let dir = std::env::temp_dir().join(format!("rh-mcp-gems-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         copy_dir(crate::fixtures::real_blog(), &dir);
@@ -816,9 +816,8 @@ mod tests {
 
         assert!(gems.contains("1 unknown (pundit)"), "{gems}");
         assert!(gems.contains("pundit — unknown 2.4.0 — 2 diagnostic(s) attributed to it"), "{gems}");
-        assert!(errors.starts_with("No errors."), "{errors}");
-        assert!(all.contains("method call `policy_scope` has unresolved type"), "{all}");
-        assert!(all.contains("the `pundit` gem is in the Gemfile and roundhouse does not model it"), "{all}");
+        assert!(errors.contains("`policy_scope` is a helper of the `pundit` gem"), "{errors}");
+        assert!(!errors.contains("@scoped"), "{errors}");
         assert!(all.contains("@scoped is assigned from the `pundit` gem"), "{all}");
     }
 
@@ -1072,15 +1071,41 @@ mod tests {
         for target in ["rust", "python", "go", "typescript"] {
             let r = call(&server(), "wont_lower", json!({ "target": target }));
             assert_eq!(r["result"]["isError"], false);
+            // Not "lowers cleanly": the forgery check these runtimes pass without a token is the one gap they name
+            let text = text_of(&r);
+            let gaps: Vec<&str> = text.lines().filter(|l| l.starts_with("warning[") || l.starts_with("error[")).collect();
             assert!(
-                text_of(&r).contains("lowers cleanly"),
-                "expected `{target}` to lower real-blog cleanly (datetime seam), got: {}",
-                text_of(&r)
+                gaps.len() == 1 && gaps[0].contains("forgery_protection"),
+                "expected `{target}` to lower real-blog's datetime columns cleanly, got: {text}"
             );
         }
 
         // An unknown/unsupported target is a genuine tool error.
         let bad = call(&server(), "wont_lower", json!({ "target": "fortran" }));
         assert_eq!(bad["result"]["isError"], true);
+    }
+
+    /// A strict target leaves `validates …, uniqueness:` out (it has no
+    /// runtime Relation to query), and `wont_lower` says so, as the CLI
+    /// does; a ruby-family target lowers the check and lists nothing for it.
+    #[test]
+    fn wont_lower_reports_uniqueness_only_where_it_is_not_lowered() {
+        let root = std::env::temp_dir().join(format!("roundhouse-mcp-wont-lower-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (path, body) in [
+            ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
+            ("app/models/widget.rb", "class Widget < ApplicationRecord\n  validates :uri, uniqueness: true\nend\n"),
+            ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"uri\"\n  end\nend\n"),
+        ] {
+            let file = root.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, body).unwrap();
+        }
+        let server = Server { root: root.clone() };
+        let rust = text_of(&call(&server, "wont_lower", json!({ "target": "rust" })));
+        let ruby = text_of(&call(&server, "wont_lower", json!({ "target": "ruby" })));
+        std::fs::remove_dir_all(&root).ok();
+        assert_eq!(rust.matches("validates :uri, uniqueness:").count(), 1, "{rust}");
+        assert!(!ruby.contains("uniqueness:"), "{ruby}");
     }
 }

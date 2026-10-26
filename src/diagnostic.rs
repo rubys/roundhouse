@@ -76,6 +76,7 @@ impl Diagnostic {
             DiagnosticKind::UndefinedFilterTarget { .. } => "undefined_filter_target",
             DiagnosticKind::GraphqlNullableField { .. } => "graphql_nullable_field",
             DiagnosticKind::UnconsumedInitializer { .. } => "unconsumed_initializer",
+            DiagnosticKind::IgnoredValidatorOption { .. } => "ignored_validator_option",
         }
     }
 
@@ -92,6 +93,7 @@ impl Diagnostic {
             DiagnosticKind::BlankUnlowered { .. } => Severity::Warning,
             DiagnosticKind::LowerResidue { .. } => Severity::Warning,
             DiagnosticKind::UnconsumedInitializer { .. } => Severity::Warning,
+            DiagnosticKind::IgnoredValidatorOption { .. } => Severity::Warning,
             _ => Severity::Error,
         }
     }
@@ -218,12 +220,36 @@ impl Diagnostic {
                 "`field :{}` is declared `null: false` but can resolve to nil; when it does, the response carries an error and nulls its parent",
                 field.as_str()
             ),
-            DiagnosticKind::UnconsumedInitializer { owner, statement, location } => format!(
-                "`{}` ({}, {}) is read by no recognizer: it has no effect on the compiled app",
+            DiagnosticKind::UnconsumedInitializer { owner, statement, location, holder } => format!(
+                "`{}` ({}, {}) is read by no recognizer: it has no effect on the compiled app; {}",
                 statement.as_str(),
                 owner.as_str(),
-                location.as_str()
+                location.as_str(),
+                Self::holder_text(holder.as_str())
             ),
+            DiagnosticKind::IgnoredValidatorOption { validator, option, hint } => format!(
+                "`{}: {{ {}: … }}` is not an option Rails' validator reads; Rails ignores it, and so does this build{}",
+                validator.as_str(),
+                option.as_str(),
+                hint.as_ref().map(|h| format!(" (did you mean `{}:`?)", h.as_str())).unwrap_or_default()
+            ),
+        }
+    }
+
+    /// What an unconsumed initializer's `holder` says about the drop.
+    fn holder_text(holder: &str) -> String {
+        match holder {
+            "rails" => "it is Rails behaviour the running app answers without".to_string(),
+            "rails-boot-only" => "it is a Rails setting for building, loading or logging the app, which the running app does not need".to_string(),
+            "app" => "it is the app's own boot code".to_string(),
+            "unknown" => "its owner is unknown".to_string(),
+            gem => match gem.strip_prefix("gem:").and_then(|g| g.rsplit_once(':')) {
+                Some((names, fate)) => format!(
+                    "it belongs to the gem `{}` ({fate})",
+                    names.replace('|', "` or `")
+                ),
+                None => format!("it belongs to {gem}"),
+            },
         }
     }
 
@@ -523,5 +549,15 @@ pub enum DiagnosticKind {
     /// initializer`, `engine SourceMonitor::Engine class body`, …),
     /// `statement` its head (`SourceMonitor.configure`), `location` the
     /// `path:line:col` it starts at.
-    UnconsumedInitializer { owner: Symbol, statement: Symbol, location: Symbol },
+    /// `holder` is who the statement belongs to
+    /// ([`crate::ingest::initializer_ledger::Holder::label`]).
+    UnconsumedInitializer { owner: Symbol, statement: Symbol, location: Symbol, holder: Symbol },
+    /// A key in a validator's options hash that the Rails validator does
+    /// not read (`numericality: { greater_than_or_equal: 0 }`, where the
+    /// bound is `greater_than_or_equal_to:`). Rails ignores it, as an
+    /// interpolation option the default message never names, and so does
+    /// the lowering. A note, not a gap: the build checks what Rails checks.
+    /// Warning, because the app's validation is weaker than it reads.
+    /// `hint` is the option it most likely meant, when one is close.
+    IgnoredValidatorOption { validator: Symbol, option: Symbol, hint: Option<Symbol> },
 }

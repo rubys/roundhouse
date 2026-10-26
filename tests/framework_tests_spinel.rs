@@ -178,6 +178,8 @@ fn build_and_run(test_file: &Path, tag: &str) {
     // `test_helper.rb: cannot load such file -- runtime/json_impl.rb`.
     for entry in [
         "active_support_time_parsing.rb",
+        "active_support_interval.rb",
+        "active_support_duration.rb",
         "base64.rb",
         "json_impl.rb",
         "message_digest.rb",
@@ -434,7 +436,7 @@ fn ac_message_verifier_test_passes_under_spinel() {
 }
 
 /// `rate_limit`'s counter (`ActionController::RateLimiter` over
-/// `Rails::Cache#increment_str`). Ruby-family lanes only: the store is
+/// `Rails::Cache#increment`). Ruby-family lanes only: the store is
 /// the shared runtime's, which the strict-target runtimes do not stage.
 #[test]
 #[ignore]

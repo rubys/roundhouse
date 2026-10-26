@@ -150,3 +150,39 @@ end
     assert!(!out.contains("def self.initialize"), "{out}");
     assert!(out.contains("def self.notify"), "{out}");
 }
+
+/// ActionMailer's class-side proxy answers only the mailer's public
+/// action methods (`action_methods`): `Notifier.stamp!` on a private
+/// helper raises NoMethodError. A private or protected instance method
+/// (a filter, a helper) gets no wrapper, which would otherwise call it
+/// on `new` from outside.
+#[test]
+fn private_and_protected_methods_get_no_class_side_wrapper() {
+    let (out, _) = lower_and_emit(
+        r#"
+class Notifier < ActionMailer::Base
+  after_action :stamp!
+
+  def hello(user)
+    mail(to: user)
+  end
+
+  protected
+
+  def footer
+    "f"
+  end
+
+  private
+
+  def stamp!
+    headers["X-Stamp"] = "1"
+  end
+end
+"#,
+    );
+    assert!(out.contains("def self.hello(user)"), "the public action keeps its wrapper:\n{out}");
+    assert!(!out.contains("def self.stamp!"), "no wrapper for a private method:\n{out}");
+    assert!(!out.contains("new.stamp!"), "{out}");
+    assert!(!out.contains("def self.footer"), "no wrapper for a protected method:\n{out}");
+}

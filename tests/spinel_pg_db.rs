@@ -66,7 +66,7 @@ fn spinel_gate_pg_db_bound_reads_and_writes() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("sig")).unwrap();
     let _cleanup = ScratchDir(dir.clone());
-    for name in ["db_pg.rb", "pg_errors.rb", "active_support_time_parsing.rb"] {
+    for name in ["db_pg.rb", "pg_errors.rb", "active_support_time_parsing.rb", "active_support_interval.rb", "active_support_duration.rb"] {
         let src = root.join("runtime/spinel").join(name);
         std::fs::copy(&src, dir.join(name))
             .unwrap_or_else(|e| panic!("copy {}: {e}", src.display()));
@@ -76,6 +76,8 @@ fn spinel_gate_pg_db_bound_reads_and_writes() {
         "runtime/spinel/pg_errors.rbs",
         "runtime/ruby/db.rbs",
         "runtime/spinel/active_support_time_parsing.rbs",
+        "runtime/spinel/active_support_interval.rbs",
+        "runtime/spinel/active_support_duration.rbs",
     ] {
         let name = Path::new(rbs).file_name().unwrap();
         std::fs::copy(root.join(rbs), dir.join("sig").join(name))

@@ -1,4 +1,14 @@
 module ActiveRecord
+  module Associations
+    class Preloader
+      @records: Array[Base]
+      @associations: untyped
+
+      def initialize: (records: Array[Base], associations: untyped) -> void
+      def call: () -> nil
+    end
+  end
+
   module Preloading
     def self.records: (Array[Base] records, Array[untyped] specs) -> nil
   end

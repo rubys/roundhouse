@@ -587,17 +587,26 @@ pub enum Dependent {
 pub struct Validation {
     pub attribute: Symbol,
     pub rules: Vec<ValidationRule>,
-    /// `validates :attr, …, if: :pred` — a Symbol condition, the same
-    /// form `validate :method, if: :pred` already lowers. `None` runs
-    /// the rules on every save. A lambda or any other condition is not
-    /// stored here; ingest refuses the whole call instead of checking
+    /// `if: :pred` / `if: -> { … }` / `if: lambda { … }` / `if: proc { … }`.
+    /// A Symbol and a zero-arity lambda/proc both become the guard
+    /// expression `callback_condition` already builds for a callback:
+    /// a Symbol is the predicate called on the record, and a lambda
+    /// body is spliced where Rails `instance_exec`s it with `self` the
+    /// record. `None` runs the rules on every save. When both this and
+    /// `unless_cond` are set, the rules run only when `if:` holds and
+    /// `unless:` does not. Anything else (an arity>0 lambda, a String,
+    /// a captured local, a body survey mode had to stub with `nil`) is
+    /// not stored; ingest refuses the whole call instead of checking
     /// unconditionally.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub if_method: Option<Symbol>,
-    /// `unless: :pred`. When both are set, the rules run only when
-    /// `if:` holds and `unless:` does not.
+    pub if_cond: Option<Expr>,
+    /// `unless:` — see `if_cond`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unless_method: Option<Symbol>,
+    pub unless_cond: Option<Expr>,
+    /// A literal String `message:` from the rule's own hash, in place of
+    /// the default message for every error the rules record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// Inclusive or exclusive numeric range from `inclusion: { in: 1..3 }`.
@@ -613,7 +622,28 @@ pub struct InclusionRange {
 pub enum ValidationRule {
     Presence,
     Absence,
-    Uniqueness { scope: Vec<Symbol>, case_sensitive: bool },
+    /// `acceptance: true` / `{ accept:, allow_nil: }`. `accept` holds the
+    /// literal values Rails' `AcceptanceValidator` accepts (its default is
+    /// `["1", true]`). `allow_nil` is from the validator's own hash or the
+    /// call (the hash wins); `None` is Rails' default, which for this
+    /// validator is `true`.
+    Acceptance {
+        accept: Vec<Literal>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_nil: Option<bool>,
+    },
+    /// `uniqueness: true` / `{ scope:, case_sensitive:, allow_nil:,
+    /// allow_blank: }`. `scope` holds the names as written; an
+    /// association name resolves to its foreign key when the check is
+    /// built. `case_sensitive: false` compares `LOWER(col) = LOWER(value)`.
+    Uniqueness {
+        scope: Vec<Symbol>,
+        case_sensitive: bool,
+        #[serde(default)]
+        allow_nil: bool,
+        #[serde(default)]
+        allow_blank: bool,
+    },
     Length {
         min: Option<u32>,
         max: Option<u32>,
@@ -631,7 +661,24 @@ pub enum ValidationRule {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         allow_nil: Option<bool>,
     },
-    Format { pattern: String },
+    Format {
+        pattern: String,
+        /// Ruby regex flags, restricted at ingest to the combinations
+        /// every emit target can reproduce with Ruby's exact meaning:
+        /// `i` (case-insensitive), `m` (Ruby's dot-matches-newline), or
+        /// both — never `x` (extended) or an encoding/`o` flag, which
+        /// stay a `format: with` survey gap instead. `#[serde(default)]`
+        /// so JSON written before this field existed still loads.
+        #[serde(default)]
+        flags: String,
+        /// `allow_nil:` / `allow_blank:`, from the validator's own hash
+        /// or the call (the hash wins). `None` is unset: Rails then
+        /// matches a nil or blank value's `to_s` like any other.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_nil: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_blank: Option<bool>,
+    },
     Numericality {
         only_integer: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -645,6 +692,16 @@ pub enum ValidationRule {
         gte: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lte: Option<f64>,
+        /// `allow_nil:` / `allow_blank:`, from the validator's own hash
+        /// or the call (the hash wins). `None` is unset: Rails then
+        /// validates a nil or blank value like any other.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_nil: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_blank: Option<bool>,
+        /// `in: a..b` / `a...b`: Rails' "must be in a..b" check.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        in_range: Option<InclusionRange>,
     },
     Inclusion {
         values: Vec<Literal>,
@@ -654,6 +711,22 @@ pub enum ValidationRule {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         range: Option<InclusionRange>,
     },
+    /// `exclusion: { in: […] }` / `validates_exclusion_of`: the value
+    /// must NOT be one of `values`, or, with `range`, must not be covered
+    /// by it. `nil` is reserved only when it's listed (no implicit
+    /// `allow_nil`), never by a range. Rails' message is "is reserved".
+    Exclusion {
+        values: Vec<Literal>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        range: Option<InclusionRange>,
+    },
+    /// `inclusion: { in: ->(record) { … } }`, `in: -> { … }` or `in: :method`:
+    /// the set Rails asks for at validation time, with the record as
+    /// `self` (a lambda's parameter is `self`). `set.include?(value)`
+    /// decides, so a nil set raises `NoMethodError` as it does in Rails.
+    InclusionCall { set: Expr },
+    /// `exclusion:` with a callable `in:`, as `InclusionCall`.
+    ExclusionCall { set: Expr },
     Custom {
         method: Symbol,
         /// `validate :m, if: :pred` / `unless: :pred` — the instance
@@ -722,6 +795,9 @@ pub enum CallbackHook {
     /// name and fires it in the right two places.
     AfterSaveCommit,
     AfterRollback,
+    /// `after_initialize :set_salt` — runs on construction and on load,
+    /// the same `def after_initialize` the block form lowers to.
+    AfterInitialize,
 }
 
 /// A formal parameter on a `MethodDef`. Carries the parameter name, an
@@ -1188,6 +1264,11 @@ pub enum LibraryClassOrigin {
     StructConstant {
         members: Vec<Symbol>,
         keyword_init: bool,
+        /// `keyword_init: false` written out: Ruby then passes a keyword
+        /// call as one Hash to the first member, as the positional
+        /// constructor does. Omitted, Ruby binds keywords by member name.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        positional_written: bool,
     },
     /// A `Dry::Struct` class lowered into its readers and constructor
     /// (`ingest::dry_struct`). Carried so a target can tell the coercions
@@ -1892,6 +1973,18 @@ impl ResourceScope {
 /// Surface forms of a routes.rb entry. Preserves source structure so
 /// `resources :articles do ... end` round-trips byte-for-byte; a downstream
 /// target emitter that needs concrete routes expands via [`RouteSpec::expand`].
+/// The `constraints` key of a route's requirement on its `(.:format)`
+/// extension (`constraints: { format: /csv|json/ }`, `format: false`).
+/// Kept apart from `format`, which there is the route's forced response
+/// format (`format: "rss"`, `defaults: { format: :json }`): Rails keeps a
+/// requirement and a default apart, and a requirement forces nothing on
+/// a request that sends no extension. Not a name a path param can take.
+pub const FORMAT_REQUIREMENT: &str = "(.:format)";
+
+/// The `FORMAT_REQUIREMENT` value of `format: false`: no extension is
+/// accepted. Not a regex source; the route lowering knows it by name.
+pub const FORMAT_NONE: &str = "";
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RouteSpec {

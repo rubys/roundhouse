@@ -14,7 +14,7 @@ use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
 
-use super::params::{ParamsSpec, ParamsSpecs, body_tail, expr, synth_to_attrs};
+use super::params::{ParamsSpec, ParamsSpecs, body_tail, expr, synth_to_attrs_for_spec};
 
 /// Record which resources name a model with a table: only those get
 /// the typed update variants (`model_to_library`'s
@@ -186,7 +186,7 @@ pub(super) fn synthesize_demanded_to_attrs(
             if let Some(spec) = specs.by_class(&params_lc.name) {
                 params_lc
                     .methods
-                    .push(synth_to_attrs(&spec.class_id, &spec.fields));
+                    .push(synth_to_attrs_for_spec(spec));
             }
         }
     }

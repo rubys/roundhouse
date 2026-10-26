@@ -75,6 +75,10 @@ pub(super) fn emit_if(cond: &Expr, then_branch: &Expr, else_branch: &Expr) -> St
             }
             return format!("if {cond_s} {{ Some({then_wrapped}) }} else {{ None }}");
         }
+        // Not the statement form when the branch answers an Option: the `if` is a value, and its absent arm is nil
+        if answers_option_value(then_branch) {
+            return format!("if {cond_s} {{ {then_wrapped} }} else {{ None }}");
+        }
         return format!("if {cond_s} {{ {then_wrapped} }}");
     }
     // `STMT unless COND` lowers to `If { cond, then: Nil, else: STMT }`
@@ -91,6 +95,9 @@ pub(super) fn emit_if(cond: &Expr, then_branch: &Expr, else_branch: &Expr) -> St
             }
             return format!("if !({cond_s}) {{ Some({else_wrapped}) }} else {{ None }}");
         }
+        if answers_option_value(else_branch) {
+            return format!("if !({cond_s}) {{ {else_wrapped} }} else {{ None }}");
+        }
         return format!("if !({cond_s}) {{ {else_wrapped} }}");
     }
     // Per-branch DECLARED_VARS scope: each branch's body is a separate
@@ -99,6 +106,20 @@ pub(super) fn emit_if(cond: &Expr, then_branch: &Expr, else_branch: &Expr) -> St
     let cond_s = emit_expr(cond);
     let then_s = with_declared_vars_scope(|| emit_expr_tail(then_branch));
     let else_s = with_declared_vars_scope(|| emit_expr_tail(else_branch));
+    // Not a bare literal beside an owned String: the two arms of a Rust `if` are one type, and a literal is a `&str`
+    let is_str_lit = |e: &Expr| matches!(&*e.node, ExprNode::Lit { value: Literal::Str { .. } });
+    let owned = |e: &Expr, s: &str| {
+        !is_str_lit(e)
+            && (s.starts_with("format!(") || s.ends_with(".to_string()") || s.starts_with("String::")
+                || (matches!(&*e.node, ExprNode::If { .. }) && (s.contains("format!(") || s.contains(".to_string() }"))))
+    };
+    let (then_s, else_s) = if is_str_lit(then_branch) && owned(else_branch, &else_s) {
+        (format!("{then_s}.to_string()"), else_s)
+    } else if is_str_lit(else_branch) && owned(then_branch, &then_s) {
+        (then_s, format!("{else_s}.to_string()"))
+    } else {
+        (then_s, else_s)
+    };
     format!("if {cond_s} {{ {then_s} }} else {{ {else_s} }}")
 }
 
@@ -287,6 +308,15 @@ pub(super) fn emit_bool_op(
                 if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
         );
         let lhs_is_bool = matches!(left.ty.as_ref(), Some(crate::ty::Ty::Bool));
+        // Not a second default: a module slot read already answers its type's default for nil, which `|| {}` / `|| []` names again
+        let empty_literal = matches!(&*right.node, ExprNode::Hash { entries, .. } if entries.is_empty())
+            || matches!(&*right.node, ExprNode::Array { elements, .. } if elements.is_empty());
+        if lhs_is_option && empty_literal && matches!(&*left.node, ExprNode::Ivar { .. }) {
+            let lhs_s = emit_expr(left);
+            if lhs_s.ends_with(".unwrap_or_default()") {
+                return lhs_s;
+            }
+        }
         if lhs_is_option {
             // `hash[k] || default` — the body-typer types `hash[k]` as
             // `Option<V>`, but rust emits Send `[]` as `hash[k]`
@@ -505,6 +535,16 @@ pub(super) fn emit_case(scrutinee: &Expr, arms: &[crate::expr::Arm]) -> String {
 /// Emit
 ///   let Some(name) = name else { <then-branch> };
 /// which rebinds `name` to the unwrapped value.
+/// A branch that is one Option-typed value (a call or a local read), not a statement whose type happens to be nil-able.
+fn answers_option_value(branch: &Expr) -> bool {
+    let value = match &*branch.node {
+        ExprNode::Send { method, .. } => !method.as_str().ends_with('=') || matches!(method.as_str(), "==" | "!=" | "<=" | ">="),
+        ExprNode::Var { .. } => true,
+        _ => false,
+    };
+    value && branch.ty.as_ref().is_some_and(super::util::is_option_ty)
+}
+
 fn try_emit_param_guard_unwrap(guard: &Expr) -> Option<(String, String)> {
     use crate::ty::Ty;
     let ExprNode::If { cond, then_branch, else_branch } = &*guard.node else {
@@ -519,10 +559,8 @@ fn try_emit_param_guard_unwrap(guard: &Expr) -> Option<(String, String)> {
     let ExprNode::Var { name: var_name, .. } = &*cond_recv.node else {
         return None;
     };
-    let recv_is_option = matches!(
-        cond_recv.ty.as_ref(),
-        Some(Ty::Union { variants }) if variants.iter().any(|v| matches!(v, Ty::Nil))
-    );
+    // Not any union with nil: one of several types besides nil is a `serde_json::Value`, which no `let Some` binds
+    let recv_is_option = cond_recv.ty.as_ref().is_some_and(super::util::is_option_ty);
     if !recv_is_option {
         return None;
     }

@@ -1,4 +1,6 @@
 # frozen_string_literal: true
+require_relative "i18n_locale_tag"
+require_relative "i18n_host"
 # `I18n.locale` / `I18n.default_locale` / `I18n.available_locales`, the
 # locale a request runs in, and the answers for a key the locale lacks.
 #
@@ -28,30 +30,42 @@ module I18n
     app_available_locales
   end
 
+  # The gem's set holds each locale as a String and a Symbol, so "en" and :en answer alike.
+  def self.locale_available?(locale)
+    !locale.nil? && !available_named(locale.to_s).nil?
+  end
+
+  # Not `name.to_sym`: Crystal cannot make a Symbol when it runs, and every locale that passes is one of these.
+  def self.available_named(name)
+    app_available_locales.find { |l| l.to_s == name }
+  end
+
   # The locale set for this thread, by name ("" when none is): a Symbol
   # read back out of `Thread.current` is a value the strict targets
   # cannot narrow, and a String they can. (Not `locale_set`: Spinel
   # spells `locale=` with that name.)
   def self.thread_locale_name
-    Thread.current[:roundhouse_i18n_locale].to_s
+    I18nHost.locale_name
   end
 
   def self.locale
-    set = thread_locale_name
-    set.empty? ? app_default_locale : set.to_sym
+    found = available_named(thread_locale_name)
+    found.nil? ? app_default_locale : found
   end
 
   # `I18n.locale = x`: an available locale, a Symbol or its String.
   def self.locale=(value)
-    Thread.current[:roundhouse_i18n_locale] = checked_locale(value).to_s
+    I18nHost.set_locale_name(checked_locale(value).to_s)
   end
 
   # `value` as the locale it names, or the gem's InvalidLocale, whose
   # message shows the value as `inspect` does (nil is not a locale).
   def self.checked_locale(value)
-    name = value.to_s.to_sym
-    return name if !value.nil? && app_available_locales.include?(name)
-    shown = value.nil? ? "nil" : (value.is_a?(Symbol) ? ":" + value.to_s : "\"" + value.to_s + "\"")
+    found = value.nil? ? nil : available_named(value.to_s)
+    return found unless found.nil?
+    # Not `value.to_s` in each arm: a strict target narrows `value` to a Symbol there and loses the conversion
+    name = value.to_s
+    shown = value.nil? ? "nil" : (value.is_a?(Symbol) ? ":" + name : "\"" + name + "\"")
     raise InvalidLocale, shown + " is not a valid locale"
   end
 
@@ -67,19 +81,21 @@ module I18n
   def self.enter_locale(value)
     return nil if value.nil?
     previous = locale.to_s
-    Thread.current[:roundhouse_i18n_locale] = checked_locale(value).to_s
+    I18nHost.set_locale_name(checked_locale(value).to_s)
     previous
   end
 
+  # Not `set_locale_name(previous) unless previous.nil?`: a strict target does not narrow the tested local
   def self.leave_locale(previous)
-    Thread.current[:roundhouse_i18n_locale] = previous unless previous.nil?
+    return nil if previous.nil?
+    I18nHost.set_locale_name(previous.to_s)
     nil
   end
 
   # Whether the running environment is one of `envs` (comma-separated),
   # where `config.i18n.fallbacks` differs by environment.
   def self.running_in?(envs)
-    envs.split(",").include?(Rails.env.to_s)
+    envs.split(",").include?(I18nHost.env_name)
   end
 
   class MissingTranslationData < ArgumentError
@@ -89,7 +105,7 @@ module I18n
   # is `config/application.rb`'s setting, and the comma-separated
   # `flipped` environments set the other value in their own file.
   def self.missing_raises(raises, flipped)
-    env = Rails.env.to_s
+    env = I18nHost.env_name
     flipped.split(",").include?(env) ? !raises : raises
   end
 
@@ -131,7 +147,7 @@ module I18n
     missing_translation(key, raises)
     last = key.split(".").last.to_s
     title = ActionView::ViewHelpers.html_escape("translation missing: " + key + details)
-    text = ActionView::ViewHelpers.html_escape(ActiveSupport.titleize(last))
+    text = ActionView::ViewHelpers.html_escape(ActiveSupport.titleize(last).to_s)
     "<span class=\"translation_missing\" title=\"" + title + "\">" + text + "</span>"
   end
 
@@ -211,7 +227,7 @@ module I18n
     loc = options.key?(:locale) ? locale_name(options[:locale]) : locale.to_s
     opaque = runtime_opaque
     runtime_chain(loc).each do |l|
-      found = opaque[l + "." + full]
+      found = opaque.fetch(l + "." + full, nil)
       return found unless found.nil?
     end
     []
@@ -253,7 +269,7 @@ module I18n
     i = 0
     while i < path.length
       key = path[i].to_s.to_sym
-      child = node[key]
+      child = node.fetch(key, nil)
       unless child.is_a?(Hash)
         child = {}
         node[key] = child
@@ -269,7 +285,7 @@ module I18n
     i = 0
     while i < path.length - 1
       key = path[i].to_s.to_sym
-      child = node[key]
+      child = node.fetch(key, nil)
       unless child.is_a?(Hash)
         child = {}
         node[key] = child
@@ -297,7 +313,7 @@ module I18n
   def self.runtime_lookup(loc, full, count)
     leaves = runtime_leaves
     runtime_chain(loc).each do |l|
-      text = leaves[l + "." + full]
+      text = leaves.fetch(l + "." + full, nil)
       return text unless text.nil?
       raise NotImplementedError, "I18n.t(\"#{full}\") answers a value that is not a String, which is not supported" if runtime_opaque.key?(l + "." + full)
       next unless runtime_nodes.key?(l + "." + full)
@@ -309,21 +325,21 @@ module I18n
 
   # Not `entry[form]` alone: with a locale's rule, I18n's Pluralization backend takes the `zero`, `0` and `1` keys first and `other` for a form the entry lacks.
   def self.plural_form(leaves, loc, node, count)
-    zero = leaves[node + ".zero"]
+    zero = leaves.fetch(node + ".zero", nil)
     return zero if count == 0 && !zero.nil?
     rule = plural_rule(loc)
     if rule.nil?
       form = count == 1 ? "one" : "other"
-      text = leaves[node + "." + form]
+      text = leaves.fetch(node + "." + form, nil)
       raise InvalidPluralizationData, "translation data #{node} can not be used with :count => #{count}. key '#{form}' is missing." if text.nil?
       return text
     end
     if count == 0 || count == 1
-      exact = leaves[node + "." + (count == 0 ? "0" : "1")]
+      exact = leaves.fetch(node + "." + (count == 0 ? "0" : "1"), nil)
       return exact unless exact.nil?
     end
     form = plural_category(rule, count)
-    text = leaves[node + "." + form] || leaves[node + ".other"]
+    text = leaves.fetch(node + "." + form, nil) || leaves.fetch(node + ".other", nil)
     raise InvalidPluralizationData, "translation data #{node} can not be used with :count => #{count}. key '#{form}' is missing." if text.nil?
     text
   end
@@ -331,7 +347,7 @@ module I18n
   def self.plural_rule(loc)
     rules = runtime_rules
     runtime_chain(loc).each do |l|
-      rule = rules[l]
+      rule = rules.fetch(l, nil)
       return rule unless rule.nil?
     end
     nil
@@ -383,7 +399,8 @@ module I18n
     if token == "of"
       size = rule[plural_step].to_s.to_i
       found = false
-      size.times { found = true if plural_num(rule, ops) == x }
+      # Not `found = true if ...`: each step reads the next operand, so every one runs, and a modifier if in a block is a statement C# cannot put there
+      size.times { found = plural_num(rule, ops) == x || found }
       return found
     end
     y = plural_num(rule, ops)
@@ -404,7 +421,7 @@ module I18n
       return a % b
     end
     return plural_num(rule, ops).floor.to_f if token == "floor"
-    value = ops[token]
+    value = ops.fetch(token, nil)
     value.nil? ? token.to_f : value
   end
 
@@ -416,8 +433,8 @@ module I18n
 
   def self.runtime_chain(loc)
     chains = runtime_chains
-    env = Rails.env.to_s
-    chains[loc + "\u001C" + env] || chains[loc + "\u001C"] || [loc]
+    env = I18nHost.env_name
+    chains.fetch(loc + "\u001C" + env, nil) || chains.fetch(loc + "\u001C", nil) || [loc]
   end
 
   # `%{name}` filled from the options that are not the gem's reserved ones, as I18n.interpolate does; none given leaves the text as it is.
@@ -456,17 +473,23 @@ module I18n
   # Not folded per locale at the call: an app with a hundred locales made every `t` a hundred-arm case.
   def self.translate_site(id, loc, key, count, names, values, details, raises, in_view, escape_plain)
     entry = site_entry(id, loc, key)
-    kind = entry[0]
-    html = entry[1] == "1"
+    # Not the fields read bare: an Array's element may be nil to the typer, and a strict target holds each one as a String
+    kind = entry[0].to_s
+    html = entry[1].to_s == "1"
     if kind == "m"
-      shown = entry[2].empty? ? loc + "." + key : entry[2]
+      named = entry[2].to_s
+      shown = named.empty? ? loc + "." + key : named
       return missing_translation_tag(shown, details, raises) if in_view
-      return entry[3].empty? ? missing_translation(shown, raises) : missing_translation_among(shown, entry[3], raises)
+      considered = entry[3].to_s
+      return considered.empty? ? missing_translation(shown, raises) : missing_translation_among(shown, considered, raises)
     end
     return subtree_translation(key) if kind == "s"
-    template = entry[2]
+    template = entry[2].to_s
     if kind == "p"
-      template = (count == 0 && entry[2] == "1") ? entry[3] : (count == 1 ? entry[4] : entry[5])
+      # Not `count == 0`: a count is an Integer or a Float, and a strict target compares one number type, as Ruby's 1.0 == 1 does
+      zero = !count.nil? && count.to_f == 0.0
+      one = !count.nil? && count.to_f == 1.0
+      template = (zero && entry[2].to_s == "1") ? entry[3].to_s : (one ? entry[4].to_s : entry[5].to_s)
     end
     out = render_template(template, count, names, values, html)
     escape_plain && !html ? ActionView::ViewHelpers.html_escape(out) : out
@@ -482,98 +505,114 @@ module I18n
 
   def self.site_entry_in(id, loc, key)
     table = translation_table
-    env = Rails.env.to_s
+    env = I18nHost.env_name
     sep = "\u001C"
     # Not the any-environment key before this environment's "*": an environment with entries of its own has them all.
-    found = table[id + sep + loc + sep + env + sep + key]
-    found = table[id + sep + loc + sep + env + sep + "*"] if found.nil? && !key.empty?
-    found = table[id + sep + loc + sep + sep + key] if found.nil?
-    found = table[id + sep + loc + sep + sep + "*"] if found.nil? && !key.empty?
+    found = table.fetch(id + sep + loc + sep + env + sep + key, nil)
+    found = table.fetch(id + sep + loc + sep + env + sep + "*", nil) if found.nil? && !key.empty?
+    found = table.fetch(id + sep + loc + sep + sep + key, nil) if found.nil?
+    found = table.fetch(id + sep + loc + sep + sep + "*", nil) if found.nil? && !key.empty?
     found
   end
 
   def self.render_template(template, count, names, values, html)
     out = ""
     template.split("\u001D").each do |part|
-      next if part.empty?
-      body = part[1, part.length - 1].to_s
-      if part[0, 1] == "n"
-        at = names.index(body)
-        value = at.nil? ? (body == "count" ? count.to_s : "%{" + body + "}") : values[at].to_s
-        out = out + (html ? ActionView::ViewHelpers.html_escape(value) : value)
-      else
-        out = out + body
+      # Not `next if part.empty?`: Rust emits this block as a closure, where `next` has no spelling yet
+      unless part.empty?
+        body = part[1, part.length - 1].to_s
+        if part[0, 1] == "n"
+          at = names.index(body)
+          value = at.nil? ? (body == "count" ? count.to_s : "%{" + body + "}") : values[at].to_s
+          out = out + (html ? ActionView::ViewHelpers.html_escape(value) : value)
+        else
+          out = out + body
+        end
       end
     end
     out
   end
 
+  # Not each reader's own ivar tested for nil: the TypeScript emitter folds an ivar named after its reader into a field that starts filled
   def self.translation_table
-    load_translation_table if @translation_table.nil?
-    @translation_table || {}
+    load_translation_table unless @table_loaded == true
+    @site_table || {}
   end
 
   def self.runtime_leaves
-    load_translation_table if @runtime_leaves.nil?
-    @runtime_leaves || {}
+    load_runtime_catalog unless @catalog_loaded == true
+    @leaf_table || {}
   end
 
   def self.runtime_nodes
-    load_translation_table if @runtime_nodes.nil?
-    @runtime_nodes || {}
+    load_runtime_catalog unless @catalog_loaded == true
+    @node_table || {}
   end
 
   def self.runtime_order
-    load_translation_table if @runtime_order.nil?
-    @runtime_order || []
+    load_runtime_catalog unless @catalog_loaded == true
+    @leaf_order || []
   end
 
   def self.runtime_empties
-    load_translation_table if @runtime_empties.nil?
-    @runtime_empties || {}
+    load_runtime_catalog unless @catalog_loaded == true
+    @empty_table || {}
   end
 
   def self.runtime_chains
-    load_translation_table if @runtime_chains.nil?
-    @runtime_chains || {}
+    load_runtime_catalog unless @catalog_loaded == true
+    @chain_table || {}
   end
 
   def self.translation_entries
-    load_translation_table if @translation_entries.nil?
-    @translation_entries || []
+    load_translation_table unless @table_loaded == true
+    @entry_list || []
   end
 
   # A line ends in a "." field: `split` drops trailing empty fields, and a template or a key can be empty.
   def self.runtime_rules
-    load_translation_table if @runtime_rules.nil?
-    @runtime_rules || {}
+    load_runtime_catalog unless @catalog_loaded == true
+    @rule_table || {}
   end
 
   def self.runtime_opaque
-    load_translation_table if @runtime_opaque.nil?
-    @runtime_opaque || {}
+    load_runtime_catalog unless @catalog_loaded == true
+    @opaque_table || {}
   end
 
+  # Not one loop over every kind: the core targets drop the catalog's readers, and a T line per key keeps each kind a single write
   def self.load_translation_table
     table = {}
+    entries = []
+    sep = "\u001C"
+    I18nHost.table_text.split("\u001E").each do |line|
+      fields = line.split("\u001F")
+      kind = fields[0].to_s
+      if kind == "E"
+        entries << (fields[1, fields.length - 2] || [])
+      elsif kind == "T"
+        table[fields[1].to_s + sep + fields[2].to_s + sep + fields[3].to_s + sep + fields[4].to_s] = fields[5].to_s.to_i
+      end
+    end
+    @entry_list = entries
+    @site_table = table
+    @table_loaded = true
+    nil
+  end
+
+  def self.load_runtime_catalog
     rules = {}
     opaque = {}
-    entries = []
-    keys = {}
     leaves = {}
     nodes = {}
     order = []
     empties = {}
     chains = {}
     sep = "\u001C"
-    File.read(File.join(Rails.root.to_s, "config", "i18n_translations")).split("\u001E").each do |line|
+    I18nHost.table_text.split("\u001E").each do |line|
       fields = line.split("\u001F")
-      kind = fields[0]
-      if kind == "E"
-        entries << fields[1, fields.length - 2]
-      elsif kind == "K"
-        keys[fields[1]] = fields[2, fields.length - 3]
-      elsif kind == "L" || kind == "M"
+      kind = fields[0].to_s
+      if kind == "L" || kind == "M"
         if kind == "L"
           leaves[fields[1]] = fields[2].to_s
         else
@@ -584,7 +623,7 @@ module I18n
         parts = fields[1].split(".")
         j = parts.length - 1
         while j > 1
-          nodes[parts[0, j].join(".")] = true
+          nodes[(parts[0, j] || []).join(".")] = true
           j -= 1
         end
       elsif kind == "O"
@@ -592,27 +631,17 @@ module I18n
       elsif kind == "R"
         rules[fields[1]] = fields[2].to_s.split(" ")
       elsif kind == "F"
-        chains[fields[1] + sep + fields[2]] = fields[3].to_s.split(",")
-      elsif kind == "B"
-        names = keys[fields[1]] || []
-        prefix = fields[1] + sep + fields[2] + sep + fields[3] + sep
-        i = 0
-        while i < names.length
-          at = fields[4 + i]
-          table[prefix + names[i]] = at.to_i unless at == "-"
-          i += 1
-        end
+        chains[fields[1].to_s + sep + fields[2].to_s] = fields[3].to_s.split(",")
       end
     end
-    @runtime_leaves = leaves
-    @runtime_nodes = nodes
-    @runtime_order = order
-    @runtime_empties = empties
-    @runtime_chains = chains
-    @runtime_rules = rules
-    @runtime_opaque = opaque
-    @translation_entries = entries
-    @translation_table = table
+    @leaf_table = leaves
+    @node_table = nodes
+    @leaf_order = order
+    @empty_table = empties
+    @chain_table = chains
+    @rule_table = rules
+    @opaque_table = opaque
+    @catalog_loaded = true
     nil
   end
 

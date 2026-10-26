@@ -118,6 +118,12 @@ fn has_local_mutation(body: &Expr) -> bool {
                 walk(scrutinee) || arms.iter().any(|a| walk(&a.body))
             }
             ExprNode::Cast { value, .. } => walk(value),
+            ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+                walk(body)
+                    || rescues.iter().any(|r| walk(&r.body))
+                    || else_branch.as_ref().is_some_and(walk)
+                    || ensure.as_ref().is_some_and(walk)
+            }
             _ => false,
         }
     }
@@ -176,6 +182,13 @@ fn calls_self_method_in(body: &Expr, mutating: &HashSet<String>) -> bool {
                     || arms.iter().any(|a| walk(&a.body, mutating))
             }
             ExprNode::Cast { value, .. } => walk(value, mutating),
+            // `rescue_from` wraps the controller's dispatcher, the Case above, in a begin/rescue
+            ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+                walk(body, mutating)
+                    || rescues.iter().any(|r| walk(&r.body, mutating))
+                    || else_branch.as_ref().is_some_and(|x| walk(x, mutating))
+                    || ensure.as_ref().is_some_and(|x| walk(x, mutating))
+            }
             _ => false,
         }
     }

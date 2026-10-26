@@ -12,6 +12,7 @@ use crate::dialect::Comment;
 use crate::expr::ArrayStyle;
 use crate::span::Span;
 
+use super::prism_api::PrismLocation;
 // ---- Leaf literal extractors -------------------------------------------
 
 /// The span of a `def`'s name token (`show` in `def show`, `title=` in
@@ -19,21 +20,21 @@ use crate::span::Span;
 /// position a method header has, since the body's spans start at its
 /// first statement.
 pub(super) fn def_name_span(def: &ruby_prism::DefNode<'_>, file: &str) -> crate::span::Span {
-    let loc = def.name_loc();
+    let (start, end) = super::prism_api::span_offsets(&def.name_loc());
     crate::span::Span {
         file: super::sources::file_id(file),
-        start: loc.start_offset() as u32,
-        end: loc.end_offset() as u32,
+        start,
+        end,
     }
 }
 
 /// Span of an arbitrary Prism node in `file`.
 pub(super) fn node_span(node: &Node<'_>, file: &str) -> crate::span::Span {
-    let loc = node.location();
+    let (start, end) = super::prism_api::span_offsets(&node.location());
     crate::span::Span {
         file: super::sources::file_id(file),
-        start: loc.start_offset() as u32,
-        end: loc.end_offset() as u32,
+        start,
+        end,
     }
 }
 
@@ -73,6 +74,72 @@ pub(super) fn bool_value(node: &Node<'_>) -> Option<bool> {
 
 pub(super) fn integer_value(node: &Node<'_>) -> Option<i64> {
     integer_i64(&node.as_integer_node()?.value())
+}
+
+/// The seconds an `ActiveSupport::Duration` literal stands for: an Integer
+/// literal times a unit (`1.week`, `2.months`), bare or with `.seconds`
+/// (`1.week.seconds`, itself a Duration of the same length). Rails 8.1.4's
+/// fixed lengths: a month is 2629746 seconds (a year / 12) and a year
+/// 31556952 (365.2425 days). A Duration equals its Integer seconds, both
+/// ways, so a list of them answers `include?` as the Integer list does.
+pub(super) fn duration_seconds(node: &Node<'_>) -> Option<i64> {
+    let call = node.as_call_node()?;
+    if call.arguments().is_some() || call.block().is_some() {
+        return None;
+    }
+    let receiver = call.receiver()?;
+    let unit: i64 = match constant_id_str(&call.name()) {
+        // `1.week.seconds`: the Duration's own `.seconds` is the same length.
+        "seconds" if receiver.as_call_node().is_some() => return duration_seconds(&receiver),
+        "second" | "seconds" => 1,
+        "minute" | "minutes" => 60,
+        "hour" | "hours" => 3_600,
+        "day" | "days" => 86_400,
+        "week" | "weeks" => 604_800,
+        "fortnight" | "fortnights" => 1_209_600,
+        "month" | "months" => 2_629_746,
+        "year" | "years" => 31_556_952,
+        _ => return None,
+    };
+    integer_value(&receiver)?.checked_mul(unit)
+}
+
+/// A non-interpolated `/pattern/flags` literal's pattern (prism's
+/// UNESCAPED bytes — the regex engine's view, same as
+/// `dialect::Literal::Regex`) and its flags, in canonical `imxoesun`
+/// order (matching Ruby's own `Regexp#to_s`). `None` for anything but
+/// a plain regex literal node — an interpolated regex
+/// (`InterpolatedRegularExpressionNode`) has no single pattern string
+/// and is each caller's own concern.
+pub(super) fn regexp_literal_flags(node: &Node<'_>) -> Option<(String, String)> {
+    let r = node.as_regular_expression_node()?;
+    let mut flags = String::new();
+    if r.is_ignore_case() {
+        flags.push('i');
+    }
+    if r.is_multi_line() {
+        flags.push('m');
+    }
+    if r.is_extended() {
+        flags.push('x');
+    }
+    if r.is_once() {
+        flags.push('o');
+    }
+    if r.is_euc_jp() {
+        flags.push('e');
+    }
+    if r.is_windows_31j() {
+        flags.push('s');
+    }
+    if r.is_utf_8() {
+        flags.push('u');
+    }
+    if r.is_ascii_8bit() {
+        flags.push('n');
+    }
+    let pattern = String::from_utf8_lossy(r.unescaped()).into_owned();
+    Some((pattern, flags))
 }
 
 /// An integer literal's value as `i64`.
@@ -163,7 +230,11 @@ pub(super) fn primary_class_with_scope<'pr>(
     while is_namespace_wrapper(&primary.1) {
         let inside = primary.1.location();
         match classes.next() {
-            Some(next) if next.1.location().start_offset() < inside.end_offset() => primary = next,
+            Some(next)
+                if next.1.location().start_offset() < inside.end_offset() =>
+            {
+                primary = next
+            }
             _ => break,
         }
     }
@@ -238,6 +309,10 @@ fn collect_classes<'pr, F: FnMut(&[String], &[String], ruby_prism::ClassNode<'pr
     }
     if let Some(body) = hoisted_singleton_body(node) {
         collect_classes(&body, scope, nesting, out);
+        return;
+    }
+    if let Some(decl) = self_guarded_body(node, Some(scope)) {
+        collect_classes(&decl, scope, nesting, out);
         return;
     }
     if let Some(m) = node.as_module_node() {
@@ -334,6 +409,10 @@ fn collect_modules<'pr, F: FnMut(&[String], ruby_prism::ModuleNode<'pr>)>(
     }
     if let Some(body) = hoisted_singleton_body(node) {
         collect_modules(&body, scope, out);
+        return;
+    }
+    if let Some(decl) = self_guarded_body(node, Some(scope)) {
+        collect_modules(&decl, scope, out);
     }
 }
 
@@ -563,6 +642,21 @@ pub(super) fn constant_path_segments_strs(node: &Node<'_>) -> Option<Vec<String>
     None
 }
 
+/// Whether a value sits anywhere under this constant path
+/// (`self.class::KINDS`, `self.class::NAMES::LABEL`): the path is then a
+/// lookup through that value. `constant_path_segments_strs` keeps the
+/// constant names alone, for the declaration sites that check their own
+/// literal spelling (`alba::literal_constant`).
+pub(super) fn constant_path_has_value_parent(p: &ruby_prism::ConstantPathNode<'_>) -> bool {
+    match p.parent() {
+        None => false,
+        Some(parent) => match parent.as_constant_path_node() {
+            Some(inner) => constant_path_has_value_parent(&inner),
+            None => parent.as_constant_read_node().is_none(),
+        },
+    }
+}
+
 pub(super) fn constant_path_segments(p: &ruby_prism::ConstantPathNode<'_>) -> Vec<Symbol> {
     constant_path_segments_strs(&p.as_node())
         .unwrap_or_default()
@@ -583,10 +677,35 @@ pub(super) fn constant_path_is_rooted(p: &ruby_prism::ConstantPathNode<'_>) -> b
 
 pub(super) fn flatten_statements<'pr>(node: Node<'pr>) -> Vec<Node<'pr>> {
     if let Some(s) = node.as_statements_node() {
-        s.body().iter().collect()
+        s.body().iter().flat_map(|stmt| match self_guarded_body(&stmt, None) {
+            Some(body) => vec![body],
+            None => vec![stmt],
+        }).collect()
     } else {
         vec![node]
     }
+}
+
+// Only a reload guard around its own declaration: any other guard, or an `else`, takes the branch what else loaded decides.
+pub(super) fn self_guarded_body<'pr>(node: &Node<'pr>, scope: Option<&[String]>) -> Option<Node<'pr>> {
+    let unless = node.as_unless_node()?;
+    if unless.else_clause().is_some() {
+        return None;
+    }
+    let guarded = constant_path_of(&unless.predicate().as_defined_node()?.value())?;
+    let mut body = unless.statements()?.body().iter();
+    let decl = body.next()?;
+    if body.next().is_some() {
+        return None;
+    }
+    let declared = if let Some(m) = decl.as_module_node() {
+        module_name_path(&m)?
+    } else if let Some(c) = decl.as_class_node() {
+        class_name_path(&c)?
+    } else {
+        return None;
+    };
+    (guarded == declared || scope.is_some_and(|scope| guarded.iter().eq(scope.iter().chain(&declared)))).then_some(decl)
 }
 
 pub(super) fn find_call_named<'pr>(

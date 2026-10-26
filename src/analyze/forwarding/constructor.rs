@@ -78,44 +78,198 @@ pub(super) fn index_unmodeled_lookup_mutations(app: &App, index: &mut SourceCont
         })
         .map(|owner| (*owner).clone())
         .collect();
-    let mut modules_with_mutating_hooks = initial_mutating_hook_modules(index, &known_modules);
-    resolve_mutating_hook_modules(
-        app,
-        &constructor_owner_aliases,
-        &modules_with_custom_new,
-        &modules_with_custom_initialize,
-        &known_modules,
-        &mut modules_with_mutating_hooks,
-    );
-    let context = ConstructorMutationContext {
-        owner_aliases: &constructor_owner_aliases,
-        modules_with_custom_new: &modules_with_custom_new,
-        modules_with_custom_initialize: &modules_with_custom_initialize,
-        known_modules: &known_modules,
-        modules_with_mutating_hooks: &modules_with_mutating_hooks,
+    // Asked twice: whether anything may replace `new` or supply the
+    // `initialize` it runs (the owner's whole constructor), and whether
+    // anything may replace `new` itself. An own `initialize` shadows what a
+    // mixin supplies, never what replaces `new`
+    // (`shadows_supplied_initialize`).
+    let no_initializers = HashSet::new();
+    for question in [Question::NewOrInitialize, Question::New] {
+        let modules_with_custom_initialize = match question {
+            Question::NewOrInitialize => &modules_with_custom_initialize,
+            Question::New => &no_initializers,
+        };
+        let mut modules_with_mutating_hooks = initial_mutating_hook_modules(index, &known_modules, question);
+        resolve_mutating_hook_modules(
+            app,
+            &constructor_owner_aliases,
+            &modules_with_custom_new,
+            modules_with_custom_initialize,
+            &known_modules,
+            question,
+            &mut modules_with_mutating_hooks,
+        );
+        let context = ConstructorMutationContext {
+            owner_aliases: &constructor_owner_aliases,
+            modules_with_custom_new: &modules_with_custom_new,
+            modules_with_custom_initialize,
+            known_modules: &known_modules,
+            modules_with_mutating_hooks: &modules_with_mutating_hooks,
+            question,
+        };
+        let findings = collect_app_lookup_mutations(app, &context);
+        let set = match question {
+            Question::NewOrInitialize => &mut index.unmodeled_constructor_lookup,
+            Question::New => &mut index.unmodeled_new_lookup,
+        };
+        set.extend(findings.hook_owners);
+        set.extend(findings.mutated_owners);
+        set.extend(findings.explicit_mutation_targets);
+    }
+    index.shadowing_initializers = shadows_supplied_initialize(app);
+}
+
+/// Owners whose own `initialize` comes first in Ruby's lookup and never
+/// passes the call on, so an `initialize` a mixin supplies is never run:
+/// every `initialize` the owner defines is a plain `def initialize` in a
+/// body that declares the owner (the class body or a reopening; not one a
+/// concern's `included do` splices in, an alias, or `define_method`, which
+/// the lookup scan already refuses), none of them contains `super` in any
+/// form, and nothing is prepended to the owner, in its body or by an
+/// initializer (`Widget.prepend(Mod)`, `App::module_mixins`): a prepended
+/// module comes before it. Anything else is not shadowing.
+fn shadows_supplied_initialize(app: &App) -> HashSet<ClassId> {
+    let resolver = app.const_resolver.for_sources(&app.sources);
+    let initialize = Symbol::from("initialize");
+    let plain = |owner: &ClassId, method: &MethodDef| {
+        let span = method.name_span;
+        !span.is_synthetic()
+            // A `def`'s name token; an alias copy spans its statement.
+            && (span.end - span.start) as usize == initialize.as_str().len()
+            && resolver.namespaces_declared_in(span.file).any(|name| name == owner.0.as_str())
+            && !contains_super(&method.body)
+            && method.params.iter().all(|param| param.default.as_ref().is_none_or(|d| !contains_super(d)))
     };
-    let findings = collect_app_lookup_mutations(app, &context);
-    index
-        .unmodeled_constructor_lookup
-        .extend(findings.hook_owners);
-    index
-        .unmodeled_constructor_lookup
-        .extend(findings.mutated_owners);
-    index
-        .unmodeled_constructor_lookup
-        .extend(findings.explicit_mutation_targets);
+    let prepends = |expr: &Expr| matches!(&*expr.node, ExprNode::Send { method, .. } if method.as_str() == "prepend");
+    // An initializer names its target as written; a full name or a
+    // trailing segment that could be the owner counts, failing closed.
+    let prepended_elsewhere = |owner: &ClassId| {
+        let full = owner.0.as_str();
+        app.module_mixins.iter().any(|mixin| {
+            let target = mixin.target.as_str().trim_start_matches("::");
+            mixin.kind == crate::app::MixinKind::Prepend
+                && (target == full || full.ends_with(&format!("::{target}")) || target.ends_with(&format!("::{full}")))
+        })
+    };
+    let mut out = HashSet::new();
+    for class in super::classes(app).filter(|class| !class.is_module) {
+        let defs: Vec<&MethodDef> = class
+            .methods
+            .iter()
+            .filter(|m| m.receiver == MethodReceiver::Instance && m.name == initialize)
+            .collect();
+        if !defs.is_empty()
+            && defs.iter().all(|m| plain(&class.name, m))
+            && !class.unknown_calls.iter().any(prepends)
+            && !prepended_elsewhere(&class.name)
+        {
+            out.insert(class.name.clone());
+        }
+    }
+    for model in &app.models {
+        let defs: Vec<&MethodDef> =
+            model.methods().filter(|m| m.receiver == MethodReceiver::Instance && m.name == initialize).collect();
+        let prepended = model.body.iter().any(|item| {
+            matches!(item, crate::dialect::ModelBodyItem::Unknown { expr, .. } if prepends(expr))
+        });
+        if !defs.is_empty() && defs.iter().all(|m| plain(&model.name, m)) && !prepended && !prepended_elsewhere(&model.name) {
+            out.insert(model.name.clone());
+        }
+    }
+    out
+}
+
+/// Any `super` in `expr`: bare, `super()`, `super(...)`, in a block or a
+/// rescue. Reachability is not asked.
+fn contains_super(expr: &Expr) -> bool {
+    if matches!(&*expr.node, ExprNode::Super { .. }) {
+        return true;
+    }
+    let mut found = false;
+    expr.node.for_each_child(&mut |child| found = found || contains_super(child));
+    found
+}
+
+/// Which part of a constructor a lookup question covers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Question {
+    /// `new` and the `initialize` it runs.
+    NewOrInitialize,
+    /// `new` alone.
+    New,
+}
+
+/// Framework mixins verified not to replace `Klass.new` through a hook
+/// (Rails 8.1.4, Sidekiq 8.1.7; oracle `framework_includes_new.rb`):
+/// included into a class, its `new` is still `Class#new` and no module the
+/// include adds to the singleton chain defines `new` or `allocate`. The
+/// flag is whether an includer without an `initialize` of its own gets one
+/// from it (`url_helpers` brings `ActionDispatch::Routing::UrlFor`'s,
+/// `ActiveModel::Model` brings `ActiveModel::API`'s).
+///
+/// This answers only the constructor-lookup question. These modules are
+/// not source modules for anything else (method resolution, keyword
+/// owners, …). Re-verify the oracle on a Rails or Sidekiq upgrade.
+const MIXINS_WITHOUT_CONSTRUCTOR_HOOK: &[(&str, bool)] = &[
+    ("ActionView::Helpers::AssetTagHelper", false),
+    ("ActionView::Helpers::NumberHelper", false),
+    ("ActionView::Helpers::TextHelper", false),
+    ("ActionView::Helpers::TagHelper", false),
+    ("ActionView::Helpers::UrlHelper", false),
+    ("ActionView::Helpers::SanitizeHelper", false),
+    ("ActionView::Helpers::JavaScriptHelper", false),
+    ("Rails.application.routes.url_helpers", true),
+    ("ActiveModel::Model", true),
+    ("ActiveModel::Validations", false),
+    ("ActiveModel::Attributes", true),
+    ("Sidekiq::Worker", false),
+];
+
+/// Whether `name` is a catalog mixin that leaves `question` unaffected.
+fn catalog_leaves(name: &str, question: Question) -> bool {
+    MIXINS_WITHOUT_CONSTRUCTOR_HOOK.iter().any(|(entry, brings_initialize)| {
+        *entry == name && (question == Question::New || !brings_initialize)
+    })
+}
+
+/// The catalog spelling of an `include` argument: a constant path, or the
+/// `Rails.application.routes.url_helpers` call chain.
+fn mixin_spelling(arg: &Expr) -> Option<String> {
+    match &*arg.node {
+        ExprNode::Const { path } => Some(
+            path.iter().filter(|part| !part.as_str().is_empty()).map(|part| part.as_str()).collect::<Vec<_>>().join("::"),
+        ),
+        ExprNode::Send { recv: Some(recv), method, args, block: None, .. } if args.is_empty() => {
+            let ExprNode::Send { recv: Some(recv), method: routes, args, block: None, .. } = &*recv.node else { return None };
+            let ExprNode::Send { recv: Some(recv), method: application, args: app_args, block: None, .. } = &*recv.node else { return None };
+            let ExprNode::Const { path } = &*recv.node else { return None };
+            (args.is_empty()
+                && app_args.is_empty()
+                && method.as_str() == "url_helpers"
+                && routes.as_str() == "routes"
+                && application.as_str() == "application"
+                && path.iter().filter(|p| !p.as_str().is_empty()).map(|p| p.as_str()).eq(["Rails"]))
+            .then(|| "Rails.application.routes.url_helpers".to_string())
+        }
+        _ => None,
+    }
 }
 
 fn initial_mutating_hook_modules(
     index: &SourceContractIndex<'_>,
     known_modules: &HashSet<ClassId>,
+    question: Question,
 ) -> HashSet<ClassId> {
     fn module_graph_is_complete(
         index: &SourceContractIndex<'_>,
         owner: &ClassId,
         known_modules: &HashSet<ClassId>,
+        question: Question,
         seen: &mut HashSet<ClassId>,
     ) -> bool {
+        if catalog_leaves(owner.0.as_str(), question) {
+            return true;
+        }
         if !known_modules.contains(owner) {
             return false;
         }
@@ -125,12 +279,12 @@ fn initial_mutating_hook_modules(
         index
             .includes(owner)
             .iter()
-            .all(|included| module_graph_is_complete(index, included, known_modules, seen))
+            .all(|included| module_graph_is_complete(index, included, known_modules, question, seen))
     }
     known_modules
         .iter()
         .filter(|module| {
-            !module_graph_is_complete(index, module, known_modules, &mut HashSet::new())
+            !module_graph_is_complete(index, module, known_modules, question, &mut HashSet::new())
         })
         .cloned()
         .collect()
@@ -142,6 +296,7 @@ fn resolve_mutating_hook_modules(
     modules_with_custom_new: &HashSet<ClassId>,
     modules_with_custom_initialize: &HashSet<ClassId>,
     known_modules: &HashSet<ClassId>,
+    question: Question,
     modules_with_mutating_hooks: &mut HashSet<ClassId>,
 ) {
     loop {
@@ -166,6 +321,7 @@ fn resolve_mutating_hook_modules(
                     modules_with_custom_initialize,
                     known_modules,
                     modules_with_mutating_hooks,
+                    question,
                 };
                 let scan = scan_constructor_mutations(
                     &method.body,
@@ -328,7 +484,13 @@ fn constructor_contract<'a>(
     if !contracts.verified_hierarchy(owner, &mut HashSet::new()) {
         return Some(ConstructorContract::UnknownLookup);
     }
-    if inherits_unmodeled_constructor_lookup(contracts, owner, &mut HashSet::new()) {
+    // `new` itself may be replaced: no own `initialize` changes that.
+    // Otherwise only a mixin's `initialize` is unmodeled, and the owner's
+    // own plain one, which never passes the call on, shadows it.
+    let unmodeled = inherits_unmodeled_constructor_lookup(contracts, owner, Question::New, &mut HashSet::new())
+        || (inherits_unmodeled_constructor_lookup(contracts, owner, Question::NewOrInitialize, &mut HashSet::new())
+            && !contracts.shadowing_initializers.contains(owner));
+    if unmodeled {
         // An unmodeled mixin with no source constructor anywhere in the
         // modeled lookup chain: nothing was flattened that a verbatim
         // keyword call could mis-bind to, so keep the call as written.
@@ -382,19 +544,24 @@ fn declares_source_constructor(
 fn inherits_unmodeled_constructor_lookup(
     contracts: &SourceContractIndex<'_>,
     owner: &ClassId,
+    question: Question,
     seen: &mut HashSet<ClassId>,
 ) -> bool {
     if !seen.insert(owner.clone()) {
         return false;
     }
-    contracts.unmodeled_constructor_lookup.contains(owner)
+    let unmodeled = match question {
+        Question::NewOrInitialize => &contracts.unmodeled_constructor_lookup,
+        Question::New => &contracts.unmodeled_new_lookup,
+    };
+    unmodeled.contains(owner)
         || contracts.includes(owner).iter().any(|included| {
-            !contracts.modules.contains(included)
-                || inherits_unmodeled_constructor_lookup(contracts, included, seen)
+            (!contracts.modules.contains(included) && !catalog_leaves(included.0.as_str(), question))
+                || inherits_unmodeled_constructor_lookup(contracts, included, question, seen)
         })
         || contracts
             .parent(owner)
-            .is_some_and(|parent| inherits_unmodeled_constructor_lookup(contracts, parent, seen))
+            .is_some_and(|parent| inherits_unmodeled_constructor_lookup(contracts, parent, question, seen))
 }
 
 #[derive(Default)]
@@ -446,6 +613,7 @@ pub(super) fn scan_constructor_mutations(
                 context.modules_with_custom_initialize,
                 context.known_modules,
                 context.modules_with_mutating_hooks,
+                context.question,
             );
             let mutates_callback_receiver = callback_receiver.is_some_and(|callback_receiver| {
                 recv.as_ref()
@@ -513,6 +681,7 @@ pub(super) struct ConstructorMutationContext<'a> {
     pub(super) modules_with_custom_initialize: &'a HashSet<ClassId>,
     pub(super) known_modules: &'a HashSet<ClassId>,
     pub(super) modules_with_mutating_hooks: &'a HashSet<ClassId>,
+    pub(super) question: Question,
 }
 
 pub(super) struct ConstructorOwnerAliases {
@@ -580,6 +749,7 @@ fn mutates_constructor_lookup_method(
     modules_with_custom_initialize: &HashSet<ClassId>,
     known_modules: &HashSet<ClassId>,
     modules_with_mutating_hooks: &HashSet<ClassId>,
+    question: Question,
 ) -> bool {
     if matches!(method, "send" | "public_send") {
         let Some((dynamic_method, rest)) = args.split_first() else {
@@ -598,6 +768,7 @@ fn mutates_constructor_lookup_method(
             modules_with_custom_initialize,
             known_modules,
             modules_with_mutating_hooks,
+            question,
         );
     }
     match method {
@@ -616,6 +787,9 @@ fn mutates_constructor_lookup_method(
                         .any(|module| super::constant_names_class(arg, module))
             }),
         "include" => args.iter().any(|arg| {
+            if mixin_spelling(arg).is_some_and(|name| catalog_leaves(&name, question)) {
+                return false;
+            }
             modules_with_custom_initialize
                 .iter()
                 .chain(modules_with_mutating_hooks)

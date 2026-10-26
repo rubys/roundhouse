@@ -322,3 +322,27 @@ pub fn test_body_stmts(body: &Expr) -> Vec<&Expr> {
         _ => vec![body],
     }
 }
+
+/// The one code `assert_response sym` accepts; `None` for a range
+/// (`:success`, `:redirect`, `:error`) or a symbol Rails does not know.
+pub fn asserted_status_code(sym: &str) -> Option<u16> {
+    match sym {
+        "missing" => Some(404),
+        "success" | "redirect" | "error" => None,
+        other => crate::lower::status_literal::status_sym_code(other),
+    }
+}
+
+#[cfg(test)]
+mod asserted_status_tests {
+    use super::asserted_status_code;
+
+    #[test]
+    fn a_symbol_names_its_code_and_a_range_names_none() {
+        assert_eq!(asserted_status_code("not_found"), Some(404));
+        assert_eq!(asserted_status_code("missing"), Some(404));
+        assert_eq!(asserted_status_code("unprocessable_entity"), Some(422));
+        assert_eq!(asserted_status_code("redirect"), None);
+        assert_eq!(asserted_status_code("no_such_status"), None);
+    }
+}

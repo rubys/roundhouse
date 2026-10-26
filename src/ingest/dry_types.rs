@@ -199,7 +199,7 @@ pub(super) fn types_modules(sources: &[crate::span::SourceFile]) -> Vec<(String,
     }
     let mut finder = Finder { nesting: Vec::new(), found: Vec::new() };
     for source in sources.iter().filter(|s| s.text.contains("Dry.Types")) {
-        let parsed = ruby_prism::parse(source.text.as_bytes());
+        let parsed = super::prism::parse_silent(source.text.as_bytes());
         ruby_prism::Visit::visit(&mut finder, &parsed.node());
     }
     finder.found

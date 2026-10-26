@@ -195,6 +195,24 @@ module ActiveJob
   class DeserializationError < StandardError
   end
 
+  # `raise ActiveJob::EnqueueError, message` — the job was not queued.
+  class EnqueueError < StandardError
+  end
+
+  # `include ActiveJob::Continuable` and `step :name { ... }`. Each step
+  # runs once on this instance. The cursor is in memory: there is no
+  # queue checkpoint to resume from after the process stops.
+  module Continuable
+    def step(name)
+      @completed_steps = [] if @completed_steps.nil?
+      key = name.to_s
+      return nil if @completed_steps.include?(key)
+      result = yield
+      @completed_steps << key
+      result
+    end
+  end
+
   # Run every job queued so far, FIFO, and answer how many ran.
   #
   # A RAISE IS ONE LOST JOB, NEVER A LOST DRAIN, and on the spinel lane

@@ -86,6 +86,7 @@ pub fn load_gem_boundary<V: Vfs + ?Sized>(
             || extensions.lock_gated_requires.iter().any(|row| row.gem == name)
             || extensions.is_rails_dependent(name);
         if lock.is_in_repo(name)
+            || lock.is_source(name)
             || (!extension_gem && !matches!(fate_of(name), GemFate::Unknown | GemFate::Modeled))
         {
             continue;
@@ -131,7 +132,7 @@ pub fn load_gem_boundary<V: Vfs + ?Sized>(
 /// across files (or twice in one) accumulates: the first parent wins,
 /// methods and ancestry union.
 pub fn read_rbi(source: &[u8], gem: &str, out: &mut GemBoundary) {
-    let result = ruby_prism::parse(source);
+    let result = super::prism::parse_silent(source);
     let node = result.node();
     let Some(program) = node.as_program_node() else { return };
     let statements = program.statements().body().iter().collect::<Vec<_>>();

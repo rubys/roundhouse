@@ -88,7 +88,7 @@ fn a_brace_block_after_command_arguments_stays_the_calls_own() {
     let source = std::fs::read_to_string(emitted.join("app/models/bracelab/builder.rb"))
         .expect("emitted builder");
     let parse = ruby_prism::parse(source.as_bytes());
-    let parse_errors: Vec<String> = parse.errors().map(|e| e.message().to_string()).collect();
+    let parse_errors: Vec<String> = parse.errors().map(|e| String::from_utf8_lossy(e.message()).into_owned()).collect();
     assert!(parse_errors.is_empty(), "{parse_errors:?} in:\n{source}");
 
     let main = emitted.join("main").display().to_string();

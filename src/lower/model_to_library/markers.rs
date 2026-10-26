@@ -323,14 +323,29 @@ fn const_symbol_array(model: &Model, path: &[Symbol]) -> Vec<Symbol> {
         if target.last() != Some(wanted) {
             continue;
         }
+        // `%i(a b).freeze` is the same list; `freeze` returns its receiver.
+        let value = match &*value.node {
+            ExprNode::Send { recv: Some(recv), method, args, block: None, .. }
+                if method.as_str() == "freeze" && args.is_empty() =>
+            {
+                recv
+            }
+            _ => value,
+        };
         let ExprNode::Array { elements, .. } = &*value.node else { continue };
+        // `attr_accessor` takes a Symbol or a String name (`%w[a b]`).
+        // Any other element raises `TypeError` there, after the names
+        // before it are defined, so a list holding one expands to nothing
+        // rather than to the names around it.
         return elements
             .iter()
-            .filter_map(|e| match &*e.node {
+            .map(|e| match &*e.node {
                 ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
+                ExprNode::Lit { value: Literal::Str { value } } => Some(Symbol::from(value.as_str())),
                 _ => None,
             })
-            .collect();
+            .collect::<Option<Vec<_>>>()
+            .unwrap_or_default();
     }
     Vec::new()
 }
@@ -488,6 +503,42 @@ pub(super) fn push_attr_accessor_methods(methods: &mut Vec<MethodDef>, model: &M
     }
 }
 
+/// Whether `attribute :name, :<ty>` over a column of `col` keeps that
+/// column's storage and reader. Rails' declared type replaces the
+/// column's everywhere (Rails 8.1.4: `attribute :enabled, :string` over a
+/// boolean column reads `"true"` back, and `:boolean` over a string column
+/// casts `"yes"` to true), but only a model's writer takes the attribute's
+/// cast here: the reader, hydration, the SQL escape and
+/// `read_attribute`/`write_attribute` follow the column. So the
+/// attribute's cast applies only where the two agree, which is the
+/// column's own type:
+///
+/// | column | attribute type |
+/// |---|---|
+/// | string, text | `:string` |
+/// | integer, bigint | `:integer` |
+/// | float | `:float` |
+/// | decimal | `:decimal` |
+/// | boolean | `:boolean` |
+/// | datetime | `:datetime` |
+///
+/// Any other pair keeps the column's cast and is reported, and so does an
+/// array column (`t.bigint "tag_ids", array: true`): its value is an
+/// Array, whose element type is not the column's.
+pub(crate) fn attribute_matches_column(ty: &str, col: &crate::schema::Column) -> bool {
+    use crate::schema::ColumnType;
+    !col.array
+        && matches!(
+        (ty, &col.col_type),
+        ("string", ColumnType::String { .. } | ColumnType::Text)
+            | ("integer", ColumnType::Integer | ColumnType::BigInt)
+            | ("float", ColumnType::Float)
+            | ("decimal", ColumnType::Decimal { .. })
+            | ("boolean", ColumnType::Boolean)
+            | ("datetime", ColumnType::DateTime)
+    )
+}
+
 /// `attribute :name, :type` declarations (the Rails Attributes API) in
 /// a model body — `(name, type)` pairs, both symbol literals. The
 /// 2-arg form only; `default:`-carrying declarations stay unclaimed
@@ -495,6 +546,24 @@ pub(super) fn push_attr_accessor_methods(methods: &mut Vec<MethodDef>, model: &M
 /// lowerer's `bool_reader_names` (a `:boolean` attribute is a bool
 /// reader for `f.check_box`) and the permit-writer filter (an
 /// `attribute` writer is assignable).
+/// `attribute :name, :type, default: v` beside the model's own `def name=`.
+/// Rails applies the default without that writer, and the writer's `super`
+/// reaches the attribute's generated one; here a source `def` replaces a
+/// generated writer or is dropped by it, so the declaration stays unclaimed
+/// and reported.
+pub(crate) fn default_beside_source_writer(body: &[ModelBodyItem], args: &[Expr]) -> bool {
+    let [name, _, options] = args else { return false };
+    let ExprNode::Lit { value: Literal::Sym { value: name } } = &*name.node else { return false };
+    if attribute_api_default(options).is_none() {
+        return false;
+    }
+    let setter = format!("{}=", name.as_str());
+    body.iter().any(|item| {
+        matches!(item, ModelBodyItem::Method { method, .. }
+            if method.name.as_str() == setter && method.receiver == MethodReceiver::Instance)
+    })
+}
+
 pub(crate) fn attribute_api_decls(body: &[ModelBodyItem]) -> Vec<(Symbol, Symbol)> {
     let mut out = Vec::new();
     for item in body {
@@ -502,7 +571,10 @@ pub(crate) fn attribute_api_decls(body: &[ModelBodyItem]) -> Vec<(Symbol, Symbol
         let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
             continue;
         };
-        if method.as_str() != "attribute" || args.len() != 2 {
+        if method.as_str() != "attribute"
+            || !(args.len() == 2 || (args.len() == 3 && attribute_api_default(&args[2]).is_some()))
+            || default_beside_source_writer(body, args)
+        {
             continue;
         }
         let (
@@ -517,23 +589,211 @@ pub(crate) fn attribute_api_decls(body: &[ModelBodyItem]) -> Vec<(Symbol, Symbol
     out
 }
 
+/// The `default:` of a 3-arg `attribute :name, :type, default: v`, when
+/// this lowering reads it: `Some(None)` for `nil` (no default), `Some(Some(
+/// e))` for a literal (`true`, `false`, a number, a String, a Symbol) or a
+/// zero-arity lambda's body. `None` for any other option or default.
+pub(crate) fn attribute_api_default(options: &Expr) -> Option<Option<Expr>> {
+    let ExprNode::Hash { entries, .. } = &*options.node else { return None };
+    let [(key, value)] = entries.as_slice() else { return None };
+    if !matches!(&*key.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "default") {
+        return None;
+    }
+    match &*value.node {
+        ExprNode::Lit { value: Literal::Nil } => Some(None),
+        ExprNode::Lit {
+            value: Literal::Bool { .. } | Literal::Int { .. } | Literal::Float { .. } | Literal::Str { .. } | Literal::Sym { .. },
+        } => Some(Some(value.clone())),
+        ExprNode::Lambda { params, rest_param: None, extra_params, block_param: None, body, .. }
+            if params.is_empty() && extra_params.is_empty() =>
+        {
+            Some(Some(body.clone()))
+        }
+        _ => None,
+    }
+}
+
+/// Each `attribute :name, :type, default: v` with a default this lowering
+/// reads (`attribute_api_default`), as `(name, the literal or lambda body)`.
+pub(crate) fn attribute_api_defaults(body: &[ModelBodyItem]) -> Vec<(Symbol, Expr)> {
+    let mut out = Vec::new();
+    for item in body {
+        let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
+            continue;
+        };
+        if method.as_str() != "attribute" || args.len() != 3 || default_beside_source_writer(body, args) {
+            continue;
+        }
+        let ExprNode::Lit { value: Literal::Sym { value: name } } = &*args[0].node else { continue };
+        if let Some(Some(default)) = attribute_api_default(&args[2]) {
+            out.push((name.clone(), default));
+        }
+    }
+    out
+}
+
+/// The flag a defaulted attribute's reader and writer share: set once the
+/// default has been applied or the attribute written.
+pub(crate) fn default_applied_ivar(name: &Symbol) -> Symbol {
+    Symbol::from(format!("{}_default_applied", name.as_str()))
+}
+
+/// The class method that answers a model attribute's default.
+pub(crate) fn default_method_name(name: &Symbol) -> Symbol {
+    Symbol::from(format!("__default_{}", name.as_str()))
+}
+
+/// `attr` is an `attribute :attr, :boolean` whose reader and writer are the
+/// synthesized ones (the model defines neither itself), so its value is
+/// what `push_attribute_api_methods`' Boolean cast stores.
+pub(crate) fn synthesized_boolean_attribute(model: &Model, attr: &Symbol) -> bool {
+    let setter = Symbol::from(format!("{}=", attr.as_str()));
+    attribute_api_decls(&model.body).iter().any(|(name, ty)| name == attr && ty.as_str() == "boolean")
+        && !crate::lower::model_to_library::model_defines_instance_method(model, attr)
+        && !crate::lower::model_to_library::model_defines_instance_method(model, &setter)
+}
+
 /// `attribute :name, :type` — typed virtual attributes (lobsters'
 /// `attribute :mod_note, :boolean` on Message, `:is_unread` on the
 /// SQL-view-backed ReplyingComment). Reader is a typed ivar read;
-/// the `:boolean` writer applies Rails' Type::Boolean cast over the
-/// realistic value space via to_s (`"" / "0" / "false" / "f"` →
-/// false, anything else → true — the form roundtrip assigns "0"/"1"
-/// strings, and an uncast write would leave "0" truthy). Other types
-/// assign verbatim. A custom method in the model body wins (the
+/// the `:boolean` writer applies Rails 8.1.4's Type::Boolean cast via
+/// `to_s`, inline so every target compiles it: `"0" / "f" / "F" /
+/// "false" / "FALSE" / "off" / "OFF"` (and `false`, `0`, `:off`) →
+/// false; anything else → true. On the ruby family `""` (and nil, whose
+/// `to_s` it is) → nil, as Rails casts it, and the reader is `bool?`. A
+/// strict target keeps a non-nil `Bool` field, so there nil and `""` are
+/// still `false`. The form roundtrip assigns "0"/"1" strings, and an
+/// uncast write would leave "0" truthy. Other types assign verbatim. A custom method in the model body wins (the
 /// synthesizers run before `push_user_methods`, which drops
 /// collisions — same dance as attr_accessor).
-pub(super) fn push_attribute_api_methods(methods: &mut Vec<MethodDef>, model: &Model) {
+fn nilable_bool() -> Ty {
+    Ty::Union { variants: vec![Ty::Bool, Ty::Nil].into() }
+}
+
+/// Does the model body `def name` as an instance method?
+fn source_defines_reader(model: &Model, name: &Symbol) -> bool {
+    model.body.iter().any(|item| {
+        matches!(item, crate::dialect::ModelBodyItem::Method { method, .. }
+            if method.name == *name && method.receiver == MethodReceiver::Instance)
+    })
+}
+
+pub(super) fn push_attribute_api_methods(methods: &mut Vec<MethodDef>, model: &Model, runtime_relation: super::RuntimeRelation) {
+    let keeps_nil = runtime_relation == super::RuntimeRelation::Present;
+    let bool_ty = || if keeps_nil { nilable_bool() } else { Ty::Bool };
     if is_primary_abstract_class(model) {
         return;
     }
+    let defaults = attribute_api_defaults(&model.body);
     for (name, ty_sym) in attribute_api_decls(&model.body) {
         let is_bool = ty_sym.as_str() == "boolean";
         let setter = Symbol::from(format!("{}=", name.as_str()));
+        let default = defaults.iter().find(|(n, _)| *n == name).map(|(_, d)| d.clone());
+        // `attribute :x, :type, default: v` (Rails 8.1.4): the default is
+        // applied on the attribute's first read, through the writer (so it
+        // is cast as an assigned value is), and kept; a write before that
+        // read means it is never read. The value is a class method's body,
+        // so a lambda runs with the class as `self` and a String literal is
+        // a fresh String each time.
+        //
+        // A reader the model defines itself is what Rails reads, default or
+        // not. The default-applying reader would replace it (only a bare
+        // `@name` read yields to a source `def`), so that attribute keeps
+        // the plain reader instead.
+        if let Some(default) = &default
+            && !methods.iter().any(|m| m.name == name)
+            && !methods.iter().any(|m| m.name == setter)
+            && !source_defines_reader(model, &name)
+        {
+            let applied = default_applied_ivar(&name);
+            let default_method = default_method_name(&name);
+            methods.push(MethodDef {
+                visibility: crate::dialect::MethodVisibility::Public,
+                unsupported_formals: None,
+                has_anonymous_block: false,
+                name_span: crate::span::Span::synthetic(),
+                name: default_method.clone(),
+                receiver: MethodReceiver::Class,
+                params: Vec::new(),
+                body: default.clone(),
+                signature: None,
+                effects: EffectSet::default(),
+                enclosing_class: Some(model.name.0.clone()),
+                kind: AccessorKind::Method,
+                is_async: false,
+                mutates_self: false,
+                block_param: None,
+            });
+            let class_of_self = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
+                    method: Symbol::from("class"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            let read_default = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send { recv: Some(class_of_self), method: default_method, args: vec![], block: None, parenthesized: false },
+            );
+            let apply = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
+                    method: setter.clone(),
+                    args: vec![read_default],
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            let not_applied = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(Expr::new(Span::synthetic(), ExprNode::Ivar { name: applied.clone() })),
+                    method: Symbol::from("!"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            let read = Expr::new(Span::synthetic(), ExprNode::Ivar { name: name.clone() });
+            let read = if is_bool { with_ty(read, bool_ty()) } else { read };
+            methods.push(MethodDef {
+                visibility: crate::dialect::MethodVisibility::Public,
+                unsupported_formals: None,
+                has_anonymous_block: false,
+                name_span: crate::span::Span::synthetic(),
+                name: name.clone(),
+                receiver: MethodReceiver::Instance,
+                params: Vec::new(),
+                body: Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Seq {
+                        exprs: vec![
+                            Expr::new(
+                                Span::synthetic(),
+                                ExprNode::If {
+                                    cond: not_applied,
+                                    then_branch: apply,
+                                    else_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+                                },
+                            ),
+                            read,
+                        ],
+                    },
+                ),
+                signature: if is_bool { Some(super::fn_sig(vec![], bool_ty())) } else { None },
+                effects: EffectSet::default(),
+                enclosing_class: Some(model.name.0.clone()),
+                kind: AccessorKind::AttributeReader,
+                is_async: false,
+                mutates_self: true,
+                block_param: None,
+            });
+        }
         if !methods.iter().any(|m| m.name == name) {
             methods.push(MethodDef {
                 visibility: crate::dialect::MethodVisibility::Public,
@@ -544,15 +804,12 @@ pub(super) fn push_attribute_api_methods(methods: &mut Vec<MethodDef>, model: &M
                 receiver: MethodReceiver::Instance,
                 params: Vec::new(),
                 body: if is_bool {
-                    with_ty(
-                        Expr::new(Span::synthetic(), ExprNode::Ivar { name: name.clone() }),
-                        Ty::Bool,
-                    )
+                    with_ty(Expr::new(Span::synthetic(), ExprNode::Ivar { name: name.clone() }), bool_ty())
                 } else {
                     Expr::new(Span::synthetic(), ExprNode::Ivar { name: name.clone() })
                 },
                 signature: if is_bool {
-                    Some(super::fn_sig(vec![], Ty::Bool))
+                    Some(super::fn_sig(vec![], bool_ty()))
                 } else {
                     None
                 },
@@ -572,7 +829,9 @@ pub(super) fn push_attribute_api_methods(methods: &mut Vec<MethodDef>, model: &M
             );
             let body = if is_bool {
                 // s = value.to_s
-                // @name = (s == "" || s == "0" || s == "false" || s == "f" ? false : true)
+                // @name = if s == "" then nil            (ruby family)
+                //         elsif s == "0" || s == "f" || … || s == "OFF" then false
+                //         else true end
                 let s = Symbol::from("s");
                 let s_ref = |_: ()| {
                     Expr::new(
@@ -623,8 +882,8 @@ pub(super) fn push_attribute_api_methods(methods: &mut Vec<MethodDef>, model: &M
                         },
                     )
                 };
-                let falsey = or(or(or(eq(""), eq("0")), eq("false")), eq("f"));
-                let cast = Expr::new(
+                let falsey = ["f", "F", "false", "FALSE", "off", "OFF"].into_iter().fold(eq("0"), |acc, lit| or(acc, eq(lit)));
+                let cast_present = with_ty(Expr::new(
                     Span::synthetic(),
                     ExprNode::If {
                         cond: falsey,
@@ -643,7 +902,22 @@ pub(super) fn push_attribute_api_methods(methods: &mut Vec<MethodDef>, model: &M
                             Ty::Bool,
                         ),
                     },
-                );
+                ), Ty::Bool);
+                let cast = if keeps_nil {
+                    with_ty(
+                        Expr::new(
+                            Span::synthetic(),
+                            ExprNode::If {
+                                cond: eq(""),
+                                then_branch: with_ty(Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }), Ty::Nil),
+                                else_branch: cast_present,
+                            },
+                        ),
+                        nilable_bool(),
+                    )
+                } else {
+                    cast_present
+                };
                 let assign = Expr::new(
                     Span::synthetic(),
                     ExprNode::Assign {
@@ -669,7 +943,19 @@ pub(super) fn push_attribute_api_methods(methods: &mut Vec<MethodDef>, model: &M
                 name: setter,
                 receiver: MethodReceiver::Instance,
                 params: vec![Param::positional(value)],
-                body,
+                // A defaulted attribute's write marks the default as read.
+                body: if default.is_some() {
+                    let mark = Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Assign {
+                            target: LValue::Ivar { name: default_applied_ivar(&name) },
+                            value: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Bool { value: true } }),
+                        },
+                    );
+                    Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![body, mark] })
+                } else {
+                    body
+                },
                 signature: None,
                 effects: EffectSet::default(),
                 enclosing_class: Some(model.name.0.clone()),
@@ -1016,6 +1302,21 @@ pub(super) fn push_cache_key_methods(methods: &mut Vec<MethodDef>, model: &Model
     );
     methods.push(str_method(model, "cache_key", key));
 
+    // THE MODEL'S OWN `cache_version` DECIDES THE VERSION, as in Rails,
+    // whose `cache_key_with_version` is `"#{cache_key}-#{cache_version}"`
+    // (or `cache_key` alone when that answers nil). The `updated_at` fast
+    // path below reads the column directly and would skip an override:
+    // campfire's `Message#cache_version` answers its trigger-maintained
+    // `presentation_version`, which moves on edits that leave the
+    // message's `updated_at` alone (a creator renamed by foreign SQL), and
+    // keyed by `updated_at` the old fragment was served after them.
+    if methods.iter().any(|m| {
+        m.name.as_str() == "cache_version" && m.receiver == MethodReceiver::Instance
+    }) {
+        methods.push(str_method(model, "cache_key_with_version", versioned_by_cache_version(span, &table_name, persisted)));
+        return;
+    }
+
     // `updated_at` decides the version. Read through the `<col>_raw`
     // storage ivar (`col_storage_name`), which for a temporal column is
     // the ISO-8601 text as stored — the public reader would parse it
@@ -1096,6 +1397,75 @@ pub(super) fn push_cache_key_methods(methods: &mut Vec<MethodDef>, model: &Model
     methods.push(str_method(model, "cache_key_with_version", versioned));
 }
 
+/// Rails' `cache_key_with_version` over the model's own `cache_version`:
+///
+///   version = cache_version
+///   version.nil? ? cache_key : "#{cache_key}-#{version}"
+///
+/// with the synthesized `cache_key` spelled out in the joined arm, as
+/// the `updated_at` path does: `persisted? ? "<table>/#{@id}-#{version}"
+/// : "<table>/new-#{version}"`, one String rather than the key's and
+/// then the joined one, for every element of a cached collection.
+fn versioned_by_cache_version(span: Span, table_name: &str, persisted: Expr) -> Expr {
+    let version = Symbol::from("version");
+    let call = |recv: Option<Expr>, method: &str| {
+        Expr::new(
+            span,
+            ExprNode::Send {
+                recv,
+                method: Symbol::from(method),
+                args: Vec::new(),
+                block: None,
+                parenthesized: false,
+            },
+        )
+    };
+    let read = || Expr::new(span, ExprNode::Var { id: VarId(0), name: version.clone() });
+    let assign = Expr::new(
+        span,
+        ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: version.clone() },
+            value: call(Some(Expr::new(span, ExprNode::SelfRef)), "cache_version"),
+        },
+    );
+    let interp = |parts: Vec<crate::expr::InterpPart>| {
+        with_ty(Expr::new(span, ExprNode::StringInterp { parts }), Ty::Str)
+    };
+    let joined = with_ty(
+        Expr::new(
+            span,
+            ExprNode::If {
+                cond: persisted,
+                then_branch: interp(vec![
+                    crate::expr::InterpPart::Text { value: format!("{table_name}/") },
+                    crate::expr::InterpPart::Expr {
+                        expr: Expr::new(span, ExprNode::Ivar { name: Symbol::from("id") }),
+                    },
+                    crate::expr::InterpPart::Text { value: "-".to_string() },
+                    crate::expr::InterpPart::Expr { expr: read() },
+                ]),
+                else_branch: interp(vec![
+                    crate::expr::InterpPart::Text { value: format!("{table_name}/new-") },
+                    crate::expr::InterpPart::Expr { expr: read() },
+                ]),
+            },
+        ),
+        Ty::Str,
+    );
+    let pick = with_ty(
+        Expr::new(
+            span,
+            ExprNode::If {
+                cond: call(Some(read()), "nil?"),
+                then_branch: with_ty(call(None, "cache_key"), Ty::Str),
+                else_branch: joined,
+            },
+        ),
+        Ty::Str,
+    );
+    seq(vec![assign, pick])
+}
+
 /// A no-arg instance method returning String — the shape both cache-key
 /// methods share.
 fn str_method(model: &Model, name: &str, body: Expr) -> MethodDef {
@@ -1123,7 +1493,7 @@ fn str_method(model: &Model, name: &str, body: Expr) -> MethodDef {
 ///
 ///   def after_create
 ///     __touch_message = message
-///     __touch_message.touch unless __touch_message.nil?
+///     __touch_message.touch_later unless __touch_message.nil?
 ///   end
 ///
 /// and the same in `after_update`, `after_destroy` and `after_touch`.
@@ -1205,9 +1575,14 @@ fn push_belongs_to_touches(methods: &mut Vec<MethodDef>, model: &Model) {
             ));
         }
         // A stamped column has to reach the row with the timestamp, so
-        // that form finishes with the whole-row `touch_written`; the bare
-        // form's `touch` writes `updated_at` alone, as Rails' does.
-        let finish = if matches!(touch, Touch::Column(_)) { "touch_written" } else { "touch" };
+        // that form finishes with the whole-row `touch_written`, at once.
+        // The bare form is Rails' `touch_later`: inside the save's
+        // transaction the parent is stamped once, just before COMMIT,
+        // however many of this record's hooks (and its siblings') asked
+        // (runtime/ruby/active_record/connection.rb); outside one, and on
+        // a strict target (base.rb), it is `touch`, which writes
+        // `updated_at` alone, as Rails' does.
+        let finish = if matches!(touch, Touch::Column(_)) { "touch_written" } else { "touch_later" };
         guarded.push(Expr::new(
             span,
             ExprNode::Send {
@@ -1332,33 +1707,36 @@ fn push_symbol_callback(
         )
     };
 
-    let mut body = seq(cb.targets.iter().map(self_call).collect());
+    // `if:` / `unless:` — a target runs only when the condition holds,
+    // exactly as Rails. The condition was already negated for `unless:`
+    // at ingest. Rails registers each target of `before_save :a, :b,
+    // if: :c` as its own callback with the condition, so it is asked
+    // again before each target: one that changes it skips the next.
+    let guarded = |call: Expr| match &cb.condition {
+        Some(cond) => Expr::new(
+            span,
+            ExprNode::If {
+                cond: cond.clone(),
+                then_branch: seq(vec![call]),
+                else_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+            },
+        ),
+        None => call,
+    };
+    let mut body = match cb.targets.as_slice() {
+        [only] => guarded(self_call(only)),
+        targets => seq(targets.iter().map(|t| guarded(self_call(t))).collect()),
+    };
     if matches!(cb.hook, Hook::BeforeValidation | Hook::AfterValidation) && cb.on.is_some() {
         // Validations never run on destroy; ingest rejects this.
         let Some(on) = cb.on else { return };
         let Some(guarded) = guard_validation_on(body, on, span) else { return };
         body = guarded;
     }
-    // `if:` / `unless:` — the callback runs only when the condition
-    // holds, exactly as Rails. The condition was already negated for
-    // `unless:` at ingest.
-    if let Some(cond) = &cb.condition {
-        body = Expr::new(
-            span,
-            ExprNode::If {
-                cond: cond.clone(),
-                then_branch: body,
-                else_branch: Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Lit { value: Literal::Nil },
-                ),
-            },
-        );
-    }
     fold_into_or_push(methods, model, hook_name, body);
 }
 
-/// Wrap a validation-hook body in the `new_record?` guard its `on:`
+/// Wrap a validation-hook body in the `persisted?` guard its `on:`
 /// restriction lowers to — accurate at validation time, since the
 /// insert hasn't happened yet. `on: :destroy` has no reading here
 /// (validations never run on destroy) and returns None: drop the
@@ -1370,28 +1748,33 @@ fn guard_validation_on(
 ) -> Option<Expr> {
     use crate::dialect::CallbackOn as On;
 
-    let new_record = Expr::new(
+    // `self.persisted?`, not a bare `new_record?`: `persisted?` is
+    // synthesized per model on every target, while `new_record?` lives on
+    // the runtime Base, which a rust or go struct does not inherit (rust
+    // read the bare call as a free `new_record_pred()`, go as a missing
+    // `self.NewRecord` field). Same spelling as the cache-key marker above.
+    let persisted = Expr::new(
         span,
         ExprNode::Send {
-            recv: None,
-            method: Symbol::from("new_record?"),
+            recv: Some(Expr::new(span, ExprNode::SelfRef)),
+            method: Symbol::from("persisted?"),
             args: vec![],
             block: None,
             parenthesized: false,
         },
     );
     let cond = match on {
-        On::Create => new_record,
-        On::Update => Expr::new(
+        On::Create => Expr::new(
             span,
             ExprNode::Send {
-                recv: Some(new_record),
+                recv: Some(persisted),
                 method: Symbol::from("!"),
                 args: vec![],
                 block: None,
                 parenthesized: false,
             },
         ),
+        On::Update => persisted,
         On::Destroy => return None,
     };
     let mut guarded = Expr::new(
@@ -1425,6 +1808,7 @@ fn hook_method_name(hook: crate::dialect::CallbackHook) -> &'static str {
         Hook::AfterCommit => "after_commit",
         Hook::AfterSaveCommit => "after_save_commit",
         Hook::AfterRollback => "after_rollback",
+        Hook::AfterInitialize => "after_initialize",
     }
 }
 

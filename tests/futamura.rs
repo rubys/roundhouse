@@ -1317,6 +1317,43 @@ fn a_class_side_method_missing_is_reached() {
     assert!(stderr.contains("whole-route: 0 GET action(s) served by the lowered app; 1 left to Rails"), "{stderr}");
 }
 
+/// INTERIM (rubys/roundhouse#58, same re-lowering as the fallback above):
+/// a send whose receiver is typed to ANOTHER class's value constant
+/// (`Gadget::DEFAULT`, with `class Gadget; DEFAULT = Gadget.new; ...`)
+/// re-lowers as `Ty::Class { id: "Gadget::DEFAULT" }` — a class that
+/// doesn't exist, since the re-lowering only seeds the enclosing class's
+/// own constants. Left unguarded, `index.lookup` finds nothing for that
+/// made-up id and the send dispatches to NOTHING instead of falling back
+/// to RTA, an unsound clear. Each case below reads `Gadget::DEFAULT` a
+/// different way (out of a Hash literal, through a local, out of an
+/// Array literal) and must still reach `Gadget#call`.
+///
+/// The top-level counterpart (`DEFAULT_GADGET = Gadget.new`, read back
+/// bare) was tried too: the re-lowering does mistype it the same way,
+/// but a bare top-level constant is already a construct the main
+/// analysis diagnoses as unsupported on its own (`constant not
+/// supported: DEFAULT_GADGET`, independent of this guard), so that
+/// route is already blocked before the planner's RTA fallback ever
+/// matters — not a case that can show this bug.
+#[test]
+fn typed_send_on_another_classs_value_constant_falls_back_to_rta() {
+    let gadget = "class Gadget\n  DEFAULT = Gadget.new\n\n  def call\n    Frobnicator::Spinner.new.spin\n  end\nend\n";
+    let cases = [
+        ("hash", "    @name = { w: Gadget::DEFAULT }[:w].call"),
+        ("local", "    x = Gadget::DEFAULT\n    @name = x.call"),
+        ("array", "    @name = [Gadget::DEFAULT].first.call"),
+    ];
+    let mut failed = Vec::new();
+    for (name, action) in cases {
+        let stderr = rta_ledger(&format!("rta-unknown-class-{name}"), action, "", &[("app/lib/gadget.rb", gadget)]);
+        let ok = stderr.contains("whole-route: 0 GET action(s) served by the lowered app; 1 left to Rails") && stderr.contains("Gadget#call");
+        if !ok {
+            failed.push(format!("{name}: {stderr}"));
+        }
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n\n"));
+}
+
 /// A minimal app whose `ruby` emit refuses one association (a `through:`
 /// hop keyed on a non-id column, Mastodon's `Status.reblogged_by_accounts`).
 fn app_with_a_ruby_refusal(src: &Path) {
@@ -1538,5 +1575,186 @@ mod preload_scopes {
         let init = &files.iter().find(|(p, _)| p == INITIALIZER).expect("initializer").1;
         assert!(init.contains("Futamura::Preload.static_scopes(\"User#published_posts\")\n"), "{init}");
         assert!(!init.contains("User#seen_posts"), "{init}");
+    }
+}
+
+/// A `where` value typed as a collection on every path: a `pluck` result,
+/// or a Relation held in a local. `ActiveRecord::StatementCache` refuses
+/// an Array, Hash, Range or Relation bind (`unsupported_value?`), so a
+/// site bound to one always runs its fallback: Rails answers, and the
+/// specialization is never used. Such a chain is left to Rails, as a
+/// literal collection already is. A value that is a collection on some
+/// paths only (`params[:name]`) is still bound.
+mod collection_binds {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    use roundhouse::analyze::Analyzer;
+    use roundhouse::emit::futamura::specialize;
+    use roundhouse::ingest::ingest_app_from_tree;
+
+    const CONTROLLER: &str = r#"class MembersController < ApplicationController
+  def index
+    rows = Member.where(active: true)
+    @named = Member.where(name: rows.pluck(:name)).to_a
+    @within = Member.where(id: rows).to_a
+    @one = Member.where(name: params[:name]).to_a
+  end
+end
+"#;
+
+    fn report() -> roundhouse::emit::futamura::Report {
+        let files: Vec<(&str, &str)> = vec![
+            (
+                "db/schema.rb",
+                "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"members\", force: :cascade do |t|\n    t.string \"name\"\n    t.boolean \"active\"\n  end\nend\n",
+            ),
+            ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
+            ("app/models/member.rb", "class Member < ApplicationRecord\nend\n"),
+            ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n"),
+            ("app/controllers/members_controller.rb", CONTROLLER),
+            ("config/routes.rb", "Rails.application.routes.draw do\n  resources :members, only: [:index]\nend\n"),
+        ];
+        let tree: HashMap<PathBuf, Vec<u8>> =
+            files.iter().map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec())).collect();
+        let mut app = ingest_app_from_tree(tree).expect("ingest");
+        Analyzer::new(&app).analyze(&mut app);
+        let mut out: Vec<(String, String)> = files.iter().map(|(p, c)| (p.to_string(), c.to_string())).collect();
+        specialize(&app, &mut out).unwrap()
+    }
+
+    fn left_to_rails(report: &roundhouse::emit::futamura::Report, line: usize) -> bool {
+        report.residue.iter().any(|r| {
+            r.contains(&format!("members_controller.rb:{line}:")) && r.contains("where value is a collection")
+        })
+    }
+
+    #[test]
+    fn a_pluck_result_is_not_a_bind() {
+        let report = report();
+        assert!(left_to_rails(&report, 4), "{:?}", report.residue);
+        assert!(!report.specialized.iter().any(|s| s.contains("members_controller.rb:4:")), "{:?}", report.specialized);
+    }
+
+    #[test]
+    fn a_relation_is_not_a_bind() {
+        let report = report();
+        assert!(left_to_rails(&report, 5), "{:?}", report.residue);
+        assert!(!report.specialized.iter().any(|s| s.contains("members_controller.rb:5:")), "{:?}", report.specialized);
+    }
+
+    #[test]
+    fn a_value_that_may_be_a_scalar_is_still_bound() {
+        let report = report();
+        assert!(report.specialized.iter().any(|s| s.contains("members_controller.rb:6:")), "{:?}", report.specialized);
+    }
+
+    /// A scope's parameter takes its call site's type: `by_names(rows.pluck(:name))`
+    /// binds an Array where the scope says `where(name: names)`, and is
+    /// left to Rails; `by_names(params[:name])` is still bound.
+    #[test]
+    fn a_scope_argument_carries_its_type() {
+        let files: Vec<(&str, &str)> = vec![
+            (
+                "db/schema.rb",
+                "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"members\", force: :cascade do |t|\n    t.string \"name\"\n    t.boolean \"active\"\n  end\nend\n",
+            ),
+            ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
+            ("app/models/member.rb", "class Member < ApplicationRecord\n  scope :by_names, ->(names) { where(name: names) }\nend\n"),
+            ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n"),
+            (
+                "app/controllers/members_controller.rb",
+                "class MembersController < ApplicationController\n  def index\n    rows = Member.where(active: true)\n    @named = Member.by_names(rows.pluck(:name)).to_a\n    @one = Member.by_names(params[:name]).to_a\n  end\nend\n",
+            ),
+            ("config/routes.rb", "Rails.application.routes.draw do\n  resources :members, only: [:index]\nend\n"),
+        ];
+        let tree: HashMap<PathBuf, Vec<u8>> =
+            files.iter().map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec())).collect();
+        let mut app = ingest_app_from_tree(tree).expect("ingest");
+        Analyzer::new(&app).analyze(&mut app);
+        let mut out: Vec<(String, String)> = files.iter().map(|(p, c)| (p.to_string(), c.to_string())).collect();
+        let report = specialize(&app, &mut out).unwrap();
+        assert!(
+            report.residue.iter().any(|r| r.contains("members_controller.rb:4:") && r.contains("where value is a collection")),
+            "{:?}",
+            report.residue
+        );
+        assert!(report.specialized.iter().any(|s| s.contains("members_controller.rb:5:")), "{:?}", report.specialized);
+    }
+
+    /// A PostgreSQL array column (`array: true`) is an Array on every path,
+    /// though the analysis types it as its element: a `where` over one, read
+    /// in the model (`tag_ids`) or through a record (`@member.tag_ids`), is
+    /// left to Rails. A plain column read is still bound.
+    #[test]
+    fn an_array_column_read_is_not_a_bind() {
+        let files: Vec<(&str, &str)> = vec![
+            (
+                "db/schema.rb",
+                "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"members\", force: :cascade do |t|\n    t.string \"name\"\n    t.bigint \"tag_ids\", array: true, default: [], null: false\n  end\nend\n",
+            ),
+            ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
+            (
+                "app/models/member.rb",
+                "class Member < ApplicationRecord\n  scope :by_ids, ->(ids) { where(id: ids) }\n  scope :named, ->(n) { where(name: n) }\n\n  def peers\n    Member.where(id: tag_ids).to_a\n  end\n\n  def namesakes\n    Member.where(name: name).to_a\n  end\n\n  def scoped_peers\n    Member.by_ids(tag_ids).to_a\n  end\n\n  def either_peers\n    Member.where(id: tag_ids || nil).to_a\n  end\n\n  def local_peers\n    ids = tag_ids\n    Member.where(id: ids).to_a\n  end\n\n  def scoped_namesakes\n    Member.named(name).to_a\n  end\n\n  def deep_peers\n    Member.where(id: tag_ids || nil || nil || nil || nil || nil || nil || nil || nil || nil).to_a\n  end\n\n  def chained_namesakes\n    Member.where(name: name || nil).to_a\n  end\nend\n",
+            ),
+            ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n"),
+            (
+                "app/controllers/members_controller.rb",
+                "class MembersController < ApplicationController\n  def index\n    @member = Member.find(params[:id])\n    @peers = Member.where(id: @member.tag_ids).to_a\n  end\nend\n",
+            ),
+            ("config/routes.rb", "Rails.application.routes.draw do\n  resources :members, only: [:index]\nend\n"),
+        ];
+        let tree: HashMap<PathBuf, Vec<u8>> =
+            files.iter().map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec())).collect();
+        let mut app = ingest_app_from_tree(tree).expect("ingest");
+        Analyzer::new(&app).analyze(&mut app);
+        let mut out: Vec<(String, String)> = files.iter().map(|(p, c)| (p.to_string(), c.to_string())).collect();
+        let report = specialize(&app, &mut out).unwrap();
+        let left = |file: &str, line: usize| {
+            report.residue.iter().any(|r| r.contains(&format!("{file}:{line}:")) && r.contains("where value is a collection"))
+        };
+        assert!(left("member.rb", 6), "{:?}", report.residue);
+        assert!(left("members_controller.rb", 4), "{:?}", report.residue);
+        assert!(report.specialized.iter().any(|s| s.contains("member.rb:10:")), "{:?}", report.specialized);
+        // Through a scope's parameter, a `||` operand and a local.
+        assert!(left("member.rb", 14), "{:?}", report.residue);
+        assert!(left("member.rb", 18), "{:?}", report.residue);
+        assert!(left("member.rb", 23), "{:?}", report.residue);
+        // A scope bound to a plain column read is still specialized.
+        assert!(report.specialized.iter().any(|s| s.contains("member.rb:27:")), "{:?}", report.specialized);
+        // Nested past the walk's limit, the value is left to Rails; a
+        // shallow plain-column value is still specialized.
+        assert!(left("member.rb", 31), "{:?}", report.residue);
+        assert!(report.specialized.iter().any(|s| s.contains("member.rb:35:")), "{:?}", report.specialized);
+    }
+
+    /// A parameter whose inferred type still holds a variable is not
+    /// evidence: callers passing `[]` and `nil` type `name` as `Array[T] |
+    /// nil`, while a call with a String is what the app runs. The site
+    /// stays bound.
+    #[test]
+    fn a_partly_inferred_collection_type_is_still_bound() {
+        let files: Vec<(&str, &str)> = vec![
+            (
+                "db/schema.rb",
+                "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"members\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n",
+            ),
+            ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
+            ("app/models/member.rb", "class Member < ApplicationRecord\nend\n"),
+            ("app/services/fetch_member_service.rb", "class FetchMemberService\n  def call(name)\n    Member.find_by(name:)\n  end\nend\n"),
+            (
+                "app/services/batch_service.rb",
+                "class BatchService\n  def first_batch\n    FetchMemberService.new.call([])\n  end\n\n  def none\n    FetchMemberService.new.call(nil)\n  end\nend\n",
+            ),
+            ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+        ];
+        let tree: HashMap<PathBuf, Vec<u8>> =
+            files.iter().map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec())).collect();
+        let mut app = ingest_app_from_tree(tree).expect("ingest");
+        Analyzer::new(&app).analyze(&mut app);
+        let mut out: Vec<(String, String)> = files.iter().map(|(p, c)| (p.to_string(), c.to_string())).collect();
+        let report = specialize(&app, &mut out).unwrap();
+        assert!(report.specialized.iter().any(|s| s.contains("fetch_member_service.rb:3:")), "{:?}", report.specialized);
     }
 }

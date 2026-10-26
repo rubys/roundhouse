@@ -2420,29 +2420,12 @@ fn find_action<'a>(
     }
 }
 
-/// The parent controller, resolving single-segment parents against the
-/// child's namespace (mirrors analyze's lexical resolution).
+/// The parent controller. Ingest stored the parent as Rubydex resolved it.
 fn parent_of<'a>(
     app: &'a App,
     controller: &'a crate::dialect::Controller,
 ) -> Option<&'a crate::dialect::Controller> {
-    let parent = controller.parent.as_ref()?;
-    find_controller(app, parent).or_else(|| {
-        if parent.0.as_str().contains("::") {
-            return None;
-        }
-        let mut segs: Vec<&str> = controller.name.0.as_str().split("::").collect();
-        segs.pop();
-        while !segs.is_empty() {
-            let candidate =
-                ClassId(Symbol::from(format!("{}::{}", segs.join("::"), parent.0.as_str())));
-            if let Some(c) = find_controller(app, &candidate) {
-                return Some(c);
-            }
-            segs.pop();
-        }
-        None
-    })
+    find_controller(app, controller.parent.as_ref()?)
 }
 
 /// The IR body of `class_id#method`, if ingested — controllers keep

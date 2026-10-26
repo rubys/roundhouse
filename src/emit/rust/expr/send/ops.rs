@@ -271,6 +271,11 @@ pub(super) fn try_binary_operator(
         if let Some(cmp) = numeric_cmp(method, r, &lhs, &args[0]) {
             return Some(cmp);
         }
+        // Not the bare operands: Rust orders a String against a String or a &str against a &str, never one against the other
+        let stringish = |e: &Expr| e.ty.as_ref().is_some_and(|t| matches!(super::super::util::peel_nil(t), crate::ty::Ty::Str | crate::ty::Ty::Sym));
+        if matches!(method, "<" | ">" | "<=" | ">=") && stringish(r) && stringish(&args[0]) {
+            return Some(format!("(&*({lhs})) {method} (&*({}))", emit_expr(&args[0])));
+        }
         return Some(format!("{} {} {}", lhs, method, emit_expr(&args[0])));
     }
     None

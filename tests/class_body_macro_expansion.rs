@@ -1091,7 +1091,7 @@ fn configuration_refuses_forward_includes_and_cross_carrier_storage_aliases() {
 }
 
 #[test]
-fn configuration_refuses_extra_carrier_state_access_and_instance_name_collisions() {
+fn configuration_refuses_extra_carrier_state_access() {
     for method in [
         "def reset_window; @window_options = {}; end",
         "def options_alias; @window_options; end",
@@ -1105,28 +1105,58 @@ fn configuration_refuses_extra_carrier_state_access_and_instance_name_collisions
             "{error}"
         );
     }
+}
+
+#[test]
+fn configuration_keeps_an_instance_method_that_shares_the_class_method_name() {
+    use roundhouse::expr::{ExprNode, LValue};
     for method in [
         "def configure_window(value); value.upcase; end",
         "def window_options; :instance; end",
     ] {
-        let error = configuration_app(
+        let app = configuration_app(
             WINDOW_SETTINGS,
             &format!("{method}\nconfigure_window mode: :month"),
         )
-        .unwrap_err();
-        assert!(error.to_string().contains("name collision"), "{error}");
+        .expect("instance and class methods of one name are different methods");
+        let controller = &app.controllers[0];
+        assert!(
+            controller.class_methods().any(|m| m.name.as_str() == "configure_window"),
+            "{method}"
+        );
+        assert!(
+            controller.body.iter().any(|item| matches!(
+                item,
+                ControllerBodyItem::ClassIvarInit { expr, .. }
+                    if matches!(&*expr.node, ExprNode::Assign { target: LValue::Ivar { name }, .. } if name.as_str() == "window_options")
+            )),
+            "{method}"
+        );
+        let instance_name = method
+            .trim_start_matches("def ")
+            .split([' ', '(', ';'])
+            .next()
+            .unwrap();
+        assert!(
+            controller.actions().any(|a| a.name.as_str() == instance_name),
+            "the instance method stays: {method}"
+        );
     }
 }
 
 #[test]
-fn configuration_refuses_an_inherited_instance_method_name_collision() {
+fn configuration_keeps_an_inherited_instance_method_of_the_same_name() {
     let tree = [
         ("app/controllers/concerns/window_settings.rb", WINDOW_SETTINGS),
         ("app/controllers/parent_controller.rb", "class ParentController < ActionController::Base\n def configure_window(value); value.upcase; end\nend\n"),
         ("app/controllers/child_controller.rb", "class ChildController < ParentController\n include WindowSettings\n configure_window mode: :month\nend\n"),
     ].into_iter().map(|(path, source)| (path.into(), source.as_bytes().to_vec())).collect();
-    let error = ingest_app_from_tree(tree).expect_err("receiver-kind collision through parent");
-    assert!(error.to_string().contains("name collision"), "{error}");
+    let app = ingest_app_from_tree(tree).expect("inherited instance method does not occupy the class method");
+    let child = app.controllers.iter().find(|c| c.name.0.as_str() == "ChildController").expect("child");
+    assert!(child.class_methods().any(|m| m.name.as_str() == "configure_window"));
+    assert!(child.body.iter().any(|item| matches!(item, ControllerBodyItem::ClassIvarInit { .. })));
+    let parent = app.controllers.iter().find(|c| c.name.0.as_str() == "ParentController").expect("parent");
+    assert!(parent.actions().any(|a| a.name.as_str() == "configure_window"));
 }
 
 #[test]

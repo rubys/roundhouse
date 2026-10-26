@@ -1,0 +1,7 @@
+module ActiveSupport
+  module IsolatedExecutionState
+    def self.[]: (String | Symbol key) -> untyped
+    def self.[]=: (String | Symbol key, untyped value) -> untyped
+    def self.state: () -> Hash[Symbol, untyped]
+  end
+end

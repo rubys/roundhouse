@@ -71,7 +71,11 @@ pub(super) fn push_adapter_methods(
     methods.push(synth_adapter_any(owner, table, schema));
     methods.push(synth_adapter_exists_by_id(owner, table, schema, param_binds));
     methods.push(synth_adapter_truncate(owner, table, schema));
-    methods.push(synth_delete_all(owner, table));
+    // A default-scoped model's `delete_all` deletes the rows its scope
+    // keeps: the runtime's `Base.delete_all` goes through its Relation.
+    if crate::lower::default_scope::default_scope(model).is_none() {
+        methods.push(synth_delete_all(owner, table));
+    }
     methods.push(synth_adapter_reload(model, table, param_binds));
     methods.push(synth_columns_sql(owner, table));
     methods.push(synth_hydrate_all(owner));
@@ -325,10 +329,7 @@ fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
         .filter(|c| c.generated.is_none() && (!c.primary_key || supplied_key.is_some()))
         .map(|c| Assignment {
             column: c.name.clone(),
-            value: Value::Runtime {
-                expr: ivar_ref(&super::schema::col_storage_name(c)),
-                ty: value_type_for_column(c),
-            },
+            value: Value::Runtime { expr: storage_value(c), ty: value_type_for_column(c) },
         })
         .collect();
 
@@ -614,10 +615,7 @@ fn synth_adapter_update(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
         .filter(|c| !c.primary_key && c.generated.is_none())
         .map(|c| Assignment {
             column: c.name.clone(),
-            value: Value::Runtime {
-                expr: ivar_ref(&super::schema::col_storage_name(c)),
-                ty: value_type_for_column(c),
-            },
+            value: Value::Runtime { expr: storage_value(c), ty: value_type_for_column(c) },
         })
         .collect();
     let has_assignments = !assignments.is_empty();
@@ -668,10 +666,7 @@ fn synth_adapter_touch(owner: &ClassId, table: &Table, schema: &Schema) -> Metho
         .filter(|c| c.name.as_str() == "updated_at" && c.generated.is_none())
         .map(|c| Assignment {
             column: c.name.clone(),
-            value: Value::Runtime {
-                expr: ivar_ref(&super::schema::col_storage_name(c)),
-                ty: value_type_for_column(c),
-            },
+            value: Value::Runtime { expr: storage_value(c), ty: value_type_for_column(c) },
         })
         .collect();
     let has_assignments = !assignments.is_empty();
@@ -972,11 +967,19 @@ fn synth_adapter_reload(model: &Model, table: &Table, param: bool) -> MethodDef 
         // nullable fk would make `where(fk: nil)` miss every row that
         // never set it.
         let read_method = super::schema::column_read_method_for(col);
-        let read_call = arel_db_call(
+        let mut read_call = arel_db_call(
             &db,
             read_method,
             vec![var_ref(&stmt), arel_lit_int(i as i64)],
         );
+        if col.array_stored {
+            // The row's JSON text, decoded into the Array the record keeps.
+            read_call = arel_db_call(
+                &ClassId(Symbol::from("ArrayColumn")),
+                super::schema::array_load_method(col),
+                vec![read_call],
+            );
+        }
         if_body.push(Expr::new(
             Span::synthetic(),
             ExprNode::Assign {
@@ -1290,6 +1293,20 @@ fn eq_id_ivar(table: &Table) -> Predicate {
     )
 }
 
+/// The value a write binds for the column: its storage ivar, or for a
+/// stored array column the JSON text of the Array it holds.
+fn storage_value(col: &crate::schema::Column) -> Expr {
+    let ivar = ivar_ref(&super::schema::col_storage_name(col));
+    if !col.array_stored {
+        return ivar;
+    }
+    let ivar = crate::lower::typing::with_ty(ivar, super::ty_of_column_slot(col));
+    crate::lower::typing::with_ty(
+        arel_db_call(&ClassId(Symbol::from("ArrayColumn")), "dump", vec![ivar]),
+        super::ty_of_column_stored(col),
+    )
+}
+
 fn ivar_ref(name: &Symbol) -> Expr {
     Expr::new(Span::synthetic(), ExprNode::Ivar { name: name.clone() })
 }
@@ -1305,6 +1322,9 @@ fn var_ref(name: &Symbol) -> Expr {
 /// nothing. Temporal columns store ISO-8601 text, so they escape as
 /// strings like any other text column.
 fn value_type_for_column(col: &crate::schema::Column) -> ValueType {
+    if col.array_stored {
+        return ValueType::StrOpt;
+    }
     let nullable = col.nullable && !col.primary_key;
     match ty_of_column(&col.col_type) {
         Ty::Int => {

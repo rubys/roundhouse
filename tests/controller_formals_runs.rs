@@ -84,17 +84,16 @@ puts "controller formals ok"
         .assert_passes();
 }
 
-/// `**` into a destination whose keywords ingest flattened to positionals
-/// (`def initialize(size: 1)` becomes `size = 1`) binds the whole packet
-/// to `size`: the emitted Ruby answered `s{:size=>5}` for `s5` while
-/// `check` was clean. A controller's forwarding goes through the same
-/// destination check a model's does, and is refused there.
+/// `**` into `def initialize(size: 1)` used to flatten `size` to a
+/// positional and then refuse the packet, because emitting both halves
+/// bound the hash to `size`. The destination keeps the keyword, so the
+/// anonymous packet binds the way Ruby does.
 #[test]
-fn controller_keyword_forwarding_into_a_flattened_destination_is_refused() {
-    let (_emitted, errors) = emit_and_run::real_blog()
+fn controller_keyword_forwarding_into_optional_keywords_keeps_the_keyword() {
+    let (emitted, errors) = emit_and_run::real_blog()
         .write(
             "app/models/flat.rb",
-            "class Flat\n  def initialize(size: 1)\n    @size = size\n  end\nend\n",
+            "class Flat\n  def initialize(size: 1)\n    @size = size\n  end\n\n  def to_s\n    @size.to_s\n  end\nend\n",
         )
         .edit(
             "app/controllers/articles_controller.rb",
@@ -103,10 +102,14 @@ fn controller_keyword_forwarding_into_a_flattened_destination_is_refused() {
         )
         .emit(roundhouse::project::BuildTarget::Ruby);
     assert!(
-        errors.iter().any(|e| e.contains("anonymous keyword forwarding")
-            && e.contains("flattened keyword parameters")),
+        errors.iter().all(|e| !e.contains("flattened keyword")),
         "got {errors:?}"
     );
+    let flat = std::fs::read_to_string(emitted.join("app/models/flat.rb")).unwrap();
+    assert!(flat.contains("def initialize(size:"), "{flat}");
+    let controller =
+        std::fs::read_to_string(emitted.join("app/controllers/articles_controller.rb")).unwrap();
+    assert!(controller.contains("Flat.new(**)"), "{controller}");
 }
 
 /// The ruby family carries the formals; every other target says it

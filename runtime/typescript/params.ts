@@ -33,3 +33,31 @@ export function str(sub: Record<string, ParamValue>, key: string, fallback: stri
 export function provided(sub: Record<string, ParamValue>, key: string): boolean {
   return typeof sub[key] === "string";
 }
+
+// The scalar readers the params lowering emits, and its record of
+// multiparameter keys. Those keys (`title(1)`) are modeled on the Ruby
+// family only (runtime/ruby/params.rb); this target ignores them, as it
+// always has, so these pass through.
+export function scalar_provided(sub: Record<string, ParamValue>, key: string): boolean {
+  return provided(sub, key);
+}
+
+export function scalar(sub: Record<string, ParamValue>, key: string): string {
+  return str(sub, key, "");
+}
+
+export function no_fields(): string[] {
+  return [];
+}
+
+export function multiparameter_fields(_sub: Record<string, ParamValue>, _keys: string[]): string[] {
+  return [];
+}
+
+export function multiparameter_unsupported(_sub: Record<string, ParamValue>, _keys: string[]): boolean {
+  return false;
+}
+
+export function any_of(list: string[], names: string[]): boolean {
+  return names.some((n) => list.includes(n));
+}

@@ -1442,7 +1442,7 @@ end
         other => panic!("expected inclusion, got {other:?}"),
     }
     let code = rules.iter().find(|v| v.attribute.as_str() == "code").unwrap();
-    assert!(matches!(&code.rules[0], ValidationRule::Format { pattern } if pattern == r"\A[A-Z]{3}\z"));
+    assert!(matches!(&code.rules[0], ValidationRule::Format { pattern, flags, .. } if pattern == r"\A[A-Z]{3}\z" && flags.is_empty()));
     let stock = rules.iter().find(|v| v.attribute.as_str() == "stock").unwrap();
     match &stock.rules[0] {
         ValidationRule::Inclusion { values, range: Some(range) } => {
@@ -1481,13 +1481,176 @@ end
     );
     assert!(warnings.is_empty(), "{warnings:?}");
     let rules = validation_rules(&model);
+    let pred = |cond: &Option<roundhouse::Expr>, name: &str| {
+        matches!(cond, Some(e) if matches!(&*e.node, ExprNode::Send { recv: None, method, args, .. } if method.as_str() == name && args.is_empty()))
+    };
     let label = rules.iter().find(|v| v.attribute.as_str() == "label").unwrap();
-    assert_eq!(label.if_method.as_ref().map(|s| s.as_str()), Some("live?"));
-    assert!(label.unless_method.is_none());
+    assert!(pred(&label.if_cond, "live?"), "{:?}", label.if_cond);
+    assert!(label.unless_cond.is_none());
     let extra = rules.iter().find(|v| v.attribute.as_str() == "extra").unwrap();
-    assert_eq!(extra.unless_method.as_ref().map(|s| s.as_str()), Some("draft?"));
+    assert!(pred(&extra.unless_cond, "draft?"), "{:?}", extra.unless_cond);
     let note = rules.iter().find(|v| v.attribute.as_str() == "note").unwrap();
-    assert_eq!(note.if_method.as_ref().map(|s| s.as_str()), Some("live?"));
+    assert!(pred(&note.if_cond, "live?"), "{:?}", note.if_cond);
+}
+
+/// Issue #985: a zero-arity lambda/proc `if:`/`unless:` lowers to a
+/// guard EXPRESSION (`if_cond`/`unless_cond`), the same body shape
+/// `callback_condition` already accepts for a callback's `if:`/
+/// `unless:`. `:name` is the call-level `->`, `:code` the call-level
+/// `lambda { }` spelling, and `:note` the RULE-level nested-hash form
+/// (`presence: { if: -> { … } }`), all three on the one guard slot
+/// `push_condition`'s call sites share with the Symbol form.
+#[test]
+fn lambda_if_and_unless_guard_the_validation_with_an_expression() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :name, presence: true, unless: -> { status.in?(%w[draft]) }
+  validates :code, presence: true, if: lambda { status == "live" }
+  validates :note, presence: { if: -> { live? } }
+end
+"#,
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let rules = validation_rules(&model);
+
+    let name = rules.iter().find(|v| v.attribute.as_str() == "name").unwrap();
+    assert!(name.if_cond.is_none());
+    assert!(
+        matches!(&name.unless_cond, Some(e) if matches!(&*e.node, ExprNode::Send { recv: Some(_), method, .. } if method.as_str() == "in?")),
+        "{:?}", name.unless_cond
+    );
+
+    let code = rules.iter().find(|v| v.attribute.as_str() == "code").unwrap();
+    assert!(
+        matches!(&code.if_cond, Some(e) if matches!(&*e.node, ExprNode::Send { recv: Some(_), method, args, .. } if method.as_str() == "==" && args.len() == 1)),
+        "{:?}", code.if_cond
+    );
+
+    // The rule-level lambda (`presence: { if: -> { live? } }`) lowers
+    // to a receiverless call on the record — exactly the shape a
+    // Symbol condition (`if: :live?`) already produces, so the two
+    // forms reach the lowerer the same way.
+    let note = rules.iter().find(|v| v.attribute.as_str() == "note").unwrap();
+    assert!(
+        matches!(&note.if_cond, Some(e) if matches!(&*e.node, ExprNode::Send { recv: None, method, args, .. } if method.as_str() == "live?" && args.is_empty())),
+        "{:?}", note.if_cond
+    );
+}
+
+/// An arity>0 lambda is not the zero-arity body shape
+/// `callback_condition` accepts (its parameter would be unbound once
+/// spliced into `def validate`), so it stays the reported gap it
+/// always was — distinct from the now-supported zero-arity form above.
+#[test]
+fn arity_one_lambda_condition_on_validates_stays_a_gap() {
+    let (model, warnings, gaps) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :name, presence: true, if: ->(w) { w.live? }
+end
+"#,
+    );
+    assert!(validation_rules(&model).is_empty(), "{:?}", validation_rules(&model));
+    assert!(warnings.iter().any(|m| m.contains("if:")), "{warnings:?}");
+    assert!(gaps.iter().any(|m| m.contains("if:")), "{gaps:?}");
+}
+
+/// A name bound by a nested block is not a captured class-body local.
+/// The block is still in the spliced guard, so the validation runs.
+#[test]
+fn nested_block_parameter_lambda_condition_is_a_guard() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :name, presence: true, if: -> { tags.any? { |tag| tag.blank? } }
+  validates :code, presence: true, if: -> { tags.any? { _1.blank? } }
+  validates :note, presence: true, if: -> { tags.any? { it.blank? } }
+end
+"#,
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    for attr in ["name", "code", "note"] {
+        let rule = validation_rules(&model)
+            .into_iter()
+            .find(|v| v.attribute.as_str() == attr)
+            .unwrap_or_else(|| panic!("{attr} missing"));
+        assert!(
+            rule.if_cond.is_some() || rule.unless_cond.is_some(),
+            "{attr} dropped its nested-block condition: {rule:?}"
+        );
+    }
+}
+
+/// `|; tmp|` is a block local the lowered block does not declare.
+/// Accepting the read would emit a bare `tmp` inside `valid?`.
+#[test]
+fn block_local_in_a_lambda_condition_stays_a_gap() {
+    let (model, warnings, gaps) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :color, presence: true, unless: -> { tags.any? { |; tmp| tmp.nil? } }
+end
+"#,
+    );
+    assert!(validation_rules(&model).is_empty(), "{:?}", validation_rules(&model));
+    assert!(warnings.iter().any(|m| m.contains("unless:")), "{warnings:?}");
+    assert!(gaps.iter().any(|m| m.contains("unless:")), "{gaps:?}");
+}
+
+/// A class-body local captured by the lambda is not in scope once the
+/// body is spliced into `def validate`. Leaving it there raises
+/// `NameError` on save. The call stays the reported gap.
+#[test]
+fn captured_local_lambda_condition_on_validates_stays_a_gap() {
+    let (model, warnings, gaps) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  required = true
+  validates :name, presence: true, if: -> { required }
+end
+"#,
+    );
+    assert!(validation_rules(&model).is_empty(), "{:?}", validation_rules(&model));
+    assert!(warnings.iter().any(|m| m.contains("if:")), "{warnings:?}");
+    assert!(gaps.iter().any(|m| m.contains("if:")), "{gaps:?}");
+}
+
+/// Survey mode substitutes `nil` for an expression it cannot ingest
+/// (an integer wider than i64) and still returns that expression.
+/// Accepting it would guard the check with `nil`, so a validation
+/// Rails runs would never run. The call stays a gap.
+#[test]
+fn survey_recovered_lambda_condition_on_validates_stays_a_gap() {
+    let (model, warnings, gaps) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :name, presence: true, if: -> { 9223372036854775808 }
+end
+"#,
+    );
+    assert!(validation_rules(&model).is_empty(), "{:?}", validation_rules(&model));
+    assert!(warnings.iter().any(|m| m.contains("if:")), "{warnings:?}");
+    assert!(gaps.iter().any(|m| m.contains("if:")), "{gaps:?}");
+}
+
+/// Ruby keeps the last value when a hash key is repeated. A Symbol
+/// followed by a lambda must leave the lambda, not the predicate.
+#[test]
+fn duplicate_if_key_keeps_the_last_condition() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :name, presence: true, if: :live?, if: -> { false }
+end
+"#,
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let name = validation_rules(&model).into_iter().find(|v| v.attribute.as_str() == "name").unwrap();
+    assert!(
+        matches!(&name.if_cond, Some(e) if matches!(&*e.node, ExprNode::Lit { value: Literal::Bool { value: false } })),
+        "{:?}", name.if_cond
+    );
 }
 
 #[test]
@@ -1495,13 +1658,18 @@ fn unmodeled_validates_options_warn_and_drop_the_whole_call() {
     let (model, warnings, gaps) = ingest_widget(
         r#"
 class Widget < ApplicationRecord
-  validates :name, presence: true, uniqueness: true
+  validates :name, presence: true, uniqueness: { conditions: -> { where(active: true) } }
   validates :stock, comparison: { less_than_or_equal_to: :max_stock }
   validates :price, numericality: { greater_than: 0, odd: true }
   validates :bounded, numericality: { equal_to: 1, other_than: 2 }
   validates :tag, presence: true, length: { maximum: 4, is: 2 }
-  validates :note, presence: true, if: -> { status == "live" }
-  validates :color, presence: true, unless: -> { false }
+  # An arity>0 lambda would splice an unbound parameter into `def
+  # validate`; a String condition names a method Rails resolves at
+  # runtime that this build does not model. Both stay the reported gap
+  # a zero-arity lambda/proc `if:`/`unless:` no longer is (see
+  # `validates_lambda_conditions.rs`).
+  validates :note, presence: true, if: ->(w) { w.live? }
+  validates :color, presence: true, unless: "a string condition"
 end
 "#,
     );
@@ -2021,15 +2189,22 @@ end
 }
 
 #[test]
-fn non_nil_classvar_initializer_is_refused() {
+fn a_literal_classvar_initializer_is_kept_and_an_expression_refused() {
     use roundhouse::ingest::ingest_library_classes;
 
-    // A non-nil `@@X = <expr>` initializer can't be dropped silently —
-    // strict ingest refuses it (survey mode records the gap per-item).
-    let src = b"class Twitter\n  @@TIMEOUT = 30\nend\n";
+    // ancestry's `@@default_update_strategy = :ruby`: a literal reads no
+    // other state, so it is kept as the class's initializer. A computed
+    // value is refused: it would observe the emitted body's order.
+    let classes = ingest_library_classes(b"class Twitter\n  @@TIMEOUT = 30\nend\n", "extras/twitter.rb")
+        .expect("a literal class-variable initializer ingests");
     assert!(
-        ingest_library_classes(src, "extras/twitter.rb").is_err(),
-        "non-nil class-variable initializer must not be silently dropped"
+        classes[0].class_ivar_initializers.iter().any(|e| roundhouse::emit::ruby::emit_expr(e).contains("@@TIMEOUT = 30")),
+        "{:?}",
+        classes[0].class_ivar_initializers
+    );
+    assert!(
+        ingest_library_classes(b"class Twitter\n  @@TIMEOUT = ENV.fetch(\"T\")\nend\n", "extras/twitter.rb").is_err(),
+        "a computed class-variable initializer must be refused"
     );
 }
 
@@ -2424,7 +2599,7 @@ fn specific_ledger_messages_replace_the_generic_catch_all() {
     for (source, expected) in [
         ("class Foo; end", "class/module defined inside a method or block (runtime class definition)"),
         ("module Foo; end", "class/module defined inside a method or block (runtime class definition)"),
-        ("1 + ", "unparsed fragment (Prism recovery node)"),
+        ("1 + ", "unparsed fragment near `+` (Prism recovery)"),
     ] {
         let result = ruby_prism::parse(source.as_bytes());
         let program = result.node();
@@ -2452,6 +2627,71 @@ fn backticks_ingest_as_the_kernel_call_and_round_trip() {
         let stmt = program.as_program_node().unwrap().statements().body().iter().next().unwrap();
         let expr = roundhouse::ingest::ingest_expr(&stmt, "<snippet>").expect("backticks ingest");
         assert_eq!(emit_expr(&expr), expected, "{source}");
+    }
+}
+
+/// `(month, *row)` in a block, and the same splat inside a nested
+/// multi-write. `MultiAssign` has no rest; the group is not an array
+/// literal, so the desugar coerces with `Array.try_convert` and then
+/// indexes. Nearby shapes: anonymous splat, post-rest, a deeper group,
+/// an ivar splat, and a splat group beside an outer name.
+#[test]
+fn nested_destructure_splat_ingests_and_round_trips() {
+    use roundhouse::emit::ruby::emit_expr;
+
+    let parse = |source: &str| {
+        let result = ruby_prism::parse(source.as_bytes());
+        assert_eq!(result.errors().count(), 0, "legal Ruby control: {source}");
+        let program = result.node();
+        roundhouse::ingest::ingest_expr(
+            &program.as_program_node().unwrap().statements().as_node(),
+            "<snippet>",
+        )
+        .unwrap_or_else(|err| panic!("{source}: {err}"))
+    };
+    for source in [
+        "rows.each_with_object({}) { |(month, *row), map| map[month] = row }",
+        "rows.each { |(month, *)| month }",
+        "rows.map { |(*row)| row }",
+        "rows.each { |(a, *b, c)| [a, b, c] }",
+        "->((month, *row)) { row }",
+        "a, (b, *c) = pairs",
+        "(a, *b), c = pairs",
+        "a, (b, (c, *d)) = pairs",
+        "a, (b, *c, d) = pairs",
+        "a, (@month, *@row) = pairs",
+        "x, (y, *z), *rest = pairs",
+    ] {
+        let expr = parse(source);
+        let emitted = emit_expr(&expr);
+        assert!(
+            emitted.contains("Array.try_convert"),
+            "nested splat must coerce with Array.try_convert, not require an array literal:\n{source}\n{emitted}"
+        );
+        if !source.contains(", *)") {
+            assert!(
+                emitted.contains(".drop("),
+                "a named rest must be the tail after the leading names:\n{source}\n{emitted}"
+            );
+        }
+        assert_eq!(expr, parse(&emitted), "round-trip IR must be stable for {source}:\n{emitted}");
+    }
+
+    // Depth-first Ruby writes the inner `x` last; the level-at-a-time
+    // desugar would leave the outer `x`. Same refusal as `(x, y), x = …`.
+    let result = ruby_prism::parse(b"(x, *y), x = [[1, 2], 3]");
+    let stmt = result.node().as_program_node().unwrap().statements().as_node();
+    let err = roundhouse::ingest::ingest_expr(&stmt, "<snippet>").expect_err("reordered last write");
+    assert!(err.to_string().contains("out of source order"), "{err}");
+    // The outer write stays last, which is the order the desugar keeps.
+    parse("x, (y, *x) = [1, [2, 3]]");
+
+    for source in ["(h[0], *x), h[0] = [[1, 2], 3]", "(A, *x), A = [[1, 2], 3]"] {
+        let result = ruby_prism::parse(source.as_bytes());
+        assert_eq!(result.errors().count(), 0, "{source}");
+        let stmt = result.node().as_program_node().unwrap().statements().as_node();
+        let err = roundhouse::ingest::ingest_expr(&stmt, "<snippet>").expect_err(source);
+        assert!(err.to_string().contains("out of source order"), "{source}: {err}");
     }
 }
 
@@ -2503,6 +2743,25 @@ fn nested_multi_write_refuses_a_reordered_last_write() {
         panic!("expected nested setter reordering to be unsupported");
     };
     assert!(message.contains("assignment-method targets"), "{message}");
+}
+
+#[test]
+fn a_leading_group_does_not_reuse_the_statement_temp() {
+    use roundhouse::emit::ruby::emit_expr;
+    let source = "(a, *b), c = [[1, 2, 3], 9]";
+    let result = ruby_prism::parse(source.as_bytes());
+    let stmt = result.node().as_program_node().unwrap().statements().body().iter().next().unwrap();
+    let expr = roundhouse::ingest::ingest_expr(&stmt, "<snippet>").unwrap();
+    let emitted = emit_expr(&expr);
+    let last = emitted.lines().last().unwrap_or("");
+    assert!(
+        last.contains("__mv_"),
+        "the expression must answer the whole RHS, not the first group:\n{emitted}"
+    );
+    assert!(
+        !last.contains("__mt_"),
+        "the group temp must not be the expression value:\n{emitted}"
+    );
 }
 
 #[test]
@@ -3090,4 +3349,532 @@ fn recognized_wrap_parameters_forms_are_consumed_others_stay_in_the_survey() {
         .collect();
     assert_eq!(wrap_gaps.len(), 1, "only the unreadable form is a gap: {wrap_gaps:?}");
     assert!(wrap_gaps[0].0.to_lowercase().contains("gadgets"), "{wrap_gaps:?}");
+}
+
+/// A `length:` / `numericality:` bound may be an integer constant of the
+/// model (`maximum: NAME_LIMIT`): Rails reads it when the class body
+/// runs. It folds to its value, for both the `validates` hash and the
+/// `validates_numericality_of` form, and nothing is reported as a gap.
+#[test]
+fn integer_constant_bounds_fold_to_their_values() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  NAME_MIN = 2
+  NAME_LIMIT = 5
+  MAX_SCORE = 100
+
+  validates :name, length: { minimum: NAME_MIN, maximum: NAME_LIMIT }
+  validates :score, numericality: { greater_than_or_equal_to: 0, less_than_or_equal_to: MAX_SCORE }
+  validates_numericality_of :rank, greater_than: NAME_MIN
+end
+"#,
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let rules = validation_rules(&model);
+    let rule = |attr: &str| rules.iter().find(|v| v.attribute.as_str() == attr).unwrap_or_else(|| panic!("no rule for {attr}: {rules:?}"));
+    assert!(
+        matches!(rule("name").rules.as_slice(), [roundhouse::dialect::ValidationRule::Length { min: Some(2), max: Some(5), .. }]),
+        "{:?}", rule("name").rules
+    );
+    assert!(
+        matches!(rule("score").rules.as_slice(), [roundhouse::dialect::ValidationRule::Numericality { gte: Some(g), lte: Some(l), .. }] if *g == 0.0 && *l == 100.0),
+        "{:?}", rule("score").rules
+    );
+    assert!(
+        matches!(rule("rank").rules.as_slice(), [roundhouse::dialect::ValidationRule::Numericality { gt: Some(g), .. }] if *g == 2.0),
+        "{:?}", rule("rank").rules
+    );
+}
+
+/// A constant reassigned to a value ingest can't fold no longer carries
+/// its earlier value: `NAME_LIMIT = 5` then `NAME_LIMIT = compute_limit`
+/// is the computed value in Rails, so the bound stays the reported gap
+/// rather than validating against 5.
+#[test]
+fn an_unfoldable_reassignment_drops_the_earlier_constant_value() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  NAME_LIMIT = 5
+  NAME_LIMIT = compute_limit
+
+  validates :name, length: { maximum: NAME_LIMIT }
+end
+"#,
+    );
+    let rules = validation_rules(&model);
+    assert!(!rules.iter().any(|v| v.attribute.as_str() == "name"), "no stale bound for name: {rules:?}");
+    assert!(warnings.iter().any(|w| w.contains("validates :name, length: maximum:")), "{warnings:?}");
+}
+
+/// `exclusion: { in: … }` (list or numeric range) and
+/// `validates_exclusion_of … in:` become `Exclusion` rules, with no gap.
+#[test]
+fn exclusion_lowers_to_an_exclusion_rule() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :status, exclusion: { in: %w[banned deleted] }
+  validates :level, exclusion: { in: 1..3 }
+  validates_exclusion_of :code, in: %w[root admin]
+end
+"#,
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let rules = validation_rules(&model);
+    let rule = |attr: &str| rules.iter().find(|v| v.attribute.as_str() == attr).unwrap_or_else(|| panic!("no rule for {attr}: {rules:?}"));
+    assert!(
+        matches!(rule("status").rules.as_slice(), [roundhouse::dialect::ValidationRule::Exclusion { values, range: None }] if values.len() == 2),
+        "{:?}", rule("status").rules
+    );
+    assert!(
+        matches!(rule("level").rules.as_slice(), [roundhouse::dialect::ValidationRule::Exclusion { range: Some(r), .. }] if r.begin == 1.0 && r.end == 3.0 && !r.exclusive),
+        "{:?}", rule("level").rules
+    );
+    assert!(
+        matches!(rule("code").rules.as_slice(), [roundhouse::dialect::ValidationRule::Exclusion { values, .. }] if values.len() == 2),
+        "{:?}", rule("code").rules
+    );
+}
+
+/// `exclusion: false` / `inclusion: false` add no validator, as in Rails'
+/// `validates`, and the call's other rules on the same line still lower.
+#[test]
+fn a_false_set_option_is_skipped_not_a_gap() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :status, presence: true, exclusion: false
+  validates :level, presence: true, inclusion: false
+end
+"#,
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let rules = validation_rules(&model);
+    for attr in ["status", "level"] {
+        let rule = rules.iter().find(|v| v.attribute.as_str() == attr).unwrap_or_else(|| panic!("no rule for {attr}: {rules:?}"));
+        assert!(
+            matches!(rule.rules.as_slice(), [roundhouse::dialect::ValidationRule::Presence]),
+            "{attr}: {:?}", rule.rules
+        );
+    }
+}
+
+/// `on: :create` / `:update` become a `self.persisted?` guard (negated for
+/// `:create`) ANDed with the call's `if:`; `on: [:create, :update]` is no
+/// guard; a custom context stays the reported gap.
+#[test]
+fn on_context_becomes_a_persisted_guard() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :uri, presence: true, on: :create
+  validates :note, presence: true, on: :update
+  validates :code, presence: true, if: :live?, on: :create
+  validates :label, presence: true, on: [:create, :update]
+  validates :name, presence: true, on: :publish
+end
+"#,
+    );
+    let rules = validation_rules(&model);
+    let rule = |attr: &str| rules.iter().find(|v| v.attribute.as_str() == attr).copied();
+    // `self.persisted?`: a SelfRef receiver, no arguments, no block.
+    let is_self_persisted = |e: &Expr| {
+        matches!(&*e.node, ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if method.as_str() == "persisted?" && args.is_empty() && matches!(&*r.node, ExprNode::SelfRef))
+    };
+    // `!self.persisted?`.
+    let is_not_self_persisted = |e: &Expr| {
+        matches!(&*e.node, ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if method.as_str() == "!" && args.is_empty() && is_self_persisted(r))
+    };
+    // `live?`, the `if:` Symbol's predicate called on the record.
+    let is_live_call = |e: &Expr| {
+        matches!(&*e.node, ExprNode::Send { recv: None, method, args, block: None, .. }
+            if method.as_str() == "live?" && args.is_empty())
+    };
+    let uri = rule("uri").and_then(|v| v.if_cond.as_ref());
+    assert!(uri.is_some_and(is_not_self_persisted), "on: :create is !self.persisted?: {uri:?}");
+    let note = rule("note").and_then(|v| v.if_cond.as_ref());
+    assert!(note.is_some_and(is_self_persisted), "on: :update is self.persisted?: {note:?}");
+    // `on: :create` with `if: :live?`: both guards ANDed, in either order.
+    let code = rule("code").and_then(|v| v.if_cond.as_ref());
+    assert!(
+        code.is_some_and(|e| matches!(&*e.node, roundhouse::expr::ExprNode::BoolOp { op: roundhouse::expr::BoolOpKind::And, left, right, .. }
+            if (is_not_self_persisted(left) && is_live_call(right)) || (is_live_call(left) && is_not_self_persisted(right)))),
+        "{code:?}"
+    );
+    assert!(rule("label").is_some_and(|v| v.if_cond.is_none()), "{:?}", rule("label"));
+    assert!(rule("name").is_none(), "a custom context stays a gap: {rules:?}");
+    assert!(warnings.iter().any(|w| w.contains("validates :name, on:")), "{warnings:?}");
+}
+
+/// `uniqueness:` becomes a `Uniqueness` rule with its options; `conditions:`
+/// stays the reported gap. A model with its own `default_scope` lowers too
+/// (the check queries `Model.unscoped`, as Rails does).
+#[test]
+fn uniqueness_options_lower_to_a_rule() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :uri, uniqueness: true
+  validates :name, uniqueness: { scope: [:owner_id, :kind], case_sensitive: false, allow_blank: true }
+  validates :code, uniqueness: { conditions: -> { where(active: true) } }
+end
+"#,
+    );
+    let rules = validation_rules(&model);
+    let rule = |attr: &str| rules.iter().find(|v| v.attribute.as_str() == attr).copied();
+    assert!(
+        matches!(rule("uri").map(|v| v.rules.as_slice()), Some([roundhouse::dialect::ValidationRule::Uniqueness { scope, case_sensitive: true, allow_nil: false, allow_blank: false }]) if scope.is_empty()),
+        "{:?}", rule("uri")
+    );
+    assert!(
+        matches!(rule("name").map(|v| v.rules.as_slice()), Some([roundhouse::dialect::ValidationRule::Uniqueness { scope, case_sensitive: false, allow_blank: true, .. }]) if scope.len() == 2),
+        "{:?}", rule("name")
+    );
+    assert!(rule("code").is_none(), "conditions: stays a gap: {rules:?}");
+    assert!(warnings.iter().any(|w| w.contains("validates :code, uniqueness: conditions:")), "{warnings:?}");
+
+    let (model, warnings, _) = ingest_widget(
+        "class Widget < ApplicationRecord\n  default_scope { where(kept: true) }\n  validates :uri, uniqueness: true\nend\n",
+    );
+    assert!(validation_rules(&model).iter().any(|v| v.attribute.as_str() == "uri"), "default_scope lowers");
+    assert!(!warnings.iter().any(|w| w.contains("validates :uri, uniqueness:")), "{warnings:?}");
+
+    let (model, warnings, _) = ingest_widget(
+        "class Widget < ApplicationRecord\n  self.default_scope { where(kept: true) }\n  validates :uri, uniqueness: true\nend\n",
+    );
+    assert!(validation_rules(&model).iter().any(|v| v.attribute.as_str() == "uri"), "self.default_scope lowers");
+    assert!(!warnings.iter().any(|w| w.contains("validates :uri, uniqueness:")), "{warnings:?}");
+}
+
+/// `inclusion: { in: NAME }` folds a list constant with each element's
+/// kind kept; a computed list (`in: ->(r) { … }`) is the set the record
+/// answers when it validates.
+#[test]
+fn inclusion_in_a_list_constant_folds_with_its_kinds() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  MODES = %w(open approved).freeze
+  KINDS = %i[a b]
+  validates :mode, inclusion: { in: MODES }
+  validates :kind, inclusion: { in: KINDS }
+  validates :tier, inclusion: { in: ->(w) { w.class::MODES } }
+end
+"#,
+    );
+    let rules = validation_rules(&model);
+    let rule = |attr: &str| rules.iter().find(|v| v.attribute.as_str() == attr).copied();
+    assert!(
+        matches!(rule("mode").map(|v| v.rules.as_slice()), Some([roundhouse::dialect::ValidationRule::Inclusion { values, range: None }])
+            if values == &vec![Literal::Str { value: "open".into() }, Literal::Str { value: "approved".into() }]),
+        "{:?}", rule("mode")
+    );
+    assert!(
+        matches!(rule("kind").map(|v| v.rules.as_slice()), Some([roundhouse::dialect::ValidationRule::Inclusion { values, .. }])
+            if matches!(values.as_slice(), [Literal::Sym { .. }, Literal::Sym { .. }])),
+        "{:?}", rule("kind")
+    );
+    // A lambda `in:` is asked on the record (`tests/inclusion_callable.rs`):
+    // its parameter is `self`, so `w.class::MODES` reads the record's class.
+    assert!(
+        matches!(rule("tier").map(|v| v.rules.as_slice()), Some([roundhouse::dialect::ValidationRule::InclusionCall { set }])
+            if matches!(&*set.node, roundhouse::expr::ExprNode::Send { method, recv: Some(recv), .. }
+                if method.as_str() == "const_get" && matches!(&*recv.node, roundhouse::expr::ExprNode::Send { recv: Some(base), .. } if matches!(&*base.node, roundhouse::expr::ExprNode::SelfRef)))),
+        "{:?}", rule("tier")
+    );
+    assert!(!warnings.iter().any(|w| w.contains("validates :tier")), "{warnings:?}");
+}
+
+/// A list constant reassigned to something ingest can't fold no longer
+/// carries the earlier list (#1143's last-write rule): the inclusion stays
+/// the reported gap.
+#[test]
+fn an_unfoldable_list_reassignment_drops_the_earlier_list() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  MODES = %w(open approved)
+  MODES = load_modes
+  validates :mode, inclusion: { in: MODES }
+end
+"#,
+    );
+    assert!(validation_rules(&model).iter().all(|v| v.attribute.as_str() != "mode"), "no stale list");
+    assert!(warnings.iter().any(|w| w.contains("validates :mode, inclusion: in:")), "{warnings:?}");
+}
+
+/// A constant assigned more than once in the class body is not folded
+/// at all, whichever write comes last. Rails reads the constant as it
+/// stands when `validates` runs, so a reassignment after the macro
+/// (`MODES = %w[closed]` below it) leaves the validation on the first
+/// value, and one before it on the second. The fold sees the whole body
+/// at once and knows neither, so both validations stay the reported gap
+/// rather than validating against the wrong value. Ruby warns "already
+/// initialized constant" for each such write.
+#[test]
+fn a_constant_assigned_twice_is_not_folded() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  MODES = %w[open]
+  NAME_LIMIT = 5
+  TITLE_LIMIT = 5
+  TITLE_LIMIT = 10
+  validates :mode, inclusion: { in: MODES }
+  validates :name, length: { maximum: NAME_LIMIT }
+  validates :title, length: { maximum: TITLE_LIMIT }
+  MODES = %w[closed]
+  NAME_LIMIT = 10
+end
+"#,
+    );
+    let rules = validation_rules(&model);
+    for attr in ["mode", "name", "title"] {
+        assert!(rules.iter().all(|v| v.attribute.as_str() != attr), "no folded rule for {attr}: {rules:?}");
+    }
+    for gap in [
+        "validates :mode, inclusion: in:",
+        "validates :name, length: maximum:",
+        "validates :title, length: maximum:",
+    ] {
+        assert!(warnings.iter().any(|w| w.contains(gap)), "{gap}: {warnings:?}");
+    }
+}
+
+/// A compound write (`-=`, `+=`, `||=`, `&&=`) to a constant is a write
+/// too: `MODES -= %w[closed]` after `validates` leaves Rails validating
+/// against the list as it stood at the macro, which the fold can't
+/// tell apart from the result. The name is unfoldable, as for a plain
+/// second write.
+#[test]
+fn a_compound_constant_write_is_a_second_write() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  MODES = %w[open closed]
+  NAME_LIMIT = 5
+  TITLE_LIMIT = 5
+  validates :mode, inclusion: { in: MODES }
+  validates :name, length: { maximum: NAME_LIMIT }
+  validates :title, length: { maximum: TITLE_LIMIT }
+  MODES -= %w[closed]
+  NAME_LIMIT += 5
+  TITLE_LIMIT ||= 10
+end
+"#,
+    );
+    let rules = validation_rules(&model);
+    for attr in ["mode", "name", "title"] {
+        assert!(rules.iter().all(|v| v.attribute.as_str() != attr), "no folded rule for {attr}: {rules:?}");
+    }
+    for gap in [
+        "validates :mode, inclusion: in:",
+        "validates :name, length: maximum:",
+        "validates :title, length: maximum:",
+    ] {
+        assert!(warnings.iter().any(|w| w.contains(gap)), "{gap}: {warnings:?}");
+    }
+}
+
+/// `exclusion: { in: NAME }` reads a list constant too: inclusion and
+/// exclusion share `parse_set`.
+#[test]
+fn exclusion_in_a_list_constant_folds() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  RESERVED = %w[admin root].freeze
+
+  validates :name, exclusion: { in: RESERVED }
+end
+"#,
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let rules = validation_rules(&model);
+    let rule = rules.iter().find(|v| v.attribute.as_str() == "name").unwrap_or_else(|| panic!("no rule for name: {rules:?}"));
+    assert!(
+        matches!(rule.rules.as_slice(), [roundhouse::dialect::ValidationRule::Exclusion { values, range: None }] if values.len() == 2),
+        "{:?}", rule.rules
+    );
+}
+
+/// A constant folds only when its one write is a plain top-level
+/// `NAME = …` and nothing else in the class body, at any depth, writes
+/// it or calls a possibly-mutating method on it. A write under `if`, an
+/// append (`<<`), a `push`, or a `concat` in a method body changes what
+/// Rails validates against, so each of those stays the reported gap; a
+/// read (`include?`, `freeze`) leaves the constant foldable.
+#[test]
+fn a_nested_write_or_a_mutation_makes_a_constant_unfoldable() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  NESTED = %w[a b]
+  if ENV["WIDGET_MODES"]
+    NESTED = %w[c]
+  end
+  APPENDED = %w[a b]
+  APPENDED << "c"
+  PUSHED = %w[a b]
+  PUSHED.push("c")
+  IN_METHOD = %w[a b]
+  READ = %w[a b].freeze
+
+  validates :nested, inclusion: { in: NESTED }
+  validates :appended, inclusion: { in: APPENDED }
+  validates :pushed, inclusion: { in: PUSHED }
+  validates :in_method, inclusion: { in: IN_METHOD }
+  validates :read, inclusion: { in: READ }
+
+  def self.widen!
+    IN_METHOD.concat(%w[c])
+  end
+
+  def readable?(value)
+    READ.include?(value) && READ.frozen?
+  end
+end
+"#,
+    );
+    let rules = validation_rules(&model);
+    for attr in ["nested", "appended", "pushed", "in_method"] {
+        assert!(rules.iter().all(|v| v.attribute.as_str() != attr), "no folded rule for {attr}: {rules:?}");
+        assert!(
+            warnings.iter().any(|w| w.contains(&format!("validates :{attr}, inclusion: in:"))),
+            "{attr}: {warnings:?}"
+        );
+    }
+    assert!(
+        rules.iter().any(|v| v.attribute.as_str() == "read"
+            && matches!(v.rules.as_slice(), [roundhouse::dialect::ValidationRule::Inclusion { values, .. }] if values.len() == 2)),
+        "a read-only constant still folds: {rules:?}"
+    );
+}
+
+/// A mutation reaches a constant through anything that may be the same
+/// object: another constant assigned from it (either way round, `.freeze`
+/// included), a receiver chain rooted at it (`CHAINED.to_a << "c"`), or a
+/// variable holding it. Each of those leaves the list unfoldable; an alias
+/// nothing mutates (`COPY = KEPT`) leaves both foldable.
+#[test]
+fn a_mutation_through_an_alias_or_a_chain_makes_a_constant_unfoldable() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  ALIASED = %w[a b]
+  ALIAS = ALIASED
+  ALIAS << "c"
+  FROZEN = %w[a b]
+  FROZEN_ALIAS = FROZEN.freeze
+  FROZEN_ALIAS.push("c")
+  BACKWARD = %w[a b]
+  BACKWARD_ALIAS = BACKWARD
+  BACKWARD << "c"
+  CHAINED = %w[a b]
+  CHAINED.to_a << "c"
+  HELD = %w[a b]
+  KEPT = %w[a b]
+  COPY = KEPT
+
+  validates :aliased, inclusion: { in: ALIASED }
+  validates :frozen, inclusion: { in: FROZEN }
+  validates :backward, inclusion: { in: BACKWARD_ALIAS }
+  validates :chained, inclusion: { in: CHAINED }
+  validates :held, inclusion: { in: HELD }
+  validates :kept, inclusion: { in: KEPT }
+  validates :copy, inclusion: { in: COPY }
+
+  def self.widen!
+    list = HELD
+    list << "c"
+  end
+end
+"#,
+    );
+    let rules = validation_rules(&model);
+    for attr in ["aliased", "frozen", "backward", "chained", "held"] {
+        assert!(rules.iter().all(|v| v.attribute.as_str() != attr), "no folded rule for {attr}: {rules:?}");
+        assert!(
+            warnings.iter().any(|w| w.contains(&format!("validates :{attr}, inclusion: in:"))),
+            "{attr}: {warnings:?}"
+        );
+    }
+    for attr in ["kept", "copy"] {
+        assert!(
+            rules.iter().any(|v| v.attribute.as_str() == attr
+                && matches!(v.rules.as_slice(), [roundhouse::dialect::ValidationRule::Inclusion { values, .. }] if values.len() == 2)),
+            "{attr} still folds: {rules:?}"
+        );
+    }
+}
+
+/// A call on a fresh value computed from a constant is not a mutation of
+/// it: `(FIELDS_LIMIT - used).times` and `MODES.map(&:upcase) << "x"`
+/// leave both constants foldable.
+#[test]
+fn a_call_on_a_value_computed_from_a_constant_keeps_it_foldable() {
+    let (model, _, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  FIELDS_LIMIT = 4
+  MODES = %w[a b]
+
+  validates :fields, length: { maximum: FIELDS_LIMIT }
+  validates :mode, inclusion: { in: MODES }
+
+  def pad(used)
+    (FIELDS_LIMIT - used).times { nil }
+    MODES.map(&:upcase) << "x"
+  end
+end
+"#,
+    );
+    let rules = validation_rules(&model);
+    assert!(
+        rules.iter().any(|v| v.attribute.as_str() == "fields"
+            && matches!(v.rules.as_slice(), [roundhouse::dialect::ValidationRule::Length { max: Some(4), .. }])),
+        "{rules:?}"
+    );
+    assert!(rules.iter().any(|v| v.attribute.as_str() == "mode"), "{rules:?}");
+}
+
+/// The taint rules cover String pieces of an interpolated regex or String
+/// constant: a piece mutated in place (`PIECE << "x"` before the regex is
+/// built, so Ruby's regex reads `[a-z]+x`) leaves every constant built from
+/// it unfoldable, directly or through an interpolated String chain.
+#[test]
+fn a_mutated_string_piece_leaves_the_interpolated_regex_unfoldable() {
+    let (model, warnings, _) = ingest_widget(
+        r##"
+class Widget < ApplicationRecord
+  PIECE = "[a-z]+"
+  PIECE << "x"
+  NAME_RE = /\A#{PIECE}\z/
+  BASE = "[a-z]"
+  BASE.concat("+")
+  PAT = "#{BASE}y"
+  CODE_RE = /\A#{PAT}\z/
+  KEPT = "[0-9]+"
+  KEPT_RE = /\A#{KEPT}\z/
+
+  validates :name, format: { with: NAME_RE }
+  validates :code, format: { with: CODE_RE }
+  validates :kept, format: { with: KEPT_RE }
+end
+"##,
+    );
+    let rules = validation_rules(&model);
+    for attr in ["name", "code"] {
+        assert!(rules.iter().all(|v| v.attribute.as_str() != attr), "no folded rule for {attr}: {rules:?}");
+        assert!(warnings.iter().any(|w| w.contains(&format!("validates :{attr}, format: with:"))), "{attr}: {warnings:?}");
+    }
+    assert!(
+        rules.iter().any(|v| v.attribute.as_str() == "kept"
+            && matches!(v.rules.as_slice(), [roundhouse::dialect::ValidationRule::Format { pattern, .. }] if pattern == r"\A[0-9]+\z")),
+        "an untouched piece still folds: {rules:?}"
+    );
 }

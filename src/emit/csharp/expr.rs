@@ -34,6 +34,10 @@ use super::naming::{camel, pascal, pascal_of_camel, type_name};
 use super::ty::csharp_ty;
 
 thread_local! {
+    static LET_OPTIONALS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+thread_local! {
     /// Local names already declared in the current method body (so the
     /// first `Assign` emits a declaration and later ones a bare `=`).
     static DECLARED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
@@ -135,7 +139,7 @@ fn next_loop_id() -> usize {
 
 /// Map a Ruby stdlib exception class to its C# analog (app/runtime exception
 /// classes like `RecordNotFound` pass through unchanged).
-fn map_exception_class(name: &str) -> String {
+pub(super) fn map_exception_class(name: &str) -> String {
     match name {
         "NotImplementedError" => "NotImplementedException".to_string(),
         "ArgumentError" => "ArgumentException".to_string(),
@@ -467,6 +471,23 @@ pub(super) fn register_class_hierarchy(name: &str, parent: Option<&str>, members
         .with(|h| h.borrow_mut().insert(name.to_string(), (parent.map(str::to_string), members)));
 }
 
+/// Whether `class_name`, or one of its ancestors, maps onto a .NET exception.
+pub(super) fn derives_from_exception(class_name: &str) -> bool {
+    let mut cur = Some(class_name.to_string());
+    let mut guard = 0;
+    while let Some(name) = cur {
+        guard += 1;
+        if guard > 32 {
+            break;
+        }
+        if map_exception_class(&name).ends_with("Exception") {
+            return true;
+        }
+        cur = CLASS_HIERARCHY.with(|h| h.borrow().get(&name).and_then(|(p, _)| p.clone()));
+    }
+    false
+}
+
 pub(super) fn ancestor_members(class_name: &str) -> HashSet<String> {
     let mut out = HashSet::new();
     let mut cur = Some(class_name.to_string());
@@ -636,6 +657,8 @@ pub(super) fn begin_method(body: &Expr) {
                     {
                         ty.clone()
                     }
+                    // Already nullable and concrete: the nil-first scan has nothing better than `object?` to offer
+                    t if t.ends_with('?') && t != "object?" => ty.clone(),
                     _ => NIL_TYPES
                         .with(|t| t.borrow().get(n).cloned())
                         .unwrap_or_else(|| ty.clone()),
@@ -653,7 +676,7 @@ fn is_a_cast_type(last: &str) -> Option<String> {
     match last {
         "Integer" => Some("long".to_string()),
         "Float" => Some("double".to_string()),
-        "String" => Some("string".to_string()),
+        "String" | "Symbol" => Some("string".to_string()),
         "TrueClass" | "FalseClass" | "Numeric" | "Hash" | "Array" => None,
         other => Some(type_name(other)),
     }
@@ -720,6 +743,22 @@ fn walk_hoist(
             }
         }
         ExprNode::Lambda { body, .. } => walk_hoist(body, depth + 1, info),
+        // Hoisted even when assigned once: `try` scopes its own locals, and rescue and ensure read what the body bound
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            let mut inner = std::collections::BTreeMap::new();
+            walk_hoist(body, depth + 1, &mut inner);
+            for r in rescues {
+                walk_hoist(&r.body, depth + 1, &mut inner);
+            }
+            for e in else_branch.iter().chain(ensure.iter()) {
+                walk_hoist(e, depth + 1, &mut inner);
+            }
+            for (n, (d, c, ty)) in inner {
+                let entry = info.entry(n).or_insert((d, 0, ty));
+                entry.0 = entry.0.max(1);
+                entry.1 = (entry.1 + c).max(2);
+            }
+        }
         ExprNode::Assign { value, .. } | ExprNode::OpAssign { value, .. } => {
             walk_hoist(value, depth, info)
         }
@@ -885,7 +924,7 @@ pub fn emit_expr_for_runtime(e: &Expr) -> String {
 ///   - `Append` `io << chunk`     → `io.Append(chunk)`
 ///   - `Result` terminal `io`     → `io.ToString()`
 fn try_string_builder(e: &Expr) -> Option<String> {
-    match e.hint? {
+    match e.hint().as_ref()? {
         IrHint::MutableStringLiteral => None, // emitted as the plain literal
         IrHint::StringBuilderInit => {
             if let ExprNode::Assign { target: LValue::Var { name, .. }, .. } = &*e.node {
@@ -943,7 +982,22 @@ fn is_empty_branch(e: &Expr) -> bool {
 fn emit_node(n: &ExprNode, e: &Expr) -> String {
     match n {
         ExprNode::Lit { value } => emit_literal(value),
-        ExprNode::Var { name, .. } => nonnull_read(camel(name.as_str())),
+        ExprNode::Var { name, .. } => {
+            let n = camel(name.as_str());
+            match (LET_OPTIONALS.with(|l| l.borrow().contains(&n)), e.ty.as_ref()) {
+                (true, Some(crate::ty::Ty::Int | crate::ty::Ty::Float | crate::ty::Ty::Bool)) => format!("{n}.Value"),
+                (true, Some(t)) if t.is_scalar() => format!("{n}!"),
+                _ => nonnull_read(n),
+            }
+        }
+        // Not a declaration statement: the binding sits in value position, and `is var` always matches, so `default` is never the answer
+        ExprNode::Let { name, value, body, .. } => {
+            let n = camel(name.as_str());
+            if matches!(value.ty, Some(crate::ty::Ty::Union { .. })) {
+                LET_OPTIONALS.with(|l| l.borrow_mut().insert(n.clone()));
+            }
+            format!("({} is var {n} ? {} : default)", emit_expr(value), emit_expr(body))
+        }
         ExprNode::Ivar { name } => {
             let n = camel(name.as_str());
             if is_object_tl_field(&n) {
@@ -1002,7 +1056,7 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
         | ExprNode::Next { .. }
         | ExprNode::Break { .. }
         | ExprNode::Super { .. } => emit_stmt(e),
-        other => format!("/* TODO {} */ null", other.kind_str()),
+        other => crate::emit::diagnostics::report_unsupported(e.span, "csharp", other.kind_str(), "no C# expression form for this construct in value position"),
     }
 }
 
@@ -1022,7 +1076,64 @@ fn emit_literal(lit: &Literal) -> String {
         }
         Literal::Str { value } => format!("\"{}\"", escape_str(value)),
         Literal::Sym { value } => format!("\"{}\"", escape_str(value.as_str())),
-        Literal::Regex { pattern, .. } => format!("new Regex(\"{}\")", escape_str(pattern)),
+        Literal::Regex { pattern, flags } => {
+            let options = csharp_regex_options(flags);
+            if options.is_empty() {
+                format!("new Regex(\"{}\")", escape_str(pattern))
+            } else {
+                format!("new Regex(\"{}\", {options})", escape_str(pattern))
+            }
+        }
+    }
+}
+
+/// Ruby regex flags this build can reproduce exactly on .NET: `i` is
+/// `RegexOptions.IgnoreCase`. Ruby's `m` (dot-matches-newline) is
+/// `RegexOptions.Singleline`. Ruby's `^`/`$` are always line anchors,
+/// so a flagged `m` also adds `RegexOptions.Multiline`. Any other
+/// flag character stays an ingest-time gap
+/// (`ValidationRule::Format` never carries one), so none reaches here.
+fn csharp_regex_options(flags: &str) -> String {
+    let bits = crate::emit::shared::regex_literal::parse_ruby_regex_flags(flags);
+    let mut parts: Vec<&str> = Vec::new();
+    if bits.ignore_case {
+        parts.push("RegexOptions.IgnoreCase");
+    }
+    if bits.dot_matches_newline {
+        parts.push("RegexOptions.Singleline");
+        parts.push("RegexOptions.Multiline");
+    }
+    parts.join(" | ")
+}
+
+#[cfg(test)]
+mod regex_flag_tests {
+    #[test]
+    fn rubys_m_keeps_line_anchors_as_well_as_dotall() {
+        assert_eq!(csharp_regex_options("m"), "RegexOptions.Singleline | RegexOptions.Multiline");
+    }
+
+    use super::{csharp_regex_options, emit_literal};
+    use crate::expr::Literal;
+
+    #[test]
+    fn no_flags_drop_the_options_argument() {
+        let lit = Literal::Regex { pattern: "a.b".into(), flags: "".into() };
+        assert_eq!(emit_literal(&lit), r#"new Regex("a.b")"#);
+    }
+
+    #[test]
+    fn ignore_case_maps_to_regexoptions_ignorecase() {
+        assert_eq!(csharp_regex_options("i"), "RegexOptions.IgnoreCase");
+    }
+
+    #[test]
+    fn ignore_case_and_dot_matches_newline_combine_in_the_constructor() {
+        let lit = Literal::Regex { pattern: "a.b".into(), flags: "im".into() };
+        assert_eq!(
+            emit_literal(&lit),
+            r#"new Regex("a.b", RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Multiline)"#
+        );
     }
 }
 
@@ -1111,7 +1222,23 @@ fn emit_string_interp(parts: &[InterpPart]) -> String {
 
 fn emit_bool_op(op: BoolOpKind, left: &Expr, right: &Expr, e: &Expr) -> String {
     let l = emit_expr(left);
-    let r = emit_expr(right);
+    // Not the empty literal's own `object?` element: `x || {}` answers x's type, and Dictionary is invariant
+    let empty_of_left = || -> Option<String> {
+        let left_ty = left.ty.as_ref()?.peel_nilable();
+        match (&*right.node, left_ty) {
+            (ExprNode::Hash { entries, .. }, crate::ty::Ty::Hash { .. }) if entries.is_empty() => {
+                Some(format!("new {}()", super::ty::csharp_ty(left_ty).trim_end_matches('?')))
+            }
+            (ExprNode::Array { elements, .. }, crate::ty::Ty::Array { .. }) if elements.is_empty() => {
+                Some(format!("new {}()", super::ty::csharp_ty(left_ty).trim_end_matches('?')))
+            }
+            _ => None,
+        }
+    };
+    let r = match op {
+        BoolOpKind::Or => empty_of_left().unwrap_or_else(|| emit_expr(right)),
+        BoolOpKind::And => emit_expr(right),
+    };
     match op {
         BoolOpKind::And => format!("{l} && {r}"),
         // `||` is logical-or for Bool results; Ruby's `x || default`
@@ -1145,7 +1272,23 @@ fn emit_if_expr(cond: &Expr, then_branch: &Expr, else_branch: &Expr) -> String {
             }
         }
     }
-    format!("({c} ? ({}) : ({els}))", emit_expr(then_branch))
+    let then_s = emit_expr(then_branch);
+    // Not left untyped: C# finds no type for `c ? null : 1.0`, so a value-type arm opposite a nil one reads as nullable
+    let nullable = |branch: &Expr| match branch.ty.as_ref() {
+        Some(crate::ty::Ty::Float) => Some("double?"),
+        Some(crate::ty::Ty::Int) => Some("long?"),
+        Some(crate::ty::Ty::Bool) => Some("bool?"),
+        _ => None,
+    };
+    if els == "null" && let Some(t) = nullable(then_branch) {
+        return format!("({c} ? ({t})({then_s}) : null)");
+    }
+    if then_s == "null" && let Some(t) = nullable(else_branch) {
+        return format!("({c} ? null : ({t})({els}))");
+    }
+    // Not parenthesized: C# rejects a throw expression inside parentheses (CS8115)
+    let arm = |s: String| if s.starts_with("throw ") { s } else { format!("({s})") };
+    format!("({c} ? {} : {})", arm(then_s), arm(els))
 }
 
 /// `case` in value position → C# switch-expression. Arms are cast to
@@ -1166,8 +1309,9 @@ fn emit_case_expr(scrutinee: &Expr, arms: &[Arm]) -> String {
                 lines.push(format!("    {} => (object?)({body}),", emit_literal(value)));
             }
             other => {
-                lines.push(format!("    /* TODO pattern {other:?} */ _ => (object?)({body}),"));
-                has_default = true;
+                let stub = crate::emit::diagnostics::report_unsupported(arm.body.span, "csharp", "case pattern", format!("{other:?}").split([' ', '(', '{']).next().unwrap_or("").to_string());
+                // Not an arm of the switch: a `_` there subsumes the arms after it, and a switch of throws alone has no type
+                return format!("((object?)null ?? {stub})");
             }
         }
     }
@@ -1229,6 +1373,11 @@ fn emit_slice_range(
 
 fn emit_lambda(params: &[crate::ident::Symbol], body: &Expr, _destructure: bool) -> String {
     let body_s = emit_expr(body);
+    // Not the assignment statement as rendered: an expression-bodied lambda takes `x = y`, not `x = y;`
+    let body_s = match body_s.strip_suffix(';') {
+        Some(expr) if matches!(&*body.node, ExprNode::Assign { .. }) => expr.to_string(),
+        _ => body_s,
+    };
     let ps: Vec<String> = params.iter().map(|p| camel(p.as_str())).collect();
     format!("({}) => {body_s}", ps.join(", "))
 }
@@ -1306,6 +1455,10 @@ fn emit_send(
     args: &[Expr],
     block: Option<&Expr>,
 ) -> String {
+    if let Some(recv) = crate::emit::shared::fn_call::function_receiver(recv, method, block) {
+        let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+        return format!("{}({})", emit_expr(recv), args_s.join(", "));
+    }
     if recv.is_none() && args.is_empty() && block.is_none() && is_param(method) {
         return camel(method);
     }
@@ -1314,7 +1467,11 @@ fn emit_send(
         return format!("!({})", emit_expr(&args[0]));
     }
 
-    let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+    // Not each argument rendered as it is: a Range has no C# value, and the slice paths below read its bounds instead
+    let args_s: Vec<String> = args
+        .iter()
+        .map(|a| if matches!(&*a.node, ExprNode::Range { .. }) { String::new() } else { emit_expr(a) })
+        .collect();
 
     // `self.class.METHOD(...)` → unqualified `METHOD(...)` (the per-model
     // static method).
@@ -1438,6 +1595,8 @@ fn emit_send(
                 "Integer" => format!("({rs} is long)"),
                 "Float" => format!("({rs} is double)"),
                 "String" => format!("({rs} is string)"),
+                // Not `is Symbol`: a Symbol is emitted as a string, so the two read alike here, as in TypeScript
+                "Symbol" => format!("({rs} is string)"),
                 "Numeric" => format!("({rs} is long || {rs} is double)"),
                 "Hash" => format!("({rs} is System.Collections.IDictionary)"),
                 "Array" => format!("({rs} is System.Collections.IList)"),
@@ -1465,6 +1624,13 @@ fn emit_send(
             "start_with?" => return format!("{}.StartsWith({})", emit_expr(r), args_s[0]),
             "end_with?" => return format!("{}.EndsWith({})", emit_expr(r), args_s[0]),
             "include?" => return format!("{}.Contains({})", emit_expr(r), args_s[0]),
+            // Not IndexOf as it is: Ruby answers nil, not -1, for a miss
+            "index" if recv_is_array(r) => {
+                return format!("({}.IndexOf({}) is var __at && __at >= 0 ? (long?)__at : null)", emit_expr(r), args_s[0]);
+            }
+            "rindex" if !recv_is_array(r) && !recv_is_hash(r) => {
+                return format!("({}.LastIndexOf({}) is var __at && __at >= 0 ? (long?)__at : null)", emit_expr(r), args_s[0]);
+            }
             // `String#match?(re)` → `re.IsMatch(s)`. C# has no
             // `string.MatchPred`; flip onto the `Regex` argument.
             "match?" => {
@@ -1504,6 +1670,10 @@ fn emit_send(
                 if recv_is_array(r) {
                     return format!("{rs}[(int)({})]", args_s[0]);
                 }
+                // Not `s[i]`, a char at an int: Ruby answers a one-character String, or nil past the end
+                if matches!(r.ty.as_ref().map(|t| t.peel_nilable()), Some(crate::ty::Ty::Str)) {
+                    return format!("RhRuntime.StrSlice({rs}, {}, 1L)", args_s[0]);
+                }
                 // Ruby `Hash#[]` returns nil for a missing key; C#'s Dictionary
                 // indexer throws — read via `GetValueOrDefault` to match.
                 if recv_is_hash(r) {
@@ -1514,6 +1684,9 @@ fn emit_send(
             if args.len() == 2 {
                 let start = &args_s[0];
                 let len = &args_s[1];
+                if recv_is_array(r) {
+                    return format!("RhRuntime.ListSlice({rs}, {start}, {len})");
+                }
                 // Ruby clamps; `Substring` throws past the end.
                 return format!("RhRuntime.StrSlice({rs}, {start}, {len})");
             }
@@ -1523,8 +1696,21 @@ fn emit_send(
     // Binary operators with a receiver and one arg.
     if let (Some(r), 1) = (recv, args.len()) {
         match crate::emit::shared::ops::classify_binop(method) {
+            // Not `a >= b` on Strings: C# orders strings only through a comparer, and Ruby's String#<=> is ordinal
+            crate::emit::shared::ops::BinopCase::NativeInfix(op)
+                if matches!(op, "<" | "<=" | ">" | ">=")
+                    && matches!(r.ty.as_ref().map(|t| t.peel_nilable()), Some(crate::ty::Ty::Str)) =>
+            {
+                return format!("(string.CompareOrdinal({}, {}) {op} 0)", emit_expr(r), args_s[0]);
+            }
             crate::emit::shared::ops::BinopCase::NativeInfix(op) => {
                 return format!("{} {} {}", emit_expr(r), op, args_s[0]);
+            }
+            // Not `.Add` on a String: C# strings are immutable, so `buf << x` rebinds the buffer
+            crate::emit::shared::ops::BinopCase::Append
+                if matches!(r.ty.as_ref().map(|t| t.peel_nilable()), Some(crate::ty::Ty::Str)) =>
+            {
+                return format!("{} += {}", emit_expr(r), args_s[0]);
             }
             crate::emit::shared::ops::BinopCase::Append => {
                 let arg = coerce_list_elem_arg(r, &args[0], &args_s[0]);
@@ -1561,6 +1747,13 @@ fn emit_send(
             return format!("{}[{}] = {}", emit_expr(r), idx, val);
         }
         if method == "fetch" {
+            // Not GetValueOrDefault(k, null): a long or bool value has no null default, so the miss reads as V?
+            if recv_is_hash(r) && matches!(&*args[1].node, ExprNode::Lit { value: crate::expr::Literal::Nil }) {
+                let (_, v) = hash_kv_tys(r);
+                let rs = emit_expr(r);
+                let v = v.trim_end_matches('?');
+                return format!("({rs}.ContainsKey({k}) ? ({v}?){rs}[{k}] : null)", k = args_s[0]);
+            }
             return format!("({}.GetValueOrDefault({}, {}))", emit_expr(r), args_s[0], args_s[1]);
         }
         if method == "tr" {
@@ -1628,6 +1821,20 @@ fn emit_send(
             "upcase" => return format!("{rs}.ToUpperInvariant()"),
             "downcase" => return format!("{rs}.ToLowerInvariant()"),
             "strip" => return format!("{rs}.Trim()"),
+            "lstrip" => return format!("{rs}.TrimStart()"),
+            "abs" => return format!("Math.Abs({rs})"),
+            "rstrip" => return format!("{rs}.TrimEnd()"),
+            // Not `.First` / `.Last`, the LINQ method group: Ruby answers nil on an empty Array
+            // Not FirstOrDefault() alone: a value-type element answers 0 or false for an empty array, where Ruby answers nil
+            "first" | "last" if recv_is_array(r) => {
+                let pick = if method == "first" { "FirstOrDefault" } else { "LastOrDefault" };
+                return match r.ty.as_ref() {
+                    Some(crate::ty::Ty::Array { elem }) if matches!(**elem, crate::ty::Ty::Int | crate::ty::Ty::Float | crate::ty::Ty::Bool) => {
+                        format!("{rs}.Select(x => ({}?)x).{pick}()", csharp_ty(elem))
+                    }
+                    _ => format!("{rs}.{pick}()"),
+                };
+            }
             "join" => return format!("string.Join(\"\", {rs})"),
             "length" | "size" => {
                 return if recv_is_array(r) || recv_is_hash(r) {
@@ -1821,6 +2028,52 @@ fn emit_call_args(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
 /// Render an expression as a statement: control flow as a block, everything
 /// else as an expression-statement terminated with `;`. Empty/`nil` no-ops
 /// render to the empty string.
+pub(super) fn emit_begin_rescue(
+    body: &Expr,
+    rescues: &[crate::expr::RescueClause],
+    else_branch: Option<&Expr>,
+    ensure: Option<&Expr>,
+    arm: &dyn Fn(&Expr) -> String,
+) -> String {
+    let mut try_body = arm(body);
+    if let Some(eb) = else_branch {
+        try_body.push('\n');
+        try_body.push_str(&arm(eb));
+    }
+    let mut out = format!("try {{\n{}\n}}", indent(&try_body));
+    if !rescues.is_empty() {
+        let mut chain = String::new();
+        for (i, r) in rescues.iter().enumerate() {
+            let test = if r.classes.is_empty() {
+                "__rescued is Exception".to_string()
+            } else {
+                r.classes
+                    .iter()
+                    .map(|c| match &*c.node {
+                        ExprNode::Const { path } => {
+                            format!("__rescued is {}", map_exception_class(path.last().map(|s| s.as_str()).unwrap_or("Exception")))
+                        }
+                        _ => "__rescued is Exception".to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" || ")
+            };
+            let bind = r.binding.as_ref().map(|b| format!("var {} = __rescued;\n", camel(b.as_str()))).unwrap_or_default();
+            chain.push_str(&format!(
+                "{}if ({test}) {{\n{}\n}}",
+                if i == 0 { "" } else { " else " },
+                indent(&format!("{bind}{}", arm(&r.body)))
+            ));
+        }
+        chain.push_str(" else {\n    throw;\n}");
+        out.push_str(&format!(" catch (Exception __rescued) {{\n{}\n}}", indent(&chain)));
+    }
+    if let Some(en) = ensure {
+        out.push_str(&format!(" finally {{\n{}\n}}", indent(&emit_stmt(en))));
+    }
+    out
+}
+
 pub(super) fn emit_stmt(e: &Expr) -> String {
     // The view string-builder sites (`io = String.new`, `io << chunk`) are
     // statements — route them through `try_string_builder` so the init emits
@@ -1836,6 +2089,9 @@ pub(super) fn emit_stmt(e: &Expr) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         ExprNode::If { cond, then_branch, else_branch } => emit_if_stmt(cond, then_branch, else_branch),
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            emit_begin_rescue(body, rescues, else_branch.as_ref(), ensure.as_ref(), &emit_stmt)
+        }
         ExprNode::While { cond, body, until_form } => {
             let c = emit_expr(cond);
             let c = if *until_form { format!("!({c})") } else { c };
@@ -1995,11 +2251,9 @@ fn emit_case_stmt(scrutinee: &Expr, arms: &[Arm]) -> String {
                 out.push_str(&format!("{kw} ({s} == {}) {{\n{body}\n}} ", emit_literal(value)));
             }
             other => {
-                let kw = if first { "if" } else { "else if" };
-                first = false;
-                out.push_str(&format!(
-                    "{kw} (false) {{ /* TODO pattern {other:?} */\n{body}\n}} "
-                ));
+                let stub = crate::emit::diagnostics::report_unsupported(arm.body.span, "csharp", "case pattern", format!("{other:?}").split([' ', '(', '{']).next().unwrap_or("").to_string());
+                // Not an arm that never matches: the Ruby arm would run where this one is skipped
+                return format!("{stub};");
             }
         }
     }
@@ -2114,7 +2368,7 @@ fn emit_op_assign(target: &LValue, op: OpAssignOp, value: &Expr) -> String {
         OpAssignOp::Mul => format!("{lhs} *= {v}"),
         OpAssignOp::Div => format!("{lhs} /= {v}"),
         OpAssignOp::Mod => format!("{lhs} %= {v}"),
-        _ => format!("{lhs} = {lhs} /* TODO op-assign */ {v}"),
+        other => crate::emit::diagnostics::report_unsupported(value.span, "csharp", "OpAssign", format!("{other:?}")),
     }
 }
 

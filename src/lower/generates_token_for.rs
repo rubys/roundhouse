@@ -332,7 +332,14 @@ fn synthesized_source(model: &Model, decls: &[TokenForDecl]) -> String {
     };
 
     let data = case(arms(&|d| match &d.value {
-        Some(e) => format!("ActiveRecord::TokenFor.{}", value_payload(e, &emit_expr(e))),
+        // Grounded as the model's own bodies are (`String#last` ->
+        // `ActiveSupport.string_last`): this source is re-ingested after
+        // that pass has run.
+        Some(e) => {
+            let mut value = e.clone();
+            crate::lower::enumerable_ext::rewrite_body(&mut value);
+            format!("ActiveRecord::TokenFor.{}", value_payload(e, &emit_expr(&value)))
+        }
         None => "ActiveRecord::TokenFor.id_data(id)".to_string(),
     }));
     let meta = case(arms(&|d| {
@@ -342,7 +349,11 @@ fn synthesized_source(model: &Model, decls: &[TokenForDecl]) -> String {
     // Rails: the finder answers nil for a token that does not verify,
     // names no row, or whose payload the record no longer produces. The
     // bang form raises InvalidSignature for the first and last, and
-    // `find`'s RecordNotFound for a row that is gone.
+    // `find`'s RecordNotFound for a row that is gone. The record is
+    // looked up with `where(id:).first` at implicit self, which is what
+    // `lower::scope_chain` roots at the relation a finder was reached
+    // through (`User.active.find_by_transfer_id` -> `find_by_token_for`):
+    // Rails' scoping makes the lookup that relation's.
     format!(
         "class {class}
   def __token_data(purpose)
@@ -360,7 +371,7 @@ fn synthesized_source(model: &Model, decls: &[TokenForDecl]) -> String {
   def self.find_by_token_for(purpose, token)
     data = ActiveRecord::TokenFor.verified_data(token, {class}.__token_meta(purpose)[0])
     return nil if data == \"\"
-    record = {class}.find_by(id: ActiveRecord::TokenFor.data_id(data))
+    record = where(id: ActiveRecord::TokenFor.data_id(data)).first
     return nil if record.nil?
     record.__token_data(purpose) == data ? record : nil
   end
@@ -368,7 +379,9 @@ fn synthesized_source(model: &Model, decls: &[TokenForDecl]) -> String {
   def self.find_by_token_for!(purpose, token)
     data = ActiveRecord::TokenFor.verified_data(token, {class}.__token_meta(purpose)[0])
     raise ActiveSupport::MessageVerifier::InvalidSignature if data == \"\"
-    record = {class}.find(ActiveRecord::TokenFor.data_id(data))
+    id = ActiveRecord::TokenFor.data_id(data)
+    record = where(id: id).first
+    raise ActiveRecord::RecordNotFound, \"Couldn't find {class} with id=#{{id}}\" if record.nil?
     raise ActiveSupport::MessageVerifier::InvalidSignature unless record.__token_data(purpose) == data
     record
   end

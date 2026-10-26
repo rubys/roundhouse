@@ -18,9 +18,12 @@ use crate::vfs::Vfs;
 use super::controller_macro_synth::{append_private_actions, push_after_filter};
 use super::{IngestError, IngestResult, survey};
 
+use crate::ingest::prism_api::PrismLocation;
+
 #[derive(Clone, Copy, PartialEq)]
 enum PropKind {
     Eager,
+    Lazy,
     Optional,
     Deferred,
     Always,
@@ -371,7 +374,7 @@ fn decode_prop_value(v: &Expr) -> Result<(PropKind, String, Expr), ()> {
     } = &*v.node
         && params.is_empty()
     {
-        return Ok((PropKind::Eager, String::new(), body.clone()));
+        return Ok((PropKind::Lazy, String::new(), body.clone()));
     }
     match classify_prop_value(v) {
         PropValue::Plain(e) => Ok((PropKind::Eager, String::new(), e)),
@@ -481,12 +484,13 @@ fn desugar(e: &mut Expr, ctx: &mut RenderCtx) {
 fn prop_stmt(span: Span, p: &Prop, shared: bool) -> Expr {
     let page = || call(span, None, "inertia_page", Vec::new());
     let key = str_lit(span, &p.key);
-    let set = call(span, Some(page()), "prop", vec![key.clone(), p.value.clone()]);
+    let method = if p.kind == PropKind::Lazy { "lazy_prop" } else { "prop" };
+    let set = call(span, Some(page()), method, vec![key.clone(), p.value.clone()]);
     let gated = if p.kind == PropKind::Always {
         set
     } else {
         let guard = match p.kind {
-            PropKind::Eager => call(span, Some(page()), "eager?", vec![key.clone()]),
+            PropKind::Eager | PropKind::Lazy => call(span, Some(page()), "eager?", vec![key.clone()]),
             PropKind::Optional => call(span, Some(page()), "optional?", vec![key.clone()]),
             PropKind::Deferred => call(
                 span,

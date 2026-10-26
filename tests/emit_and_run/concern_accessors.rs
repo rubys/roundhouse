@@ -362,3 +362,82 @@ class Article < ApplicationRecord; primary_abstract_class; self.abstract_class =
     run.assert_passes();
     assert!(run.stdout.contains("concrete primary scratch=draft reviewed=false second_reviewed=true"));
 }
+
+const ATTEMPT_TRACKING: &str = "module AttemptTracking\n  extend ActiveSupport::Concern\n  included do\n    attr_reader :attempt\n    attr_writer :note\n  end\n\n  def record_attempt(value)\n    @attempt = value\n  end\n\n  def note_value\n    @note\n  end\nend\n";
+
+const ONE_SIDED: &str = r##"a = Article.new
+raise "fresh reader: #{a.attempt.inspect}" unless a.attempt.nil?
+a.record_attempt("first")
+raise "reader: #{a.attempt.inspect}" unless a.attempt == "first"
+raise "other record: #{Article.new.attempt.inspect}" unless Article.new.attempt.nil?
+raise "reader-only has a writer" if a.respond_to?(:attempt=)
+a.note = "n"
+raise "writer: #{a.note_value.inspect}" unless a.note_value == "n"
+raise "writer-only has a reader" if a.respond_to?(:note)
+raise "loaded: #{Article.first.attempt.inspect}" if Article.first && !Article.first.attempt.nil?
+puts "one-sided passed"
+"##;
+
+fn one_sided() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/attempt_tracking.rb",
+            ATTEMPT_TRACKING,
+        )
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < ApplicationRecord\n  include AttemptTracking\n")
+}
+
+/// A one-sided `attr_reader` / `attr_writer` from a concern's `included`
+/// block defines only its half on each includer, over the includer's ivar.
+#[test]
+fn concern_one_sided_accessors_run() {
+    one_sided()
+        .run_ruby(ONE_SIDED)
+        .assert_passes();
+}
+
+#[test]
+fn concern_one_sided_accessors_emit_on_strict_targets() {
+    use roundhouse::project::BuildTarget;
+    for target in [BuildTarget::Rust, BuildTarget::Typescript, BuildTarget::Go, BuildTarget::Crystal] {
+        let (_emitted, errors) = one_sided().emit(target);
+        assert!(errors.is_empty(), "{target:?}: {errors:#?}");
+    }
+}
+
+/// The same concern and script under activerecord 8.1.4; skipped when
+/// the gems aren't installed.
+#[test]
+fn rails_answers_the_one_sided_script() {
+    let probe = r#"gem "activerecord", "8.1.4"; require "active_record"; require "sqlite3""#;
+    if !std::process::Command::new("ruby").args(["-e", probe]).status().is_ok_and(|s| s.success()) {
+        eprintln!("skipping: ruby with activerecord 8.1.4 and sqlite3 not available");
+        return;
+    }
+    let script = format!(
+        r##"gem "activerecord", "8.1.4"
+require "active_record"
+require "sqlite3"
+ActiveRecord::Base.establish_connection(adapter: "sqlite3", database: ":memory:")
+ActiveRecord::Schema.verbose = false
+ActiveRecord::Schema.define do
+  create_table(:articles) {{ |t| t.string :title; t.text :body }}
+end
+class ApplicationRecord < ActiveRecord::Base
+  primary_abstract_class
+end
+{ATTEMPT_TRACKING}
+class Article < ApplicationRecord
+  include AttemptTracking
+end
+Article.create!(title: "t", body: "b")
+{ONE_SIDED}"##
+    );
+    let output = std::process::Command::new("ruby").arg("-e").arg(&script).output().expect("ruby is on PATH");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("one-sided passed"),
+        "activerecord 8.1.4 disagrees\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"
+    );
+}

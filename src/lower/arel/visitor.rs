@@ -253,11 +253,11 @@ fn visit_select(sel: &Select, schema: &Schema, owner: &ClassId, param: bool) -> 
                 detail,
             ));
             let mut stub = nil_lit();
-            stub.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+            stub.set_diagnostic(Some(crate::diagnostic::DiagnosticKind::Unsupported {
                 target: None,
                 construct: Symbol::from("ColumnSpec::Named"),
                 detail: detail.to_string(),
-            });
+            }));
             stub
         }
     }
@@ -1392,6 +1392,8 @@ mod tests {
                         generated: None,
                         generated_text_compatible: None,
                         generated_int4_compatible: None,
+                        array: false,
+                        array_stored: false,
                     },
                     Column {
                         name: Symbol::from("title"),
@@ -1402,6 +1404,8 @@ mod tests {
                         generated: None,
                         generated_text_compatible: None,
                         generated_int4_compatible: None,
+                        array: false,
+                        array_stored: false,
                     },
                 ],
                 indexes: vec![],

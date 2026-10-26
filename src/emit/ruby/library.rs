@@ -26,9 +26,6 @@ pub(super) fn preserve_record_receiver_returns(lcs: &mut [LibraryClass], app: &A
     let templates = crate::runtime_src::parse_methods(
         "def reload(options = nil)\n  super(options)\n  self\nend\ndef lock!(lock = true)\n  super(lock)\n  self\nend\n",
     ).expect("receiver-return forwarders parse");
-    let classes: HashMap<ClassId, ()> = app.models.iter().map(|m| &m.name)
-        .chain(app.library_classes.iter().map(|lc| &lc.name))
-        .map(|id| (id.clone(), ())).collect();
     for lc in lcs {
         if !app.models.iter().any(|m| m.name == lc.name && app.schema.tables.contains_key(&m.table.0)) {
             continue;
@@ -36,7 +33,7 @@ pub(super) fn preserve_record_receiver_returns(lcs: &mut [LibraryClass], app: &A
         let self_ty = Ty::Class { id: lc.name.clone(), args: vec![].into() };
         for template in &templates {
             if lc.methods.iter().any(|m| m.name == template.name && m.receiver == MethodReceiver::Instance)
-                || record_return_overridden(app, &classes, &lc.name, template.name.as_str())
+                || record_return_overridden(app, &lc.name, template.name.as_str())
             {
                 continue;
             }
@@ -67,41 +64,10 @@ pub(super) fn preserve_record_receiver_returns(lcs: &mut [LibraryClass], app: &A
 
 /// Source overrides, including those on ApplicationRecord or a mixin,
 /// may return a different object. Do not interpose a self-returning wrapper.
-fn record_return_overridden(app: &App, classes: &HashMap<ClassId, ()>, class: &ClassId, method: &str) -> bool {
-    let mut pending = vec![class.clone()];
-    let mut seen = BTreeSet::new();
-    while let Some(id) = pending.pop() {
-        if !seen.insert(id.clone()) { continue; }
-        // Per-file ingest can retain a relative include. Resolve it in
-        // its owner's scope before looking for the concern's override.
-        let resolve = |written: &ClassId| crate::analyze::lexical_class(written, id.0.as_str(), classes)
-            .unwrap_or_else(|| written.clone());
-        let relevant = |m: &MethodDef| m.receiver == MethodReceiver::Instance
-            && (m.name.as_str() == method || (method == "lock!" && m.name.as_str() == "reload"));
-        if let Some(model) = app.models.iter().find(|m| m.name == id) {
-            if model.methods().any(relevant) { return true; }
-            // Parents are written relative to the subclass (`< Base` inside
-            // `module Admin`); resolve them the same way includes already are.
-            pending.extend(model.parent.iter().map(resolve));
-            for item in &model.body {
-                let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { continue };
-                let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
-                if method.as_str() != "include" { continue; }
-                for arg in args {
-                    if let ExprNode::Const { path } = &*arg.node {
-                        let written = ClassId(Symbol::from(path.iter().map(Symbol::as_str).collect::<Vec<_>>().join("::")));
-                        pending.push(resolve(&written));
-                    }
-                }
-            }
-        }
-        if let Some(lc) = app.library_classes.iter().find(|lc| lc.name == id) {
-            if lc.methods.iter().any(relevant) { return true; }
-            pending.extend(lc.parent.iter().map(resolve));
-            pending.extend(lc.includes.iter().map(resolve));
-        }
-    }
-    false
+/// `lock!` calls `reload`, so an override of either one answers the source.
+fn record_return_overridden(app: &App, class: &ClassId, method: &str) -> bool {
+    crate::analyze::source_instance_method(app, class, method)
+        || (method == "lock!" && crate::analyze::source_instance_method(app, class, "reload"))
 }
 
 /// Lower library classes for Ruby and emit their source/RBS file pairs, grouping
@@ -159,6 +125,8 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     apply_datetime_lowering(&mut lcs, app);
     apply_rich_text_content_memo(&mut lcs);
     apply_boolean_lowering(&mut lcs, app);
+    apply_typed_writer_cast_lowering(&mut lcs, app);
+    parse_untyped_numericality_input(&mut lcs, app);
     apply_hydration_nil_lowering(&mut lcs, app);
     apply_time_format_lowering(&mut lcs, app);
     // Same rooting the view pipeline applies, for the same reason one
@@ -255,7 +223,18 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
             }
             files
         })
-        .collect()
+        .fold(Vec::<EmittedFile>::new(), |mut out, file| {
+            // Not left to the tree's last-wins dedupe: a module opened in two files (rolify's `Rolify`) would lose one opening's methods.
+            match out.iter_mut().find(|f| f.path == file.path) {
+                Some(existing) if existing.content == file.content => {}
+                Some(existing) => {
+                    existing.content.push('\n');
+                    existing.content.push_str(&file.content);
+                }
+                None => out.push(file),
+            }
+            out
+        })
 }
 
 /// `Data.define(<symbols>)` — the factory `analyze::data` models.
@@ -751,21 +730,26 @@ fn invoked_lambda(expr: &Expr) -> Option<&Expr> {
     }
 }
 
-fn walk_param_defaults(params: &[crate::dialect::Param], owner: &LibraryClass, visited: &mut BTreeSet<String>, paths: &mut BTreeSet<Vec<String>>) {
+fn walk_param_defaults(params: &[crate::dialect::Param], owner: &LibraryClass, side: MethodReceiver, visited: &mut BTreeSet<String>, paths: &mut BTreeSet<Vec<String>>) {
     for param in params {
         if let Some(default) = &param.default {
-            walk_load_time_paths(default, owner, visited, paths);
+            walk_load_time_paths_on(default, owner, side, visited, paths);
         }
     }
 }
 
 fn walk_load_time_paths(expr: &Expr, owner: &LibraryClass, visited: &mut BTreeSet<String>, paths: &mut BTreeSet<Vec<String>>) {
+    walk_load_time_paths_on(expr, owner, MethodReceiver::Class, visited, paths);
+}
+
+// Not by name alone: a class-body `configure` runs `def self.configure`, never an instance method of that name.
+fn walk_load_time_paths_on(expr: &Expr, owner: &LibraryClass, side: MethodReceiver, visited: &mut BTreeSet<String>, paths: &mut BTreeSet<Vec<String>>) {
     if let Some(lambda) = invoked_lambda(expr) {
         if let ExprNode::Lambda { extra_params, body, .. } = &*lambda.node {
-            walk_param_defaults(extra_params, owner, visited, paths);
-            walk_load_time_paths(body, owner, visited, paths);
+            walk_param_defaults(extra_params, owner, side, visited, paths);
+            walk_load_time_paths_on(body, owner, side, visited, paths);
         } else {
-            walk_load_time_paths(lambda, owner, visited, paths);
+            walk_load_time_paths_on(lambda, owner, side, visited, paths);
         }
     }
     if let ExprNode::Lambda { .. } = &*expr.node {
@@ -780,18 +764,31 @@ fn walk_load_time_paths(expr: &Expr, owner: &LibraryClass, visited: &mut BTreeSe
             ExprNode::Const { path } => path.iter().map(|part| part.as_str()).filter(|part| !part.is_empty()).collect::<Vec<_>>().join("::") == owner.name.0.as_str(),
             _ => false,
         });
-        let called = if method.as_str() == "new" { "initialize" } else { method.as_str() };
-        if own && visited.insert(called.to_string()) {
-            for method in owner.methods.iter().filter(|method| method.name.as_str() == called) {
-                walk_param_defaults(&method.params, owner, visited, paths);
-                if let Some(block) = &method.block_param {
-                    walk_param_defaults(std::slice::from_ref(block), owner, visited, paths);
+        let overridden_new = owner.methods.iter().any(|m| m.name.as_str() == "new" && m.receiver == MethodReceiver::Class);
+        let (called, on) = if method.as_str() == "new" && side == MethodReceiver::Class && !overridden_new {
+            ("initialize", MethodReceiver::Instance)
+        } else {
+            (method.as_str(), side)
+        };
+        // An overridden `new` still reaches `initialize` through its `super`, so both are walked.
+        let targets: Vec<(&str, MethodReceiver)> = if method.as_str() == "new" && side == MethodReceiver::Class && overridden_new {
+            vec![(called, on), ("initialize", MethodReceiver::Instance)]
+        } else {
+            vec![(called, on)]
+        };
+        for (called, on) in targets {
+            if own && visited.insert(format!("{}{called}", if on == MethodReceiver::Class { "." } else { "#" })) {
+                for method in owner.methods.iter().filter(|method| method.name.as_str() == called && method.receiver == on) {
+                    walk_param_defaults(&method.params, owner, on, visited, paths);
+                    if let Some(block) = &method.block_param {
+                        walk_param_defaults(std::slice::from_ref(block), owner, on, visited, paths);
+                    }
+                    walk_load_time_paths_on(&method.body, owner, on, visited, paths);
                 }
-                walk_load_time_paths(&method.body, owner, visited, paths);
             }
         }
         for value in recv.iter().chain(args) {
-            walk_load_time_paths(value, owner, visited, paths);
+            walk_load_time_paths_on(value, owner, side, visited, paths);
         }
         let stores_block = matches!(method.as_str(), "proc" | "lambda")
             || (method.as_str() == "new" && matches!(recv.as_ref().map(|recv| &*recv.node),
@@ -799,12 +796,12 @@ fn walk_load_time_paths(expr: &Expr, owner: &LibraryClass, visited: &mut BTreeSe
         if !stores_block {
             if let Some(block) = block {
                 let body = match &*block.node { ExprNode::Lambda { body, .. } => body, _ => block };
-                walk_load_time_paths(body, owner, visited, paths);
+                walk_load_time_paths_on(body, owner, side, visited, paths);
             }
         }
         return;
     }
-    expr.node.for_each_child(&mut |child| walk_load_time_paths(child, owner, visited, paths));
+    expr.node.for_each_child(&mut |child| walk_load_time_paths_on(child, owner, side, visited, paths));
 }
 
 struct NestedEmitter<'a> {
@@ -1062,23 +1059,40 @@ fn rewrite_library_partial_render(
     let Some(contract) = contracts.get(&(module_camel.clone(), stem.clone())) else { return };
     let span = expr.span;
     let nil = || sp_expr(ExprNode::Lit { value: Literal::Nil });
-    let lookup = |name: &str| -> Option<Expr> {
+    let locals_lookup = |name: &str| -> Option<Expr> {
         locals
             .iter()
             .find(|(k, _)| k.as_str() == name)
             .map(|(_, v)| v.clone())
-            .or_else(|| {
-                in_scope.iter().find(|p| p.as_str() == name).map(|p| {
-                    Expr::new(span, ExprNode::Var { id: VarId(0), name: p.clone() })
-                })
-            })
+    };
+    let param_lookup = |name: &str| -> Option<Expr> {
+        in_scope.iter().find(|p| p.as_str() == name).map(|p| {
+            Expr::new(span, ExprNode::Var { id: VarId(0), name: p.clone() })
+        })
+    };
+    let lookup = |name: &str| -> Option<Expr> {
+        locals_lookup(name).or_else(|| param_lookup(name))
+    };
+    let caller_flash = [
+        crate::lower::view_to_library::flash_param_in_scope(in_scope, "notice"),
+        crate::lower::view_to_library::flash_param_in_scope(in_scope, "alert"),
+    ];
+    let caller_flash = match (&caller_flash[0], &caller_flash[1]) {
+        (Some(n), Some(a)) => Some([n.clone(), a.clone()]),
+        _ => None,
     };
     let mut view_args: Vec<Expr> = Vec::new();
     view_args.push(lookup(&contract.record).unwrap_or_else(nil));
     for n in &contract.closure {
         view_args.push(lookup(n).unwrap_or_else(nil));
     }
-    view_args.extend(contract.extras_args(lookup, nil, span));
+    view_args.extend(contract.extras_args(
+        locals_lookup,
+        param_lookup,
+        caller_flash.as_ref(),
+        nil,
+        span,
+    ));
     *expr = Expr::new(
         span,
         ExprNode::Send {
@@ -1825,6 +1839,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
         // The Ruby family's attrs Hash holds a record (see the field).
         owner_objects: true,
     };
+    let sole_includers = app.sole_includer_of_modules();
     for lc in lcs.iter_mut() {
         // Models gain their scope class methods (already chain-normalized).
         let is_model = app.models.iter().any(|m| m.name == lc.name);
@@ -1871,6 +1886,13 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                         .and_then(|other| other.parent.clone());
                 }
                 None
+            })
+            // Not only by namespace: a gem module that one model alone includes runs on that model.
+            .or_else(|| {
+                (lc.is_module && !is_model)
+                    .then(|| sole_includers.get(&lc.name).cloned())
+                    .flatten()
+                    .filter(|owner| app.models.iter().any(|m| &m.name == owner))
             });
         if let Some(model) = app.models.iter().find(|m| m.name == lc.name) {
             crate::lower::model_to_library::push_scope_methods(
@@ -1986,6 +2008,10 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
         // against a seeded Relation. A model's own CLASS methods
         // additionally seed bare implicit-self roots (`where(key: key)`
         // in `Keystore.value_for`), signalled via `class_self`.
+        // Ivars every method that assigns them binds to one association
+        // read, for the methods that only read them (a controller's
+        // private helper after its `before_action`).
+        let ivar_bindings = crate::lower::scope_chain::class_ivar_assoc_bindings(&lc.methods, &assocs);
         for m in &mut lc.methods {
             // A `__scope_` entry's forward body already carries `__rel`
             // exactly once — never re-thread it (re-entrancy guard for
@@ -1993,6 +2019,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
             if m.name.as_str().starts_with("__scope_") {
                 continue;
             }
+            let ivar_seeds = crate::lower::scope_chain::ivar_seeds_for(&m.body, &ivar_bindings);
             let class_self = (m.receiver == MethodReceiver::Class)
                 .then(|| if is_model { Some(lc.name.clone()) } else { concern_owner.clone() })
                 .flatten();
@@ -2019,7 +2046,15 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                     || (class_self.is_some()
                         && crate::lower::scope_chain::mentions_bare_chain_start(e))
             };
-            if mentions(&m.body) {
+            if !ivar_seeds.is_empty() {
+                crate::lower::scope_chain::rewrite_call_site_seeded(
+                    &mut m.body,
+                    &regs,
+                    class_self.as_ref(),
+                    instance_self.as_ref(),
+                    &ivar_seeds,
+                );
+            } else if mentions(&m.body) {
                 crate::lower::scope_chain::rewrite_call_site(
                     &mut m.body,
                     &regs,
@@ -2404,7 +2439,8 @@ fn sti_dispatch(base_new: Expr, type_read: &Expr, subs: &[ClassId], span: Span) 
 ///      the automatic inverse, and a singleton method or unsaved change
 ///      on the owner is what the record must see);
 ///   2. `_autosave_<name>` saves an unsaved one and takes the id,
-///      folded into `before_validation`;
+///      folded into `_autosave_belongs_to`, which `save` calls before
+///      `valid?` so that a direct `valid?` writes nothing, as in Rails;
 ///   3. the constructor's `attrs[:<name>]` goes through that writer,
 ///      as Rails routes every attrs key through its writer, instead of
 ///      the shared lowering's bare foreign-key copy.
@@ -2453,10 +2489,12 @@ fn sti_dispatch(base_new: Expr, type_read: &Expr, subs: &[ClassId], span: Span) 
 /// strict targets keep the gap they already had, ledgered in
 /// docs/pipeline/runtime.md.
 ///
-/// Ordering inside `before_validation` is load-bearing: the autosave
-/// call is pushed BEFORE the belongs_to `default:` statement, which is
-/// guarded on `@creator_id == 0`. Fill the key first or an explicitly
-/// assigned unsaved creator is overwritten by the default.
+/// The belongs_to `default:` statement in `before_validation` is
+/// guarded on `@creator_id == 0`, which an explicitly assigned unsaved
+/// creator also has. `save` calls `_autosave_belongs_to` ahead of
+/// `valid?`, so the key is filled first; a direct `valid?` has no
+/// autosave, so the guard also asks the reader
+/// (`guard_default_on_reader`).
 pub(crate) fn apply_belongs_to_autosave(lcs: &mut [LibraryClass], app: &App) {
     use crate::dialect::Association;
 
@@ -2498,10 +2536,79 @@ pub(crate) fn apply_belongs_to_autosave(lcs: &mut [LibraryClass], app: &App) {
                 ExprNode::Seq { exprs: vec![assign, stash_target(&name, span)] },
             );
             lc.methods.push(autosave_method(&lc.name, &name, &fk));
-            fold_before_validation(&mut lc.methods, &lc.name, &name);
+            fold_autosave_call_into_hook(&mut lc.methods, &lc.name, &name);
+            guard_default_on_reader(&mut lc.methods, &name, &fk);
             route_init_through_writer(lc, &name, &fk);
         }
     }
+}
+
+/// The shared `default:` statement in `before_validation`,
+/// `self.<name> = <default> if @fk.nil? || @fk == 0`, also requires
+/// `<name>.nil?`, as Rails' `association.default` checks the reader.
+/// An unsaved target assigned through the writer has a zero key until
+/// `save` autosaves it, and a direct `valid?` runs `before_validation`
+/// without that autosave. The key test stays first, so the reader
+/// answers from the stash and never queries.
+fn guard_default_on_reader(methods: &mut [MethodDef], name: &Symbol, fk: &Symbol) {
+    let Some(hook) = methods
+        .iter_mut()
+        .find(|m| m.name.as_str() == "before_validation" && m.receiver == MethodReceiver::Instance)
+    else {
+        return;
+    };
+    let writer = format!("{}=", name.as_str());
+    let guard = |stmt: &mut Expr| {
+        let ExprNode::If { cond, then_branch, .. } = &mut *stmt.node else { return };
+        let assigns = matches!(&*then_branch.node, ExprNode::Send { recv: Some(r), method, .. }
+            if matches!(&*r.node, ExprNode::SelfRef) && method.as_str() == writer);
+        // The default's statement only: a model's own block
+        // before_validation can assign the association under its own
+        // condition, and that keeps its meaning.
+        if !assigns || !is_default_key_test(cond, fk) {
+            return;
+        }
+        let span = cond.span;
+        let syn = |n| Expr::new(span, n);
+        let reader_nil = syn(ExprNode::Send {
+            recv: Some(syn(ExprNode::Send {
+                recv: None,
+                method: name.clone(),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            })),
+            method: Symbol::from("nil?"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        });
+        *cond = syn(ExprNode::BoolOp {
+            op: crate::expr::BoolOpKind::And,
+            surface: crate::expr::BoolOpSurface::default(),
+            left: cond.clone(),
+            right: reader_nil,
+        });
+    };
+    match &mut *hook.body.node {
+        ExprNode::Seq { exprs } => exprs.iter_mut().for_each(guard),
+        _ => guard(&mut hook.body),
+    }
+}
+
+/// `@<fk>.nil? || @<fk> == 0`, the test `push_belongs_to_defaults`
+/// (lower::model_to_library::markers) guards a `default:` with.
+fn is_default_key_test(cond: &Expr, fk: &Symbol) -> bool {
+    let is_fk = |e: &Expr| matches!(&*e.node, ExprNode::Ivar { name } if name == fk);
+    let ExprNode::BoolOp { op: crate::expr::BoolOpKind::Or, left, right, .. } = &*cond.node else {
+        return false;
+    };
+    let nil_test = matches!(&*left.node, ExprNode::Send { recv: Some(r), method, args, .. }
+        if method.as_str() == "nil?" && args.is_empty() && is_fk(r));
+    let zero_test = matches!(&*right.node, ExprNode::Send { recv: Some(r), method, args, .. }
+        if method.as_str() == "==" && is_fk(r)
+            && matches!(args.as_slice(), [a] if matches!(&*a.node, ExprNode::Lit { value: Literal::Int { value: 0 } })));
+    nil_test && zero_test
 }
 
 /// `@<name>_cache = value; @<name>_loaded = true`
@@ -2676,9 +2783,9 @@ fn autosave_method(
     }
 }
 
-/// PREPEND, not append: see the ordering note on
-/// [`apply_belongs_to_autosave`].
-fn fold_before_validation(
+/// Prepended, as when this folded into `before_validation`, so the
+/// order the targets are saved in is unchanged.
+fn fold_autosave_call_into_hook(
     methods: &mut Vec<crate::dialect::MethodDef>,
     owner: &ClassId,
     name: &Symbol,
@@ -2694,7 +2801,7 @@ fn fold_before_validation(
             parenthesized: false,
         },
     );
-    let hook = Symbol::from("before_validation");
+    let hook = Symbol::from("_autosave_belongs_to");
     if let Some(existing) =
         methods.iter_mut().find(|m| m.name == hook && m.receiver == MethodReceiver::Instance)
     {
@@ -3639,8 +3746,8 @@ fn is_view_helpers_const(e: &Expr) -> bool {
 /// could mutate it; the three below all interpolate into a new String.
 ///
 /// `stylesheet_link_tag` / `javascript_include_tag` map a literal name to
-/// an undigested `/assets/` path (the `image_path` note explains why no
-/// digests), so they are pure over their literals the way `image_tag`
+/// a path through the immutable emitted asset table, so they are pure
+/// over their literals the way `image_tag`
 /// is; `javascript_importmap_tags` is pure over the importmap table,
 /// which is the one non-literal argument this list admits (see
 /// `HOISTABLE_CONST_READERS`). campfire's layout pays all three on every
@@ -7606,6 +7713,14 @@ fn emit_library_class_decl_inner(
         .iter()
         .filter(|call| call.decisions & crate::expr::REPLAYED_CLASS_BODY != 0 && !call.span.is_synthetic())
         .collect();
+    // Kept out of `replayed_in_place`: that list is what turns on
+    // source-ordered bodies, and a constant write must not move includes
+    // or a gem DSL. The call is span-sorted into the constant list below.
+    let constant_calls: Vec<&Expr> = lc
+        .unknown_calls
+        .iter()
+        .filter(|call| !call.span.is_synthetic() && constant_defining_class_call(app, classes, lc, call))
+        .collect();
     let ordered_body = (lc.origin.is_none() || lc.data_define().is_some())
         && (lc.has_source_ivar_initializers() || !replayed_in_place.is_empty())
         && !app.controllers.iter().any(|controller| controller.name == lc.name);
@@ -7620,9 +7735,9 @@ fn emit_library_class_decl_inner(
     // project-root-anchored paths; we relpath each one against `out_dir`
     // so emit works correctly from any output directory.
     let mut requires: Vec<String> = Vec::new();
+    // Ingest stored the parent as Rubydex resolved it.
     if let Some(parent) = lc.parent.as_ref() {
-        let parent = lexical_parent(name, parent, app, classes);
-        if let Some(anchor) = require_path_for_parent(&parent, app, classes) {
+        if let Some(anchor) = require_path_for_parent(parent, app, classes) {
             if anchor != self_anchor {
                 requires.push(relpath(&out_dir, &anchor));
             }
@@ -7747,6 +7862,8 @@ fn emit_library_class_decl_inner(
     enum BodyItem<'a> {
         Constant(usize, &'a Expr),
         Initializer(&'a Expr),
+        Call(&'a Expr),
+        Include(&'a ClassId),
         Method(&'a MethodDef),
     }
     let mut body: Vec<_> = eager.iter().map(|&i| {
@@ -7767,6 +7884,9 @@ fn emit_library_class_decl_inner(
     if ordered_body {
         body.extend(replayed_in_place.iter().map(|call| (call.span.start, BodyItem::Initializer(call))));
     }
+    body.extend(constant_calls.iter().filter(|call| {
+        !(ordered_body && replayed_in_place.iter().any(|kept| std::ptr::eq(*kept, **call)))
+    }).map(|call| (call.span.start, BodyItem::Call(call))));
     // Concern-spliced and other foreign-file methods keep foreign
     // `name_span` offsets; interleave only same-file declarations.
     let body_file = lc.class_ivar_initializers.iter().find_map(|init| {
@@ -7777,7 +7897,25 @@ fn emit_library_class_decl_inner(
                     | ExprNode::OpAssign { target: LValue::Ivar { .. }, .. }
             ))
         .then_some(init.span.file)
-    }).or_else(|| replayed_in_place.first().map(|call| call.span.file));
+    }).or_else(|| replayed_in_place.first().map(|call| call.span.file))
+        .or_else(|| constant_calls.first().map(|call| call.span.file));
+    let same_file_method = |m: &MethodDef| {
+        !ordered_body
+            && !constant_calls.is_empty()
+            && !m.name_span.is_synthetic()
+            && constant_calls.first().is_some_and(|call| m.name_span.file == call.span.file)
+    };
+    let mut positioned: Vec<(usize, &ClassId)> = Vec::new();
+    if !ordered_body {
+        for inc in &lc.includes {
+            let floor = positioned.last().map(|(at, _)| *at);
+            if let Some(at) = hooked_include_position(lc, inc, app, classes).max(floor) {
+                positioned.push((at, inc));
+            }
+        }
+    }
+    let (moved_methods, moved_includes) =
+        methods_traveling_with_constant_call(lc, &positioned, same_file_method);
     let method_in_ordered_body = |m: &MethodDef| {
         ordered_body
             && !m.name_span.is_synthetic()
@@ -7791,12 +7929,24 @@ fn emit_library_class_decl_inner(
                 .map(|m| (m.name_span.start, BodyItem::Method(m))),
         );
     }
+    for (slot, start) in &moved_includes {
+        body.push((*start, BodyItem::Include(positioned[*slot].1)));
+    }
+    for index in &moved_methods {
+        let method = &lc.methods[*index];
+        body.push((method.name_span.start, BodyItem::Method(method)));
+    }
     body.sort_by_key(|(start, _)| *start);
     // Every require the file needs at its TOP: the class-body calls and
     // deferred constants (both run at load), and the method bodies.
     let mut body_requires: BTreeSet<String> = BTreeSet::new();
     for call in &lc.unknown_calls {
         body_requires.extend(resolve_all(call, true));
+    }
+    for call in &replayed_in_place {
+        let mut paths = BTreeSet::new();
+        walk_load_time_paths(call, lc, &mut BTreeSet::new(), &mut paths);
+        body_requires.extend(paths.iter().filter_map(|p| resolve(p, true)));
     }
     for &i in &deferred {
         body_requires.extend(resolve_all(&lc.constants[i].1, true));
@@ -7837,8 +7987,10 @@ fn emit_library_class_decl_inner(
     // load-time code reads one of the constants above it.
     let per_body: Vec<BTreeSet<String>> =
         body.iter().map(|(_, item)| match item {
-            BodyItem::Constant(_, expr) | BodyItem::Initializer(expr) => resolve_all(expr, true),
-            BodyItem::Method(_) => BTreeSet::new(),
+            BodyItem::Constant(_, expr) | BodyItem::Initializer(expr) | BodyItem::Call(expr) => {
+                resolve_all(expr, true)
+            }
+            BodyItem::Method(_) | BodyItem::Include(_) => BTreeSet::new(),
         }).collect();
     let readers = constant_readers(lc, app, classes, &resolve);
     let mut splits = std::collections::BTreeMap::new();
@@ -8037,15 +8189,6 @@ fn emit_library_class_decl_inner(
     // earlier than it, so the includes keep their source order, and with
     // it the class's ancestors. An ordered body interleaves its methods
     // with ivar writes and keeps every include first.
-    let mut positioned: Vec<(usize, &ClassId)> = Vec::new();
-    if !ordered_body {
-        for inc in &lc.includes {
-            let floor = positioned.last().map(|(at, _)| *at);
-            if let Some(at) = hooked_include_position(lc, inc, app, classes).max(floor) {
-                positioned.push((at, inc));
-            }
-        }
-    }
     for inc in &lc.includes {
         if positioned.iter().any(|(_, p)| *p == inc) {
             continue;
@@ -8112,6 +8255,12 @@ fn emit_library_class_decl_inner(
         for (_, item) in items {
             match item {
                 BodyItem::Constant(i, _) => render_constants(s, &[*i]),
+                BodyItem::Call(expr) => {
+                    nested.borrow_mut().write_expr(s, depth, lc, expr);
+                    for line in super::emit_expr(&top_level(expr)).lines() {
+                        writeln!(s, "{body_pad}{line}").unwrap();
+                    }
+                }
                 BodyItem::Initializer(expr) if ordered_body => {
                     nested.borrow_mut().write_expr(s, depth, lc, expr);
                     for line in super::emit_expr(&top_level(expr)).lines() {
@@ -8121,6 +8270,10 @@ fn emit_library_class_decl_inner(
                 // Keep initialization in the require plan even when the
                 // lowered class renders it after its methods below.
                 BodyItem::Initializer(_) => {}
+                BodyItem::Include(inc) => {
+                    nested.borrow_mut().write_include(s, depth, lc, inc);
+                    writeln!(s, "{body_pad}{}", include_line(inc)).unwrap();
+                }
                 BodyItem::Method(method) => {
                     writeln!(s).unwrap();
                     render_method(s, method);
@@ -8175,28 +8328,35 @@ fn emit_library_class_decl_inner(
     // after it (`app_extension_calls`); every other call stays dropped.
     // Preserved external-gem `include`s are emitted separately and filtered
     // out of both the foreign replay list and the dropped-call reports.
+    let in_body = |call: &&Expr| {
+        constant_calls.iter().any(|kept| std::ptr::eq(*kept, *call))
+            || (ordered_body && replayed_in_place.iter().any(|kept| std::ptr::eq(*kept, *call)))
+    };
     let replayed: Vec<&Expr> = if replays_foreign_class_body(lc, app, classes) {
         lc.unknown_calls
             .iter()
-            .filter(|call| !is_preserved_external_include(call))
+            .filter(|call| !is_preserved_external_include(call) && !in_body(call))
             .collect()
     } else {
         let own = app_extension_calls(lc, app, classes);
+        let mut replayed = own.clone();
+        replayed.retain(|call| !in_body(call));
         for call in &lc.unknown_calls {
             // A payload job's `queue_as` and `discard_on
             // ActiveJob::DeserializationError` are not dropped: the plan
             // carries them (`lower::job_payload`).
-            if call.decisions & crate::expr::REPLAYED_CLASS_BODY != 0 && ordered_body {
+            if in_body(&call) {
                 continue;
             }
-            if !own.iter().any(|c| std::ptr::eq(*c, call))
-                && !is_preserved_external_include(call)
-                && !crate::lower::job_payload::modelled_class_body_call(app, lc, call)
-            {
-                report_dropped_class_body_call(lc, call);
+            let listed = own.iter().any(|c| std::ptr::eq(*c, call))
+                || is_preserved_external_include(call)
+                || crate::lower::job_payload::modelled_class_body_call(app, lc, call);
+            if listed {
+                continue;
             }
+            report_dropped_class_body_call(lc, call);
         }
-        own
+        replayed
     };
     for call in &replayed {
         nested.borrow_mut().write_expr(&mut s, depth, lc, call);
@@ -8222,14 +8382,23 @@ fn emit_library_class_decl_inner(
                 writeln!(s).unwrap();
             }
             first = false;
-            for (_, inc) in positioned.iter().filter(|(at, _)| *at == index) {
+            for (slot, (_, inc)) in positioned.iter().enumerate().filter(|(_, (at, _))| *at == index) {
+                if moved_includes.iter().any(|(moved, _)| *moved == slot) {
+                    continue;
+                }
                 nested.borrow_mut().write_include(&mut s, depth, lc, inc);
                 writeln!(s, "{body_pad}{}", include_line(inc)).unwrap();
                 writeln!(s).unwrap();
             }
+            if moved_methods.binary_search(&index).is_ok() {
+                continue;
+            }
             render_method(&mut s, m);
         }
-        for (_, inc) in positioned.iter().filter(|(at, _)| *at >= lc.methods.len()) {
+        for (slot, (_, inc)) in positioned.iter().enumerate().filter(|(_, (at, _))| *at >= lc.methods.len()) {
+            if moved_includes.iter().any(|(moved, _)| *moved == slot) {
+                continue;
+            }
             writeln!(s).unwrap();
             nested.borrow_mut().write_include(&mut s, depth, lc, inc);
             writeln!(s, "{body_pad}{}", include_line(inc)).unwrap();
@@ -8276,6 +8445,63 @@ fn emit_library_class_decl_inner(
     }
 
     EmittedFile { path: out_path, content: s }
+}
+
+/// Same-file methods a constant-defining call must see, and the hooked
+/// includes that sit between them.
+///
+/// Returns method indices (ascending) and `(slot, anchor)` into
+/// `positioned`. The anchor is the include's own offset, and not
+/// before the end of the method the hook calls. A call written on
+/// either side of the include stays there. An include that cannot
+/// move stays with the later method loop, and so does every method
+/// that would otherwise pass it.
+fn methods_traveling_with_constant_call<'a>(
+    lc: &'a LibraryClass,
+    positioned: &[(usize, &'a ClassId)],
+    same_file: impl Fn(&MethodDef) -> bool,
+) -> (Vec<usize>, Vec<(usize, u32)>) {
+    let mut method_moves = vec![false; lc.methods.len()];
+    let mut include_moves = vec![false; positioned.len()];
+    for (index, method) in lc.methods.iter().enumerate() {
+        let blocked = positioned
+            .iter()
+            .enumerate()
+            .any(|(slot, (at, _))| *at <= index && !include_moves[slot]);
+        if !same_file(method) || blocked {
+            continue;
+        }
+        method_moves[index] = true;
+        for (slot, (at, _)) in positioned.iter().enumerate() {
+            if at.checked_sub(1) == Some(index) {
+                include_moves[slot] = true;
+            }
+        }
+    }
+    let methods: Vec<usize> = method_moves
+        .iter()
+        .enumerate()
+        .filter(|(_, moves)| **moves)
+        .map(|(index, _)| index)
+        .collect();
+    let includes = include_moves
+        .iter()
+        .enumerate()
+        .filter(|(_, moves)| **moves)
+        .map(|(slot, _)| {
+            let followed = &lc.methods[positioned[slot].0 - 1];
+            let after_method = followed.name_span.end.max(followed.name_span.start.saturating_add(1));
+            let source = lc
+                .includes
+                .iter()
+                .zip(lc.include_spans.iter())
+                .find_map(|(inc, span)| std::ptr::eq(inc, positioned[slot].1).then_some(span))
+                .filter(|span| !span.is_synthetic())
+                .map(|span| span.start);
+            (slot, source.map(|start| start.max(after_method)).unwrap_or(after_method))
+        })
+        .collect();
+    (methods, includes)
 }
 
 /// Where `include inc` must be written in `lc`'s body when the source's
@@ -8888,25 +9114,44 @@ fn replays_foreign_class_body(lc: &LibraryClass, app: &App, classes: &[LibraryCl
     })
 }
 
-/// The class-body calls of a plain class (no superclass, or a built-in one)
-/// that only the app's own code defines: `extend M` of an app module and
+/// The class-body calls of a class whose body this tree already models
+/// (one `replays_foreign_class_body` says is not a gem's — the caller
+/// only reaches this function in that `else` branch) that only the
+/// app's own code defines: `extend M`/`prepend M` of an app module and
 /// the bare calls after it to that module's methods (`extend SymbolEnum`
 /// then `symbol_enum :state, [:on, :off]`). No runtime base answers
-/// these, so the module is the receiver's and replaying the calls is what
-/// Ruby runs. They are written before the methods, like every replayed
-/// call, so a call to the class's own `def self.` (defined below it in
-/// the emitted body) is not one of them. Anything else stays dropped and
-/// reported (`replays_foreign_class_body`).
+/// these, so the module is the receiver's and replaying the calls is
+/// what Ruby runs — whether or not the class also has an ordinary
+/// app-local superclass: that superclass answers `replays_foreign_class_body`
+/// on its own, and has no bearing on whether THIS class's own `extend`/
+/// `prepend` of an unrelated module should replay. They are written
+/// before the methods, like every replayed call, so a call to the
+/// class's own `def self.` (defined below it in the emitted body) is
+/// not one of them. Anything else stays dropped and reported
+/// (`replays_foreign_class_body`).
 fn app_extension_calls<'a>(lc: &'a LibraryClass, app: &App, classes: &'a [LibraryClass]) -> Vec<&'a Expr> {
-    if lc.is_module || lc.parent.as_ref().is_some_and(|p| !is_core_class_name(p.0.as_str())) {
+    if lc.is_module {
         return Vec::new();
     }
     let app_module = |path: &[Symbol]| -> Option<&LibraryClass> {
-        let written = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
-        let nested = format!("{}::{written}", lc.name.0.as_str());
+        // `written_names` has already rewritten this path in place to
+        // Rubydex's resolved answer (or left it as written when Rubydex
+        // had none, or the call has no source span to resolve from —
+        // a synthesized class body). Reading it back here keeps this
+        // lookup from disagreeing with the analyzer's own
+        // `fold_extended_modules`, which asks Rubydex for the same
+        // span; the nested-under-this-class guess is kept only as a
+        // fallback for an unresolved path (e.g. `extend SymbolEnum`
+        // from a DSL this emitter itself expands, which never had a
+        // source span `written_names` could resolve).
+        // A rooted `::M` names the top-level M only: drop the empty
+        // leading segment for the lookup and skip the nested guess.
+        let rooted = path.first().is_some_and(|s| s.as_str().is_empty());
+        let written = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
+        let nested = if rooted { written.clone() } else { format!("{}::{written}", lc.name.0.as_str()) };
         match NameIndex::current(app).filter(|index| index.covers(classes)) {
             Some(index) => index.library_classes.get(&written).into_iter().flatten()
-                .chain(index.library_classes.get(&nested).into_iter().flatten())
+                .chain(index.library_classes.get(&nested).into_iter().flatten().filter(|_| !rooted))
                 .copied()
                 .filter(|&j| {
                     let c = &classes[j];
@@ -8923,7 +9168,11 @@ fn app_extension_calls<'a>(lc: &'a LibraryClass, app: &App, classes: &'a [Librar
     let mut out = Vec::new();
     for call in &lc.unknown_calls {
         let ExprNode::Send { recv: None, method, args, .. } = &*call.node else { continue };
-        if method.as_str() == "extend" {
+        // `prepend M` replays the same way `extend M` does — the
+        // module is app-only and not otherwise modelled — but, unlike
+        // `extend`, does not put M's methods on the class side, so it
+        // does not feed the bare-macro-call follow-on below.
+        if matches!(method.as_str(), "extend" | "prepend") {
             let modules: Option<Vec<&LibraryClass>> = args
                 .iter()
                 .map(|a| match &*a.node {
@@ -8932,7 +9181,9 @@ fn app_extension_calls<'a>(lc: &'a LibraryClass, app: &App, classes: &'a [Librar
                 })
                 .collect();
             if let Some(modules) = modules.filter(|m| !m.is_empty()) {
-                extended.extend(modules);
+                if method.as_str() == "extend" {
+                    extended.extend(modules);
+                }
                 out.push(call);
             }
             continue;
@@ -8945,6 +9196,65 @@ fn app_extension_calls<'a>(lc: &'a LibraryClass, app: &App, classes: &'a [Librar
         }
     }
     out
+}
+
+/// A receiverless class-body call that assigns a constant inside its block,
+/// and whose method this class or an ancestor defines. Running the call is
+/// what creates the constant; the ancestor check keeps a framework macro
+/// (`queue_as`, `included`) from being replayed just because a block wrote
+/// a name.
+fn constant_defining_class_call(app: &App, classes: &[LibraryClass], lc: &LibraryClass, call: &Expr) -> bool {
+    if lc.is_module {
+        return false;
+    }
+    let ExprNode::Send { recv: None, method, .. } = &*call.node else { return false };
+    block_assigns_bare_constant(call) && singleton_method_visible(app, classes, lc, method)
+}
+
+fn block_assigns_bare_constant(call: &Expr) -> bool {
+    let ExprNode::Send { block: Some(block), .. } = &*call.node else { return false };
+    let ExprNode::Lambda { body, .. } = &*block.node else { return false };
+    let stmts: &[Expr] = match &*body.node {
+        ExprNode::Seq { exprs } => exprs,
+        _ => std::slice::from_ref(body),
+    };
+    stmts.iter().any(|stmt| match &*stmt.node {
+        ExprNode::Assign { target: LValue::Const { path }, .. } => path.len() == 1,
+        ExprNode::Send { .. } => block_assigns_bare_constant(stmt),
+        _ => false,
+    })
+}
+
+/// An ancestor's class method. This fragment's own `def self` is emitted
+/// with the methods, after this call, so it is not loaded yet. Another
+/// reopen of this class is a different file.
+fn singleton_method_visible(app: &App, classes: &[LibraryClass], lc: &LibraryClass, method: &Symbol) -> bool {
+    let defines = |m: &MethodDef| m.receiver == MethodReceiver::Class && m.name == *method;
+    let mut current = lc.parent.clone();
+    let mut seen = BTreeSet::new();
+    seen.insert(lc.name.clone());
+    while let Some(id) = current {
+        if !seen.insert(id.clone()) {
+            return false;
+        }
+        // The require loads the ancestor's anchor file, the first fragment.
+        if let Some(class) = classes.iter().find(|class| class.name == id) {
+            if class.methods.iter().any(defines) {
+                return true;
+            }
+            current = class.parent.clone();
+            continue;
+        }
+        if let Some(model) = app.models.iter().find(|model| model.name == id) {
+            if model.methods().any(defines) {
+                return true;
+            }
+            current = model.parent.clone();
+            continue;
+        }
+        return false;
+    }
+    false
 }
 
 /// Ledger a class-body call we captured but chose not to replay. The
@@ -8973,7 +9283,7 @@ fn report_dropped_class_body_call(lc: &LibraryClass, call: &Expr) {
 
 fn is_preserved_external_include(call: &Expr) -> bool {
     matches!(
-        &call.diagnostic,
+        &call.diagnostic(),
         Some(crate::diagnostic::DiagnosticKind::Unsupported {
             construct,
             detail,
@@ -9001,7 +9311,7 @@ fn external_include_is_enabled(detail: &str) -> bool {
 fn include_is_unresolved(lc: &LibraryClass, inc: &ClassId) -> bool {
     let detail = format!("{} includes unresolved {}", lc.name.0, inc.0);
     lc.unknown_calls.iter().any(|call| {
-        matches!(&call.diagnostic,
+        matches!(&call.diagnostic(),
             Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, detail: d, .. })
             if construct.as_str() == "include" && *d == detail)
     })
@@ -9097,30 +9407,29 @@ fn declares_constant_path(path: &str, app: &App, classes: &[LibraryClass]) -> bo
     })
 }
 
-/// An app constant `written` as a class header's superclass or a body's
+/// An app constant `name` as a class header's superclass or a body's
 /// mixin must spell it, given the lexical `scopes` (innermost last) Ruby
 /// searches first: `::Api::Base` inside `module Admin; module Api`, where
-/// a bare `Api` is `Admin::Api`. The ingest records the absolute name
-/// without its `::`, and written bare the header died with
-/// `uninitialized constant Admin::Api::Base`. A name the innermost
-/// shadowing scope does declare in full is that scope's, as Ruby binds
-/// it, and stays as written; so does a name the app does not declare.
-fn lexically_qualified(written: &str, scopes: &[&str], app: &App, classes: &[LibraryClass]) -> String {
-    if written.starts_with("::") || scopes.is_empty() {
-        return written.to_string();
+/// a bare `Api` is `Admin::Api`. Ingest stores the absolute name Rubydex
+/// resolved, without its `::`, and the emitted file nests every segment
+/// of the class it declares, so a source class written compact (`class
+/// Billing::Receipt < Record`, which is `::Record`) is emitted inside
+/// `module Billing` where a bare `Record` would be `Billing::Record`. A
+/// name the app does not declare (a runtime or gem class) stays as
+/// written.
+fn lexically_qualified(name: &str, scopes: &[&str], app: &App, classes: &[LibraryClass]) -> String {
+    if name.starts_with("::") || scopes.is_empty() {
+        return name.to_string();
     }
-    let first = written.split("::").next().unwrap_or(written);
-    let Some(scope) = (1..=scopes.len())
+    let first = name.split("::").next().unwrap_or(name);
+    let shadowed = (1..=scopes.len())
         .rev()
         .map(|i| scopes[..i].join("::"))
-        .find(|scope| declares_constant_path(&format!("{scope}::{first}"), app, classes))
-    else {
-        return written.to_string();
-    };
-    if declares_constant_path(&format!("{scope}::{written}"), app, classes) || !declares_constant_path(written, app, classes) {
-        return written.to_string();
+        .any(|scope| declares_constant_path(&format!("{scope}::{first}"), app, classes));
+    if !shadowed || !declares_constant_path(name, app, classes) {
+        return name.to_string();
     }
-    format!("::{written}")
+    format!("::{name}")
 }
 
 fn is_app_class(name: &str, app: &App, classes: &[LibraryClass]) -> bool {
@@ -9144,37 +9453,6 @@ fn outer_class_parent(name: &str, app: &App, classes: &[LibraryClass]) -> Option
     }
     library_classes_named(name, app, classes).into_iter()
         .find(|c| !c.is_module).and_then(|c| c.parent.clone())
-}
-
-/// The app class a written superclass names, looked up from the child's
-/// namespace outward as Ruby does: `Base` written in
-/// `Outer::Inner::Leaf` is `Outer::Inner::Base`. A name that matches
-/// no app class at any level is returned as written (a runtime or gem
-/// class).
-///
-/// The ingested class keeps only its qualified name, so this reads the
-/// nested form (`module Outer; module Inner`) and tries every enclosing
-/// prefix. The compact form (`module Outer::Inner`) searches only the
-/// innermost one, so an outer match that natively falls through to a
-/// top-level class can add a require the program does not need; the
-/// innermost match, the case that fixes load order, is the same in both
-/// forms. This only orders `require`s; typing uses `ConstResolver`.
-fn lexical_parent(child: &str, parent: &ClassId, app: &App, classes: &[LibraryClass]) -> ClassId {
-    let written = parent.0.as_str();
-    if written.starts_with("::") {
-        return parent.clone();
-    }
-    let defined = |candidate: &str| is_model_or_library_class(candidate, app, classes) || is_controller_named(candidate, app);
-    let mut scope: Vec<&str> = child.split("::").collect();
-    scope.pop();
-    while !scope.is_empty() {
-        let candidate = format!("{}::{written}", scope.join("::"));
-        if defined(&candidate) {
-            return ClassId(crate::ident::Symbol::from(candidate.as_str()));
-        }
-        scope.pop();
-    }
-    parent.clone()
 }
 
 fn require_path_for_parent(parent: &ClassId, app: &App, classes: &[LibraryClass]) -> Option<String> {
@@ -9218,7 +9496,8 @@ fn require_path_for_parent(parent: &ClassId, app: &App, classes: &[LibraryClass]
     if is_model_or_library_class(raw, app, classes)
     {
         // underscore: namespaced parents nest (see emit_library_class_decls).
-        return Some(format!("app/models/{}", crate::naming::underscore(raw)));
+        let owner = file_owner(raw, app, classes);
+        return Some(format!("app/models/{}", crate::naming::underscore(&owner)));
     }
     if is_controller_named(raw, app) {
         return Some(format!("app/controllers/{}", crate::naming::underscore(raw)));
@@ -9686,6 +9965,291 @@ pub(crate) fn apply_boolean_lowering(lcs: &mut [LibraryClass], app: &App) {
     }
 }
 
+/// Ruby-family pre-emit pass: the public writer of an integer, float,
+/// decimal or boolean column casts what it is given, as ActiveModel's
+/// typed attribute does (`record.min_favs = "5"` reads back `5`,
+/// `= ""` reads nil, `active = "1"` true). Before, the writer stored the
+/// value as given, so a request param reached every validator, comparison
+/// and serializer as a String (#1158). `ActiveSupport.cast_integer` /
+/// `cast_float` / `cast_decimal` / `cast_boolean` implement ActiveModel
+/// 8.1.4's casts; a decimal column is a Float here, cast as `Type::Decimal`
+/// casts (a Symbol is 0.0 there, where `Type::Float` raises). Hydration passes
+/// values already of the column's type (`Db.column_int_opt`,
+/// `row.x&.to_i`), on which each cast is the identity. Strict targets
+/// type the writer's parameter and are not rewritten.
+///
+/// Only the synthesized writer is rewritten (`@col = <the value>`, perhaps
+/// through `normalizes`, which then runs on the cast value as in Rails),
+/// also when a model's own `col=` renamed it `_write_<col>_raw`, so its
+/// `super` casts too. An enum column's writer maps labels and is left
+/// alone, as is the primary key's.
+pub(crate) fn apply_typed_writer_cast_lowering(lcs: &mut [LibraryClass], app: &App) {
+    for model in &app.models {
+        let table = app.schema.tables.get(&model.table.0);
+        let mut casts: HashMap<Symbol, &'static str> = table
+            .map(|table| {
+                table
+                    .columns
+                    .iter()
+                    // A stored array column's writer takes the Array; its
+                    // elements are not cast (`lower::array_columns`).
+                    .filter(|c| !c.primary_key && !c.array_stored && !model.enums.contains_key(&c.name))
+                    .filter_map(|c| {
+                        let cast = match c.col_type {
+                            crate::schema::ColumnType::Integer | crate::schema::ColumnType::BigInt => "cast_integer",
+                            crate::schema::ColumnType::Float => "cast_float",
+                            crate::schema::ColumnType::Decimal { .. } => "cast_decimal",
+                            crate::schema::ColumnType::Boolean => "cast_boolean",
+                            _ => return None,
+                        };
+                        Some((c.name.clone(), cast))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        // A model's `attribute :name, :type` writers cast as ActiveModel's
+        // types do, as `ingest::active_model_attributes` casts a plain
+        // class's: an `ActiveModel::Model` form's and an ActiveRecord
+        // model's alike (Rails 8.1.4). Over a column, Rails' declared type
+        // replaces the column's everywhere, but here only the writer would
+        // follow it, so a column keeps its own cast unless the two agree
+        // (`markers::attribute_matches_column`; the mismatch is reported
+        // with the model DSL). An enum column keeps its mapping too: the
+        // enum decorates the attribute (`"archived"` stays a label).
+        // `:boolean` already casts inline (`markers::push_attribute_api_methods`).
+        {
+            for (name, ty) in crate::lower::model_to_library::markers::attribute_api_decls(&model.body) {
+                if model.enums.contains_key(&name) {
+                    continue;
+                }
+                if let Some(col) = table.and_then(|t| t.columns.iter().find(|c| c.name == name))
+                    && !crate::lower::model_to_library::markers::attribute_matches_column(ty.as_str(), col)
+                {
+                    continue;
+                }
+                let cast = match ty.as_str() {
+                    "string" => "cast_string",
+                    "integer" => "cast_integer",
+                    "float" => "cast_float",
+                    "decimal" => "cast_decimal",
+                    "datetime" => "cast_datetime",
+                    _ => continue,
+                };
+                casts.insert(name, cast);
+            }
+        }
+        if casts.is_empty() {
+            continue;
+        }
+        let Some(lc) = lcs.iter_mut().find(|lc| lc.name == model.name) else {
+            continue;
+        };
+        // The columns a `numericality:` validation checks: their writer
+        // keeps what the user assigned, and the check reads it.
+        let mut checked: BTreeSet<Symbol> = BTreeSet::new();
+        for m in &lc.methods {
+            collect_numericality_checks(&m.body, &mut checked);
+        }
+        // Columns only: an ActiveModel attribute has no `_before_type_cast`,
+        // so its check reads the cast value (`"abc"` is 0, Rails 8.1.4).
+        checked.retain(|c| casts.contains_key(c) && table.is_some_and(|t| t.columns.iter().any(|col| col.name == *c)));
+        for m in &mut lc.methods {
+            if m.receiver != MethodReceiver::Instance || m.kind != crate::dialect::AccessorKind::AttributeWriter {
+                if !checked.is_empty() {
+                    read_raw_in_numericality_checks(&mut m.body, &checked);
+                    forget_raw_on_internal_writes(&mut m.body, &checked);
+                }
+                continue;
+            }
+            let name = m.name.as_str();
+            let col = name
+                .strip_prefix("_write_")
+                .and_then(|n| n.strip_suffix("_raw"))
+                .or_else(|| name.strip_suffix('='))
+                .map(Symbol::from);
+            let Some(col) = col else { continue };
+            let Some(cast) = casts.get(&col) else { continue };
+            let [param] = m.params.as_slice() else { continue };
+            let param = param.name.clone();
+            // A defaulted attribute's writer is `@col = value; @col_default_applied = true`.
+            let assign = match &mut *m.body.node {
+                ExprNode::Seq { exprs } => match exprs.first_mut() {
+                    Some(first) => &mut *first.node,
+                    None => continue,
+                },
+                node => node,
+            };
+            let ExprNode::Assign { target: crate::expr::LValue::Ivar { name: ivar }, value } = assign else {
+                continue;
+            };
+            if *ivar != col {
+                continue;
+            }
+            cast_param_reads(value, &param, cast);
+            if checked.contains(&col) {
+                let keep_raw = sp_expr(ExprNode::Assign {
+                    target: crate::expr::LValue::Ivar { name: raw_ivar(&col) },
+                    value: sp_expr(ExprNode::Var { id: crate::ident::VarId(0), name: param.clone() }),
+                });
+                let cast_write = std::mem::replace(&mut m.body, sp_expr(ExprNode::Lit { value: Literal::Nil }));
+                m.body = sp_expr(ExprNode::Seq { exprs: vec![keep_raw, cast_write] });
+            }
+        }
+    }
+}
+
+/// `@<col>_before_type_cast`: what the user assigned to `col`, nil when
+/// the value did not come from the user (a load, an internal write).
+fn raw_ivar(col: &Symbol) -> Symbol {
+    Symbol::from(format!("{}_before_type_cast", col.as_str()))
+}
+
+/// The column a lowered `numericality:` check tests, when `e` is one:
+/// `if @col.nil? || !@col.is_a?(Numeric)` (`inline_numericality_check`).
+fn numericality_check_column(e: &Expr) -> Option<Symbol> {
+    let ExprNode::If { cond, .. } = &*e.node else { return None };
+    let ExprNode::BoolOp { op: crate::expr::BoolOpKind::Or, left, right, .. } = &*cond.node else {
+        return None;
+    };
+    let ExprNode::Send { recv: Some(nil_recv), method: nil_m, args: nil_args, .. } = &*left.node else {
+        return None;
+    };
+    let ExprNode::Ivar { name } = &*nil_recv.node else { return None };
+    if nil_m.as_str() != "nil?" || !nil_args.is_empty() {
+        return None;
+    }
+    let ExprNode::Send { recv: Some(not_recv), method: not_m, .. } = &*right.node else { return None };
+    let ExprNode::Send { recv: Some(is_a_recv), method: is_a_m, args: is_a_args, .. } = &*not_recv.node else {
+        return None;
+    };
+    let numeric = matches!(is_a_args.as_slice(), [a] if matches!(&*a.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Numeric"));
+    let same = matches!(&*is_a_recv.node, ExprNode::Ivar { name: n } if n == name);
+    (not_m.as_str() == "!" && is_a_m.as_str() == "is_a?" && numeric && same).then(|| name.clone())
+}
+
+fn collect_numericality_checks(e: &Expr, out: &mut BTreeSet<Symbol>) {
+    if let Some(col) = numericality_check_column(e) {
+        out.insert(col);
+    }
+    e.node.for_each_child(&mut |c| collect_numericality_checks(c, out));
+}
+
+/// Ruby-family pre-emit pass: a `numericality:` check on an attribute no
+/// column types (an `attr_accessor` of an `ActiveModel::Model` form, fed
+/// request Strings) reads the number Rails' validator parses from the value
+/// as given (`ActiveSupport.numericality_number(nil, @attr)`): `"12"` and
+/// `" 12 "` are numbers, `"12abc"` is not, and `only_integer` reads the raw
+/// text, so `"7.0"` is not an integer. The attribute keeps the String. A
+/// column's check is `apply_typed_writer_cast_lowering`'s.
+pub(crate) fn parse_untyped_numericality_input(lcs: &mut [LibraryClass], app: &App) {
+    use crate::dialect::{ModelBodyItem, ValidationRule};
+    for model in &app.models {
+        let columns: BTreeSet<Symbol> = app
+            .schema
+            .tables
+            .get(&model.table.0)
+            .map(|table| table.columns.iter().map(|c| c.name.clone()).collect())
+            .unwrap_or_default();
+        let untyped: BTreeSet<Symbol> = model
+            .body
+            .iter()
+            .filter_map(|item| match item {
+                ModelBodyItem::Validation { validation, .. } => Some(validation),
+                _ => None,
+            })
+            .filter(|v| !columns.contains(&v.attribute))
+            .filter(|v| v.rules.iter().any(|r| matches!(r, ValidationRule::Numericality { .. })))
+            .map(|v| v.attribute.clone())
+            .collect();
+        if untyped.is_empty() {
+            continue;
+        }
+        let Some(lc) = lcs.iter_mut().find(|lc| lc.name == model.name) else {
+            continue;
+        };
+        for method in &mut lc.methods {
+            read_parsed_in_numericality_checks(&mut method.body, &untyped);
+        }
+    }
+}
+
+fn read_parsed_in_numericality_checks(e: &mut Expr, untyped: &BTreeSet<Symbol>) {
+    if let Some(attr) = numericality_check_column(e).filter(|a| untyped.contains(a)) {
+        let number = sp_expr(ExprNode::Send {
+            recv: Some(sp_expr(ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] })),
+            method: Symbol::from("numericality_number"),
+            args: vec![sp_expr(ExprNode::Lit { value: Literal::Nil }), ivar_read(&attr)],
+            block: None,
+            parenthesized: true,
+        });
+        replace_ivar_reads(e, &attr, &number);
+        return;
+    }
+    e.node.for_each_child_mut(&mut |c| read_parsed_in_numericality_checks(c, untyped));
+}
+
+/// In each lowered `numericality:` check on a `checked` column, read the
+/// number ActiveModel's validator reads: the user's raw value when there
+/// is one, parsed as `parse_as_number` does
+/// (`ActiveSupport.numericality_number`), instead of the cast value. The
+/// `allow_nil`/`allow_blank` skip around it keeps the cast value, as
+/// Rails' `EachValidator#validate` does.
+fn read_raw_in_numericality_checks(e: &mut Expr, checked: &BTreeSet<Symbol>) {
+    if let Some(col) = numericality_check_column(e).filter(|c| checked.contains(c)) {
+        let number = sp_expr(ExprNode::Send {
+            recv: Some(sp_expr(ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] })),
+            method: Symbol::from("numericality_number"),
+            args: vec![ivar_read(&raw_ivar(&col)), ivar_read(&col)],
+            block: None,
+            parenthesized: true,
+        });
+        replace_ivar_reads(e, &col, &number);
+        return;
+    }
+    e.node.for_each_child_mut(&mut |c| read_raw_in_numericality_checks(c, checked));
+}
+
+fn replace_ivar_reads(e: &mut Expr, col: &Symbol, with: &Expr) {
+    if matches!(&*e.node, ExprNode::Ivar { name } if name == col) {
+        *e = with.clone();
+        return;
+    }
+    e.node.for_each_child_mut(&mut |c| replace_ivar_reads(c, col, with));
+}
+
+/// A write to a checked column other than its writer (`[]=`, a counter)
+/// is not the user's assignment: it clears the raw value, so the check
+/// reads the column again.
+fn forget_raw_on_internal_writes(e: &mut Expr, checked: &BTreeSet<Symbol>) {
+    e.node.for_each_child_mut(&mut |c| forget_raw_on_internal_writes(c, checked));
+    let col = match &*e.node {
+        ExprNode::Assign { target: crate::expr::LValue::Ivar { name }, .. } if checked.contains(name) => name.clone(),
+        _ => return,
+    };
+    let forget = sp_expr(ExprNode::Assign {
+        target: crate::expr::LValue::Ivar { name: raw_ivar(&col) },
+        value: sp_expr(ExprNode::Lit { value: Literal::Nil }),
+    });
+    let write = std::mem::replace(e, sp_expr(ExprNode::Lit { value: Literal::Nil }));
+    *e = sp_expr(ExprNode::Seq { exprs: vec![forget, write] });
+}
+
+/// Replace each read of `param` in `e` with `ActiveSupport.<cast>(param)`.
+fn cast_param_reads(e: &mut Expr, param: &Symbol, cast: &str) {
+    if matches!(&*e.node, ExprNode::Var { name, .. } if name == param) {
+        let read = std::mem::replace(e, sp_expr(ExprNode::Lit { value: Literal::Nil }));
+        *e = sp_expr(ExprNode::Send {
+            recv: Some(sp_expr(ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] })),
+            method: Symbol::from(cast),
+            args: vec![read],
+            block: None,
+            parenthesized: true,
+        });
+        return;
+    }
+    e.node.for_each_child_mut(&mut |c| cast_param_reads(c, param, cast));
+}
+
 /// `@col == true || @col == 1`.
 fn boolean_cast_body(col: &Symbol) -> Expr {
     let eq = |rhs: Expr| {
@@ -9765,7 +10329,12 @@ pub(crate) fn apply_preload_lowering(lcs: &mut [LibraryClass], app: &App) {
     // A dynamic query can reach Relation without any named scope (for
     // example, a helper returning a where.not chain). Its includes hint
     // needs the same batch loaders. Apps with no includes remain untouched.
-    if !app_mentions_includes(app) {
+    // A has_many reader that replaces its target's default scope on the
+    // key (`lower::default_scope::reader_replaces_scope`) answers other
+    // rows than Rails' preload, which ANDs the scope: its batch loader
+    // must exist for any `includes` that reaches the runtime, seen here
+    // or not, rather than fall back to that reader.
+    if !app_mentions_includes(app) && !app_has_scope_replacing_reader(app) {
         return;
     }
 
@@ -9840,6 +10409,12 @@ fn preload_cache_guard(name: &Symbol) -> Expr {
 /// `eager_load` to a receiver. Over-approximates (a chain the arel pass
 /// later consumes statically still counts) — the cost of a false
 /// positive is inert synthesized methods, not wrong behavior.
+fn app_has_scope_replacing_reader(app: &App) -> bool {
+    app.models
+        .iter()
+        .any(|m| m.associations().any(|a| crate::lower::default_scope::reader_replaces_scope(&app.models, a)))
+}
+
 fn app_mentions_includes(app: &App) -> bool {
     use crate::dialect::{ControllerBodyItem, ModelBodyItem};
     let in_expr = expr_mentions_includes;
@@ -9864,8 +10439,19 @@ fn expr_mentions_includes(expr: &Expr) -> bool {
         if *found {
             return;
         }
-        if let ExprNode::Send { recv: Some(_), method, .. } = &*e.node {
-            if matches!(method.as_str(), "includes" | "preload" | "eager_load") {
+        if let ExprNode::Send { recv: Some(recv), method, .. } = &*e.node {
+            if matches!(method.as_str(), "includes" | "preload" | "eager_load" | "preload_associations") {
+                *found = true;
+                return;
+            }
+            // `Preloader.new(...).call` lowers to `Preloading.records`
+            // when the records are not one known model. That call is
+            // the only mention, and the batch loaders have to exist
+            // for it.
+            if method.as_str() == "records"
+                && matches!(&*recv.node, ExprNode::Const { path }
+                    if path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).eq(["ActiveRecord", "Preloading"]))
+            {
                 *found = true;
                 return;
             }
@@ -9935,6 +10521,34 @@ enum PreloadKind {
     PlainText { attr: String, owner: String },
 }
 
+/// Would `assoc`'s raw-SQL batch (belongs_to, `through:`) load rows of a
+/// model whose `default_scope` the runtime Relation applies
+/// (`lower::default_scope`): its target, or its `through:` model?
+fn touches_default_scoped(model: &crate::dialect::Model, assoc: &crate::dialect::Association, app: &App) -> bool {
+    use crate::dialect::Association;
+    let scoped = |id: &ClassId| {
+        app.models.iter().any(|m| &m.name == id && crate::lower::default_scope::default_scope(m).is_some())
+    };
+    let (target, through) = match assoc {
+        Association::BelongsTo { target, .. } => (target, None),
+        Association::HasMany { target, through, .. } | Association::HasOne { target, through, .. } => {
+            (target, through.as_ref())
+        }
+        _ => return false,
+    };
+    // A direct has_many / has_one batch loads through
+    // `Relation.new(<target>)`, which applies the scope itself.
+    let Some(thr) = through else {
+        return matches!(assoc, Association::BelongsTo { .. }) && scoped(target);
+    };
+    scoped(target) || {
+        model.associations().any(|a| {
+            a.name() == thr
+                && matches!(a, Association::BelongsTo { target, .. } | Association::HasMany { target, .. } | Association::HasOne { target, .. } if scoped(target))
+        })
+    }
+}
+
 /// Select association shapes whose batch queries preserve the reader's filters,
 /// resolving each against the app model registry and its table metadata.
 fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, PreloadKind)> {
@@ -9951,6 +10565,12 @@ fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, Pre
         // A refused association (`assoc_primary_key`) has no reader to
         // preload into.
         if crate::lower::assoc_primary_key::unsupported_reason(model, &app.models, assoc).is_some() {
+            continue;
+        }
+        // A belongs_to or `through:` batch is raw SQL; one that loads a
+        // default-scoped model keeps its lazy reader, whose Relation
+        // applies the scope, rather than load the rows it hides.
+        if touches_default_scoped(model, assoc, app) {
             continue;
         }
         match assoc {

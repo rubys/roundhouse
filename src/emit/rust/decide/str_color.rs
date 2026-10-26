@@ -478,7 +478,8 @@ fn producer_color_with_locals(
 
 fn producer_color(e: &Expr) -> Option<StrColor> {
     match e.node.as_ref() {
-        ExprNode::Lit { value: Literal::Str { .. } } => Some(StrColor::Static),
+        // A Symbol literal renders as the same `&'static str` a String literal does
+        ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } } => Some(StrColor::Static),
         ExprNode::StringInterp { .. } => Some(StrColor::Owned),
         ExprNode::Ivar { .. } => Some(StrColor::Owned),
         ExprNode::Send { .. } => Some(StrColor::Owned),

@@ -15,6 +15,13 @@ pub(in crate::analyze) fn connection_ty() -> Ty {
     Ty::Class { id: ClassId(Symbol::from("ActiveRecord::Connection")), args: vec![].into() }
 }
 
+/// `Model.current_transaction` — Rails 7.2's handle on the open
+/// transaction, whose `after_commit` the runtime implements
+/// (`runtime/ruby/active_record/connection.rb`).
+pub(in crate::analyze) fn transaction_ty() -> Ty {
+    Ty::Class { id: ClassId(Symbol::from("ActiveRecord::Transaction")), args: vec![].into() }
+}
+
 /// `ActiveRecord::Connection` and `ActiveRecord::Result`, read from the
 /// runtime's own signatures rather than restated here, so the analyzer
 /// knows exactly the surface both lanes implement. `connection` used to
@@ -25,7 +32,7 @@ pub(in crate::analyze) fn connection_ty() -> Ty {
 fn register_connection_surface(classes: &mut HashMap<ClassId, ClassInfo>) {
     const RBS: &str = include_str!("../../../runtime/ruby/active_record/connection.rbs");
     let Ok(parsed) = crate::rbs::parse_app_signatures(RBS) else { return };
-    for name in ["ActiveRecord::Connection", "ActiveRecord::Result"] {
+    for name in ["ActiveRecord::Connection", "ActiveRecord::Result", "ActiveRecord::Transaction"] {
         let id = ClassId(Symbol::from(name));
         let Some(methods) = parsed.get(&id) else { continue };
         let cls = classes.entry(id).or_default();
@@ -105,10 +112,14 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             .or_default();
         for m in [
             "transaction",
+            "uncached",
             "establish_connection",
         ] {
             base.class_methods.entry(Symbol::from(m)).or_insert(Ty::Untyped);
         }
+        base.class_methods
+            .entry(Symbol::from("current_transaction"))
+            .or_insert_with(transaction_ty);
         // Which database, and the pool's `with_connection` — served on the
         // ruby family and spinel by runtime/spinel/active_record_db_config.rb.
         base.class_methods
@@ -126,7 +137,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         base.class_methods
             .entry(Symbol::from("connection"))
             .or_insert_with(connection_ty);
-        for m in ["sanitize_sql", "sanitize_sql_array", "sanitize_sql_like"] {
+        base.class_methods.entry(Symbol::from("configurations")).or_insert(Ty::Untyped);
+        base.class_methods.entry(Symbol::from("configurations=")).or_insert(Ty::Untyped);
+        for m in ["sanitize_sql", "sanitize_sql_array", "sanitize_sql_for_order", "sanitize_sql_like"] {
             base.class_methods.entry(Symbol::from(m)).or_insert(Ty::Str);
         }
         // Association / ActionText macro helpers call these on the
@@ -151,8 +164,12 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         let config = classes
             .entry(ClassId(Symbol::from("ActiveRecord::DatabaseConfigurations::HashConfig")))
             .or_default();
-        for m in ["database", "adapter", "name", "env_name"] {
+        for m in ["database", "adapter", "name", "env_name", "schema_dump"] {
             config.instance_methods.entry(Symbol::from(m)).or_insert(Ty::Str);
+        }
+        config.instance_methods.entry(Symbol::from("configuration_hash")).or_insert(Ty::Untyped);
+        for m in ["seeds?", "database_tasks?"] {
+            config.instance_methods.entry(Symbol::from(m)).or_insert(Ty::Bool);
         }
         // The block's value: whatever the caller computes from the connection.
         classes
@@ -527,12 +544,6 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             ClassId(Symbol::from("ActiveStorage::Previewer::VideoPreviewer")),
             video_previewer,
         );
-        // Rails' error hierarchy: `PreviewError < Error < StandardError`.
-        let as_error_id = ClassId(Symbol::from("ActiveStorage::Error"));
-        classes.insert(as_error_id.clone(), ClassInfo::default());
-        let mut preview_error = ClassInfo::default();
-        preview_error.parent = Some(as_error_id);
-        classes.insert(ClassId(Symbol::from("ActiveStorage::PreviewError")), preview_error);
 
         // The multipart part a permitted `has_one_attached` field
         // carries (`runtime/spinel/multipart.rbs` verbatim): what the
@@ -584,10 +595,44 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         Ty::Class { id: ClassId(Symbol::from("Arel::SelectManager")), args: vec![].into() };
 
     // `Arel.sql(...)` / `Arel.star` — module-level node constructors.
+    // `sql` answers the literal it built (`Arel::Nodes::SqlLiteral`),
+    // which is the node `to_s` renders back to the fragment.
+    let sql_literal = Ty::Class { id: ClassId(Symbol::from("Arel::Nodes::SqlLiteral")), args: vec![].into() };
     let mut arel_mod = ClassInfo::default();
-    arel_mod.class_methods.insert(Symbol::from("sql"), arel_node.clone());
+    arel_mod.class_methods.insert(Symbol::from("sql"), sql_literal.clone());
     arel_mod.class_methods.insert(Symbol::from("star"), arel_node.clone());
     classes.insert(ClassId(Symbol::from("Arel")), arel_mod);
+
+    let quoted = Ty::Class { id: ClassId(Symbol::from("Arel::Nodes::Quoted")), args: vec![].into() };
+    let case_node = Ty::Class { id: ClassId(Symbol::from("Arel::Nodes::Case")), args: vec![].into() };
+    register_node(classes, "Arel::Nodes", &[("build_quoted", quoted.clone())], &[]);
+    register_node(classes, "Arel::Nodes::Node", &[], &[("to_s", Ty::Str), ("to_sql", Ty::Str)]);
+    register_node(classes, "Arel::Nodes::SqlLiteral", &[], &[("to_s", Ty::Str), ("to_sql", Ty::Str)]);
+    register_node(classes, "Arel::Nodes::Quoted", &[], &[("to_s", Ty::Str), ("to_sql", Ty::Str)]);
+    register_node(classes, "Arel::Nodes::Not", &[], &[("to_s", Ty::Str), ("to_sql", Ty::Str)]);
+    register_node(classes, "Arel::Nodes::NamedFunction", &[], &[("to_s", Ty::Str), ("to_sql", Ty::Str)]);
+    for order in ["Arel::Nodes::Ascending", "Arel::Nodes::Descending"] {
+        let node = Ty::Class { id: ClassId(Symbol::from(order)), args: vec![].into() };
+        register_node(
+            classes,
+            order,
+            &[],
+            &[("nulls_first", node.clone()), ("nulls_last", node), ("to_s", Ty::Str), ("to_sql", Ty::Str)],
+        );
+    }
+    register_node(classes, "Arel::Nodes::Predicate", &[], &[("to_s", Ty::Str), ("to_sql", Ty::Str)]);
+    register_node(
+        classes,
+        "Arel::Nodes::Case",
+        &[],
+        &[
+            ("when", case_node.clone()),
+            ("then", case_node.clone()),
+            ("else", case_node),
+            ("to_s", Ty::Str),
+            ("to_sql", Ty::Str),
+        ],
+    );
 
     // `Model.arel_table` → table; `table[:col]` → attribute. A table
     // also delegates query-builder calls to a select manager
@@ -629,6 +674,22 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         arel_select.instance_methods.insert(Symbol::from(m), arel_select_mgr.clone());
     }
     classes.insert(ClassId(Symbol::from("Arel::SelectManager")), arel_select);
+}
+
+fn register_node(
+    classes: &mut HashMap<ClassId, ClassInfo>,
+    name: &str,
+    class_methods: &[(&str, Ty)],
+    instance_methods: &[(&str, Ty)],
+) {
+    let mut info = ClassInfo::default();
+    for (method, ty) in class_methods {
+        info.class_methods.insert(Symbol::from(*method), ty.clone());
+    }
+    for (method, ty) in instance_methods {
+        info.instance_methods.insert(Symbol::from(*method), ty.clone());
+    }
+    classes.insert(ClassId(Symbol::from(name)), info);
 }
 
 /// Action Text's VALUE surface — `ActionText::Content` (the coder a
@@ -687,6 +748,15 @@ pub(in crate::analyze) fn register_action_cable(classes: &mut HashMap<ClassId, C
     cable
         .class_methods
         .insert(Symbol::from("server"), Ty::Class { id: server_id, args: vec![].into() });
+    // `ActionCable::INTERNAL`, as both cable runtimes define it: the
+    // `message_types` and `disconnect_reasons` tables, each a table of
+    // Strings (campfire's `close reason:
+    // ActionCable::INTERNAL[:disconnect_reasons][:unauthorized]`).
+    let strings = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Str) };
+    cable.constants.insert(
+        Symbol::from("INTERNAL"),
+        Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(strings) },
+    );
     classes.insert(ClassId(Symbol::from("ActionCable")), cable);
 }
 

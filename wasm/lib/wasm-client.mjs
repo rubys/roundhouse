@@ -7,8 +7,8 @@
 //
 // The worker holds no durable state: the app source lives on the main thread
 // and is re-sent on the next call, so a restart is transparent apart from the
-// one call that provoked it. This is the shared substrate both /playground/
-// (transpile) and /ide/ (analyze) run on.
+// one call that provoked it. The playground, IDE, and Fractal explorer share
+// this worker interface.
 export function createClient({
   workerUrl,
   wasmUrl,
@@ -100,6 +100,7 @@ export function createClient({
     related: (path) => call("related", { path }),
     traceroute: (query) => call("traceroute", { query }),
     traceTargets: () => call("traceTargets", {}),
+    fractalStages: (src, files) => call("fractalStages", { src, files }),
     dispose: () => { try { worker.terminate(); } catch { /* ignore */ } },
   };
 }

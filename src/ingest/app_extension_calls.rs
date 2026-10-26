@@ -20,14 +20,50 @@ use crate::dialect::{MethodReceiver, ModelBodyItem};
 use crate::expr::ExprNode;
 
 pub(super) fn mark(app: &mut App) {
+    let modules: HashSet<String> =
+        app.library_classes.iter().filter(|lc| lc.is_module && lc.origin.is_none()).map(|lc| lc.name.0.as_str().to_string()).collect();
+    // Where the source has it, a module's or a class's: the emit otherwise drops a module's, and runs a class's after a `@@x = …` written before it.
+    for lc in app.library_classes.iter_mut().filter(|lc| lc.origin.is_none()) {
+        let owner = lc.name.0.as_str().to_string();
+        for expr in &mut lc.unknown_calls {
+            let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else { continue };
+            let known = |a: &crate::expr::Expr| match &*a.node {
+                ExprNode::Const { path } => {
+                    let rooted = path.first().is_some_and(|s| s.as_str().is_empty());
+                    let written = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
+                    modules.contains(&written) || (!rooted && modules.contains(&format!("{owner}::{written}")))
+                }
+                _ => false,
+            };
+            if method.as_str() == "extend" && !args.is_empty() && args.iter().all(known) && !expr.span.is_synthetic() {
+                expr.decisions |= crate::expr::REPLAYED_CLASS_BODY;
+            }
+        }
+    }
+    for lc in app.library_classes.iter_mut().filter(|lc| lc.origin.is_none()) {
+        let own: HashSet<String> = lc
+            .methods
+            .iter()
+            .filter(|m| m.receiver == MethodReceiver::Class)
+            .map(|m| m.name.as_str().to_string())
+            .collect();
+        for expr in &mut lc.unknown_calls {
+            let ExprNode::Send { recv, method, block, .. } = &*expr.node else { continue };
+            let on_self = recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef));
+            // Not a Concern's `included do … end`: the hook's own name, which the concern splice owns.
+            let hook = matches!(method.as_str(), "included" | "extended" | "prepended" | "inherited" | "class_methods");
+            if on_self && !hook && block.is_none() && own.contains(method.as_str()) && !expr.span.is_synthetic() {
+                expr.decisions |= crate::expr::REPLAYED_CLASS_BODY;
+            }
+        }
+    }
     let mut openings: std::collections::BTreeMap<String, (usize, HashSet<String>)> = Default::default();
     for lc in app.library_classes.iter().filter(|lc| lc.is_module && lc.origin.is_none()) {
         let entry = openings.entry(lc.name.0.as_str().to_string()).or_default();
         entry.0 += 1;
         entry.1.extend(lc.methods.iter().filter(|m| m.receiver == MethodReceiver::Instance).map(|m| m.name.as_str().to_string()));
     }
-    // Not replayed through a reopened module: the Ruby emit keeps only one opening's methods, so the replayed call would raise at load.
-    let modules: Vec<(String, HashSet<String>)> = openings.into_iter().filter(|(_, (n, _))| *n == 1).map(|(name, (_, methods))| (name, methods)).collect();
+    let modules: Vec<(String, HashSet<String>)> = openings.into_iter().map(|(name, (_, methods))| (name, methods)).collect();
     for model in &mut app.models {
         let owner = model.name.0.as_str().to_string();
         let mut extended: Vec<usize> = Vec::new();

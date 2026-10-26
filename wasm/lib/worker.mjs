@@ -1,6 +1,6 @@
 // Shared compiler Web Worker: owns one wasm engine instance so a multi-second
 // pass (a Mastodon transpile, a whole-app analyze) never blocks the UI thread.
-// Backs BOTH /playground/ and /ide/ through wasm-client.mjs.
+// Backs /playground/, /ide/, and /fractal/ through wasm-client.mjs.
 //
 // Protocol: the page posts {id, op, args}; the worker replies {id, result} or
 // {id, error}. Wasm calls are synchronous and non-interruptible, so a hang
@@ -21,6 +21,7 @@ const OP_EXPORT = {
   traceroute: "traceroute",
   traceTargets: "trace_targets",
   version: "version",
+  fractalStages: "fractal_stages",
 };
 
 // Assigned synchronously by the `init` handler so an op that arrives before
