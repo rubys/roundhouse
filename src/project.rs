@@ -10754,6 +10754,12 @@ pub fn build_site(fixture: &Path, out: &Path) -> Result<(), String> {
 /// Build selected browse archives without website assets or WASM demos.
 /// The file sets and archive writers are shared with `build_site`.
 pub fn build_archives(fixture: &Path, out: &Path, targets: &[BuildTarget]) -> Result<(), String> {
+    // Archives hold text files only; Roundsnap's compiled ISeqs exist only
+    // after `finalize_roundsnap` on a directory. A prepared tree without
+    // them cannot boot, so refuse rather than publish one.
+    if targets.contains(&BuildTarget::Ruby) && crate::roundsnap::enabled() {
+        return Err("roundsnap: ISeq delivery writes a directory (--target ruby -o DIR); unset ROUNDSNAP for --archives/--site".into());
+    }
     let browse = out.join("browse");
     if browse.exists() {
         fs::remove_dir_all(&browse).map_err(|e| format!("clean {}: {e}", browse.display()))?;

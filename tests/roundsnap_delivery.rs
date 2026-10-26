@@ -155,6 +155,25 @@ fn failed_finalize_preserves_last_compiled_generation() {
     std::fs::remove_dir_all(out).unwrap();
 }
 
+#[test]
+fn archives_refuse_roundsnap_instead_of_publishing_an_unbootable_tree() {
+    let fixture = std::fs::canonicalize("fixtures/tiny-blog").unwrap();
+    let out = scratch_dir("archives");
+    let result = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--archives", "ruby"])
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&out)
+        .env("ROUNDSNAP", "1")
+        .output()
+        .expect("spawn compiler");
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(!result.status.success(), "archives accepted ROUNDSNAP:\n{stderr}");
+    assert!(stderr.contains("roundsnap:"), "{stderr}");
+    assert!(!out.join("browse/ruby.tgz").exists());
+    std::fs::remove_dir_all(out).unwrap();
+}
+
 fn copy_tree(from: &Path, to: &Path) {
     if from.is_dir() {
         std::fs::create_dir_all(to).unwrap();
