@@ -38,8 +38,25 @@ and blocking. Tip drift against basecamp/once-campfire `main` is not a
 standing CI job; survey tip only when deliberately bumping that pin.
 `unit-build` compiles one archive of all library, binary, and integration
 tests. Four unit shards partition the active cases; ignored integrations
-still need selected toolchain lanes. Framework and toolchain suites also
-run inside comparison jobs. **Spinel is not part of `BASE`.**
+still need selected toolchain lanes.
+Shard 0 of `unit` also runs each `gems/roundsnap/test/*_test.rb` in its own
+MRI process (`ruby -Ilib:test "$file"`): extra positional arguments are ARGV,
+not additional test files, so one invocation cannot load the suite. Missing
+files fail the step; they are not skipped green. Those gem tests ride the
+Ruby floor (including compiler/runtime diffs) because `unit` is in `BASE`.
+`gems/roundsnap/` and `src/roundsnap.rs` stay on that floor — they do not
+fan out extras or the Spinel lanes. There is no `campfire-roundsnap` job and no
+`ci:roundsnap` focus label. The default `roundsnap_delivery` target runs
+real-blog emit + boot + the four emitted model/controller suites, plus
+source-frame assertions for a model and ERB view. It uses subprocess flags,
+not global environment mutation, and fails when MRI or fixtures are absent.
+The existing `campfire-conformance` job additionally emits and boots the
+pinned Campfire app through Roundsnap without app/runtime `.rb`, then runs
+its full emitted suite without stubs. Its per-file results and per-test
+failures must match the plain Ruby lane on the same app, MRI, gems and
+compiler; the plain lane's existing conformance floor still applies.
+The standalone `campfire-roundsnap` script remains a boot-only local smoke.
+Framework and toolchain suites also run inside comparison jobs. **Spinel is not part of `BASE`.**
 
 That floor is the merge claim for ordinary analyzer, lowerer, and runtime
 work: the Ruby shape runs, and Campfire still matches Rails. Crystal, Go,

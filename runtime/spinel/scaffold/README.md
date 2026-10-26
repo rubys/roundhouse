@@ -112,6 +112,20 @@ has a `<turbo-cable-stream-source>` that opens a WebSocket back to
 Puma; subsequent creates from any other browser tab — or even from
 `curl` — appear in the index in real time without a page refresh.
 
+### Roundsnap / straight-to-ISeq (optional CRuby delivery)
+
+With `ROUNDSNAP=1` (alias `ROUNDHOUSE_RUBY_ISEQ=1`), `--target ruby` ships
+MRI bytecode instead of app/runtime `.rb` files: `manifest.json` +
+`iseq/**` plus a vendored [`roundsnap`](../../../gems/roundsnap/) gem.
+The original `boot.rb` chain installs the loader; requires resolve units
+by key without eagerly evaluating unrelated files. ISeq metadata names
+honest emitted file:line locations. A sidecar from `#<SPINEL_SOURCE>`
+markers formats source frames through `Loader#format_backtrace`, without
+moving code or claiming native Coverage/profiler remapping. This is for the
+**emitted** tree, not a `Bootsnap.setup` drop-in for unmodified Rails. Keep sources
+beside the binaries with `ROUNDSNAP_KEEP_SOURCE=1`. Default emit (unset)
+stays the classic `.rb` tree. Prototype check: `scripts/campfire-roundsnap`.
+
 Build/test targets — the CRuby target uses `rake` (the overlay's
 Rakefile owns the dev server); the spinel target uses `make` (no
 Rack/Puma dependency):
