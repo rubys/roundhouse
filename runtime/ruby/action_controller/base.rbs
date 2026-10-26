@@ -228,6 +228,7 @@ module ActionController
     def set_header: (String name, String value) -> String
     def headers: () -> ActionController::HeaderStore
     def helpers: () -> Base
+    def view_context: () -> ActionView::Base
     def send_data: (String data, ?type: String, ?disposition: String) -> void
     def verify_authenticity_token: () -> void
     def verified_request?: () -> bool

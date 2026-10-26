@@ -1231,7 +1231,12 @@ fn every_runtime_method_body_concretely_typed() {
     // `ActiveRecord::Bounds` element (`where(created_at: [nil, 7.days.ago..])`),
     // and the element read off the untyped Array reaches `bounds_predicate`
     // through it (+2 in active_record/relation.rb, 884 -> 886).
-    const CEILING: usize = 886;
+    // MEASURED 893 on 2026-10-27 (on 886): `ActionView::Base#asset_path`
+    // takes whatever source and options hash the caller passes (a String
+    // or Symbol, nil raising; `host:` / `skip_pipeline:` read from the
+    // hash), so its `nil?`, `to_s`, `match?` and option reads are
+    // gradual sites (+7 in the new action_view/base.rb methods, 886 -> 893).
+    const CEILING: usize = 893;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

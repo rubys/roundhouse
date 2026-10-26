@@ -1,5 +1,7 @@
 module ActionView
   class Base
     def form_with: () -> nil
+    def asset_path: (untyped source, ?Hash[Symbol, untyped] options) -> String
+    def asset_url: (untyped source, ?Hash[Symbol, untyped] options) -> String
   end
 end
