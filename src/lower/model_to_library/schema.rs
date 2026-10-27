@@ -2278,6 +2278,11 @@ fn pending_change_methods(col: &Column) -> Vec<(Symbol, &'static str, Ty)> {
         (Symbol::from(format!("{n}_changed?")), "attribute_changed?", Ty::Bool),
         (Symbol::from(format!("will_save_change_to_{n}?")), "attribute_changed?", Ty::Bool),
         (Symbol::from(format!("{n}_was")), "attribute_was", Ty::Untyped),
+        // `clear_<col>_change` and `restore_<col>!`: ActiveModel::Dirty's
+        // other two affixes, forgetting the pending change and writing
+        // the original value back.
+        (Symbol::from(format!("clear_{n}_change")), "clear_attribute_change", Ty::Untyped),
+        (Symbol::from(format!("restore_{n}!")), "restore_attribute!", Ty::Untyped),
     ]
 }
 

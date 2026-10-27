@@ -236,5 +236,7 @@ module ActiveRecord
     def saved_changes: () -> Hash[String, untyped]
     def changes_to_save: () -> Hash[String, untyped]
     def attribute_was: (String name) -> untyped
+    def clear_attribute_change: (String name) -> nil
+    def restore_attribute!: (String name) -> nil
   end
 end

@@ -2021,6 +2021,27 @@ module ActiveRecord
       pair.nil? ? attributes[name] : pair[0]
     end
 
+    # Rails' `clear_<col>_change`: the column's current value becomes its
+    # baseline, so it is no longer pending. Other columns stay as they were.
+    def clear_attribute_change(name)
+      baseline = @__last_saved_attributes
+      baseline = baseline.nil? ? {} : baseline.dup
+      baseline[name] = attributes[name]
+      @__last_saved_attributes = baseline
+      @__touched_updated_at = nil if name == "updated_at"
+      nil
+    end
+
+    # Rails' `restore_<col>!`: a pending change is written back to its
+    # original value and cleared.
+    def restore_attribute!(name)
+      if attribute_changed?(name)
+        __send__("#{name}=", attribute_was(name))
+        clear_attribute_change(name)
+      end
+      nil
+    end
+
     # ---- cache_key / cache_version / cache_key_with_version ---------
     #
     # Lives HERE, not base.rb, for the same reason as the rest of this

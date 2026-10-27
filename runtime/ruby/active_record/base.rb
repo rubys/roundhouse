@@ -1132,6 +1132,18 @@ module ActiveRecord
       changes[name]
     end
 
+    # `clear_<col>_change` and `restore_<col>!`: nothing is ever pending
+    # here (see `changes_to_save`), so there is nothing to forget or
+    # write back. The ruby family's connection.rb reopen holds the real
+    # ones.
+    def clear_attribute_change(name)
+      nil
+    end
+
+    def restore_attribute!(name)
+      nil
+    end
+
     # `id` never appears in the subclass `attributes` hash, so the
     # created-vs-updated question is answered by the save path itself
     # rather than the snapshot diff.

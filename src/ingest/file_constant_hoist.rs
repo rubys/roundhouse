@@ -5,8 +5,7 @@
 //! when every reader can see that host and the value does not name a class
 //! defined after it — otherwise Ruby NameErrors at load or call time.
 
-use std::collections::{HashMap, HashSet};
-
+use crate::det::{HashMap, HashSet};
 use crate::dialect::LibraryClass;
 use crate::expr::{Expr, ExprNode, LValue};
 use crate::ident::Symbol;
@@ -131,7 +130,7 @@ fn class_sees_host_constants(
         return true;
     }
     let mut cur = class.parent.as_ref().map(|parent| parent.0.as_str());
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while let Some(parent) = cur {
         if !seen.insert(parent) {
             break;

@@ -491,7 +491,11 @@ fn untyped_subexpressions_baseline() {
     // MEASURED 1112 on 2026-10-27 (on 1110): the filter's `where.not`
     // list, its parameter and reader (+2 in the same file), and the
     // preloads nested under the association (+2 more, 1114).
-    const CEILING: usize = 1114;
+    // MEASURED 1121 on 2026-10-27 (on 1114): `clear_attribute_change` and
+    // `restore_attribute!` take the column name; it is a var on this
+    // RBS-less probe (+7 in active_record/connection.rb); the RBS-paired
+    // gate types it.
+    const CEILING: usize = 1121;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

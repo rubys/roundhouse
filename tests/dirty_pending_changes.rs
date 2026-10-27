@@ -88,3 +88,18 @@ fn a_model_definition_wins() {
     assert!(src.contains("\"mine\""), "{src}");
     assert!(!src.contains(r#"attribute_was("username")"#), "{src}");
 }
+
+/// `clear_<col>_change` and `restore_<col>!`, ActiveModel::Dirty's other
+/// affixes, are synthesized on demand and delegate to the runtime's
+/// name-taking `clear_attribute_change` / `restore_attribute!`.
+#[test]
+fn clear_change_and_restore_bang_are_synthesized_on_demand() {
+    let src = emit_user(
+        "class User < ApplicationRecord\n  def settle\n    clear_about_change\n    restore_email!\n  end\nend\n",
+    );
+    assert!(src.contains("def clear_about_change"), "{src}");
+    assert!(src.contains(r#"clear_attribute_change("about")"#), "{src}");
+    assert!(src.contains("def restore_email!"), "{src}");
+    assert!(src.contains(r#"restore_attribute!("email")"#), "{src}");
+    assert!(!src.contains("def clear_username_change"), "{src}");
+}
