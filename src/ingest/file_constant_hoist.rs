@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::dialect::LibraryClass;
-use crate::expr::{Expr, ExprNode};
+use crate::expr::{Expr, ExprNode, LValue};
 use crate::ident::Symbol;
 use crate::library_class_order;
 
@@ -18,8 +18,9 @@ use super::{IngestError, IngestResult};
 /// first ordinary class of the file, else the first admitted factory —
 /// the same choice the hoist itself uses. A reader outside that host
 /// (and outside its nested classes / subclasses) cannot see a constant
-/// placed in the host body; a value that names a class defined after the
-/// host runs before that class exists.
+/// placed in the host body; a rooted `::NAME` lookup still wants Object
+/// even on the host; a value that names a class defined after the host
+/// runs before that class exists.
 pub(super) fn ensure_safe(
     file: &str,
     file_constants: &[(Symbol, Expr)],
@@ -51,11 +52,19 @@ pub(super) fn ensure_safe(
     let hoisted: HashSet<&str> = file_constants.iter().map(|(name, _)| name.as_str()).collect();
 
     for class in out.iter().chain(factories.iter()) {
-        if class_sees_host_constants(class, host_name, &by_name) {
-            continue;
-        }
+        let sees_host = class_sees_host_constants(class, host_name, &by_name);
         for expr in class_reader_exprs(class) {
-            if let Some(name) = find_const(expr, |path| is_hoisted_const_path(path, &hoisted)) {
+            // Classes that see the host can use a bare `TIMEOUT` after
+            // hoist. Rooted `::TIMEOUT` still means Object::TIMEOUT, so
+            // refuse that on every class — including the host.
+            let hit = find_const_path(expr, |path| {
+                if is_rooted_path(path) {
+                    is_hoisted_const_path(path, &hoisted)
+                } else {
+                    !sees_host && is_hoisted_const_path(path, &hoisted)
+                }
+            });
+            if let Some(name) = hit {
                 return Err(IngestError::Unsupported {
                     file: file.into(),
                     message: format!(
@@ -67,15 +76,16 @@ pub(super) fn ensure_safe(
         }
     }
     for (_, value) in file_constants {
-        if let Some(name) = find_const(value, |path| {
-            let joined = path
-                .iter()
-                .map(|segment| segment.as_str())
-                .filter(|segment| !segment.is_empty())
-                .collect::<Vec<_>>()
-                .join("::");
-            after_host.contains(joined.as_str())
-        }) {
+        if let Some(name) = find_const_path(value, |path| is_rooted_path(path) && is_hoisted_const_path(path, &hoisted))
+        {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: format!(
+                    "file-level constant value roots `::{name}`, which would miss the hoist onto `{host_name}`"
+                ),
+            });
+        }
+        if let Some(name) = find_const_path(value, |path| names_after_host_class(path, &after_host).is_some()) {
             return Err(IngestError::Unsupported {
                 file: file.into(),
                 message: format!(
@@ -159,6 +169,10 @@ fn class_reader_exprs(class: &LibraryClass) -> Vec<&Expr> {
     out
 }
 
+fn is_rooted_path(path: &[Symbol]) -> bool {
+    path.first().is_some_and(|segment| segment.as_str().is_empty())
+}
+
 /// A const that names a hoisted top-level constant: bare `TIMEOUT` or
 /// rooted `::TIMEOUT` (`path` `["", "TIMEOUT"]`). Multi-segment paths
 /// are another constant.
@@ -171,28 +185,62 @@ fn is_hoisted_const_path(path: &[Symbol], hoisted: &HashSet<&str>) -> bool {
     matches!(segments.as_slice(), [one] if hoisted.contains(one))
 }
 
-fn find_const(expr: &Expr, matches: impl Fn(&[Symbol]) -> bool) -> Option<String> {
+/// True when any non-empty prefix of the const path is a class defined
+/// after the host (`LimitError` and `LimitError::TOKEN` both hit).
+fn names_after_host_class(path: &[Symbol], after_host: &HashSet<&str>) -> Option<String> {
+    let segments: Vec<&str> = path
+        .iter()
+        .map(|segment| segment.as_str())
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    for end in 1..=segments.len() {
+        let joined = segments[..end].join("::");
+        if after_host.contains(joined.as_str()) {
+            return Some(joined);
+        }
+    }
+    None
+}
+
+fn find_const_path(expr: &Expr, matches: impl Fn(&[Symbol]) -> bool) -> Option<String> {
     let mut found = None;
-    walk_expr(expr, &mut |node| {
+    for_each_const_path(expr, &mut |path| {
         if found.is_some() {
             return;
         }
-        if let ExprNode::Const { path } = &*node.node {
-            if matches(path) {
-                let name = path
-                    .iter()
+        if matches(path) {
+            found = Some(
+                path.iter()
                     .map(|segment| segment.as_str())
                     .filter(|segment| !segment.is_empty())
                     .collect::<Vec<_>>()
-                    .join("::");
-                found = Some(name);
-            }
+                    .join("::"),
+            );
         }
     });
     found
 }
 
-fn walk_expr(expr: &Expr, visit: &mut dyn FnMut(&Expr)) {
-    visit(expr);
-    expr.node.for_each_child(&mut |child| walk_expr(child, visit));
+/// Every const path in `expr`, including `LValue::Const` assign /
+/// op-assign targets that `for_each_child` does not expose as Exprs.
+fn for_each_const_path(expr: &Expr, visit: &mut dyn FnMut(&[Symbol])) {
+    if let ExprNode::Const { path } = &*expr.node {
+        visit(path);
+    }
+    match &*expr.node {
+        ExprNode::Assign { target, .. } | ExprNode::OpAssign { target, .. } => {
+            if let LValue::Const { path } = target {
+                visit(path);
+            }
+        }
+        ExprNode::MultiAssign { targets, .. } => {
+            for target in targets {
+                if let LValue::Const { path } = target {
+                    visit(path);
+                }
+            }
+        }
+        _ => {}
+    }
+    expr.node.for_each_child(&mut |child| for_each_const_path(child, visit));
 }

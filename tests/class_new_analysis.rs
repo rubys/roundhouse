@@ -1576,6 +1576,55 @@ fn file_level_constants_refuse_a_sibling_rooted_const_reader() {
 }
 
 #[test]
+fn file_level_constants_refuse_a_host_rooted_const_reader() {
+    // Even the host cannot keep Object::TIMEOUT after the hoist.
+    let source = "TIMEOUT = 5\nA = Class.new(StandardError) do\n  def self.t = ::TIMEOUT\nend\n";
+    roundhouse::ingest::survey::activate();
+    let tree: HashMap<PathBuf, Vec<u8>> =
+        [(PathBuf::from("app/models/errors.rb"), source.as_bytes().to_vec())]
+            .into_iter()
+            .collect();
+    let _app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let gaps = roundhouse::ingest::survey::drain();
+    assert!(
+        gaps.iter().any(|gap| gap.to_string().contains("cannot see it after hoisting")),
+        "{gaps:?}"
+    );
+}
+
+#[test]
+fn file_level_constants_refuse_a_rooted_value() {
+    let source = "TIMEOUT = 5\nA = Class.new(StandardError)\nALL = [::TIMEOUT]\n";
+    roundhouse::ingest::survey::activate();
+    let tree: HashMap<PathBuf, Vec<u8>> =
+        [(PathBuf::from("app/models/errors.rb"), source.as_bytes().to_vec())]
+            .into_iter()
+            .collect();
+    let _app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let gaps = roundhouse::ingest::survey::drain();
+    assert!(
+        gaps.iter().any(|gap| gap.to_string().contains("roots `::")),
+        "{gaps:?}"
+    );
+}
+
+#[test]
+fn file_level_constants_refuse_a_qualified_later_class_value() {
+    let source = "class BaseError; end\nclass LimitError < BaseError; TOKEN = 1; end\nALL = [LimitError::TOKEN]\n";
+    roundhouse::ingest::survey::activate();
+    let tree: HashMap<PathBuf, Vec<u8>> =
+        [(PathBuf::from("app/models/errors.rb"), source.as_bytes().to_vec())]
+            .into_iter()
+            .collect();
+    let _app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let gaps = roundhouse::ingest::survey::drain();
+    assert!(
+        gaps.iter().any(|gap| gap.to_string().contains("defined after host")),
+        "{gaps:?}"
+    );
+}
+
+#[test]
 fn a_file_level_factory_follows_its_in_file_parent_class() {
     // `NotFound = Class.new(AppError)` after `class AppError` must not
     // prepend the factory ahead of AppError: Ruby resolves the superclass
