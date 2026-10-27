@@ -173,16 +173,22 @@ fn is_rooted_path(path: &[Symbol]) -> bool {
     path.first().is_some_and(|segment| segment.as_str().is_empty())
 }
 
-/// A const that names a hoisted top-level constant: bare `TIMEOUT` or
-/// rooted `::TIMEOUT` (`path` `["", "TIMEOUT"]`). Multi-segment paths
-/// are another constant.
+/// A const whose first real segment is a hoisted top-level name: bare
+/// `TIMEOUT`, rooted `::TIMEOUT`, or qualified `TIMEOUT::PI` /
+/// `::TIMEOUT::PI`. After hoist those all miss Object.
 fn is_hoisted_const_path(path: &[Symbol], hoisted: &HashSet<&str>) -> bool {
+    // Bare `TIMEOUT`, rooted `::TIMEOUT`, and qualified `TIMEOUT::PI` /
+    // `::TIMEOUT::PI` — any path whose first real segment is a hoisted
+    // name would miss Object after the hoist.
     let segments: Vec<&str> = path
         .iter()
         .map(|segment| segment.as_str())
         .filter(|segment| !segment.is_empty())
         .collect();
-    matches!(segments.as_slice(), [one] if hoisted.contains(one))
+    segments
+        .first()
+        .copied()
+        .is_some_and(|first| hoisted.contains(first))
 }
 
 /// True when any non-empty prefix of the const path is a class defined

@@ -1625,6 +1625,22 @@ fn file_level_constants_refuse_a_qualified_later_class_value() {
 }
 
 #[test]
+fn file_level_constants_refuse_a_qualified_hoisted_reader() {
+    let source = "CONFIG = { PI: 3 }\nA = Class.new(StandardError) do\n  def self.t = CONFIG::PI\nend\nB = Class.new(StandardError) do\n  def self.t = CONFIG::PI\nend\n";
+    roundhouse::ingest::survey::activate();
+    let tree: HashMap<PathBuf, Vec<u8>> =
+        [(PathBuf::from("app/models/errors.rb"), source.as_bytes().to_vec())]
+            .into_iter()
+            .collect();
+    let _app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let gaps = roundhouse::ingest::survey::drain();
+    assert!(
+        gaps.iter().any(|gap| gap.to_string().contains("cannot see it after hoisting")),
+        "{gaps:?}"
+    );
+}
+
+#[test]
 fn a_file_level_factory_follows_its_in_file_parent_class() {
     // `NotFound = Class.new(AppError)` after `class AppError` must not
     // prepend the factory ahead of AppError: Ruby resolves the superclass
