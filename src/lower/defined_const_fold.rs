@@ -544,12 +544,14 @@ fn lit(like: &Expr, value: Literal, ty: Ty) -> Expr {
 
 /// Fold `e` in place; true when anything under it changed. `cond`:
 /// only `e`'s truthiness is read (an `if`/`while` condition, the left
-/// of `&&`/`||`, the operand of `!`, or the right of a `&&`/`||` that
-/// is itself one).
+/// of `&&`, the operand of `!`, or either side of a `&&`/`||` that is
+/// itself one). The left of a `||` in value position is its result
+/// when truthy, so it keeps its value.
 fn walk(e: &mut Expr, owner: Option<&ClassId>, facts: &Facts, lt: bool, cond: bool) -> bool {
     let child_cond: &[bool] = match &*e.node {
         ExprNode::If { .. } | ExprNode::While { .. } => &[true],
-        ExprNode::BoolOp { .. } => &[true, cond],
+        ExprNode::BoolOp { op: BoolOpKind::And, .. } => &[true, cond],
+        ExprNode::BoolOp { .. } => &[cond, cond],
         ExprNode::Send { recv: Some(_), method, args, .. } if method.as_str() == "!" && args.is_empty() => &[true],
         _ => &[],
     };

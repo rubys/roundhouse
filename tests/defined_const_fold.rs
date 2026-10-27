@@ -66,6 +66,8 @@ const PROBE: &str = r#"class Probe
   def folded_ternary_label; @on && (defined?(Widget) ? "w" : "x"); end
   def value_conjunction; @on && defined?(Widget); end
   def guarded_conjunction; go if @on && defined?(Widget); end
+  def value_disjunction; defined?(Widget) || fallback; end
+  def guarded_disjunction; go if defined?(Widget) || @on; end
 end
 "#;
 
@@ -178,6 +180,9 @@ fn folded_guards_prune_their_dead_branch() {
     // condition reads only its truth.
     assert_eq!(b["value_conjunction"], "@on && \"constant\"");
     assert!(b["guarded_conjunction"].contains("@on && true"), "{}", b["guarded_conjunction"]);
+    // `||` returns its truthy left operand itself.
+    assert_eq!(b["value_disjunction"], "\"constant\"");
+    assert!(!b["guarded_disjunction"].contains("constant"), "{}", b["guarded_disjunction"]);
     assert!(!b["compacted"].contains("OmniAuth") && !b["compacted"].contains(":b"), "{}", b["compacted"]);
 }
 

@@ -17,6 +17,7 @@ const STRUCTS: &str = r#"module Grants
 
   class Holder < T::Struct
     prop :attributes_hash, T.nilable(String)
+    prop :unknown, T.nilable(String)
   end
 
   class Named < T::Struct
@@ -46,6 +47,7 @@ end
 h = Grants::Holder.new({ attributes_hash: "kept" })
 raise "a prop named like the Hash parameter" unless h.attributes_hash == "kept"
 raise "its keyword" unless Grants::Holder.new(attributes_hash: "kw").attributes_hash == "kw"
+raise "a prop named like the key check" unless Grants::Holder.new({}, unknown: "kept").unknown == "kept"
 n = Grants::Named.new(name: "n")
 raise "required const with nilable omitted" unless n.name == "n" && n.note.nil?
 begin

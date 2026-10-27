@@ -1338,15 +1338,21 @@ fn struct_hash_prologue(members: &[SorbetStructMember]) -> Option<(String, Expr)
     if members.is_empty() || !members.iter().all(|m| m.default.is_some() || m.nilable) {
         return None;
     }
-    let mut param = String::from("attributes_hash");
-    while members.iter().any(|m| m.name.as_str() == param) {
-        param.push('_');
-    }
+    // Locals no prop's keyword is named like.
+    let fresh = |base: &str| {
+        let mut name = base.to_string();
+        while members.iter().any(|m| m.name.as_str() == name) {
+            name.push('_');
+        }
+        name
+    };
+    let param = fresh("attributes_hash");
+    let unknown = fresh("unknown");
     let declared: Vec<String> = members.iter().map(|m| format!(":{}", m.name.as_str())).collect();
     let mut source = format!(
         "unless {param}.nil?\n  {param} = {param}.to_h.transform_keys(&:to_sym)\n  \
-         unknown = {param}.keys - [{}]\n  \
-         raise ArgumentError, \"Unrecognized properties: #{{unknown.join(\", \")}}\" unless unknown.empty?\n",
+         {unknown} = {param}.keys - [{}]\n  \
+         raise ArgumentError, \"Unrecognized properties: #{{{unknown}.join(\", \")}}\" unless {unknown}.empty?\n",
         declared.join(", ")
     );
     for member in members {
