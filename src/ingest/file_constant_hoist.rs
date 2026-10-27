@@ -54,10 +54,8 @@ pub(super) fn ensure_safe(
         if class_sees_host_constants(class, host_name, &by_name) {
             continue;
         }
-        for expr in class_body_exprs(class) {
-            if let Some(name) = find_const(expr, |path| {
-                path.len() == 1 && hoisted.contains(path[0].as_str())
-            }) {
+        for expr in class_reader_exprs(class) {
+            if let Some(name) = find_const(expr, |path| is_hoisted_const_path(path, &hoisted)) {
                 return Err(IngestError::Unsupported {
                     file: file.into(),
                     message: format!(
@@ -139,14 +137,38 @@ fn class_sees_host_constants(
     false
 }
 
-fn class_body_exprs(class: &LibraryClass) -> impl Iterator<Item = &Expr> {
-    class
-        .methods
+/// Expressions that may read a file-level constant after hoist: method
+/// bodies, their parameter defaults (including the block param), class
+/// constants, class-ivar seeds, and unknown class-body calls.
+fn class_reader_exprs(class: &LibraryClass) -> Vec<&Expr> {
+    let mut out = Vec::new();
+    for method in &class.methods {
+        out.push(&method.body);
+        for param in &method.params {
+            if let Some(default) = &param.default {
+                out.push(default);
+            }
+        }
+        if let Some(default) = method.block_param.as_ref().and_then(|param| param.default.as_ref()) {
+            out.push(default);
+        }
+    }
+    out.extend(class.constants.iter().map(|(_, value)| value));
+    out.extend(class.class_ivar_initializers.iter());
+    out.extend(class.unknown_calls.iter());
+    out
+}
+
+/// A const that names a hoisted top-level constant: bare `TIMEOUT` or
+/// rooted `::TIMEOUT` (`path` `["", "TIMEOUT"]`). Multi-segment paths
+/// are another constant.
+fn is_hoisted_const_path(path: &[Symbol], hoisted: &HashSet<&str>) -> bool {
+    let segments: Vec<&str> = path
         .iter()
-        .map(|method| &method.body)
-        .chain(class.constants.iter().map(|(_, value)| value))
-        .chain(class.class_ivar_initializers.iter())
-        .chain(class.unknown_calls.iter())
+        .map(|segment| segment.as_str())
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    matches!(segments.as_slice(), [one] if hoisted.contains(one))
 }
 
 fn find_const(expr: &Expr, matches: impl Fn(&[Symbol]) -> bool) -> Option<String> {
