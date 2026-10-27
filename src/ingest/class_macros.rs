@@ -595,14 +595,15 @@ impl<'a> Mentions<'a> {
             // chunk), stay on one accumulator — buffering every chunk map is
             // pure peak-memory cost with no schedule gain.
             let chunk = self.sources.len().div_ceil(64).max(1);
-            let parts: Vec<&'a [SourceFile]> = self.sources.chunks(chunk).collect();
-            if crate::par::workers_for(parts.len()) <= 1 {
+            let n_parts = self.sources.len().div_ceil(chunk);
+            if crate::par::workers_for(n_parts) <= 1 {
                 let mut words: HashMap<&'a str, usize> = HashMap::new();
                 for source in self.sources {
                     count_words(&source.text, &mut words);
                 }
                 return words;
             }
+            let parts: Vec<&'a [SourceFile]> = self.sources.chunks(chunk).collect();
             let mut words: HashMap<&'a str, usize> = HashMap::new();
             for part in crate::par::map(&parts, |part| {
                 let mut words = HashMap::new();
