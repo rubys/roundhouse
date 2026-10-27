@@ -214,6 +214,26 @@ fn in_batches_warns_only_when_it_loads_rows() {
     fs::remove_dir_all(&out).unwrap();
 }
 
+/// `in_batches.each_record` enumerates records — treat it as a loading
+/// boundary so aggregate suppression does not quiet the chain.
+#[test]
+fn in_batches_each_record_under_an_aggregate_is_reported() {
+    let src = scratch("batches-each-record-src");
+    let out = scratch("batches-each-record-out");
+    app(
+        &src,
+        "",
+        "class FeatureProbe\n  def self.run\n    Feature.in_batches.each_record.count\n  end\nend\n",
+    );
+    let stderr = survey(&src, &out);
+    assert!(
+        stderr.contains("`Feature.in_batches` on a subclass"),
+        "each_record under count still loads rows: {stderr}"
+    );
+    fs::remove_dir_all(&src).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+}
+
 /// The STI lowering rewrites test bodies too, so a finder in a test is
 /// reported like one in the app.
 #[test]

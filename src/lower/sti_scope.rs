@@ -499,7 +499,7 @@ const LOADING_METHODS: &[&str] = &[
     "reorder", "limit", "offset", "joins", "left_joins", "left_outer_joins", "includes",
     "preload", "eager_load", "distinct", "select", "group", "having", "unscoped",
     "readonly", "lock", "find_or_create_by", "find_or_create_by!", "find_or_initialize_by",
-    "create_or_find_by", "create_or_find_by!",
+    "create_or_find_by", "create_or_find_by!", "each_record",
 ];
 
 /// Relation-preserving sends: an aggregate on this chain still answers a
