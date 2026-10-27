@@ -502,6 +502,17 @@ const LOADING_METHODS: &[&str] = &[
     "create_or_find_by", "create_or_find_by!",
 ];
 
+/// Relation-preserving sends: an aggregate on this chain still answers a
+/// value and loads no subclass row (`Feature.where(…).count`). Eager
+/// finders (`find`, `first`, `find_by`, …) are not here — they load
+/// records even when an aggregate is written on the result
+/// (`Feature.find([1, 2]).count`), so the subclass warning still fires.
+const RELATION_CHAIN_METHODS: &[&str] = &[
+    "all", "where", "order", "reorder", "limit", "offset", "joins", "left_joins",
+    "left_outer_joins", "includes", "preload", "eager_load", "distinct", "select", "group",
+    "having", "unscoped", "readonly", "lock",
+];
+
 /// Aggregates that answer a value from a relation, not its records: the
 /// relation they're called on loads nothing (`Feature.where(…).count`).
 const VALUE_METHODS: &[&str] = &[
@@ -559,9 +570,14 @@ pub(crate) fn untyped_subclass_diagnostics(app: &App) -> Vec<crate::diagnostic::
             if let ExprNode::Const { path } = &*recv.node {
                 let sub = const_class_id(path);
                 if let Some(base) = untyped.get(&sub) {
-                    let loads = LOADING_METHODS.contains(&method.as_str())
-                        || scopes.get(base).is_some_and(|names| names.contains(method.as_str()));
-                    if loads && !valued {
+                    let named_scope = scopes.get(base).is_some_and(|names| names.contains(method.as_str()));
+                    let loads = LOADING_METHODS.contains(&method.as_str()) || named_scope;
+                    // An aggregate suppresses only relation-preserving
+                    // sends (and named scopes). Eager finders still load
+                    // subclass rows when written as `Feature.find(…).count`.
+                    let relation_chain =
+                        RELATION_CHAIN_METHODS.contains(&method.as_str()) || named_scope;
+                    if loads && !(valued && relation_chain) {
                         sites.push((e.span, sub, base.clone(), method.clone()));
                     }
                 }

@@ -130,12 +130,17 @@ const AGGREGATES: &str = r#"class FeatureProbe
   def self.found_inside
     Feature.where(title: Feature.find_by(title: "f").title).exists?
   end
+
+  def self.find_then_count
+    Feature.find([1, 2]).count
+  end
 end
 "#;
 
 /// `none` loads nothing, and an aggregate's relation (`where(…).count`,
 /// `order(…).pluck`) answers a value, so neither is reported. A finder
-/// in the aggregate's arguments still is.
+/// in the aggregate's arguments still is. An eager `find` under `.count`
+/// still loads rows, so it is reported.
 #[test]
 fn none_and_an_aggregates_relation_are_not_reported() {
     let src = scratch("value-src");
@@ -146,6 +151,10 @@ fn none_and_an_aggregates_relation_are_not_reported() {
         assert!(!stderr.contains(&format!("`{call}`")), "{call} loads no record: {stderr}");
     }
     assert!(stderr.contains("`Feature.find_by` on a subclass"), "the argument's finder is reported: {stderr}");
+    assert!(
+        stderr.contains("`Feature.find` on a subclass"),
+        "eager find under count still loads rows: {stderr}"
+    );
     fs::remove_dir_all(&src).unwrap();
     fs::remove_dir_all(&out).unwrap();
 }
