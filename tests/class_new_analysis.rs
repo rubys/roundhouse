@@ -1487,6 +1487,60 @@ fn file_level_constants_hoist_onto_a_class_new_only_file() {
 }
 
 #[test]
+fn file_level_constants_refuse_a_sibling_factory_reader() {
+    // Hoisting TIMEOUT onto A leaves B's bare read unreachable at runtime.
+    let source = "TIMEOUT = 5\nA = Class.new(StandardError)\nB = Class.new(StandardError) do\n  def self.t = TIMEOUT\nend\n";
+    roundhouse::ingest::survey::activate();
+    let tree: HashMap<PathBuf, Vec<u8>> =
+        [(PathBuf::from("app/models/errors.rb"), source.as_bytes().to_vec())]
+            .into_iter()
+            .collect();
+    let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let gaps = roundhouse::ingest::survey::drain();
+    assert!(
+        gaps.iter().any(|gap| gap.to_string().contains("cannot see it after hoisting")),
+        "{gaps:?}"
+    );
+    assert!(
+        !app.library_classes.iter().any(|class| class.name.0.as_str() == "B"),
+        "refused file must not keep the sibling factory: {:?}",
+        app.library_classes.iter().map(|c| c.name.0.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn file_level_constants_refuse_an_unrelated_host_reader() {
+    let source = "TIMEOUT = 5\nclass Foo; end\nE = Class.new(StandardError) do\n  def self.t = TIMEOUT\nend\n";
+    roundhouse::ingest::survey::activate();
+    let tree: HashMap<PathBuf, Vec<u8>> =
+        [(PathBuf::from("app/models/errors.rb"), source.as_bytes().to_vec())]
+            .into_iter()
+            .collect();
+    let _app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let gaps = roundhouse::ingest::survey::drain();
+    assert!(
+        gaps.iter().any(|gap| gap.to_string().contains("cannot see it after hoisting")),
+        "{gaps:?}"
+    );
+}
+
+#[test]
+fn file_level_constants_refuse_a_value_naming_a_later_class() {
+    let source = "BaseError = Class.new(StandardError)\nLimitError = Class.new(BaseError)\nALL = [LimitError]\n";
+    roundhouse::ingest::survey::activate();
+    let tree: HashMap<PathBuf, Vec<u8>> =
+        [(PathBuf::from("app/models/errors.rb"), source.as_bytes().to_vec())]
+            .into_iter()
+            .collect();
+    let _app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let gaps = roundhouse::ingest::survey::drain();
+    assert!(
+        gaps.iter().any(|gap| gap.to_string().contains("defined after host")),
+        "{gaps:?}"
+    );
+}
+
+#[test]
 fn a_file_level_factory_follows_its_in_file_parent_class() {
     // `NotFound = Class.new(AppError)` after `class AppError` must not
     // prepend the factory ahead of AppError: Ruby resolves the superclass
