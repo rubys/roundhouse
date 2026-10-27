@@ -13,7 +13,7 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
-use crate::det::{HashMap, HashSet};
+use crate::det::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -236,82 +236,6 @@ impl<V: Vfs + ?Sized> Vfs for CachedVfs<'_, V> {
 
     fn canonical(&self, path: &Path) -> Option<PathBuf> {
         self.inner.canonical(path)
-    }
-}
-
-/// A `Vfs` that shows only some of `inner`'s files: `visible`, and the
-/// directories on the way to them. Everything else reads as absent, so
-/// a walker over it sees an app made of just those files. A scoped
-/// Fractal build ingests through one.
-pub struct ScopedVfs<'a, V: Vfs + ?Sized> {
-    inner: &'a V,
-    files: HashSet<PathBuf>,
-    dirs: HashSet<PathBuf>,
-}
-
-impl<'a, V: Vfs + ?Sized> ScopedVfs<'a, V> {
-    /// `visible` paths are compared as given, so pass them in the form
-    /// the walker will ask for them (absolute under the same root).
-    pub fn new(inner: &'a V, visible: impl IntoIterator<Item = PathBuf>) -> Self {
-        let files: HashSet<PathBuf> = visible.into_iter().collect();
-        let mut dirs = HashSet::default();
-        for file in &files {
-            let mut current = file.parent();
-            while let Some(dir) = current {
-                if !dirs.insert(dir.to_path_buf()) {
-                    break;
-                }
-                current = dir.parent();
-            }
-        }
-        Self { inner, files, dirs }
-    }
-
-    fn shows(&self, path: &Path) -> bool {
-        self.files.contains(path) || self.dirs.contains(path)
-    }
-
-    fn absent(path: &Path) -> io::Error {
-        io::Error::new(io::ErrorKind::NotFound, format!("{} is outside the scope", path.display()))
-    }
-}
-
-impl<V: Vfs + ?Sized> Vfs for ScopedVfs<'_, V> {
-    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
-        if !self.files.contains(path) {
-            return Err(Self::absent(path));
-        }
-        self.inner.read(path)
-    }
-
-    fn read_to_string(&self, path: &Path) -> io::Result<String> {
-        if !self.files.contains(path) {
-            return Err(Self::absent(path));
-        }
-        self.inner.read_to_string(path)
-    }
-
-    fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
-        if !self.dirs.contains(path) {
-            return Err(Self::absent(path));
-        }
-        Ok(self.inner.read_dir(path)?.into_iter().filter(|child| self.shows(child)).collect())
-    }
-
-    fn exists(&self, path: &Path) -> bool {
-        self.shows(path) && self.inner.exists(path)
-    }
-
-    fn is_dir(&self, path: &Path) -> bool {
-        self.dirs.contains(path) && self.inner.is_dir(path)
-    }
-
-    fn is_symlink(&self, path: &Path) -> bool {
-        self.shows(path) && self.inner.is_symlink(path)
-    }
-
-    fn canonical(&self, path: &Path) -> Option<PathBuf> {
-        if self.shows(path) { self.inner.canonical(path) } else { None }
     }
 }
 

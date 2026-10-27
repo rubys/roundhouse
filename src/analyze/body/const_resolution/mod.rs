@@ -466,64 +466,6 @@ fn is_assigned_value(graph: &Graph, declaration: &Declaration) -> bool {
     assigned
 }
 
-/// Where each class and module is defined, and what its ancestors are,
-/// read from Rubydex alone. A scoped fractal build asks this before it
-/// ingests anything, to decide which files to ingest.
-#[derive(Debug, Default)]
-pub struct DefinitionIndex {
-    /// Fully qualified name -> the source paths that define it
-    /// (`class`/`module` bodies, reopenings included), sorted.
-    pub files: HashMap<Box<str>, Vec<String>>,
-    /// Fully qualified name -> its resolved ancestors, nearest first,
-    /// itself excluded. A gem's ancestor that left the chain incomplete
-    /// ends it.
-    pub ancestors: HashMap<Box<str>, Vec<Box<str>>>,
-}
-
-/// Index `sources` with Rubydex and keep only [`DefinitionIndex`]'s
-/// answers. Cheaper than ingest: it parses each file once for constants
-/// and resolves names, and keeps nothing else.
-pub(crate) fn definition_index(sources: &[SourceFile]) -> DefinitionIndex {
-    let mut graph = crate::timings::phase("rubydex: index", || index_sources(sources));
-    crate::timings::phase("rubydex: resolve", || Resolver::new(&mut graph).resolve());
-    let app_paths: HashSet<&str> = sources.iter().map(|source| source.path.as_str()).collect();
-    let mut index = DefinitionIndex::default();
-    for declaration in graph.declarations().values() {
-        let Some(namespace) = declaration.as_namespace() else { continue };
-        let name: Box<str> = hoisted_name(declaration.name()).as_ref().into();
-        let mut paths: Vec<String> = declaration
-            .definitions()
-            .iter()
-            .filter_map(|id| graph.definitions().get(id))
-            .filter(|definition| matches!(definition, Definition::Class(_) | Definition::Module(_)))
-            .filter_map(|definition| graph.documents().get(definition.uri_id()))
-            .map(|document| document.uri())
-            .filter(|uri| app_paths.contains(uri))
-            .map(str::to_string)
-            .collect();
-        paths.sort();
-        paths.dedup();
-        let mut ancestors = Vec::new();
-        for ancestor in namespace.ancestors() {
-            let Ancestor::Complete(id) = ancestor else { break };
-            let Some(ancestor) = graph.declarations().get(id) else { continue };
-            let ancestor: Box<str> = hoisted_name(ancestor.name()).as_ref().into();
-            if ancestor != name && !ancestors.contains(&ancestor) {
-                ancestors.push(ancestor);
-            }
-        }
-        if !paths.is_empty() {
-            index.files.entry(name.clone()).or_default().extend(paths);
-        }
-        index.ancestors.entry(name).or_default().extend(ancestors);
-    }
-    for paths in index.files.values_mut() {
-        paths.sort();
-        paths.dedup();
-    }
-    index
-}
-
 impl ConstResolver {
     /// Index real Ruby app sources with their original 1-based file IDs.
     pub(crate) fn from_app_sources(sources: &[SourceFile]) -> Self {
@@ -568,21 +510,6 @@ impl ConstResolver {
     fn file(&self, file: FileId) -> Option<&FileAnswers> {
         let index = file.0.checked_sub(1)?;
         self.files.get(index as usize)?.as_ref()
-    }
-
-    /// Every `class`/`module` definition in the app, as (fully qualified
-    /// name, span of the whole definition), reopenings included, in file
-    /// order. A definition's span contains the definitions nested in it.
-    pub(crate) fn class_bodies(&self) -> Vec<(Box<str>, Span)> {
-        let mut out = Vec::new();
-        for (index, file) in self.files.iter().enumerate() {
-            let Some(file) = file else { continue };
-            for (name, start, end) in &file.class_bodies {
-                out.push((name.clone(), Span { file: FileId(index as u32 + 1), start: *start, end: *end }));
-            }
-        }
-        out.sort_by_key(|(_, span)| (span.file.0, span.start));
-        out
     }
 
     /// Every constant (fully qualified) `file` declares: its classes and

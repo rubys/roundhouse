@@ -1,7 +1,5 @@
-//! The subcommands behind the multi-call `roundhouse` binary and the
-//! per-tool entrypoints (`roundhouse-check`, `roundhouse-lsp`,
-//! `roundhouse-mcp`, `fractal`). Each uses the same implementation as
-//! the shipped binary.
+//! The subcommands behind the multi-call `roundhouse` binary. Each uses
+//! the same implementation as the shipped binary.
 //!
 //! Host-only: every subcommand speaks stdio or walks a real directory.
 
@@ -10,8 +8,6 @@ use std::process::ExitCode;
 
 use crate::analyze::{diagnose, Analyzer, Diagnostic, DiagnosticKind, Severity};
 use crate::ingest::{ingest_app, survey, IngestError};
-
-pub mod fractal;
 
 /// `roundhouse lsp`: serve the read-only Language Server over stdio
 /// until the client hangs up. The workspace root comes from the LSP

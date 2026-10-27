@@ -176,19 +176,6 @@ class SiteTreeTests(unittest.TestCase):
         self.assertEqual(metadata["archive_source_sha"], self.old)
         self.assertEqual(metadata["source_sha"], state["source_sha"])
 
-    def test_frontend_change_checks_only_its_surface_without_rebuilding_compiler(self):
-        self.put("wasm/fractal/fractal.js", "changed browser source")
-        self.commit()
-        state = self.plan()
-        self.assertFalse(state["wasm"])
-        self.assertEqual(state["browser"], ["fractal"])
-
-    def test_browser_selection_uses_the_published_bytes_not_only_source_history(self):
-        self.published("fractal/fractal.js", b"outdated deployed browser code")
-        state = self.plan()
-        self.assertFalse(state["wasm"])
-        self.assertEqual(state["browser"], ["fractal"])
-
     def test_shared_browser_change_checks_every_surface_without_compiler_build(self):
         self.put("wasm/lib/engine.mjs", "changed browser module")
         self.commit()

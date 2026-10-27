@@ -858,7 +858,7 @@ jobs:
       - name: Install Playwright Chromium (+ system deps)
         run: $GITHUB_WORKSPACE/scripts/ci-playwright-install
         working-directory: tests/browser_smoke
-      - name: Serve wasm/ and verify the /ide/ + /playground/ + /studio/ + /fractal/ pages
+      - name: Serve wasm/ and verify the /ide/ + /playground/ + /studio/ pages
         run: |
           set -euo pipefail
           (cd wasm && python3 -m http.server 8099 >/tmp/ide-server.log 2>&1 &)
@@ -871,8 +871,6 @@ jobs:
           # wasm/lib/test-runtime.mjs — the in-memory Db shim that once drifted
           # off the `_opt` seam unseen because nothing here ran it.
           (cd wasm/studio && node verify-studio.mjs)
-          # Fractal's pass explorer, over the same worker's fractal_stages export.
-          (cd wasm/fractal && node verify-fractal.mjs)
 
   # Per-target framework-test conformance gate for the spinel AOT
   # target. Same emit pipeline as framework-tests-ruby, but each
@@ -3242,7 +3240,7 @@ jobs:
       # as an artifact (NOT committed) — see wasm/vendor/ruby-rbs-sys/README.md
       # and the "Publishing to Pages" section of docs/archive/browser-demo-plan.md. Pure
       # static files (no npm/vite, no COOP/COEP), so they serve straight off Pages.
-      - name: Bundle the in-browser playground + studio demos (→ _site/lib, _site/playground, _site/studio, _site/fractal)
+      - name: Bundle the in-browser playground + studio demos (→ _site/lib, _site/playground, _site/studio)
         if: needs.plan.outputs.site == 'true'
         run: |
           set -euo pipefail

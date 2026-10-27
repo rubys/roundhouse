@@ -8,7 +8,6 @@ pub mod crystal;
 pub mod csharp;
 pub mod diagnostics;
 pub mod elixir;
-pub mod fractal;
 pub mod futamura;
 pub mod go;
 pub mod kotlin;

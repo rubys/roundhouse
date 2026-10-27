@@ -37,8 +37,6 @@ fn usage() -> &'static str {
     "\
 Usage: roundhouse --target LANG [INPUT] [-o OUT]
        roundhouse --site [INPUT] [-o OUT]
-       roundhouse fractal emit [OPTIONS] [APP] [-o OUT]
-       roundhouse fractal apply [OVERLAY] [APP]
        roundhouse --archives LANG,LANG [INPUT] [-o OUT]
        roundhouse check [--continue] [--inventory PATH] [--hotspots] [APP]
        roundhouse lsp
@@ -55,7 +53,6 @@ Subcommands (each takes --help):
                        ranked hotspot report. --inventory PATH writes JSON.
   lsp                  Serve the Language Server over stdio.
   mcp                  Serve the MCP tools over stdio for APP (default .).
-  fractal              Emit a file overlay, or apply it to an existing app.
 
 Options:
   -t, --target LANG    Transpile target. One of:
@@ -108,7 +105,6 @@ fn cli() -> ExitCode {
         Some("check") => return roundhouse::cli::check(&args[1..], "."),
         Some("lsp") => return roundhouse::cli::lsp(&args[1..]),
         Some("mcp") => return roundhouse::cli::mcp(&args[1..]),
-        Some("fractal") => return roundhouse::cli::fractal::run(&args[1..]),
         _ => {}
     }
     match parse_args(args) {

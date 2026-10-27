@@ -37,7 +37,7 @@ try {
 }
 
 for (const surface of state.browser) {
-  assert(["playground", "studio", "ide", "fractal"].includes(surface), "unknown browser surface");
+  assert(["playground", "studio", "ide"].includes(surface), "unknown browser surface");
   const script = new URL(`../wasm/${surface}/verify-${surface}.mjs`, import.meta.url);
   const result = spawnSync(process.execPath, [script.pathname], { stdio: "inherit" });
   assert.equal(result.status, 0, `${surface}: browser verification failed`);
