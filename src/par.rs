@@ -9,6 +9,25 @@
 //! worker starts with none of it, so work handed to a worker must not read
 //! or write any: pass what it needs in through the closure.
 
+/// How many worker threads [`map`] would spawn for `n` items. `1` means the
+/// calling thread alone (wasm, a single available core, or fewer than two
+/// items): callers that retain per-item results can stay on a single accumulator
+/// instead of buffering every item's map.
+pub fn workers_for(n: usize) -> usize {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = n;
+        1
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if n <= 1 {
+            return 1;
+        }
+        std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get).min(32).min(n)
+    }
+}
+
 /// `f` over `items`, one result per item in input order. Workers take
 /// items from a shared counter on threads with the compiler's stack
 /// budget (the closure may walk expression trees).
@@ -16,7 +35,7 @@ pub fn map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> 
     #[cfg(not(target_arch = "wasm32"))]
     {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        let workers = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get).min(32).min(items.len());
+        let workers = workers_for(items.len());
         if workers > 1 {
             let next = AtomicUsize::new(0);
             let (next, f) = (&next, &f);
@@ -75,6 +94,14 @@ pub fn join<A: Send, B: Send>(a: impl FnOnce() -> A + Send, b: impl FnOnce() -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workers_for_is_one_when_map_stays_serial() {
+        assert_eq!(workers_for(0), 1);
+        assert_eq!(workers_for(1), 1);
+        assert!(workers_for(2) >= 1);
+        assert!(workers_for(100) <= 32);
+    }
 
     #[test]
     fn map_returns_results_in_input_order() {

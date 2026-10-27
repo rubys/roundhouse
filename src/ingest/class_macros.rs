@@ -591,8 +591,18 @@ impl<'a> Mentions<'a> {
             // `count_words` reads only its text: no thread-local compiler state,
             // which a worker would not have. Only this build runs in parallel;
             // `Mentions` itself (the `scans` memo) stays on the calling thread.
+            // When `par::map` would not spawn workers (wasm / one core / one
+            // chunk), stay on one accumulator — buffering every chunk map is
+            // pure peak-memory cost with no schedule gain.
             let chunk = self.sources.len().div_ceil(64).max(1);
             let parts: Vec<&'a [SourceFile]> = self.sources.chunks(chunk).collect();
+            if crate::par::workers_for(parts.len()) <= 1 {
+                let mut words: HashMap<&'a str, usize> = HashMap::new();
+                for source in self.sources {
+                    count_words(&source.text, &mut words);
+                }
+                return words;
+            }
             let mut words: HashMap<&'a str, usize> = HashMap::new();
             for part in crate::par::map(&parts, |part| {
                 let mut words = HashMap::new();
