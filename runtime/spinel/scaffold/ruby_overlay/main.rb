@@ -205,15 +205,12 @@ module Main
     controller.params  = merged
     controller.path_parameters = matched.path_params
 
-    # Decode inbound flash from cookies. Each flash key carries via
-    # its own cookie (`flash_notice`, `flash_alert`) so the cookie
-    # plumbing stays format-free.
     cookies = request[:cookies] || {}
     # Cookie-carried session: restore the whole session from the session
-    # cookie (url-encoded k=v pairs; empty when absent or garbled —
-    # "logged out", never a 500). The raw inbound value is kept so the
-    # persist step below can skip Set-Cookie when the action left the
-    # session untouched.
+    # cookie, Rails' encrypted JSON (runtime/cookie_store.rb; empty when
+    # absent or unreadable - "logged out", never a 500). Its plain JSON is
+    # kept so the persist step below can skip Set-Cookie when the action
+    # left the session untouched.
     #
     # The NAME comes from `Rails.application.session_cookie_key` (see the
     # spinel main.rb twin): apps set it with `config.session_store
@@ -227,21 +224,21 @@ module Main
     # header, and `controller.cookies.pending` already contributes String
     # keys to the same hash.
     session_cookie = Rails.application.session_cookie_key
-    # SIGNED — see the spinel main.rb twin: `session_in` is the restored
-    # session's plain encoding, and only a changed session is re-signed.
+    # ENCRYPTED - see the spinel main.rb twin: `session_in` is the restored
+    # session's plain JSON, and only a changed session is re-encrypted.
     #
     # Under the futamura bridge the host Rails app owns the session: it
     # arrives already decoded as `roundhouse.session` and leaves as
-    # `roundhouse.session.out`, with no cookie signed or verified on
+    # `roundhouse.session.out`, with no cookie encrypted or decrypted on
     # this side.
     host_session = env["roundhouse.session"]
     restored = if host_session.nil?
-      ActionDispatch::Session.from_signed_cookie(
+      ActionDispatch::CookieStore.restore(
         cookies[session_cookie.to_sym].to_s, session_cookie)
     else
       ActionDispatch::Session.new(host_session)
     end
-    session_in = restored.to_cookie
+    session_in = ActionDispatch::CookieStore.payload(restored)
     controller.assign_http_session(restored)
     # Expose the inbound cookies to the controller as a CookieJar so
     # `cookies[:k]` reads (and `cookies[:k] = v` records writes, surfaced
@@ -250,16 +247,12 @@ module Main
     # Load inbound flash through the constructor (NOT `flash[:k]=`) so the
     # Flash snapshots these as carried-in; `to_persisted` then sweeps the
     # ones merely displayed (show-once). See ActionDispatch::Flash.
-    # SIGNED — see the spinel main.rb twin: a cookie that does not verify
-    # is no message (and is still cleared below, as a consumed one is).
+    # The messages ride in the session, as Rails keeps them - see the
+    # spinel main.rb twin.
     inbound_flash = {}
     host_flash = env["roundhouse.flash"]
     if host_flash.nil?
-      %w[notice alert].each do |kind|
-        name = "flash_#{kind}"
-        value = ActionDispatch::SignedCookie.verified(cookies[name.to_sym].to_s, name)
-        inbound_flash[kind] = value unless value.empty?
-      end
+      inbound_flash = ActionDispatch::CookieStore.inbound_flash(restored)
     else
       host_flash.each { |k, v| inbound_flash[k.to_s] = v }
     end
@@ -326,30 +319,14 @@ module Main
     # "Redirecting…" body; render-with-`location:` (Rails' POST 201
     # idiom) keeps a 2xx status and ships the rendered body alongside
     # the Location header.
-    # Persist the swept flash as cookies for the next request. Flash owns
-    # the show-once sweep (`to_persisted` keeps only entries this request
-    # set); set those, and clear any inbound cookie that wasn't carried so
-    # a displayed notice doesn't repeat.
+    # Flash owns the show-once sweep (`to_persisted` keeps only entries
+    # this request set). Under the futamura bridge the host keeps the
+    # flash in its own session: hand back what survives this request
+    # (nothing, once displayed). Otherwise it goes into the session below.
     out_cookies = {}
-    persisted = controller.flash.to_persisted
-    if !host_flash.nil?
-      # The host keeps the flash in its own session; hand back what
-      # survives this request (nothing, once displayed).
-      env["roundhouse.flash.out"] = persisted
-    elsif persisted.key?("notice")
-      out_cookies[:flash_notice] = ActionDispatch::SignedCookie.sign(persisted["notice"], "flash_notice")
-    elsif cookies.key?(:flash_notice)
-      out_cookies[:flash_notice] = nil
-    end
-    if !host_flash.nil?
-      # Handed back above, with the notice.
-    elsif persisted.key?("alert")
-      out_cookies[:flash_alert] = ActionDispatch::SignedCookie.sign(persisted["alert"], "flash_alert")
-    elsif cookies.key?(:flash_alert)
-      out_cookies[:flash_alert] = nil
-    end
+    env["roundhouse.flash.out"] = controller.flash.to_persisted unless host_flash.nil?
     # Cookies the action wrote (`cookies[:k] = v` / `cookies.permanent`)
-    # ride out alongside the flash cookies. Flag maps stay off the
+    # ride out alongside the session cookie. Flag maps stay off the
     # value so `run_rack` can emit Secure / the requested SameSite.
     jar = controller.cookies
     secure_cookies = {}
@@ -370,13 +347,15 @@ module Main
     # Set-Cookie only on change. An emptied session (reset_session
     # logout with no token re-added) clears the cookie.
     # `request.session_options[:skip] = true` leaves it alone — see
-    # the spinel main.
-    session_out = controller.session.to_cookie
+    # the spinel main. The flash goes into the session first, as Rails'
+    # `commit_flash` puts it there.
+    ActionDispatch::CookieStore.commit_flash(controller.session, controller.flash) if host_flash.nil?
+    session_out = ActionDispatch::CookieStore.payload(controller.session)
     if !host_session.nil?
       env["roundhouse.session.out"] = controller.session.to_hash if session_out != session_in && !controller.request.session_skip?
     elsif session_out != session_in && !controller.request.session_skip?
       out_cookies[session_cookie] =
-        session_out.empty? ? nil : ActionDispatch::Session.signed_cookie(session_out, session_cookie)
+        controller.session.to_hash.empty? ? nil : ActionDispatch::CookieStore.cookie_value(controller.session, session_cookie)
     end
     is_redirect = controller.status >= 300 && controller.status < 400 && !controller.head_response?
     # Compose `Cache-Control` from whatever `response.cache_control`
@@ -477,7 +456,7 @@ module Main
         ss = (samesite_cookies && samesite_cookies[name]).to_s
         ss = "Lax" if ss.empty?
         line = "#{name}=#{CgiIo.url_encode(val.to_s)}; Path=/"
-        # Default HttpOnly. Session/flash cookies are not in the map.
+        # Default HttpOnly. The session cookie is not in the map.
         # An explicit httponly: false records false and is omitted.
         line = line + "; HttpOnly" unless httponly_cookies && httponly_cookies.key?(name) && !httponly_cookies[name]
         line = line + "; SameSite=#{ss}"

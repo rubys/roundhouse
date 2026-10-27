@@ -2,9 +2,9 @@
 # CRuby overlay session codec (`from_cookie` / `to_cookie`). CSRF
 # minting lives in `runtime/ruby/action_controller/authenticity_token.rb`.
 #
-# Storage model: cookie-carried, stateless — the whole session rides
-# in a `_session` cookie as url-encoded `k=v&k2=v2` pairs. HMAC signing
-# of that cookie is `runtime/signed_cookies.rb` on the dispatch path.
+# The dispatchers no longer write this encoding: the session cookie is
+# Rails' encrypted JSON (`runtime/cookie_store.rb`). `to_cookie` stays
+# for callers that want a flat, deterministic text of a session.
 module ActionDispatch
   class Session
     # Decode a `_session` cookie value into a Session. Tolerates a
