@@ -52,6 +52,7 @@ mod concern_accessors;
 pub mod controller;
 mod class_new_factory;
 mod data_factory;
+mod file_constant_hoist;
 mod module_factory;
 mod define_method_loop;
 pub mod expr;
