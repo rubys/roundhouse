@@ -159,6 +159,61 @@ fn none_and_an_aggregates_relation_are_not_reported() {
     fs::remove_dir_all(&out).unwrap();
 }
 
+/// `Feature.where(…).find(…).count` must still warn: the finder loads
+/// rows, so aggregate suppression must not quiet the preceding `where`.
+#[test]
+fn a_chained_find_under_an_aggregate_is_reported() {
+    let src = scratch("chain-find-src");
+    let out = scratch("chain-find-out");
+    app(
+        &src,
+        "",
+        "class FeatureProbe\n  def self.run\n    Feature.where(title: \"f\").find([1, 2]).count\n  end\nend\n",
+    );
+    let stderr = survey(&src, &out);
+    assert!(
+        stderr.contains("`Feature.where` on a subclass"),
+        "where before find under count still loads rows: {stderr}"
+    );
+    fs::remove_dir_all(&src).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+}
+
+/// `in_batches.update_all` updates without instantiating rows; keep it
+/// quiet. `in_batches.each` loads rows and must warn.
+#[test]
+fn in_batches_warns_only_when_it_loads_rows() {
+    let src = scratch("batches-update-src");
+    let out = scratch("batches-update-out");
+    app(
+        &src,
+        "",
+        "class FeatureProbe\n  def self.run\n    Feature.in_batches.update_all(title: \"x\")\n  end\nend\n",
+    );
+    let stderr = survey(&src, &out);
+    assert!(
+        !stderr.contains("`Feature.in_batches` on a subclass"),
+        "in_batches.update_all loads no row: {stderr}"
+    );
+    fs::remove_dir_all(&src).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+
+    let src = scratch("batches-each-src");
+    let out = scratch("batches-each-out");
+    app(
+        &src,
+        "",
+        "class FeatureProbe\n  def self.run\n    Feature.in_batches.each { |row| row }\n  end\nend\n",
+    );
+    let stderr = survey(&src, &out);
+    assert!(
+        stderr.contains("`Feature.in_batches` on a subclass"),
+        "in_batches.each loads rows: {stderr}"
+    );
+    fs::remove_dir_all(&src).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+}
+
 /// The STI lowering rewrites test bodies too, so a finder in a test is
 /// reported like one in the app.
 #[test]

@@ -507,10 +507,13 @@ const LOADING_METHODS: &[&str] = &[
 /// finders (`find`, `first`, `find_by`, …) are not here — they load
 /// records even when an aggregate is written on the result
 /// (`Feature.find([1, 2]).count`), so the subclass warning still fires.
+/// `in_batches` yields an enumerator; non-loading consumers
+/// (`update_all`, `delete_all`) run without instantiating rows, so it
+/// is quiet under those the same way `where` is under `count`.
 const RELATION_CHAIN_METHODS: &[&str] = &[
     "all", "where", "order", "reorder", "limit", "offset", "joins", "left_joins",
     "left_outer_joins", "includes", "preload", "eager_load", "distinct", "select", "group",
-    "having", "unscoped", "readonly", "lock",
+    "having", "unscoped", "readonly", "lock", "in_batches",
 ];
 
 /// Aggregates that answer a value from a relation, not its records: the
@@ -582,7 +585,18 @@ pub(crate) fn untyped_subclass_diagnostics(app: &App) -> Vec<crate::diagnostic::
                     }
                 }
             }
-            let chain = valued || VALUE_METHODS.contains(&method.as_str());
+            // An eager finder loads rows itself. Do not push aggregate
+            // suppression through it — otherwise
+            // `Feature.where(…).find(…).count` quiets the only Const
+            // receiver (`where`) while the chain still materializes
+            // base-class records.
+            let eager = LOADING_METHODS.contains(&method.as_str())
+                && !RELATION_CHAIN_METHODS.contains(&method.as_str());
+            let chain = if eager {
+                false
+            } else {
+                valued || VALUE_METHODS.contains(&method.as_str())
+            };
             walk(recv, chain, untyped, scopes, sites);
         }
         for arg in args {
