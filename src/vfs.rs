@@ -242,7 +242,7 @@ impl<V: Vfs + ?Sized> Vfs for CachedVfs<'_, V> {
 /// A `Vfs` that shows only some of `inner`'s files: `visible`, and the
 /// directories on the way to them. Everything else reads as absent, so
 /// a walker over it sees an app made of just those files. A scoped
-/// `--target fractal` build ingests through one.
+/// Fractal build ingests through one.
 pub struct ScopedVfs<'a, V: Vfs + ?Sized> {
     inner: &'a V,
     files: HashSet<PathBuf>,

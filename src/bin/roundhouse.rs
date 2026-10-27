@@ -37,7 +37,6 @@ fn usage() -> &'static str {
     "\
 Usage: roundhouse --target LANG [INPUT] [-o OUT]
        roundhouse --site [INPUT] [-o OUT]
-       roundhouse --target fractal [--file PATH]... [--whole-app] [--report PATH] [INPUT] [-o OUT]
        roundhouse fractal emit [OPTIONS] [APP] [-o OUT]
        roundhouse fractal apply [OVERLAY] [APP]
        roundhouse --archives LANG,LANG [INPUT] [-o OUT]
@@ -64,18 +63,6 @@ Options:
                          swift, typescript, typescript-worker, ruby, jruby,
                          spinel
                        Default INPUT=.  Default OUT=./out/<lang>/
-                       `fractal` emits only changed files under their app
-                       paths. Apply them with `fractal apply`; it replaces
-                       only those base files and does not copy the app.
-      --file PATH      With --target fractal: a file to compile, relative
-                       to INPUT (`app/models/order.rb`). Repeatable.
-                       No --file emits no app files. Only these
-                       files, and what the registered passes say they
-                       need, are ingested.
-      --whole-app      With --target fractal: ingest and analyze the
-                       whole app instead, as a pass that needs it does.
-      --report PATH    With --target fractal: write the build's decisions
-                       (compiled files, methods, rewrites, declines) as JSON.
       --site           Build all targets + landing-page assets.
                        Default INPUT=fixtures/real-blog  Default OUT=./_site/
       --archives LIST  Build only comma-separated targets' browse archives.
@@ -133,15 +120,6 @@ fn cli() -> ExitCode {
             println!("roundhouse {}", roundhouse::version::describe());
             ExitCode::SUCCESS
         }
-        Ok(Action::Fractal { files, input, out, survey, report, whole_app }) => {
-            match roundhouse::cli::fractal::emit(&files, &input, &out, survey, report.as_deref(), whole_app) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("roundhouse: {e}");
-                    ExitCode::FAILURE
-                }
-            }
-        }
         Ok(Action::Transpile { target, input, out, allow_unsupported, survey }) => {
             match run_transpile(target, &input, &out, allow_unsupported, survey) {
                 Ok(()) => ExitCode::SUCCESS,
@@ -188,14 +166,6 @@ enum Action {
         input: PathBuf,
         out: PathBuf,
     },
-    Fractal {
-        files: Vec<String>,
-        input: PathBuf,
-        out: PathBuf,
-        survey: bool,
-        report: Option<PathBuf>,
-        whole_app: bool,
-    },
     Archives {
         targets: Vec<BuildTarget>,
         input: PathBuf,
@@ -210,10 +180,6 @@ fn parse_args(args: Vec<String>) -> Result<Action, String> {
     let mut out: Option<PathBuf> = None;
     let mut allow_unsupported = false;
     let mut survey = false;
-    let mut fractal = false;
-    let mut files: Vec<String> = Vec::new();
-    let mut report: Option<PathBuf> = None;
-    let mut whole_app = false;
     let mut positional: Vec<String> = Vec::new();
 
     let mut iter = args.into_iter();
@@ -237,24 +203,14 @@ fn parse_args(args: Vec<String>) -> Result<Action, String> {
                 let v = iter
                     .next()
                     .ok_or_else(|| format!("{arg} requires a value"))?;
-                if v == "fractal" {
-                    fractal = true;
-                } else {
-                    target = Some(parse_target(&v)?);
-                }
+                target = Some(parse_target(&v)?);
             }
-            "--file" => files.push(iter.next().ok_or("--file requires a path")?),
-            "--whole-app" => whole_app = true,
-            "--report" => report = Some(PathBuf::from(iter.next().ok_or("--report requires a path")?)),
             "-o" | "--output" => {
                 let v = iter
                     .next()
                     .ok_or_else(|| format!("{arg} requires a value"))?;
                 out = Some(PathBuf::from(v));
             }
-            "--target=fractal" => fractal = true,
-            s if s.starts_with("--file=") => files.push(s["--file=".len()..].to_string()),
-            s if s.starts_with("--report=") => report = Some(PathBuf::from(&s["--report=".len()..])),
             s if s.starts_with("--target=") => {
                 target = Some(parse_target(&s["--target=".len()..])?);
             }
@@ -276,22 +232,6 @@ fn parse_args(args: Vec<String>) -> Result<Action, String> {
         ));
     }
 
-    if fractal {
-        if target.is_some() || site || archives.is_some() || allow_unsupported {
-            return Err("--target fractal cannot be combined with another --target, --site, --archives or --allow-unsupported".into());
-        }
-        return Ok(Action::Fractal {
-            files,
-            input: positional.pop().map(PathBuf::from).unwrap_or_else(|| PathBuf::from(".")),
-            out: out.unwrap_or_else(|| PathBuf::from("out/fractal")),
-            survey,
-            report,
-            whole_app,
-        });
-    }
-    if !files.is_empty() || report.is_some() || whole_app {
-        return Err("--file, --whole-app and --report are only meaningful with --target fractal".into());
-    }
     if let Some(targets) = archives {
         if target.is_some() || site || allow_unsupported || survey {
             return Err("--archives cannot be combined with --target, --site, --survey or --allow-unsupported".into());

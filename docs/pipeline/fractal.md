@@ -41,7 +41,6 @@ time) are the same kind of edit, applied the same way.
 
 The Cargo binary is `fractal`. The shipped binary accepts the same
 commands as `roundhouse fractal emit` and `roundhouse fractal apply`.
-`roundhouse --target fractal` also uses the same emission step.
 
 Emit defaults to the current app and `out/fractal`. Apply uses the same
 defaults. The overlay can be inside the base app. Apply does not create

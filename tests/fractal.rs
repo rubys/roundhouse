@@ -1,5 +1,4 @@
-//! `--target fractal` (`emit::fractal`): the driver every Fractal rewrite
-//! goes through.
+//! Fractal (`emit::fractal`): the driver every Fractal rewrite goes through.
 //!
 //! What it promises: the output holds only changed files at app-relative
 //! paths; only files named with `--file` are compiled; edits keep every
@@ -457,28 +456,19 @@ fn repeated_emission_inside_the_app_does_not_copy_the_app() {
 }
 
 #[test]
-fn the_cli_builds_reports_and_rejects_fractal_flags_elsewhere() {
-    let dir = app_dir("cli", &base_files());
-    let base = scratch("cli-out");
-    let out = base.join("out");
-    let report = base.join("report.json");
-    let run = |args: &[&str]| Command::new(env!("CARGO_BIN_EXE_roundhouse")).args(args).output().unwrap();
-
-    let ok = run(&["--target", "fractal", "--file", CURRENT_RB, "--report", report.to_str().unwrap(), dir.to_str().unwrap(), "-o", out.to_str().unwrap()]);
-    let stderr = String::from_utf8_lossy(&ok.stderr);
-    assert!(ok.status.success(), "{stderr}");
-    let json: serde_json::Value = serde_json::from_str(&fs::read_to_string(&report).unwrap()).unwrap();
-    assert_eq!(json["compiled"][0], CURRENT_RB);
-    assert_eq!(json["methods"].as_array().unwrap().len(), 6);
-    assert_eq!(files_in(&out), [MANIFEST]);
-    assert_eq!(fs::read_to_string(dir.join("app/models/current.rb")).unwrap(), CURRENT);
-
-    let misplaced = run(&["--target", "ruby", "--file", CURRENT_RB, dir.to_str().unwrap()]);
-    assert!(!misplaced.status.success());
-    let gone = run(&["--target", "fractal", "--class", "Current", dir.to_str().unwrap(), "-o", out.to_str().unwrap()]);
-    assert!(!gone.status.success());
-    let missing = run(&["--target", "fractal", "--file", "app/models/missing.rb", dir.to_str().unwrap(), "-o", out.to_str().unwrap()]);
-    assert!(!missing.status.success());
+fn target_fractal_is_not_a_transpile_target() {
+    for args in [vec!["--target", "fractal"], vec!["--target=fractal"]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+            .args(&args)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("unknown target 'fractal'"),
+            "{args:?}: {stderr}"
+        );
+    }
 }
 
 // Scope: what a build ingests.

@@ -1,5 +1,4 @@
-//! `--target fractal`: compile a Rails app by rewriting its own source,
-//! one file at a time.
+//! Fractal compiles a Rails app by rewriting its own source, one file at a time.
 //!
 //! A person names the files to compile (`--file app/models/article.rb`).
 //! Roundhouse ingests and analyzes those files and what its passes say
