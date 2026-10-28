@@ -1943,6 +1943,25 @@ fn is_relocatable_mattr_seed(expr: &Expr, class_attributes: &HashSet<Symbol>) ->
 ///
 /// `include T::Struct::ActsAsComparable` is deliberately NOT here: it
 /// gives a struct its `==`, which is behavior, and it goes when the
+
+/// A receiver that is `self`, or a call chain on `self` (`self.logger`,
+/// `self.config.settings`): what a class body's statement writes or
+/// calls through is the class's own.
+fn receiver_rooted_at_self(receiver: &ruby_prism::Node<'_>) -> bool {
+    let mut node = receiver.as_call_node();
+    if node.is_none() {
+        return receiver.as_self_node().is_some();
+    }
+    while let Some(call) = node {
+        match call.receiver() {
+            Some(inner) if inner.as_self_node().is_some() => return true,
+            Some(inner) => node = inner.as_call_node(),
+            None => return false,
+        }
+    }
+    false
+}
+
 /// struct itself is lowered.
 pub(super) fn is_sorbet_annotation_mixin(call: &ruby_prism::CallNode<'_>) -> bool {
     let name = call.name();
@@ -3044,7 +3063,7 @@ fn walk_decl_body_with_visibility<'pr>(
                         }
                     }
                 }
-            } else if call.receiver().is_some_and(|r| r.as_self_node().is_some()) {
+            } else if call.receiver().is_some_and(|r| receiver_rooted_at_self(&r)) {
                 // `self.default_success = Success` — a class-level
                 // attribute write. The whole branch above requires NO
                 // receiver, so this never reached the capture and was
@@ -3057,6 +3076,10 @@ fn walk_decl_body_with_visibility<'pr>(
                 // subclasses at load time (`must explicitly call
                 // self.default_success = …`) rejects the emitted class
                 // outright, so the tree stops there.
+                //
+                // So is a write through what a class-side reader answers
+                // (`self.logger.progname = "Gem"`, after `self.logger =
+                // ::Logger.new(...)`), which reached neither branch.
                 if let Ok(e) = ingest_expr(&stmt, file) {
                     out.unknown_calls.push(e);
                 }

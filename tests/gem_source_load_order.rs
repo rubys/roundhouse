@@ -57,7 +57,6 @@ fn app_with(files: &[(&str, &str)], application: &str) -> emit_and_run::Overlay 
 }
 
 #[test]
-#[ignore = "fork spec: load order"]
 fn a_gem_source_loads_its_data_modules_and_requires_like_the_gem() {
     let gem = std::env::temp_dir().join(format!("rh_tessera_native_{}", std::process::id()));
     write_gem(&gem, FILES);

@@ -8238,6 +8238,8 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
         // from public/vendor/xterm, which the dev-directory skip dropped.
         walk_dir_into_skipping(&public, "public/", &[], &mut files)?;
     }
+    // A PATH gem's own data, beside its compiled code.
+    carry_path_gem_data(fixture, &mut files)?;
     // `test/fixtures/files` — `file_fixture_path`, which `file_fixture`,
     // `fixture_file_upload` and an `ActiveStorage::FixtureSet.blob`
     // fixture row read. The same blind spot again: the binary files
@@ -11181,6 +11183,57 @@ fn walk_dir_into(
     out: &mut Vec<(String, String)>,
 ) -> Result<(), String> {
     walk_dir_into_skipping(src, prefix, SKIP_DIRS, out)
+}
+
+/// The text files of each PATH gem in the app's tree (`Gemfile.lock`'s
+/// `PATH` remotes inside the app), other than the Ruby under its `lib/`,
+/// which is compiled: a gem reads them by a path from its own file
+/// (`File.join(File.dirname(__FILE__), "../VERSION")`), and the emitted
+/// `__FILE__` names the source path (`emit::ruby::expr::source_file_path`).
+/// Each `lib/` directory the source has is kept (with a `.keep` where no
+/// file is carried under it), so a path that goes up through it resolves.
+/// Hidden entries are skipped, as are files named for secrets.
+fn carry_path_gem_data(fixture: &Path, out: &mut Vec<(String, String)>) -> Result<(), String> {
+    let Ok(lock) = fs::read_to_string(fixture.join("Gemfile.lock")) else { return Ok(()) };
+    let secret = |name: &str| {
+        let lower = name.to_ascii_lowercase();
+        ["secret", "credential", "password", "token"].iter().any(|w| lower.contains(w))
+            || [".key", ".pem", ".p12", ".env"].iter().any(|ext| lower.ends_with(ext))
+    };
+    for remote in crate::gems::lock_path_remotes(&lock) {
+        let gem = Path::new(&remote);
+        if gem.is_absolute() || gem.components().any(|c| !matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir)) {
+            continue;
+        }
+        let root = fixture.join(gem);
+        if !root.is_dir() {
+            continue;
+        }
+        let prefix = format!("{}/", remote.trim_end_matches('/').trim_start_matches("./"));
+        let mut found = Vec::new();
+        walk_dir_into_skipping(&root, &prefix, &[], &mut found)?;
+        let lib = format!("{prefix}lib/");
+        found.retain(|(rel, _)| {
+            let name = rel.rsplit('/').next().unwrap_or(rel);
+            !(rel.starts_with(&lib) && rel.ends_with(".rb")) && !secret(name)
+        });
+        let mut dirs = vec![root.join("lib")];
+        while let Some(dir) = dirs.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else { continue };
+            let rel = format!("{prefix}{}/", dir.strip_prefix(&root).unwrap_or(&dir).display());
+            if !found.iter().any(|(path, _)| path.starts_with(&rel)) {
+                found.push((format!("{rel}.keep"), String::new()));
+            }
+            for entry in entries.flatten() {
+                let hidden = entry.file_name().to_string_lossy().starts_with('.');
+                if !hidden && entry.file_type().is_ok_and(|t| t.is_dir()) {
+                    dirs.push(entry.path());
+                }
+            }
+        }
+        out.extend(found);
+    }
+    Ok(())
 }
 
 /// [`walk_dir_into`] with the directory names to skip given explicitly.

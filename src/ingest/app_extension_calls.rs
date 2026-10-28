@@ -52,7 +52,11 @@ pub(super) fn mark(app: &mut App) {
             let on_self = recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef));
             // Not a Concern's `included do … end`: the hook's own name, which the concern splice owns.
             let hook = matches!(method.as_str(), "included" | "extended" | "prepended" | "inherited" | "class_methods");
-            if on_self && !hook && block.is_none() && own.contains(method.as_str()) && !expr.span.is_synthetic() {
+            let own_call = on_self && own.contains(method.as_str());
+            // A call on what one of its own readers answers (`self.logger.progname
+            // = "Gem"` after `self.logger = ::Logger.new(nil)`) runs there too.
+            let through_own_reader = recv.as_ref().is_some_and(|r| reads_through_own(r, &own));
+            if (own_call || through_own_reader) && !hook && block.is_none() && !expr.span.is_synthetic() {
                 expr.decisions |= crate::expr::REPLAYED_CLASS_BODY;
             }
         }
@@ -101,6 +105,21 @@ pub(super) fn mark(app: &mut App) {
             if extended.iter().any(|&i| modules[i].1.contains(method.as_str())) {
                 expr.decisions |= crate::expr::REPLAYED_CLASS_BODY;
             }
+        }
+    }
+}
+
+/// Whether `recv` is a call chain whose innermost call is one of the
+/// class's own class-side methods on `self` (`self.logger`, `logger`,
+/// `self.config.settings` with `config` its own).
+fn reads_through_own(recv: &crate::expr::Expr, own: &HashSet<String>) -> bool {
+    let mut at = recv;
+    loop {
+        let ExprNode::Send { recv: inner, method, block: None, .. } = &*at.node else { return false };
+        match inner {
+            None => return own.contains(method.as_str()),
+            Some(r) if matches!(&*r.node, ExprNode::SelfRef) => return own.contains(method.as_str()),
+            Some(r) => at = r,
         }
     }
 }
