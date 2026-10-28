@@ -1091,6 +1091,13 @@ module ActionController
       self
     end
 
+    # ActionView::Rendering#view_context: the object a template's helper
+    # calls land on. A plain object can ask `ApplicationController.new`
+    # for it outside any request (`view_context.asset_url`).
+    def view_context
+      ActionView::Base.new
+    end
+
     # `send_data data, type:, disposition:` — a binary response body
     # (lobsters streams avatar PNGs). Same buffering contract as
     # render. `disposition` is retained as a Content-Disposition

@@ -1241,7 +1241,12 @@ fn every_runtime_method_body_concretely_typed() {
     // column's original value, whatever its type, to the column's writer
     // and `clear_attribute_change` stores the current one in the baseline
     // (+2 in active_record/connection.rb, 886 -> 888).
-    const CEILING: usize = 888;
+    // MEASURED 895 on 2026-10-27 (on 888): `ActionView::Base#asset_path`
+    // takes whatever source and options hash the caller passes (a String
+    // or Symbol, nil raising; `host:` / `skip_pipeline:` read from the
+    // hash), so its `nil?`, `to_s`, `match?` and option reads are
+    // gradual sites (+7 in the new action_view/base.rb methods, 888 -> 895).
+    const CEILING: usize = 895;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"
