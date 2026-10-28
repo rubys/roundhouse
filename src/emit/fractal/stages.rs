@@ -11,7 +11,7 @@ use serde::Serialize;
 
 use crate::App;
 
-use super::pass::{Cx, Pass, Unit};
+use super::pass::{Context, Pass, Unit};
 use super::region;
 use super::rewrite::{self, Decline, Rewrite};
 use super::select::Selection;
@@ -54,19 +54,19 @@ pub struct StageFile {
 /// The stages of compiling `files` (paths relative to the app root) with
 /// `passes`. `untrusted` names files ingest could only partly read; they
 /// are reported as skipped and stay the source in every stage.
-pub fn stages(app: &App, cx: &Cx<'_>, files: &[String], untrusted: &[String], passes: &[&dyn Pass]) -> Result<Stages, String> {
-    let mut out = Stages {
-        passes: passes.iter().map(|p| PassSummary { name: p.name().to_string(), summary: p.summary().to_string() }).collect(),
+pub fn stages(app: &App, context: &Context<'_>, files: &[String], untrusted: &[String], passes: &[&dyn Pass]) -> Result<Stages, String> {
+    let mut stages = Stages {
+        passes: passes.iter().map(|pass| PassSummary { name: pass.name().to_string(), summary: pass.summary().to_string() }).collect(),
         ..Stages::default()
     };
-    let selection = Selection::resolve(app, cx.root, files)?;
-    let source_of = |file: crate::span::FileId| (file.0 as usize).checked_sub(1).and_then(|i| app.sources.get(i));
+    let selection = Selection::resolve(app, context, files)?;
+    let source_of = |file: crate::span::FileId| (file.0 as usize).checked_sub(1).and_then(|index| app.sources.get(index));
     let source_files: Vec<StageFile> = selection
         .files
         .iter()
-        .filter_map(|(file, path)| source_of(*file).map(|s| StageFile { path: path.clone(), content: s.text.clone() }))
+        .filter_map(|(file, path)| source_of(*file).map(|source| StageFile { path: path.clone(), content: source.text.clone() }))
         .collect();
-    out.stages.push(Stage {
+    stages.stages.push(Stage {
         pass: "source".to_string(),
         summary: "The files the build compiles, as the app wrote them.".to_string(),
         files: source_files,
@@ -74,7 +74,7 @@ pub fn stages(app: &App, cx: &Cx<'_>, files: &[String], untrusted: &[String], pa
         declined: Vec::new(),
     });
     for pass in passes {
-        out.stages.push(Stage {
+        stages.stages.push(Stage {
             pass: pass.name().to_string(),
             summary: pass.summary().to_string(),
             files: Vec::new(),
@@ -83,31 +83,31 @@ pub fn stages(app: &App, cx: &Cx<'_>, files: &[String], untrusted: &[String], pa
         });
     }
     for (file, path) in &selection.files {
-        let Some(src) = source_of(*file) else { continue };
-        let skipped = untrusted.iter().any(|u| super::is_suffix_path(&src.path, u) || super::is_suffix_path(u, &src.path));
+        let Some(source) = source_of(*file) else { continue };
+        let skipped = untrusted.iter().any(|untrusted_path| super::is_suffix_path(&source.path, untrusted_path) || super::is_suffix_path(untrusted_path, &source.path));
         if skipped {
-            out.skipped.push(super::Skipped {
+            stages.skipped.push(super::Skipped {
                 file: path.clone(),
                 reason: "ingest could not read the file faithfully (a survey gap or a syntax error)".to_string(),
             });
-            for stage in out.stages.iter_mut().skip(1) {
-                stage.files.push(StageFile { path: path.clone(), content: src.text.clone() });
+            for stage in stages.stages.iter_mut().skip(1) {
+                stage.files.push(StageFile { path: path.clone(), content: source.text.clone() });
             }
             continue;
         }
         let methods = region::find(app, &selection, *file, path);
-        let unit = Unit { file: *file, path: path.clone(), text: &src.text, bodies: selection.bodies_in(*file), methods, selection: &selection };
+        let unit = Unit { file: *file, path: path.clone(), text: &source.text, bodies: selection.bodies_in(*file), methods, selection: &selection };
         // Each pass proposes against the source, as in a build.
-        let proposals: Vec<_> = passes.iter().map(|p| (p.name(), p.run(cx, &unit))).collect();
-        for n in 1..=passes.len() {
-            let upto: Vec<_> = proposals.iter().take(n).map(|(name, p)| (*name, p.clone())).collect();
-            let outcome = rewrite::apply(&unit, upto);
-            let stage = &mut out.stages[n];
-            stage.files.push(StageFile { path: path.clone(), content: outcome.text.unwrap_or_else(|| src.text.clone()) });
-            let name = passes[n - 1].name();
-            stage.rewrites.extend(outcome.rewrites.into_iter().filter(|r| r.pass == name));
-            stage.declined.extend(outcome.declined.into_iter().filter(|d| d.pass == name));
+        let proposals: Vec<_> = passes.iter().map(|pass| (pass.name(), pass.run(context, &unit))).collect();
+        for count in 1..=passes.len() {
+            let applied: Vec<_> = proposals.iter().take(count).map(|(name, proposal)| (*name, proposal.clone())).collect();
+            let outcome = rewrite::apply(&unit, applied);
+            let stage = &mut stages.stages[count];
+            stage.files.push(StageFile { path: path.clone(), content: outcome.text.unwrap_or_else(|| source.text.clone()) });
+            let name = passes[count - 1].name();
+            stage.rewrites.extend(outcome.rewrites.into_iter().filter(|rewrite| rewrite.pass == name));
+            stage.declined.extend(outcome.declined.into_iter().filter(|decline| decline.pass == name));
         }
     }
-    Ok(out)
+    Ok(stages)
 }

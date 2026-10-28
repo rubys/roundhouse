@@ -2,13 +2,13 @@
 //! held in memory the way the browser holds it: stage 0 is the source,
 //! each later stage the file after one more pass, with what that pass
 //! rewrote and declined. No pass is registered, so the passes here are
-//! test-only renames; this pins the view and `Cx::in_memory`.
+//! test-only renames; this pins the view and `Context::in_memory`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use roundhouse::analyze::Analyzer;
-use roundhouse::emit::fractal::{self, Cx, Edit, Pass, Proposal, Scope, Unit, stages::Stages};
+use roundhouse::emit::fractal::{self, Context, Edit, Pass, Proposal, Scope, Unit, stages::Stages};
 use roundhouse::span::SourceFile;
 
 const ARTICLE_RB: &str = "app/models/article.rb";
@@ -50,7 +50,7 @@ impl Pass for Rename {
         Scope::Files(Vec::new())
     }
 
-    fn run(&self, cx: &Cx<'_>, unit: &Unit<'_>) -> Proposal {
+    fn run(&self, context: &Context<'_>, unit: &Unit<'_>) -> Proposal {
         let mut proposal = Proposal::default();
         let symbol = format!(":{}", self.from);
         for (start, _) in unit.text.match_indices(&symbol) {
@@ -59,9 +59,9 @@ impl Pass for Rename {
                 continue;
             }
             let span = unit.span(start, end);
-            if let Some(sites) = cx.defined_methods().get(self.from) {
+            if let Some(sites) = context.defined_methods().get(self.from) {
                 proposal.declined.push((span, format!("the app defines `{}` itself ({})", self.from, sites.join(", "))));
-            } else if let Some(version) = cx.gem_version("activerecord") {
+            } else if let Some(version) = context.gem_version("activerecord") {
                 proposal.edits.push(Edit { span, text: format!(":{}_{}", self.to, version.replace('.', "_")) });
             } else {
                 proposal.declined.push((span, "Gemfile.lock pins no activerecord".to_string()));
@@ -82,10 +82,10 @@ fn stages(src: &[(&str, &str)], files: &[&str], untrusted: &[&str], passes: &[&d
     let tree: HashMap<PathBuf, Vec<u8>> = src.iter().map(|(p, t)| (PathBuf::from(p), t.as_bytes().to_vec())).collect();
     let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
     Analyzer::new(&app).analyze(&mut app);
-    let cx = fractal::Cx::in_memory(&app, Path::new(""), sources, lockfile.as_deref());
+    let context = fractal::Context::in_memory(&app, Path::new(""), sources, lockfile.as_deref());
     let files: Vec<String> = files.iter().map(|f| f.to_string()).collect();
     let untrusted: Vec<String> = untrusted.iter().map(|f| f.to_string()).collect();
-    fractal::stages::stages(&app, &cx, &files, &untrusted, passes).expect("stages")
+    fractal::stages::stages(&app, &context, &files, &untrusted, passes).expect("stages")
 }
 
 fn content<'a>(s: &'a Stages, stage: usize, path: &str) -> &'a str {
@@ -186,7 +186,7 @@ fn a_file_ingest_did_not_read_is_an_error() {
     let tree: HashMap<PathBuf, Vec<u8>> = [(PathBuf::from(ARTICLE_RB), ARTICLE.as_bytes().to_vec())].into_iter().collect();
     let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
     Analyzer::new(&app).analyze(&mut app);
-    let cx = fractal::Cx::in_memory(&app, Path::new(""), sources, Some(&lock));
-    let err = fractal::stages::stages(&app, &cx, &["app/models/missing.rb".to_string()], &[], &[&TODO]).err().expect("error");
+    let context = fractal::Context::in_memory(&app, Path::new(""), sources, Some(&lock));
+    let err = fractal::stages::stages(&app, &context, &["app/models/missing.rb".to_string()], &[], &[&TODO]).err().expect("error");
     assert!(err.contains("app/models/missing.rb"), "{err}");
 }

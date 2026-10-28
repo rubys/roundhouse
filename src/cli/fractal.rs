@@ -30,7 +30,7 @@ The shipped roundhouse binary also accepts: roundhouse fractal emit|apply.
 struct Emit {
     files: Vec<String>,
     input: Option<PathBuf>,
-    out: Option<PathBuf>,
+    overlay: Option<PathBuf>,
     survey: bool,
     report: Option<PathBuf>,
     whole_app: bool,
@@ -43,11 +43,11 @@ enum Command {
 }
 
 /// Run `fractal emit|apply` or `roundhouse fractal emit|apply`.
-pub fn run(args: &[String]) -> ExitCode {
-    let command = match parse(args) {
+pub fn run(arguments: &[String]) -> ExitCode {
+    let command = match parse(arguments) {
         Ok(command) => command,
-        Err(err) => {
-            eprintln!("fractal: {err}\n\n{USAGE}");
+        Err(error) => {
+            eprintln!("fractal: {error}\n\n{USAGE}");
             return ExitCode::from(2);
         }
     };
@@ -59,7 +59,7 @@ pub fn run(args: &[String]) -> ExitCode {
         Command::Emit(options) => emit(
             &options.files,
             options.input.as_deref().unwrap_or(Path::new(".")),
-            options.out.as_deref().unwrap_or(Path::new("out/fractal")),
+            options.overlay.as_deref().unwrap_or(Path::new("out/fractal")),
             options.survey,
             options.report.as_deref(),
             options.whole_app,
@@ -70,26 +70,26 @@ pub fn run(args: &[String]) -> ExitCode {
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
-        Err(err) => {
-            eprintln!("fractal: {err}");
+        Err(error) => {
+            eprintln!("fractal: {error}");
             ExitCode::FAILURE
         }
     }
 }
 
-fn parse(args: &[String]) -> Result<Command, String> {
-    let Some((command, args)) = args.split_first() else {
+fn parse(arguments: &[String]) -> Result<Command, String> {
+    let Some((command, arguments)) = arguments.split_first() else {
         return Err("expected emit or apply".into());
     };
     match command.as_str() {
         "-h" | "--help" => Ok(Command::Help),
         "apply" => {
             let mut paths = Vec::new();
-            for arg in args {
-                match arg.as_str() {
+            for argument in arguments {
+                match argument.as_str() {
                     "-h" | "--help" => return Ok(Command::Help),
-                    s if s.starts_with('-') => return Err(format!("unknown apply flag: {s}")),
-                    _ => paths.push(PathBuf::from(arg)),
+                    flag if flag.starts_with('-') => return Err(format!("unknown apply flag: {flag}")),
+                    _ => paths.push(PathBuf::from(argument)),
                 }
             }
             if paths.len() > 2 {
@@ -103,21 +103,21 @@ fn parse(args: &[String]) -> Result<Command, String> {
         }
         "emit" => {
             let mut options = Emit::default();
-            let mut args = args.iter();
-            while let Some(arg) = args.next() {
-                match arg.as_str() {
+            let mut arguments = arguments.iter();
+            while let Some(argument) = arguments.next() {
+                match argument.as_str() {
                     "-h" | "--help" => return Ok(Command::Help),
-                    "--file" => options.files.push(args.next().ok_or("--file requires a path")?.clone()),
+                    "--file" => options.files.push(arguments.next().ok_or("--file requires a path")?.clone()),
                     "--whole-app" => options.whole_app = true,
                     "--survey" => options.survey = true,
-                    "--report" => options.report = Some(PathBuf::from(args.next().ok_or("--report requires a path")?)),
-                    "-o" | "--output" => options.out = Some(PathBuf::from(args.next().ok_or("--output requires a path")?)),
-                    s if s.starts_with("--file=") => options.files.push(s["--file=".len()..].to_string()),
-                    s if s.starts_with("--report=") => options.report = Some(PathBuf::from(&s["--report=".len()..])),
-                    s if s.starts_with("--output=") => options.out = Some(PathBuf::from(&s["--output=".len()..])),
-                    s if s.starts_with('-') => return Err(format!("unknown emit flag: {s}")),
+                    "--report" => options.report = Some(PathBuf::from(arguments.next().ok_or("--report requires a path")?)),
+                    "-o" | "--output" => options.overlay = Some(PathBuf::from(arguments.next().ok_or("--output requires a path")?)),
+                    flag if flag.starts_with("--file=") => options.files.push(flag["--file=".len()..].to_string()),
+                    flag if flag.starts_with("--report=") => options.report = Some(PathBuf::from(&flag["--report=".len()..])),
+                    flag if flag.starts_with("--output=") => options.overlay = Some(PathBuf::from(&flag["--output=".len()..])),
+                    flag if flag.starts_with('-') => return Err(format!("unknown emit flag: {flag}")),
                     _ if options.input.is_some() => return Err("emit expects at most one APP".into()),
-                    _ => options.input = Some(PathBuf::from(arg)),
+                    _ => options.input = Some(PathBuf::from(argument)),
                 }
             }
             Ok(Command::Emit(options))
@@ -130,7 +130,7 @@ fn parse(args: &[String]) -> Result<Command, String> {
 pub fn emit(
     files: &[String],
     input: &Path,
-    out: &Path,
+    overlay: &Path,
     survey: bool,
     report_path: Option<&Path>,
     whole_app: bool,
@@ -138,9 +138,18 @@ pub fn emit(
     if !input.exists() {
         return Err(format!("input {} does not exist", input.display()));
     }
+    // A report inside the overlay would be deleted by the next rebuild, and a
+    // report named like the manifest would make an unrelated directory look
+    // like an earlier build. Refuse it before reading or writing anything.
+    if let Some(report_path) = report_path {
+        let report_absolute = fractal::tree::absolute(report_path)?;
+        if report_absolute.starts_with(fractal::tree::absolute(overlay)?) {
+            return Err(format!("--report {} is inside the overlay {}; write it outside", report_path.display(), overlay.display()));
+        }
+    }
     let passes = fractal::pass::registered();
-    let passes: Vec<&dyn fractal::Pass> = passes.iter().map(|p| p.as_ref()).collect();
-    let root = input.canonicalize().map_err(|e| format!("input {}: {e}", input.display()))?;
+    let passes: Vec<&dyn fractal::Pass> = passes.iter().map(|pass| pass.as_ref()).collect();
+    let root = input.canonicalize().map_err(|error| format!("input {}: {error}", input.display()))?;
     let files = fractal::scope::normalize_files(&root, files)?;
     let ingest = fractal::scope::decide(&root, &files, &passes, whole_app)?;
     if survey {
@@ -156,17 +165,17 @@ pub fn emit(
                 "roundhouse: fractal: ingesting {} file(s) the compiled files and passes need (Rubydex indexed {indexed}); --whole-app reads everything",
                 files.len()
             );
-            let fs = crate::vfs::FsVfs::new();
-            let vfs = crate::vfs::ScopedVfs::new(&fs, files.iter().cloned());
+            let filesystem = crate::vfs::FsVfs::new();
+            let vfs = crate::vfs::ScopedVfs::new(&filesystem, files.iter().cloned());
             crate::ingest::app::ingest_app_with_vfs(&vfs, &root)
         }
     });
     let gaps = if survey { crate::ingest::survey::drain() } else { Vec::new() };
     let mut app = match app_result {
         Ok(app) => app,
-        Err(e) => {
-            for d in &parse_diags {
-                eprintln!("roundhouse: {}", d.render(&[]));
+        Err(error) => {
+            for diagnostic in &parse_diags {
+                eprintln!("roundhouse: {}", diagnostic.render(&[]));
             }
             if !gaps.is_empty() {
                 eprintln!();
@@ -174,15 +183,15 @@ pub fn emit(
             } else if !survey {
                 eprintln!("roundhouse: hint: re-run with --survey to record unsupported constructs and keep going");
             }
-            return Err(format!("ingest {}: {e}", input.display()));
+            return Err(format!("ingest {}: {error}", input.display()));
         }
     };
     // A file with a syntax error or a recorded gap keeps the app's code.
     // Its IR holds placeholders, so no pass rewrites it.
     let mut untrusted: Vec<String> = Vec::new();
-    for d in parse_diags.iter().filter(|d| d.severity == Severity::Error) {
-        eprintln!("roundhouse: {}", d.render(&app.sources));
-        if let Some(source) = (d.span.file.0 as usize).checked_sub(1).and_then(|i| app.sources.get(i)) {
+    for diagnostic in parse_diags.iter().filter(|diagnostic| diagnostic.severity == Severity::Error) {
+        eprintln!("roundhouse: {}", diagnostic.render(&app.sources));
+        if let Some(source) = (diagnostic.span.file.0 as usize).checked_sub(1).and_then(|index| app.sources.get(index)) {
             untrusted.push(source.path.clone());
         }
     }
@@ -201,11 +210,11 @@ pub fn emit(
     for line in plan.report.render().lines() {
         eprintln!("roundhouse: {line}");
     }
-    if let Some(path) = report_path {
-        let json = serde_json::to_string_pretty(&plan.report).map_err(|e| format!("report: {e}"))?;
-        std::fs::write(path, json + "\n").map_err(|e| format!("write {}: {e}", path.display()))?;
+    let written = fractal::write(input, overlay, &plan)?;
+    if let Some(report_path) = report_path {
+        let json = serde_json::to_string_pretty(&plan.report).map_err(|error| format!("report: {error}"))?;
+        std::fs::write(report_path, json + "\n").map_err(|error| format!("write {}: {error}", report_path.display()))?;
     }
-    let written = fractal::write(input, out, &plan)?;
-    eprintln!("roundhouse: emitted {} changed file(s) to {} (fractal overlay; every other file stays in the base app)", written.rewritten, out.display());
+    eprintln!("roundhouse: emitted {} changed file(s) to {} (fractal overlay; every other file stays in the base app)", written.rewritten, overlay.display());
     Ok(())
 }

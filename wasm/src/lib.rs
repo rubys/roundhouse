@@ -875,8 +875,8 @@ fn fractal_stages_inner(json_in: &str) -> String {
     let passes = fractal::pass::registered();
     let passes: Vec<&dyn fractal::Pass> = passes.iter().map(|p| p.as_ref()).collect();
     let root = std::path::Path::new("");
-    let cx = fractal::Cx::in_memory(&app, root, sources, lockfile.as_deref());
-    match fractal::stages::stages(&app, &cx, &input.files, &untrusted, &passes) {
+    let context = fractal::Context::in_memory(&app, root, sources, lockfile.as_deref());
+    match fractal::stages::stages(&app, &context, &input.files, &untrusted, &passes) {
         Ok(stages) => serde_json::to_string(&FractalOutput { stages, candidates, gaps: gaps_out })
             .unwrap_or_else(|e| error_json(&format!("serialize: {e}"))),
         Err(e) => error_json(&e),

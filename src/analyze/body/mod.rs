@@ -62,7 +62,7 @@ mod diagnostic;
 pub(crate) use diagnostic::some_operands_take_it;
 mod const_resolution;
 mod lambda_local;
-pub(crate) use const_resolution::{ConstResolver, ConstResolverTask, definition_index};
+pub(crate) use const_resolution::{ConstResolver, ConstResolverTask, definition_index, has_ambiguous_namespace};
 pub use const_resolution::DefinitionIndex;
 pub use const_resolution::PreparedConstResolver;
 use const_resolution::ResolvedConstant;

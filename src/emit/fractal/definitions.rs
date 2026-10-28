@@ -21,16 +21,16 @@ use crate::ingest::prism_api::PrismLocation;
 /// computed at runtime.
 pub const DYNAMIC: &str = "*";
 
-/// Add the names `source` defines to `out`, each with its `path:line`
+/// Add the names `source` defines to `definitions`, each with its `path:line`
 /// (relative to `root`).
-pub fn collect(source: &SourceFile, root: &Path, out: &mut HashMap<String, Vec<String>>) {
+pub fn collect(source: &SourceFile, root: &Path, definitions: &mut HashMap<String, Vec<String>>) {
     let parsed = ruby_prism::parse(source.text.as_bytes());
-    let path = Path::new(&source.path).strip_prefix(root).map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_else(|_| source.path.clone());
+    let path = Path::new(&source.path).strip_prefix(root).map(|relative| relative.to_string_lossy().replace('\\', "/")).unwrap_or_else(|_| source.path.clone());
     let mut collector = Collector { found: Vec::new() };
     collector.visit(&parsed.node());
     for (name, offset) in collector.found {
         let line = source.text[..offset.min(source.text.len())].matches('\n').count() + 1;
-        out.entry(name).or_default().push(format!("{path}:{line}"));
+        definitions.entry(name).or_default().push(format!("{path}:{line}"));
     }
 }
 
@@ -40,13 +40,13 @@ struct Collector {
 
 const NAMING_CALLS: &[&str] = &["define_method", "define_singleton_method", "alias_method", "attr_reader", "attr_writer", "attr_accessor", "attr", "delegate", "delegate_missing_to"];
 
-impl<'pr> Visit<'pr> for Collector {
-    fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+impl<'parse> Visit<'parse> for Collector {
+    fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'parse>) {
         self.found.push((text(node.name().as_slice()), node.location().start_offset()));
         ruby_prism::visit_def_node(self, node);
     }
 
-    fn visit_alias_method_node(&mut self, node: &ruby_prism::AliasMethodNode<'pr>) {
+    fn visit_alias_method_node(&mut self, node: &ruby_prism::AliasMethodNode<'parse>) {
         match literal_name(&node.new_name()) {
             Some(name) => self.found.push((name, node.location().start_offset())),
             None => self.found.push((DYNAMIC.to_string(), node.location().start_offset())),
@@ -54,22 +54,22 @@ impl<'pr> Visit<'pr> for Collector {
         ruby_prism::visit_alias_method_node(self, node);
     }
 
-    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'parse>) {
         let name = text(node.name().as_slice());
         if NAMING_CALLS.contains(&name.as_str()) {
             let at = node.location().start_offset();
-            let args: Vec<_> = node.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+            let arguments: Vec<_> = node.arguments().map(|arguments_node| arguments_node.arguments().iter().collect()).unwrap_or_default();
             match name.as_str() {
                 // The new name is the first argument.
-                "define_method" | "define_singleton_method" | "alias_method" => match args.first().and_then(literal_name) {
+                "define_method" | "define_singleton_method" | "alias_method" => match arguments.first().and_then(literal_name) {
                     Some(defined) => self.found.push((defined, at)),
                     None => self.found.push((DYNAMIC.to_string(), at)),
                 },
                 // Every positional argument names a method (and a writer
                 // for the writing forms).
                 "attr_reader" | "attr_writer" | "attr_accessor" | "attr" => {
-                    for arg in &args {
-                        match literal_name(arg) {
+                    for argument in &arguments {
+                        match literal_name(argument) {
                             Some(defined) => {
                                 if name != "attr_reader" && name != "attr" {
                                     self.found.push((format!("{defined}="), at));
@@ -85,13 +85,13 @@ impl<'pr> Visit<'pr> for Collector {
                 // `delegate :a, :b, to: :x, prefix: ...`: a prefix changes
                 // the names, so any prefix makes them unknown here.
                 "delegate" => {
-                    let prefixed = args.iter().any(|arg| {
-                        arg.as_keyword_hash_node().is_some_and(|kh| {
-                            kh.elements().iter().any(|e| e.as_assoc_node().is_some_and(|a| literal_name(&a.key()).as_deref() == Some("prefix")))
+                    let prefixed = arguments.iter().any(|argument| {
+                        argument.as_keyword_hash_node().is_some_and(|keyword_hash| {
+                            keyword_hash.elements().iter().any(|element| element.as_assoc_node().is_some_and(|pair| literal_name(&pair.key()).as_deref() == Some("prefix")))
                         })
                     });
-                    for arg in args.iter().filter(|a| a.as_keyword_hash_node().is_none()) {
-                        match literal_name(arg) {
+                    for argument in arguments.iter().filter(|argument| argument.as_keyword_hash_node().is_none()) {
+                        match literal_name(argument) {
                             Some(defined) if !prefixed => self.found.push((defined, at)),
                             _ => self.found.push((DYNAMIC.to_string(), at)),
                         }
@@ -106,11 +106,11 @@ impl<'pr> Visit<'pr> for Collector {
 
 /// A symbol or plain string literal's value.
 pub(super) fn literal_name(node: &ruby_prism::Node<'_>) -> Option<String> {
-    if let Some(sym) = node.as_symbol_node() {
-        return Some(String::from_utf8_lossy(sym.unescaped()).into_owned());
+    if let Some(symbol) = node.as_symbol_node() {
+        return Some(String::from_utf8_lossy(symbol.unescaped()).into_owned());
     }
-    if let Some(s) = node.as_string_node() {
-        return Some(String::from_utf8_lossy(s.unescaped()).into_owned());
+    if let Some(string) = node.as_string_node() {
+        return Some(String::from_utf8_lossy(string.unescaped()).into_owned());
     }
     None
 }
@@ -123,18 +123,18 @@ fn text(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    fn names(src: &str) -> Vec<String> {
-        let mut out = HashMap::default();
-        collect(&SourceFile { path: "/app/x.rb".into(), text: src.into() }, Path::new("/app"), &mut out);
-        let mut names: Vec<String> = out.into_keys().collect();
+    fn names(source: &str) -> Vec<String> {
+        let mut definitions = HashMap::default();
+        collect(&SourceFile { path: "/app/x.rb".into(), text: source.into() }, Path::new("/app"), &mut definitions);
+        let mut names: Vec<String> = definitions.into_keys().collect();
         names.sort();
         names
     }
 
     #[test]
     fn collects_every_spelling_of_a_definition() {
-        let src = "class A\n  def a?; end\n  def self.b; end\n  define_method(:c) { }\n  alias d a?\n  alias_method :e, :a?\n  attr_accessor :f\n  delegate :g, to: :x\n  Module.new { def h; end }\nend\n";
-        assert_eq!(names(src), ["a?", "b", "c", "d", "e", "f", "f=", "g", "h"]);
+        let source = "class A\n  def a?; end\n  def self.b; end\n  define_method(:c) { }\n  alias d a?\n  alias_method :e, :a?\n  attr_accessor :f\n  delegate :g, to: :x\n  Module.new { def h; end }\nend\n";
+        assert_eq!(names(source), ["a?", "b", "c", "d", "e", "f", "f=", "g", "h"]);
     }
 
     #[test]

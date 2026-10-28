@@ -49,10 +49,10 @@ use serde::Serialize;
 
 use crate::App;
 
-pub use pass::{Cx, Edit, Pass, Proposal, Unit};
+pub use pass::{Context, Edit, Pass, Proposal, Unit};
 pub use region::{Analyzed, Knowledge, Region};
 pub use rewrite::{Decline, Rewrite};
-pub use scope::{Ingest, Reach, Scope, ScopeCx};
+pub use scope::{Ingest, Reach, Scope, ScopeContext};
 pub use select::Selection;
 pub use tree::{MANIFEST, apply};
 
@@ -87,32 +87,34 @@ pub struct Skipped {
 impl Report {
     /// The human-readable summary the CLI prints.
     pub fn render(&self) -> String {
-        let mut out = String::new();
+        let mut summary = String::new();
         if self.compiled.is_empty() {
-            out.push_str("fractal: no --file given, so nothing to compile\n");
-            return out;
+            summary.push_str("fractal: no --file given, so nothing to compile\n");
+            return summary;
         }
         for file in &self.compiled {
-            out.push_str(&format!("fractal: compiling {file}\n"));
+            summary.push_str(&format!("fractal: compiling {file}\n"));
         }
-        let typed = self.methods.iter().filter(|m| m.knowledge.copies > 0 && m.knowledge.typed == m.knowledge.expressions).count();
-        out.push_str(&format!(
+        let typed = self.methods.iter().filter(|method| method.knowledge.copies > 0 && method.knowledge.typed == method.knowledge.expressions).count();
+        summary.push_str(&format!(
             "fractal: {} method(s) in the compiled files ({typed} fully typed); {} pass(es): {}\n",
             self.methods.len(),
             self.passes.len(),
             if self.passes.is_empty() { "none registered".to_string() } else { self.passes.join(", ") },
         ));
-        for s in &self.skipped {
-            out.push_str(&format!("  skipped       {}: {}\n", s.file, s.reason));
+        for skipped in &self.skipped {
+            summary.push_str(&format!("  skipped       {}: {}\n", skipped.file, skipped.reason));
         }
-        out.push_str(&format!("fractal: {} rewrite(s) in {} file(s)\n", self.rewrites.len(), self.rewritten.len()));
-        for r in &self.rewrites {
-            out.push_str(&format!("  rewrote       {} [{}]: {} -> {}\n", r.at, r.pass, r.from, r.to));
+        summary.push_str(&format!("fractal: {} rewrite(s) in {} file(s)\n", self.rewrites.len(), self.rewritten.len()));
+        // One line per rewrite: a multi-line edit's line breaks print as `\n`.
+        let one_line = |text: &str| text.replace('\n', "\\n");
+        for rewrite in &self.rewrites {
+            summary.push_str(&format!("  rewrote       {} [{}]: {} -> {}\n", rewrite.at, rewrite.pass, one_line(&rewrite.from), one_line(&rewrite.to)));
         }
-        for d in &self.declined {
-            out.push_str(&format!("  declined      {} [{}]: {}\n", d.at, d.pass, d.reason));
+        for decline in &self.declined {
+            summary.push_str(&format!("  declined      {} [{}]: {}\n", decline.at, decline.pass, decline.reason));
         }
-        out
+        summary
     }
 }
 
@@ -127,13 +129,13 @@ impl Plan {
     /// The [`MANIFEST`] the emitted overlay carries.
     pub fn manifest(&self) -> String {
         #[derive(Serialize)]
-        struct Manifest<'a> {
-            compiled: &'a [String],
-            passes: &'a [String],
-            rewritten: &'a [String],
+        struct Manifest<'report> {
+            compiled: &'report [String],
+            passes: &'report [String],
+            rewritten: &'report [String],
         }
-        let m = Manifest { compiled: &self.report.compiled, passes: &self.report.passes, rewritten: &self.report.rewritten };
-        serde_json::to_string_pretty(&m).unwrap_or_default() + "\n"
+        let manifest = Manifest { compiled: &self.report.compiled, passes: &self.report.passes, rewritten: &self.report.rewritten };
+        serde_json::to_string_pretty(&manifest).unwrap_or_default() + "\n"
     }
 }
 
@@ -144,25 +146,25 @@ impl Plan {
 pub fn plan(app: &App, input: &Path, files: &[String], untrusted: &[String], passes: &[&dyn Pass]) -> Result<Plan, String> {
     let mut report = Report {
         compiled: files.to_vec(),
-        passes: passes.iter().map(|p| p.name().to_string()).collect(),
+        passes: passes.iter().map(|pass| pass.name().to_string()).collect(),
         ..Report::default()
     };
     if files.is_empty() {
         return Ok(Plan { report, rewritten: Vec::new() });
     }
-    let root = input.canonicalize().map_err(|e| format!("input {}: {e}", input.display()))?;
-    let selection = Selection::resolve(app, &root, files)?;
+    let root = input.canonicalize().map_err(|error| format!("input {}: {error}", input.display()))?;
+    let context = Context::new(app, &root);
+    let selection = Selection::resolve(app, &context, files)?;
     report.compiled = selection.files.iter().map(|(_, path)| path.clone()).collect();
-    let is_untrusted = |path: &str| untrusted.iter().any(|u| is_suffix_path(path, u) || is_suffix_path(u, path));
-    let cx = Cx::new(app, &root);
+    let is_untrusted = |path: &str| untrusted.iter().any(|untrusted_path| is_suffix_path(path, untrusted_path) || is_suffix_path(untrusted_path, path));
     let mut rewritten = Vec::new();
     for (file, path) in &selection.files {
-        let Some(src) = (file.0 as usize).checked_sub(1).and_then(|i| app.sources.get(i)) else { continue };
+        let Some(source) = (file.0 as usize).checked_sub(1).and_then(|index| app.sources.get(index)) else { continue };
         let methods = region::find(app, &selection, *file, path);
-        report.methods.extend(methods.iter().map(|m| MethodReport { key: m.key(), knowledge: m.knowledge.clone() }));
-        let skip = if is_untrusted(&src.path) {
+        report.methods.extend(methods.iter().map(|method| MethodReport { key: method.key(), knowledge: method.knowledge.clone() }));
+        let skip = if is_untrusted(&source.path) {
             Some("ingest could not read the file faithfully (a --survey gap or a syntax error)".to_string())
-        } else if std::fs::read(root.join(path)).ok().as_deref() != Some(src.text.as_bytes()) {
+        } else if std::fs::read(root.join(path)).ok().as_deref() != Some(source.text.as_bytes()) {
             Some("the file on disk is not the UTF-8 text ingest read".to_string())
         } else {
             None
@@ -174,27 +176,27 @@ pub fn plan(app: &App, input: &Path, files: &[String], untrusted: &[String], pas
         if passes.is_empty() {
             continue;
         }
-        let unit = Unit { file: *file, path: path.clone(), text: &src.text, bodies: selection.bodies_in(*file), methods, selection: &selection };
-        let proposals = passes.iter().map(|p| (p.name(), p.run(&cx, &unit))).collect();
+        let unit = Unit { file: *file, path: path.clone(), text: &source.text, bodies: selection.bodies_in(*file), methods, selection: &selection };
+        let proposals = passes.iter().map(|pass| (pass.name(), pass.run(&context, &unit))).collect();
         let outcome = rewrite::apply(&unit, proposals);
         report.rewrites.extend(outcome.rewrites);
         report.declined.extend(outcome.declined);
-        if let Some(text) = outcome.text.filter(|text| text != &src.text) {
+        if let Some(text) = outcome.text.filter(|text| text != &source.text) {
             report.rewritten.push(path.clone());
             rewritten.push((path.clone(), text));
         }
     }
-    report.methods.sort_by(|a, b| a.key.cmp(&b.key));
+    report.methods.sort_by(|left, right| left.key.cmp(&right.key));
     Ok(Plan { report, rewritten })
 }
 
-/// Write only changed files and the build manifest to `out`. The base
+/// Write only changed files and the build manifest to `overlay`. The base
 /// app stays unchanged until [`apply`] copies the overlay onto it.
-pub fn write(input: &Path, out: &Path, plan: &Plan) -> Result<tree::Written, String> {
-    tree::write(input, out, &plan.rewritten, &plan.manifest())
+pub fn write(input: &Path, overlay: &Path, plan: &Plan) -> Result<tree::Written, String> {
+    tree::write(input, overlay, &plan.rewritten, &plan.manifest())
 }
 
-/// Is `rel` the tail of `path` at a path boundary?
-fn is_suffix_path(path: &str, rel: &str) -> bool {
-    path == rel || path.ends_with(&format!("/{rel}"))
+/// Is `relative_path` the tail of `path` at a path boundary?
+fn is_suffix_path(path: &str, relative_path: &str) -> bool {
+    path == relative_path || path.ends_with(&format!("/{relative_path}"))
 }

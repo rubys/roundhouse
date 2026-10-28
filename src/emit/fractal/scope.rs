@@ -45,19 +45,19 @@ pub enum Reach {
     /// types.
     Schema,
     /// Anything else: the function adds paths (absolute, under
-    /// [`ScopeCx::root`]) from the Rubydex index.
-    Custom(fn(&ScopeCx<'_>, &mut BTreeSet<PathBuf>)),
+    /// [`ScopeContext::root`]) from the Rubydex index.
+    Custom(fn(&ScopeContext<'_>, &mut BTreeSet<PathBuf>)),
 }
 
 /// What a [`Reach::Custom`] function can read.
-pub struct ScopeCx<'a> {
+pub struct ScopeContext<'build> {
     /// The app root, canonical.
-    pub root: &'a Path,
+    pub root: &'build Path,
     /// The files the build compiles, relative to `root`.
-    pub files: &'a [String],
+    pub files: &'build [String],
     /// The classes and modules those files define, fully qualified.
-    pub classes: &'a [String],
-    pub index: &'a DefinitionIndex,
+    pub classes: &'build [String],
+    pub index: &'build DefinitionIndex,
 }
 
 /// The build's decision.
@@ -80,26 +80,29 @@ const UNINDEXED: &[&str] = &["vendor", "tmp", "log", "coverage", "public", "test
 
 /// `--file` arguments as paths relative to the app root `root`
 /// (canonical): relative arguments are taken from the root, absolute ones
-/// must lie under it, and each must be a file.
+/// must lie under it, and each must be a Ruby file.
 pub fn normalize_files(root: &Path, files: &[String]) -> Result<Vec<String>, String> {
-    let mut out = Vec::new();
+    let mut normalized = Vec::new();
     for file in files {
         let path = root.join(file);
         let Ok(canonical) = path.canonicalize() else {
             return Err(format!("--file {file}: no such file in the app"));
         };
-        let Ok(rel) = canonical.strip_prefix(root) else {
+        let Ok(relative) = canonical.strip_prefix(root) else {
             return Err(format!("--file {file}: outside the app"));
         };
         if !canonical.is_file() {
             return Err(format!("--file {file}: not a file"));
         }
-        let rel = rel.to_string_lossy().replace('\\', "/");
-        if !out.contains(&rel) {
-            out.push(rel);
+        if canonical.extension().is_none_or(|extension| extension != "rb") {
+            return Err(format!("--file {file}: not a Ruby source (.rb)"));
+        }
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        if !normalized.contains(&relative) {
+            normalized.push(relative);
         }
     }
-    Ok(out)
+    Ok(normalized)
 }
 
 /// Decide what a build compiling `files` (relative to `root`, canonical)
@@ -112,7 +115,7 @@ pub fn decide(root: &Path, files: &[String], passes: &[&dyn Pass], whole_app: bo
     for pass in passes {
         match pass.scope() {
             Scope::WholeApp => return Ok(Ingest::WholeApp { reason: format!("pass `{}` needs the whole app", pass.name()) }),
-            Scope::Files(r) => reaches.extend(r),
+            Scope::Files(pass_reaches) => reaches.extend(pass_reaches),
         }
     }
     let mut kept = BTreeSet::new();
@@ -130,15 +133,15 @@ pub fn decide(root: &Path, files: &[String], passes: &[&dyn Pass], whole_app: bo
             indexed = sources.len();
             let index = definition_index(&sources);
             drop(sources);
-            let compiled: Vec<String> = kept.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+            let compiled: Vec<String> = kept.iter().map(|path| path.to_string_lossy().into_owned()).collect();
             let mut classes: Vec<String> = index
                 .files
                 .iter()
-                .filter(|(_, paths)| paths.iter().any(|p| compiled.contains(p)))
+                .filter(|(_, paths)| paths.iter().any(|path| compiled.contains(path)))
                 .map(|(name, _)| name.to_string())
                 .collect();
             classes.sort();
-            let cx = ScopeCx { root, files, classes: &classes, index: &index };
+            let context = ScopeContext { root, files, classes: &classes, index: &index };
             for reach in reaches {
                 match reach {
                     Reach::Ancestors => {
@@ -149,21 +152,21 @@ pub fn decide(root: &Path, files: &[String], passes: &[&dyn Pass], whole_app: bo
                         }
                     }
                     Reach::Signatures => walk(&root.join("sig"), &|_| false, &mut |path| {
-                        if path.extension().is_some_and(|e| e == "rbs") {
+                        if path.extension().is_some_and(|extension| extension == "rbs") {
                             kept.insert(path.to_path_buf());
                         }
                     }),
                     Reach::Schema => {
-                        let schema = ["db/schema.rb", "db/structure.sql"].iter().map(|p| root.join(p)).find(|p| p.is_file());
+                        let schema = ["db/schema.rb", "db/structure.sql"].iter().map(|path| root.join(path)).find(|path| path.is_file());
                         kept.extend(schema);
                     }
-                    Reach::Custom(widen) => widen(&cx, &mut kept),
+                    Reach::Custom(widen) => widen(&context, &mut kept),
                 }
             }
         }
     }
     kept.extend(layout_files(root, &kept));
-    kept.extend(APP_SHAPE.iter().map(|p| root.join(p)).filter(|p| p.is_file()));
+    kept.extend(APP_SHAPE.iter().map(|path| root.join(path)).filter(|path| path.is_file()));
     Ok(Ingest::Files { files: kept, indexed })
 }
 
@@ -171,53 +174,53 @@ pub fn decide(root: &Path, files: &[String], passes: &[&dyn Pass], whole_app: bo
 /// a Packwerk `package.yml`, or the `Rails::Engine` subclass in the `lib/`
 /// of an in-repository gem (a component with its own `app/`).
 fn layout_files(root: &Path, files: &BTreeSet<PathBuf>) -> BTreeSet<PathBuf> {
-    let mut dirs = BTreeSet::new();
+    let mut directories = BTreeSet::new();
     for file in files {
-        dirs.extend(file.ancestors().skip(1).take_while(|dir| dir.starts_with(root) && *dir != root).map(Path::to_path_buf));
+        directories.extend(file.ancestors().skip(1).take_while(|directory| directory.starts_with(root) && *directory != root).map(Path::to_path_buf));
     }
-    let mut out = BTreeSet::new();
-    for dir in dirs {
-        let package = dir.join("package.yml");
+    let mut layout = BTreeSet::new();
+    for directory in directories {
+        let package = directory.join("package.yml");
         if package.is_file() {
-            out.insert(package);
+            layout.insert(package);
         }
-        let is_gem = std::fs::read_dir(&dir)
+        let is_gem = std::fs::read_dir(&directory)
             .into_iter()
             .flatten()
             .flatten()
-            .any(|entry| entry.path().extension().is_some_and(|e| e == "gemspec"));
-        if is_gem && dir.join("app").is_dir() {
-            walk(&dir.join("lib"), &|_| false, &mut |path| {
-                let declares = path.extension().is_some_and(|e| e == "rb")
+            .any(|entry| entry.path().extension().is_some_and(|extension| extension == "gemspec"));
+        if is_gem && directory.join("app").is_dir() {
+            walk(&directory.join("lib"), &|_| false, &mut |path| {
+                let declares = path.extension().is_some_and(|extension| extension == "rb")
                     && std::fs::read_to_string(path).is_ok_and(|text| text.contains("Rails::Engine"));
                 if declares {
-                    out.insert(path.to_path_buf());
+                    layout.insert(path.to_path_buf());
                 }
             });
         }
     }
-    out
+    layout
 }
 
 /// Exclude root-level non-program directories, dependency trees at any
 /// depth, and earlier emitted overlays.
-pub(super) fn skip_source_dir(root: &Path, dir: &Path, root_only: &[&str]) -> bool {
-    skip_program_dir(root, dir, root_only) || dir.join(super::tree::MANIFEST).is_file()
+pub(super) fn skip_source_dir(root: &Path, directory: &Path, root_only: &[&str]) -> bool {
+    skip_program_dir(root, directory, root_only) || directory.join(super::tree::MANIFEST).is_file()
 }
 
 /// Directory exclusions shared by disk and in-memory source trees.
-pub(super) fn skip_program_dir(root: &Path, dir: &Path, root_only: &[&str]) -> bool {
-    let name = dir.file_name().and_then(|name| name.to_str()).unwrap_or("");
-    name.starts_with('.') || name == "node_modules" || (dir.parent() == Some(root) && root_only.contains(&name))
+pub(super) fn skip_program_dir(root: &Path, directory: &Path, root_only: &[&str]) -> bool {
+    let name = directory.file_name().and_then(|name| name.to_str()).unwrap_or("");
+    name.starts_with('.') || name == "node_modules" || (directory.parent() == Some(root) && root_only.contains(&name))
 }
 
 /// Every `.rb` under `root` outside [`UNINDEXED`] and hidden directories,
 /// with absolute paths, for the Rubydex index.
 fn ruby_sources(root: &Path) -> Vec<SourceFile> {
     let mut paths = Vec::new();
-    walk(root, &|dir| skip_source_dir(root, dir, UNINDEXED), &mut |p| {
-        if p.extension().is_some_and(|e| e == "rb") {
-            paths.push(p.to_path_buf());
+    walk(root, &|directory| skip_source_dir(root, directory, UNINDEXED), &mut |path| {
+        if path.extension().is_some_and(|extension| extension == "rb") {
+            paths.push(path.to_path_buf());
         }
     });
     paths.sort();
@@ -230,10 +233,10 @@ fn ruby_sources(root: &Path) -> Vec<SourceFile> {
         .collect()
 }
 
-/// Visit every file under `dir`, not following symlinked directories and
-/// skipping hidden directories and the ones `skip` names.
-pub(super) fn walk(dir: &Path, skip: &dyn Fn(&Path) -> bool, visit: &mut dyn FnMut(&Path)) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+/// Visit every file under `directory`, not following symlinked
+/// directories and skipping hidden directories and the ones `skip` names.
+pub(super) fn walk(directory: &Path, skip: &dyn Fn(&Path) -> bool, visit: &mut dyn FnMut(&Path)) {
+    let Ok(entries) = std::fs::read_dir(directory) else { return };
     for entry in entries.flatten() {
         let path = entry.path();
         let Ok(kind) = entry.file_type() else { continue };

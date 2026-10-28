@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use roundhouse::analyze::Analyzer;
-use roundhouse::emit::fractal::{self, Cx, Edit, MANIFEST, Pass, Plan, Proposal, Scope, Unit};
+use roundhouse::emit::fractal::{self, Context, Edit, MANIFEST, Pass, Plan, Proposal, Scope, Unit};
 use roundhouse::ingest::ingest_app;
 
 const SCHEMA: &str = r#"ActiveRecord::Schema.define do
@@ -226,7 +226,7 @@ impl Pass for Swap {
         Scope::Files(Vec::new())
     }
 
-    fn run(&self, _cx: &Cx<'_>, unit: &Unit<'_>) -> Proposal {
+    fn run(&self, _context: &Context<'_>, unit: &Unit<'_>) -> Proposal {
         let edits = unit
             .text
             .match_indices(self.from)
@@ -248,7 +248,7 @@ impl Pass for Fixed {
         Scope::Files(Vec::new())
     }
 
-    fn run(&self, _cx: &Cx<'_>, unit: &Unit<'_>) -> Proposal {
+    fn run(&self, _context: &Context<'_>, unit: &Unit<'_>) -> Proposal {
         Proposal { edits: (self.0)(unit), ..Proposal::default() }
     }
 }
@@ -495,7 +495,7 @@ impl Pass for Scoped {
         (self.0)()
     }
 
-    fn run(&self, _cx: &Cx<'_>, _unit: &Unit<'_>) -> Proposal {
+    fn run(&self, _context: &Context<'_>, _unit: &Unit<'_>) -> Proposal {
         Proposal::default()
     }
 }
@@ -569,8 +569,8 @@ fn schema_signatures_and_custom_reaches_add_their_files() {
         Scope::Files(vec![
             fractal::Reach::Schema,
             fractal::Reach::Signatures,
-            fractal::Reach::Custom(|cx, files| {
-                files.extend(cx.index.files["Unrelated"].iter().map(PathBuf::from));
+            fractal::Reach::Custom(|context, files| {
+                files.extend(context.index.files["Unrelated"].iter().map(PathBuf::from));
             }),
         ])
     });
@@ -660,7 +660,7 @@ fn invalid_utf8_edit_and_decline_offsets_report_without_panicking() {
     impl Pass for InvalidOffsets {
         fn name(&self) -> &'static str { "test-invalid-offsets" }
         fn scope(&self) -> Scope { Scope::Files(Vec::new()) }
-        fn run(&self, _cx: &Cx<'_>, unit: &Unit<'_>) -> Proposal {
+        fn run(&self, _context: &Context<'_>, unit: &Unit<'_>) -> Proposal {
             let inside = unit.text.find('é').unwrap() + 1;
             Proposal {
                 edits: vec![Edit { span: unit.span(inside, inside + 1), text: "x".into() }],
@@ -719,4 +719,108 @@ fn a_pass_that_keeps_the_same_text_emits_no_app_file() {
     let plan = build_plan(&dir, &[CURRENT_RB], &[&pass]).unwrap();
     assert!(plan.rewritten.is_empty());
     assert!(plan.report.rewritten.is_empty());
+}
+
+/// Plan `compiled` the way the CLI does by default: ingest only what the
+/// scope decides, recording gaps (`--survey`) so their files are skipped
+/// instead of stopping the build.
+fn scoped_plan(dir: &Path, compiled: &[&str], passes: &[&dyn Pass]) -> Plan {
+    let root = dir.canonicalize().unwrap();
+    let fractal::Ingest::Files { files, .. } = decide(dir, compiled, passes, false).unwrap() else { panic!("expected a scoped ingest") };
+    let filesystem = roundhouse::vfs::FsVfs::new();
+    let vfs = roundhouse::vfs::ScopedVfs::new(&filesystem, files);
+    roundhouse::ingest::survey::activate();
+    let app = roundhouse::ingest::app::ingest_app_with_vfs(&vfs, &root);
+    let gaps = roundhouse::ingest::survey::drain();
+    let mut app = app.unwrap();
+    Analyzer::new(&app).analyze(&mut app);
+    let untrusted: Vec<String> = gaps
+        .iter()
+        .filter_map(|gap| match gap {
+            roundhouse::ingest::IngestError::Unsupported { file, .. } | roundhouse::ingest::IngestError::Parse { file, .. } => Some(file.clone()),
+            _ => None,
+        })
+        .collect();
+    let compiled: Vec<String> = compiled.iter().map(|file| file.to_string()).collect();
+    fractal::plan(&app, &root, &compiled, &untrusted, passes).unwrap()
+}
+
+#[test]
+fn a_class_inside_a_singleton_class_body_holds_instance_methods() {
+    let source = "class Outer\n  class << self\n    def built; end\n\n    class Inner\n      def title; end\n    end\n  end\n\n  class << OTHER\n    class ::Plain\n      def label; end\n    end\n\n    def elsewhere; end\n  end\nend\n";
+    let dir = app_dir("singleton-nesting", &[("app/models/outer.rb", source)]);
+    let plan = scoped_plan(&dir, &["app/models/outer.rb"], &[]);
+    assert_eq!(keys(&plan), ["OTHER.elsewhere", "Outer.built", "Outer::Inner#title", "Plain#label"]);
+}
+
+#[test]
+fn a_relative_namespace_defined_in_another_file_gets_its_full_name() {
+    let compiled = "module Top\n  class Admin::Report\n    def title; end\n  end\nend\n";
+    let dir = app_dir(
+        "relative-namespace",
+        &[("app/models/top/admin/report.rb", compiled), ("app/models/top/admin.rb", "module Top\n  module Admin\n  end\nend\n")],
+    );
+    // A scoped build ingests only the compiled file, which does not say
+    // where `Admin` is; the app's sources do.
+    let plan = scoped_plan(&dir, &["app/models/top/admin/report.rb"], &[]);
+    assert_eq!(keys(&plan), ["Top::Admin::Report#title"]);
+
+    // A namespace no app file defines (a gem's, say) resolves to the
+    // top-level constant, as Ruby's lexical lookup falls back to it.
+    let dir = app_dir("relative-namespace-gem", &[("app/models/top/report.rb", compiled)]);
+    let plan = scoped_plan(&dir, &["app/models/top/report.rb"], &[]);
+    assert_eq!(keys(&plan), ["Admin::Report#title"]);
+}
+
+#[test]
+fn a_report_inside_the_overlay_is_refused_before_anything_is_written() {
+    let dir = app_dir("report-in-overlay", &base_files());
+    let base = scratch("report-in-overlay-out");
+    let run = |arguments: &[&str]| Command::new(env!("CARGO_BIN_EXE_fractal")).args(arguments).output().unwrap();
+
+    // Next to an earlier build: the rebuild would delete the report.
+    let overlay = base.join("overlay");
+    let built = run(&["emit", "--file", CURRENT_RB, dir.to_str().unwrap(), "-o", overlay.to_str().unwrap()]);
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    let inside = overlay.join("report.json");
+    let refused = run(&["emit", "--file", CURRENT_RB, "--report", inside.to_str().unwrap(), dir.to_str().unwrap(), "-o", overlay.to_str().unwrap()]);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("is inside the overlay"), "{}", String::from_utf8_lossy(&refused.stderr));
+    assert!(!inside.exists());
+
+    // In an unrelated directory: a report named like the manifest must not
+    // make it look like an earlier build, which emit would then replace.
+    let precious = base.join("precious");
+    fs::create_dir_all(&precious).unwrap();
+    fs::write(precious.join("keep.txt"), "keep").unwrap();
+    let marker = precious.join(MANIFEST);
+    let refused = run(&["emit", "--file", CURRENT_RB, "--report", marker.to_str().unwrap(), dir.to_str().unwrap(), "-o", precious.to_str().unwrap()]);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(!marker.exists());
+    assert_eq!(fs::read_to_string(precious.join("keep.txt")).unwrap(), "keep");
+
+    // Outside the overlay the report is written after the overlay.
+    let report = base.join("report.json");
+    let emitted = run(&["emit", "--file", CURRENT_RB, "--report", report.to_str().unwrap(), dir.to_str().unwrap(), "-o", overlay.to_str().unwrap()]);
+    assert!(emitted.status.success(), "{}", String::from_utf8_lossy(&emitted.stderr));
+    assert!(report.exists());
+}
+
+#[test]
+fn a_file_that_is_not_ruby_is_refused() {
+    let mut files = base_files();
+    files.push(("config/settings.yml", "key: value\n"));
+    let dir = app_dir("not-ruby", &files);
+    let error = fractal::scope::normalize_files(&dir.canonicalize().unwrap(), &["config/settings.yml".to_string()]).err().unwrap();
+    assert!(error.contains("--file config/settings.yml: not a Ruby source (.rb)"), "{error}");
+}
+
+#[test]
+fn a_multi_line_rewrite_renders_on_one_line() {
+    let dir = app_dir("one-line", &base_files());
+    let pass = Fixed(Box::new(|unit| vec![at(unit, "def outer_label\n    \"original\"", "def outer_label\n    \"rewritten\"")]));
+    let plan = build_plan(&dir, &[OUTER_RB], &[&pass]).unwrap();
+    let rendered = plan.report.render();
+    let line = rendered.lines().find(|line| line.contains("rewrote")).unwrap_or_else(|| panic!("{rendered}"));
+    assert!(line.ends_with(r#"def outer_label\n    "original" -> def outer_label\n    "rewritten""#), "{line}");
 }

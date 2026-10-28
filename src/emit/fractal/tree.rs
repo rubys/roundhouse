@@ -13,59 +13,59 @@ pub struct Written {
 }
 
 /// Write only rewritten files and the build manifest, never a copy of
-/// the app. A rebuild replaces an earlier overlay in `out`.
-pub fn write(input: &Path, out: &Path, rewritten: &[(String, String)], manifest: &str) -> Result<Written, String> {
-    let input = input.canonicalize().map_err(|e| format!("input {}: {e}", input.display()))?;
-    let out_abs = absolute(out)?;
-    if input.starts_with(&out_abs) {
-        return Err(format!("output {} is the app or contains it", out.display()));
+/// the app. A rebuild replaces an earlier overlay in that directory.
+pub fn write(input: &Path, overlay: &Path, rewritten: &[(String, String)], manifest: &str) -> Result<Written, String> {
+    let input = input.canonicalize().map_err(|error| format!("input {}: {error}", input.display()))?;
+    let overlay_absolute = absolute(overlay)?;
+    if input.starts_with(&overlay_absolute) {
+        return Err(format!("output {} is the app or contains it", overlay.display()));
     }
     // Validate before replacing an earlier output or writing any file.
-    for (rel, _) in rewritten {
-        let path = Path::new(rel);
-        if path.as_os_str().is_empty() || !path.components().all(|c| matches!(c, std::path::Component::Normal(_))) {
-            return Err(format!("internal: rewritten file {rel} is not a plain relative path"));
+    for (relative_path, _) in rewritten {
+        let path = Path::new(relative_path);
+        if path.as_os_str().is_empty() || !path.components().all(|component| matches!(component, std::path::Component::Normal(_))) {
+            return Err(format!("internal: rewritten file {relative_path} is not a plain relative path"));
         }
-        let source = input.join(path).canonicalize().map_err(|e| format!("rewritten file {rel}: {e}"))?;
+        let source = input.join(path).canonicalize().map_err(|error| format!("rewritten file {relative_path}: {error}"))?;
         if !source.starts_with(&input) || !source.is_file() {
-            return Err(format!("internal: rewritten file {rel} is not a file of the app"));
+            return Err(format!("internal: rewritten file {relative_path} is not a file of the app"));
         }
     }
-    if out_abs.exists() {
-        let empty = fs::read_dir(&out_abs).map_err(|e| format!("read {}: {e}", out.display()))?.next().is_none();
-        if !empty && !out_abs.join(MANIFEST).is_file() {
+    if overlay_absolute.exists() {
+        let empty = fs::read_dir(&overlay_absolute).map_err(|error| format!("read {}: {error}", overlay.display()))?.next().is_none();
+        if !empty && !overlay_absolute.join(MANIFEST).is_file() {
             return Err(format!(
                 "output {} is not empty and is not an earlier fractal build (no {MANIFEST}); use an empty directory",
-                out.display()
+                overlay.display()
             ));
         }
-        fs::remove_dir_all(&out_abs).map_err(|e| format!("remove {}: {e}", out.display()))?;
+        fs::remove_dir_all(&overlay_absolute).map_err(|error| format!("remove {}: {error}", overlay.display()))?;
     }
-    fs::create_dir_all(&out_abs).map_err(|e| format!("create {}: {e}", out.display()))?;
-    for (rel, text) in rewritten {
-        let dest = out_abs.join(rel);
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    fs::create_dir_all(&overlay_absolute).map_err(|error| format!("create {}: {error}", overlay.display()))?;
+    for (relative_path, text) in rewritten {
+        let destination = overlay_absolute.join(relative_path);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(|error| format!("create {}: {error}", parent.display()))?;
         }
-        fs::write(&dest, text).map_err(|e| format!("write {}: {e}", dest.display()))?;
-        let permissions = fs::metadata(input.join(rel)).map_err(|e| format!("stat {rel}: {e}"))?.permissions();
-        fs::set_permissions(&dest, permissions).map_err(|e| format!("chmod {}: {e}", dest.display()))?;
+        fs::write(&destination, text).map_err(|error| format!("write {}: {error}", destination.display()))?;
+        let permissions = fs::metadata(input.join(relative_path)).map_err(|error| format!("stat {relative_path}: {error}"))?.permissions();
+        fs::set_permissions(&destination, permissions).map_err(|error| format!("chmod {}: {error}", destination.display()))?;
     }
-    fs::write(out_abs.join(MANIFEST), manifest).map_err(|e| format!("write {MANIFEST}: {e}"))?;
+    fs::write(overlay_absolute.join(MANIFEST), manifest).map_err(|error| format!("write {MANIFEST}: {error}"))?;
     Ok(Written { rewritten: rewritten.len() })
 }
 
 /// Copy only overlay files onto an existing app, leaving other files
 /// untouched. Keep the build manifest in the overlay, not in the app.
 pub fn apply(overlay: &Path, app: &Path) -> Result<usize, String> {
-    for dir in [overlay, app] {
-        let meta = fs::symlink_metadata(dir).map_err(|e| format!("stat {}: {e}", dir.display()))?;
-        if !meta.is_dir() {
-            return Err(format!("{} must be a directory, not a file or symlink", dir.display()));
+    for directory in [overlay, app] {
+        let metadata = fs::symlink_metadata(directory).map_err(|error| format!("stat {}: {error}", directory.display()))?;
+        if !metadata.is_dir() {
+            return Err(format!("{} must be a directory, not a file or symlink", directory.display()));
         }
     }
-    let overlay = overlay.canonicalize().map_err(|e| format!("resolve {}: {e}", overlay.display()))?;
-    let app = app.canonicalize().map_err(|e| format!("resolve {}: {e}", app.display()))?;
+    let overlay = overlay.canonicalize().map_err(|error| format!("resolve {}: {error}", overlay.display()))?;
+    let app = app.canonicalize().map_err(|error| format!("resolve {}: {error}", app.display()))?;
     if app.starts_with(&overlay) {
         return Err("the app must not be the overlay directory or inside it".into());
     }
@@ -73,72 +73,74 @@ pub fn apply(overlay: &Path, app: &Path) -> Result<usize, String> {
     walk(&overlay, &overlay, &mut files)?;
     // Check every path before copying, so a bad entry cannot leave a
     // predictably partial apply. I/O errors can still interrupt copying.
-    for rel in &files {
-        let dest = app.join(rel);
-        if dest.starts_with(&overlay) {
-            return Err(format!("destination {} is inside the overlay", dest.display()));
+    for relative_path in &files {
+        let destination = app.join(relative_path);
+        if destination.starts_with(&overlay) {
+            return Err(format!("destination {} is inside the overlay", destination.display()));
         }
         let mut path = app.clone();
-        let mut components = rel.components().peekable();
+        let mut components = relative_path.components().peekable();
         while let Some(component) = components.next() {
             path.push(component);
             match fs::symlink_metadata(&path) {
-                Ok(meta) => {
-                    let expected = if components.peek().is_some() { meta.is_dir() } else { meta.is_file() };
+                Ok(metadata) => {
+                    let expected = if components.peek().is_some() { metadata.is_dir() } else { metadata.is_file() };
                     if !expected {
                         return Err(format!("destination {} has the wrong type or is a symlink", path.display()));
                     }
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
-                Err(e) => return Err(format!("stat {}: {e}", path.display())),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Err(error) => return Err(format!("stat {}: {error}", path.display())),
             }
         }
     }
-    for rel in &files {
-        let dest = app.join(rel);
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    for relative_path in &files {
+        let destination = app.join(relative_path);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(|error| format!("create {}: {error}", parent.display()))?;
         }
-        fs::copy(overlay.join(rel), &dest).map_err(|e| format!("copy {}: {e}", dest.display()))?;
+        fs::copy(overlay.join(relative_path), &destination).map_err(|error| format!("copy {}: {error}", destination.display()))?;
     }
     Ok(files.len())
 }
 
 /// Collect regular overlay files without following links.
-fn walk(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
-    for entry in fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))? {
-        let path: PathBuf = entry.map_err(|e| format!("read {}: {e}", dir.display()))?.path();
-        if dir == root && path.file_name().is_some_and(|name| name == MANIFEST) {
+fn walk(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
+    for entry in fs::read_dir(directory).map_err(|error| format!("read {}: {error}", directory.display()))? {
+        let path: PathBuf = entry.map_err(|error| format!("read {}: {error}", directory.display()))?.path();
+        if directory == root && path.file_name().is_some_and(|name| name == MANIFEST) {
             continue;
         }
-        let meta = fs::symlink_metadata(&path).map_err(|e| format!("stat {}: {e}", path.display()))?;
-        if meta.is_dir() {
-            walk(root, &path, out)?;
+        let metadata = fs::symlink_metadata(&path).map_err(|error| format!("stat {}: {error}", path.display()))?;
+        if metadata.is_dir() {
+            walk(root, &path, files)?;
         } else {
-            if !meta.is_file() {
+            if !metadata.is_file() {
                 return Err(format!("overlay {} is not a regular file", path.display()));
             }
-            let rel = path.strip_prefix(root).map_err(|e| format!("{}: {e}", path.display()))?;
-            out.push(rel.to_path_buf());
+            let relative_path = path.strip_prefix(root).map_err(|error| format!("{}: {error}", path.display()))?;
+            files.push(relative_path.to_path_buf());
         }
     }
     Ok(())
 }
 
-fn absolute(path: &Path) -> Result<PathBuf, String> {
+/// `path` made absolute, with its deepest existing ancestor canonicalized,
+/// so a path that does not exist yet can be compared with one that does.
+pub(crate) fn absolute(path: &Path) -> Result<PathBuf, String> {
     if path.exists() {
-        return path.canonicalize().map_err(|e| format!("{}: {e}", path.display()));
+        return path.canonicalize().map_err(|error| format!("{}: {error}", path.display()));
     }
     // Canonicalize the deepest existing ancestor and append the rest.
     let mut missing = Vec::new();
     let mut current = path.to_path_buf();
     loop {
         if current.as_os_str().is_empty() {
-            current = std::env::current_dir().map_err(|e| e.to_string())?;
+            current = std::env::current_dir().map_err(|error| error.to_string())?;
             break;
         }
         if current.exists() {
-            current = current.canonicalize().map_err(|e| format!("{}: {e}", current.display()))?;
+            current = current.canonicalize().map_err(|error| format!("{}: {error}", current.display()))?;
             break;
         }
         match (current.file_name(), current.parent()) {

@@ -555,6 +555,59 @@ pub(crate) fn definition_index(sources: &[SourceFile]) -> DefinitionIndex {
     index
 }
 
+/// Does any `class`/`module` definition in `sources` name its namespace
+/// with a relative constant path (`class B::C` written inside `module A`)
+/// whose namespace the indexed sources do not define? Ruby looks that
+/// namespace up lexically first (`A::B`), so the fully qualified name
+/// depends on files the graph has not seen. A scoped fractal build asks
+/// this of the files it compiles, to know when naming their bodies needs
+/// the rest of the app.
+pub(crate) fn has_ambiguous_namespace(sources: &[SourceFile]) -> bool {
+    if sources.is_empty() {
+        return false;
+    }
+    let mut graph = index_sources(sources);
+    Resolver::new(&mut graph).resolve();
+    sources.iter().filter(|source| is_indexed(source)).any(|source| {
+        let Some(document) = graph.documents().get(&UriId::from(source.path.as_str())) else { return false };
+        document.definitions().iter().any(|definition_id| {
+            let Some(definition @ (Definition::Class(_) | Definition::Module(_))) = graph.definitions().get(definition_id) else {
+                return false;
+            };
+            definition.name_id().is_some_and(|name_id| namespace_is_ambiguous(&graph, *name_id))
+        })
+    })
+}
+
+/// Is `name_id` a relative path (`B::C`) written inside a body, whose
+/// namespace (`B`) no indexed `class`, `module` or constant defines?
+/// Rubydex still creates a declaration for such a namespace; it just has
+/// no definitions.
+fn namespace_is_ambiguous(graph: &Graph, name_id: NameId) -> bool {
+    let Some(name) = graph.names().get(&name_id) else { return false };
+    let ParentScope::Some(namespace_id) = name.parent_scope() else { return false };
+    let mut leftmost_id = *namespace_id;
+    loop {
+        let Some(segment) = graph.names().get(&leftmost_id) else { return false };
+        match segment.parent_scope() {
+            ParentScope::Some(next_id) => leftmost_id = *next_id,
+            // `::B::C`, or a path on a singleton, resolves without lexical scope.
+            ParentScope::TopLevel | ParentScope::Attached(_) => return false,
+            ParentScope::None => {
+                if segment.nesting().is_none() {
+                    // Written at the top level: `B` can only be `::B`.
+                    return false;
+                }
+                break;
+            }
+        }
+    }
+    graph
+        .name_id_to_declaration_id(*namespace_id)
+        .and_then(|declaration_id| graph.declarations().get(declaration_id))
+        .is_none_or(|namespace| namespace.definitions().is_empty())
+}
+
 impl ConstResolver {
     /// Index real Ruby app sources with their original 1-based file IDs.
     pub(crate) fn from_app_sources(sources: &[SourceFile]) -> Self {
