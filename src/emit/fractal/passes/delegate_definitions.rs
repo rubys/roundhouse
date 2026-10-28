@@ -17,7 +17,8 @@
 //! could be told apart from a `delegate` without running the app. A module counts
 //! when it can reach a singleton chain ([`module_reaches_singleton_chain`]):
 //! it is named `ClassMethods` (which `ActiveSupport::Concern` extends), calls
-//! `extend self`, is named by an `extend` call, or is included or prepended
+//! `extend self` or `module_function` with no names, is named by an `extend`
+//! call, or is included or prepended
 //! in a `class << X` body, on `singleton_class`, into `Class`, `Module` or
 //! another class every class's chain reaches, inside a block, or into another
 //! module that can itself reach one, followed to a fixed point. A naming call
@@ -226,6 +227,20 @@ impl<'parse> Visit<'parse> for DefinitionFinder<'_> {
                 // it may be any class's singleton chain.
                 self.record(offset, !on_self);
             }
+        } else if method == "module_function" && on_self {
+            if names_delegate() {
+                // `module_function :delegate` copies it onto the module's
+                // singleton, which a body of that module calls.
+                self.record(offset, true);
+            } else if arguments.iter().all(|argument| argument.as_splat_node().is_some())
+                && let Some(Scope::Module { name }) = self.scopes.last().cloned()
+            {
+                // With no names (or only splats, which may expand to none),
+                // every def after it is copied onto the module's singleton
+                // too: counted like `extend self`, whichever side of it the
+                // def is on.
+                self.self_extended_modules.insert(name);
+            }
         } else if method == "extend" && on_self && arguments.iter().any(|argument| argument.as_self_node().is_some()) {
             // `extend self` in a module body makes its methods singleton
             // methods of the module, which a class could reach as a constant.
@@ -424,6 +439,16 @@ mod tests {
             let found = blocking(&[("override.rb", override_module), ("mixer.rb", mixer)]);
             assert_eq!(!found.is_empty(), reaches, "{mixer}: {found:?}");
         }
+    }
+
+    #[test]
+    fn module_function_copies_count() {
+        let files = [
+            ("named.rb", "module Named\n  def delegate(*) = nil\n  module_function :delegate\nend\n"),
+            ("section.rb", "module Section\n  module_function\n\n  def delegate(*) = nil\nend\n"),
+            ("other.rb", "module Other\n  def delegate(*) = nil\n  module_function :helper\nend\n"),
+        ];
+        assert_eq!(blocking(&files), ["named.rb:3", "section.rb:4"]);
     }
 
     #[test]

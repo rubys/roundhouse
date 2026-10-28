@@ -104,6 +104,17 @@ pub fn apply(overlay: &Path, app: &Path) -> Result<usize, String> {
     Ok(files.len())
 }
 
+/// The files [`apply`] would copy from `overlay`, relative to it: every
+/// regular file but the manifest. A symlink or other special entry is an
+/// error, as it is for `apply`.
+pub(crate) fn overlay_files(overlay: &Path) -> Result<Vec<PathBuf>, String> {
+    let overlay = overlay.canonicalize().map_err(|error| format!("resolve {}: {error}", overlay.display()))?;
+    let mut files = Vec::new();
+    walk(&overlay, &overlay, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
 /// Collect regular overlay files without following links.
 fn walk(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
     for entry in fs::read_dir(directory).map_err(|error| format!("read {}: {error}", directory.display()))? {

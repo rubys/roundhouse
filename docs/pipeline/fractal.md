@@ -188,7 +188,10 @@ The overlay is verified, and the command exits 0, only when:
 
 The report and the overlay's `.roundhouse-fractal.json` must name the same
 rewritten files, or `verify` refuses them as different builds before
-booting anything.
+booting anything. The overlay must also hold exactly those files, and
+`--keep` must lie outside it: only the reported files are saved and
+restored, so an extra file would be left in the app, and a missing one
+would compare the original with itself.
 
 Equal fingerprints show the rewritten app defines the same methods with
 the same bytecode. They do not cover state the fingerprint leaves out:
@@ -236,8 +239,9 @@ else with a reason:
   naming call with an explicit receiver or `send`, through
   `delegate :delegate`, an `undef_method :delegate` that would send the
   call to `method_missing`, or in a module that can reach a singleton
-  chain (extended, mixed into a singleton class or into `Class` or
-  `Module`, or included into a module that can, to a fixed point).
+  chain (extended, copied onto its own singleton by `module_function`,
+  mixed into a singleton class or into `Class` or `Module`, or included
+  into a module that can, to a fixed point).
   Instance methods of ordinary classes (a controller action named
   `delegate`) don't count. Names computed at run time
   (`define_method(name)`, `delegate(*NAMES, ...)`) can't be seen, so they

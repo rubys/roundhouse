@@ -163,6 +163,24 @@ pub fn verify(options: &Options) -> Result<Outcome, String> {
     if options.ruby.is_empty() {
         return Err("--ruby is empty".into());
     }
+    // Only the report's rewritten files are saved and restored, so the
+    // overlay must hold exactly those: an extra file would be copied onto
+    // the app and left there, and a missing one would compare the original
+    // with itself.
+    let overlay_files: BTreeSet<String> =
+        super::tree::overlay_files(&options.overlay)?.iter().map(|path| path.to_string_lossy().replace('\\', "/")).collect();
+    let extra: Vec<&String> = overlay_files.iter().filter(|path| !report_rewritten.contains(path)).collect();
+    let missing: Vec<&&String> = report_rewritten.iter().filter(|path| !overlay_files.contains(path.as_str())).collect();
+    if !extra.is_empty() || !missing.is_empty() {
+        return Err(format!(
+            "the overlay must hold exactly the files the report rewrites; it also holds {extra:?} and lacks {missing:?}"
+        ));
+    }
+    if let Some(keep) = &options.keep
+        && super::tree::absolute(keep)?.starts_with(super::tree::absolute(&options.overlay)?)
+    {
+        return Err(format!("--keep {} is inside the overlay {}; keep the fingerprints outside it", keep.display(), options.overlay.display()));
+    }
     let app = options.app.canonicalize().map_err(|error| format!("app {}: {error}", options.app.display()))?;
 
     static VERIFICATIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);

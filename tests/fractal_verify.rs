@@ -189,6 +189,26 @@ fn a_report_from_another_build_is_refused_before_booting() {
 }
 
 #[test]
+fn an_overlay_that_is_not_exactly_the_reported_files_is_refused_before_booting() {
+    let fixture = Fixture::new("extra", EVALUATED, WRITTEN, &["lib/order.rb:2:3"]);
+    put(&fixture.root.join("overlay"), "lib/stray.rb", "class Stray; end\n");
+    let error = verify(&fixture.options()).expect_err("an extra overlay file");
+    assert!(error.contains("also holds [\"lib/stray.rb\"]"), "{error}");
+    assert!(!fixture.app().join("lib/stray.rb").exists());
+
+    let fixture = Fixture::new("missing", EVALUATED, WRITTEN, &["lib/order.rb:2:3"]);
+    fs::remove_file(fixture.root.join("overlay").join(MODEL)).unwrap();
+    let error = verify(&fixture.options()).expect_err("a missing overlay file");
+    assert!(error.contains("lacks [\"lib/order.rb\"]"), "{error}");
+
+    let fixture = Fixture::new("keep-inside", EVALUATED, WRITTEN, &["lib/order.rb:2:3"]);
+    let keep = fixture.root.join("overlay/prints");
+    let error = verify(&Options { keep: Some(keep.clone()), ..fixture.options() }).expect_err("--keep inside the overlay");
+    assert!(error.contains("is inside the overlay"), "{error}");
+    assert!(!keep.exists());
+}
+
+#[test]
 fn the_cli_exits_zero_only_when_verified() {
     if !ruby_available() {
         return;
