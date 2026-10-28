@@ -55,6 +55,16 @@ Rails; other gems take a requirement, not one exact build. When
 rather than fail. Some older controls still pin `8.1.4` inline and ignore
 `RH_RAILS_ORACLE`.
 
+## Fork specs
+
+Some suites were ported from the Shopify/roundhouse-1 fork's tests to
+serve as specs for behavior the fork's compiler has and this one does not
+yet. A test the compiler does not pass is ignored with the group of
+behavior it waits on, `#[ignore = "fork spec: <group>"]` (load order,
+autoload, conditional declarations, class-body loops and hooks, gem
+closures, rails_dependent_by_name). Run a group's tests with `--ignored`
+to see what remains; a change that makes one pass removes its `ignore`.
+
 ## Complete local verification
 
 1. Install [cargo-nextest](https://nexte.st/docs/running/) once:
