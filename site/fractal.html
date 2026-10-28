@@ -90,10 +90,8 @@
     </p>
     <p class="status-line">
       Status: early. The pipeline is built, and the <a href="fractal/">pass
-      explorer</a> runs it in your browser. No pass is registered yet: the
-      first, <code>inline-enum-predicates</code>, was removed because
-      <a href="https://github.com/rails/rails/pull/59250">rails/rails#59250</a>
-      proposes plain <code>def</code> predicates. The proposal remains open.
+      explorer</a> runs it in your browser. One pass is registered,
+      <code>inline-delegate</code>.
     </p>
     <div class="cta">
       <a href="fractal/">▶ Open the pass explorer</a>
@@ -235,6 +233,20 @@
       proposal whole, with a report, when an edit falls outside the file,
       overlaps another edit or moves a line, or when the rewritten file has a
       parse error or warning the original did not.
+    </p>
+
+    <h3>The registered pass: <code>inline-delegate</code></h3>
+    <p>
+      <code>delegate :name, to: :author</code> makes Active Support build Ruby
+      source for each method at boot and <code>module_eval</code> it. The pass
+      writes that exact source where the call was, on the call's first line,
+      so Rails does not generate it, Bootsnap caches it with the file, and the
+      JIT sees a plain <code>def</code>. It rewrites only the form whose
+      generated source it can reproduce exactly (symbol literals and
+      <code>to:</code> alone, in a class body, with the Active Support version
+      it was checked against, and no app definition of <code>delegate</code>
+      a class body could call instead), and declines everything else with a
+      reason.
     </p>
 
     <h3>Why the first pass was removed</h3>

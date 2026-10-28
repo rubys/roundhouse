@@ -1,8 +1,9 @@
 //! The pass explorer's view of a build (`fractal::stages`), over an app
 //! held in memory the way the browser holds it: stage 0 is the source,
 //! each later stage the file after one more pass, with what that pass
-//! rewrote and declined. No pass is registered, so the passes here are
-//! test-only renames; this pins the view and `Context::in_memory`.
+//! rewrote and declined. The passes here are test-only renames, which pin
+//! the view and `Context::in_memory`; one test runs the registered passes
+//! as the explorer does.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -93,8 +94,32 @@ fn content<'a>(s: &'a Stages, stage: usize, path: &str) -> &'a str {
 }
 
 #[test]
-fn no_pass_is_registered() {
-    assert!(fractal::pass::registered().is_empty());
+fn the_registered_passes_read_the_lockfile_and_sources_from_memory() {
+    let registered = fractal::pass::registered();
+    let passes: Vec<&dyn Pass> = registered.iter().map(|pass| pass.as_ref()).collect();
+    assert_eq!(passes.iter().map(|pass| pass.name()).collect::<Vec<_>>(), ["inline-delegate"]);
+    let model = "class Article < ApplicationRecord\n  delegate :name, to: :author\n\n  def author = nil\nend\n";
+    let lock = "GEM\n  remote: https://rubygems.org/\n  specs:\n    activesupport (8.2.0.alpha)\n\nBUNDLED WITH\n   2.6.9\n";
+    let s = stages(&[(ARTICLE_RB, model), ("app/models/application_record.rb", BASE), ("Gemfile.lock", lock)], &[ARTICLE_RB], &[], &passes);
+    assert_eq!(s.stages.len(), 2);
+    assert_eq!(s.stages[1].pass, "inline-delegate");
+    assert_eq!(s.stages[1].rewrites.len(), 1, "{:?}", s.stages[1].declined);
+    assert!(content(&s, 1, ARTICLE_RB).contains("  def name(...);  _ = author;  _.name(...);"), "{}", content(&s, 1, ARTICLE_RB));
+
+    // An app file that defines `delegate` where a class body could call it
+    // blocks the pass, read from the in-memory sources. A pass keeps what it
+    // learned about the app for one build, so the build gets fresh passes.
+    let registered = fractal::pass::registered();
+    let passes: Vec<&dyn Pass> = registered.iter().map(|pass| pass.as_ref()).collect();
+    let patch = "class Module\n  def delegate(*) = nil\nend\n";
+    let s = stages(
+        &[(ARTICLE_RB, model), ("app/models/application_record.rb", BASE), ("lib/patch.rb", patch), ("Gemfile.lock", lock)],
+        &[ARTICLE_RB],
+        &[],
+        &passes,
+    );
+    assert!(s.stages[1].rewrites.is_empty());
+    assert!(s.stages[1].declined[0].reason.contains("lib/patch.rb:2"), "{:?}", s.stages[1].declined);
 }
 
 #[test]

@@ -204,10 +204,11 @@ pub struct Edit {
     pub text: String,
 }
 
-/// The passes a build runs, in order. None yet: see
-/// `docs/pipeline/fractal.md`.
+/// The passes a build runs, in order. See `docs/pipeline/fractal.md`.
+/// Call it once per build: a pass may keep what it learned about the app
+/// (an app-wide read) for the rest of the build.
 pub fn registered() -> Vec<Box<dyn Pass>> {
-    Vec::new()
+    vec![Box::new(super::passes::InlineDelegate::default())]
 }
 
 /// Directories [`Context::app_sources`] skips only at the app root.

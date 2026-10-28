@@ -12,8 +12,10 @@
 
 import { createClient } from "../lib/wasm-client.mjs";
 
-// A small app to compile. No pass is registered yet, so the only stage is
-// the source. Nothing here is from a real application.
+// A small app to compile. The registered pass, `inline-delegate`, writes
+// the simple `delegate` calls out as the methods Active Support would
+// generate, and declines the one with `prefix:`. Nothing here is from a
+// real application.
 const EXAMPLES = {
   article: {
     label: "Article model",
@@ -22,38 +24,38 @@ const EXAMPLES = {
       "app/models/article.rb": `# frozen_string_literal: true
 
 class Article < ApplicationRecord
+  belongs_to :author
   enum :status, { draft: 0, published: 1, archived: 2 }
-  enum :visibility, { everyone: "everyone", members: "members" }, prefix: true
+
+  delegate :name, :email, to: :author
+  delegate :time_zone, to: :author, prefix: true
 
   def listed?
     published? && !archived?
   end
 
-  def badge
-    return "archived" if archived?
-    visibility_members? ? "members only" : "public"
-  end
-
-  def unfinished? = draft?
+  def byline = "by #{name}"
 end
 `,
       "app/models/application_record.rb": `class ApplicationRecord < ActiveRecord::Base
   primary_abstract_class
 end
 `,
-      // Passes read gem versions from here.
+      // Passes read gem versions from here: inline-delegate reproduces the
+      // source this Active Support generates.
       "Gemfile.lock": `GEM
   remote: https://rubygems.org/
   specs:
-    activerecord (8.1.1)
-      activemodel (= 8.1.1)
-      activesupport (= 8.1.1)
+    activerecord (8.2.0.alpha)
+      activemodel (= 8.2.0.alpha)
+      activesupport (= 8.2.0.alpha)
+    activesupport (8.2.0.alpha)
 
 PLATFORMS
   ruby
 
 DEPENDENCIES
-  activerecord (~> 8.1)
+  activerecord
 
 BUNDLED WITH
    2.6.9

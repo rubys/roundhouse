@@ -21,7 +21,8 @@
 //! - [`region`]: each `def` in a compiled file, with the analyzer's facts
 //!   about it.
 //! - [`pass`]: the rewrites. Each reads one compiled file (a [`Unit`])
-//!   and proposes edits anywhere in it.
+//!   and proposes edits anywhere in it. [`passes`] holds the registered
+//!   ones.
 //! - [`rewrite`]: applies the proposals, refusing any that leave the
 //!   file, overlap, move a line, or break the parse.
 //! - [`tree`]: emits the sparse overlay and applies it to the base app.
@@ -36,6 +37,7 @@
 
 mod definitions;
 pub mod pass;
+pub mod passes;
 pub mod region;
 pub mod rewrite;
 pub mod scope;

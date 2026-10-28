@@ -3,8 +3,9 @@
 // render loop over the compiler wasm's `fractal_stages` export.
 //
 // Asserts:
-//   1. boots and compiles app/models/article.rb; with no pass registered the
-//      only stage is the source, shown as written, with no rewrites;
+//   1. boots and compiles app/models/article.rb: the source, then
+//      inline-delegate, which writes out the simple delegation (two methods) and
+//      declines the prefixed one;
 //   2. editing the model re-runs the passes and shows the edited source;
 //   3. no console or page errors.
 //
@@ -51,9 +52,12 @@ console.log("=== boot ===");
 let s = await state();
 console.log(s.status, "|", s.chips.join(" → "), "|", s.file);
 if (s.file !== "app/models/article.rb") fail(`expected article.rb to be compiled, got ${s.file}`);
-if (s.chips.join(",") !== "source") fail(`expected only the source stage, got: ${s.chips.join(", ")}`);
-if (!/^0 rewrite/.test(s.status)) fail(`expected no rewrites, got "${s.status}"`);
-if (!s.lines.some((t) => t.includes("published? && !archived?"))) fail(`source not shown: ${JSON.stringify(s.lines)}`);
+if (s.chips.join(",") !== "source,inline-delegate") fail(`expected source → inline-delegate, got: ${s.chips.join(", ")}`);
+if (!/^1 rewrite/.test(s.status)) fail(`expected 1 rewrite, got "${s.status}"`);
+if (!s.lines.some((t) => t.includes("def name(...);"))) fail(`delegation not rewritten: ${JSON.stringify(s.lines)}`);
+if (!s.lines.some((t) => t.includes("delegate :time_zone, to: :author, prefix: true"))) fail(`prefixed delegation should stay: ${JSON.stringify(s.lines)}`);
+const notes = await page.evaluate(() => document.getElementById("notes").textContent);
+if (!notes.includes("passes `prefix:`")) fail(`expected the prefix decline in the notes: ${notes}`);
 
 console.log("=== edit app/models/article.rb ===");
 await page.evaluate(() => {
@@ -67,7 +71,7 @@ await page.waitForFunction(
 );
 s = await state();
 console.log(s.status, "|", s.chips.join(" → "));
-if (s.chips.join(",") !== "source" || !/^0 rewrite/.test(s.status)) fail(`unexpected re-run: ${s.status} | ${s.chips.join(", ")}`);
+if (s.chips.join(",") !== "source,inline-delegate" || !/^1 rewrite/.test(s.status)) fail(`unexpected re-run: ${s.status} | ${s.chips.join(", ")}`);
 
 const realErrors = logs.filter((l) => /pageerror|\[error\]|\[crash\]/.test(l));
 if (realErrors.length) {
@@ -79,4 +83,4 @@ if (realErrors.length) {
 await browser.close();
 
 if (failed) process.exit(1);
-console.log("\nOK: Fractal pass explorer — source stage and re-run on edit verified in a real browser tab.");
+console.log("\nOK: Fractal pass explorer — inline-delegate stage and re-run on edit verified in a real browser tab.");

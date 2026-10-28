@@ -137,8 +137,70 @@ on a large app; this proof of concept does not do them yet.
 
 ## Passes
 
-None are registered, so a build compiles the selected files and emits
-only the metadata file.
+One pass is registered, `inline-delegate`.
+
+### `inline-delegate`
+
+[`passes/inline_delegate.rs`](../../src/emit/fractal/passes/inline_delegate.rs).
+`delegate :name, to: :author` makes Active Support build Ruby source for
+each method at boot and `module_eval` it. The pass writes that exact
+source where the call was, so Rails does not generate it, Bootsnap caches
+it with the file, and the JIT sees a plain `def`. The methods go on the
+call's first line, which is the line Active Support gives them, and the
+call's other lines are left empty.
+
+It rewrites only what it can reproduce exactly, and declines everything
+else with a reason:
+
+- the call is a bare statement of a `class`, `module` or `class << self`
+  body, not the last statement of that body, and nothing before it in the
+  body may change the default visibility (a `private`, `protected`,
+  `public` or `module_function` with no arguments, however it is called:
+  `self.private`, `private if ...`, `send(:private)`);
+- the file activates no refinement with `using`: a `def` written in the
+  file would see it, Active Support's `module_eval`'d methods do not;
+- methods are symbol literals naming plain methods (no writers, operators
+  or reserved names), and the only option is `to:` with a symbol literal
+  naming a plain method (no `prefix:`, `allow_nil:`, `private:`, instance
+  variables, constants, or `:class`);
+- `Gemfile.lock` resolves activesupport 8.2.0.alpha, whose generator it
+  was checked against (rails/rails main; 8.1 differs);
+- the app's source defines no `delegate` that a class body could call
+  instead
+  ([`passes/delegate_definitions.rs`](../../src/emit/fractal/passes/delegate_definitions.rs)):
+  a singleton method, one in `class << X`, in `Module`, `Class`, `Object`,
+  `BasicObject` or `Kernel`, at the top level, in a block, through a
+  naming call with an explicit receiver or `send`, through
+  `delegate :delegate`, an `undef_method :delegate` that would send the
+  call to `method_missing`, or in a module that can reach a singleton
+  chain (extended, mixed into a singleton class or into `Class` or
+  `Module`, or included into a module that can, to a fixed point).
+  Instance methods of ordinary classes (a controller action named
+  `delegate`) don't count. Names computed at run time
+  (`define_method(name)`, `delegate(*NAMES, ...)`) can't be seen, so they
+  aren't counted.
+
+The checks read calls directly and through `send`, `__send__` and
+`public_send` with a literal name. Other dynamic dispatch
+(`method(:private).call`, `eval`, `instance_eval` with a string) and
+names computed at run time are beyond what the source shows; the pass
+trusts that the app doesn't use them to change visibility, activate
+refinements or define `delegate`.
+
+The pass reads the compiled file, the lockfile and the app's Ruby files
+from source (`Context`), so it widens no ingest scope. A file ingest
+records a gap in keeps the app's code before the pass sees it, as every
+skipped file does.
+
+[`tests/fractal_inline_delegate.rs`](../../tests/fractal_inline_delegate.rs)
+pins the rewrites and every decline. It also loads the original and the
+rewritten class in Ruby with Active Support's delegation, and compares
+each method's owner, visibility, parameters, arity, source line, return
+values, a `NoMethodError` raised inside the target, and the error for a
+nil target. That comparison runs only where `ruby -e 'require
+"active_support/core_ext/module/delegation"'` works.
+
+### Removed: `inline-enum-predicates`
 
 The first pass, `inline-enum-predicates`, was removed. It rewrote a call
 to an Active Record enum predicate inside the enum's own class
@@ -153,20 +215,21 @@ remains in the git history.
 
 ## Writing a pass
 
-Implement [`Pass`](../../src/emit/fractal/pass.rs): a name, a one-line
+Implement [`Pass`](../../src/emit/fractal/pass.rs) in a module of
+[`passes/`](../../src/emit/fractal/passes/): a name, a one-line
 `summary` (what the pass explorer shows), a `scope`,
 and a `run` that reads a [`Unit`](../../src/emit/fractal/pass.rs) and
 returns a `Proposal` of `Edit`s (spans of the unit's file and their
-replacement text) and declined sites. [`Cx`](../../src/emit/fractal/pass.rs)
+replacement text) and declined sites. [`Context`](../../src/emit/fractal/pass.rs)
 gives app-wide facts read from source without ingest: every Ruby file of
 the program, a Rubydex index of classes and their ancestors and
 descendants, every method name the app defines, and the lockfile's gem
 versions. Decline, with a reason, whatever cannot be shown to behave as
 the original does for every caller of the compiled app. Register the pass
 in `pass::registered()`, pin its rewrites and declines in a build test,
-and add a runtime test that emits and applies the overlay against Active
-Record and SQLite and compares the app's answers before and after apply
-(the removed `inline-enum-predicates` had one to start from).
+and add a runtime test that compares the original and the rewritten code
+in Ruby (`inline-delegate`'s is one to start from; the removed
+`inline-enum-predicates` had one against Active Record and SQLite).
 
 ## Pass explorer
 
@@ -177,13 +240,14 @@ after each pass, with what each pass rewrote and what it declined and
 why. It calls the wasm's `fractal_stages` export, which runs
 [`stages.rs`](../../src/emit/fractal/stages.rs): the same selection,
 passes and driver as a build, over sources already in memory
-(`Cx::in_memory`, since the browser has no app on disk), keeping what
+(`Context::in_memory`, since the browser has no app on disk), keeping what
 each pass added. Stage *n* is the passes `1..=n` applied together, the
 way a build applies them. It writes nothing. The explorer shows the
 complete selected file at each stage, but `fractal emit` writes only
 changed files. Use `fractal apply` to overwrite those files in the base app.
 
-With no pass registered, the only stage is the source.
+The example compiles a model whose simple `delegate` call
+`inline-delegate` writes out, and whose `prefix:` call it declines.
 [`site/fractal.html`](../../site/fractal.html) introduces Fractal and
 links to the explorer.
 
