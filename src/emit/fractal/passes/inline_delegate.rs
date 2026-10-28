@@ -31,9 +31,8 @@ use crate::ingest::prism_api::PrismLocation;
 use crate::span::Span;
 
 /// The `activesupport` version whose `ActiveSupport::Delegation.generate`
-/// this pass reproduces, checked against rails/rails main. 8.1 and earlier
-/// generate `rescue NoMethodError` and a bare `raise`, so they are not
-/// handled.
+/// this pass reproduces, checked against rails/rails main. Every other
+/// version is declined rather than assumed to generate the same source.
 pub const VERIFIED_ACTIVESUPPORT_VERSION: &str = "8.2.0.alpha";
 
 /// Names Active Support rewrites to `self.<name>` when they are the

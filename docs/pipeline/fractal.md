@@ -40,7 +40,8 @@ time) are the same kind of edit, applied the same way.
    ```
 
 The Cargo binary is `fractal`. The shipped binary accepts the same
-commands as `roundhouse fractal emit` and `roundhouse fractal apply`.
+commands as `roundhouse fractal emit`, `roundhouse fractal apply` and
+`roundhouse fractal verify`.
 `roundhouse --target fractal` also uses the same emission step.
 
 Emit defaults to the current app and `out/fractal`. Apply uses the same
@@ -95,11 +96,18 @@ All of it lives in [`src/emit/fractal/`](../../src/emit/fractal/).
    command overwrites only files present in the overlay. It leaves
    unrelated files unchanged and does not copy the build metadata.
 
-`--report PATH` writes the build's decisions as JSON: the compiled
-files, every method in them with the analyzer's facts, files skipped
-and why, every rewrite (`path:line:col`, pass, old and new text) and every
-declined site with the pass and reason.
-Keep the report outside the overlay directory.
+`--report PATH` writes the build's decisions as JSON, after the overlay:
+the compiled files, every method in them with the analyzer's facts, files
+skipped and why, every rewrite (`path:line:col`, pass, old and new text)
+and every declined site with the pass and reason. A report path inside
+the overlay is refused before anything is read or written: a rebuild
+would delete it, and one named like the metadata file would make an
+unrelated directory look like an earlier build.
+
+A compiled file that names a namespace by a relative path the compiled
+files do not define (`class B::C` inside `module A`, with `A::B` defined
+elsewhere) is named against the app's sources, since a scoped ingest may
+not have read the file that settles it.
 
 Source discovery keeps nested namespaces such as `app/models/public/`
 and `app/models/test/`. It excludes test and state directories only at
@@ -131,9 +139,63 @@ build, not the boot, responsible for correctness:
 - the build must see what the deploy will run: the same source, the same
   `Gemfile.lock`.
 
-Checking a booted app's state against the source's, and stamping a build
-with what it was compiled from, are natural next steps for running this
-on a large app; this proof of concept does not do them yet.
+`fractal verify` checks a booted app's state against the source's (see
+below). Stamping a build with what it was compiled from is a natural next
+step for running this on a large app; this proof of concept does not do
+it yet.
+
+## Verifying an overlay
+
+```sh
+# From the app's root, with the report of the build that wrote the overlay
+fractal emit --file app/models/article.rb --report report.json . -o out/fractal
+fractal verify --report report.json --ruby 'bundle exec ruby' \
+  --require config/environment out/fractal .
+```
+
+[`verify.rs`](../../src/emit/fractal/verify.rs) boots the app twice in
+fresh Ruby processes, before and after copying the overlay onto it, and
+restores the app's files afterwards whether or not the second boot
+succeeds. While the overlay is applied, Ctrl+C stops the Ruby boot but not
+`verify`, which still restores the files (on Unix); copies of the
+originals are also written to `originals/` in the working directory
+(`--keep DIR`, or a temporary directory removed after a successful run).
+Each boot requires the `--require` files, then the compiled files, and
+[`fingerprint.rb`](../../src/emit/fractal/verify/fingerprint.rb)
+fingerprints every named module with a method in a compiled file (every
+named module with `--all`): its ancestors, singleton ancestors, constants
+and instance variable names, and for each of its own methods the owner,
+visibility, parameters, arity, original name, source location and a
+digest of its bytecode (`RubyVM::InstructionSequence#to_a`). The bytecode
+keeps line numbers, which a rewrite preserves, and drops column and node
+positions, the absolute path (code compiled from a string has none), and
+memory addresses (a builtin's C function pointer, an embedded object's
+inspect). `--keep DIR` keeps both fingerprints as JSON.
+
+The overlay is verified, and the command exits 0, only when:
+
+- the two fingerprints are equal; a difference names the rewrite on the
+  method's line, if any;
+- every rewrite in the report was observed: some method in both boots is
+  defined on its line. A rewrite no method sits on was never checked, so
+  it fails rather than passing vacuously;
+- no method changed from compiled-from-a-string to compiled-from-the-file
+  while naming a constant by a relative path. Constant lookup depends on
+  the lexical scope the code was compiled in, which the bytecode does not
+  record, so equal bytecode does not settle such a method.
+  `inline-delegate` writes every constant with a leading `::` for this
+  reason.
+
+The report and the overlay's `.roundhouse-fractal.json` must name the same
+rewritten files, or `verify` refuses them as different builds before
+booting anything.
+
+Equal fingerprints show the rewritten app defines the same methods with
+the same bytecode. They do not cover state the fingerprint leaves out:
+values of class-level instance variables (only their names), methods Rails
+generates lazily after boot (attribute methods appear only once a model is
+instantiated), or code paths the boot never loads. `verify` is not in the
+browser build.
 
 ## Passes
 
@@ -164,7 +226,8 @@ else with a reason:
   naming a plain method (no `prefix:`, `allow_nil:`, `private:`, instance
   variables, constants, or `:class`);
 - `Gemfile.lock` resolves activesupport 8.2.0.alpha, whose generator it
-  was checked against (rails/rails main; 8.1 differs);
+  was checked against (rails/rails main); any other version is declined
+  rather than assumed to generate the same source;
 - the app's source defines no `delegate` that a class body could call
   instead
   ([`passes/delegate_definitions.rs`](../../src/emit/fractal/passes/delegate_definitions.rs)):

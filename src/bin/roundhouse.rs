@@ -40,6 +40,7 @@ Usage: roundhouse --target LANG [INPUT] [-o OUT]
        roundhouse --target fractal [--file PATH]... [--whole-app] [--report PATH] [INPUT] [-o OUT]
        roundhouse fractal emit [OPTIONS] [APP] [-o OUT]
        roundhouse fractal apply [OVERLAY] [APP]
+       roundhouse fractal verify --report PATH [OPTIONS] [OVERLAY] [APP]
        roundhouse --archives LANG,LANG [INPUT] [-o OUT]
        roundhouse check [--continue] [--inventory PATH] [--hotspots] [APP]
        roundhouse lsp
@@ -56,7 +57,8 @@ Subcommands (each takes --help):
                        ranked hotspot report. --inventory PATH writes JSON.
   lsp                  Serve the Language Server over stdio.
   mcp                  Serve the MCP tools over stdio for APP (default .).
-  fractal              Emit a file overlay, or apply it to an existing app.
+  fractal              Emit a file overlay, apply it to an existing app,
+                       or verify it by booting the app before and after.
 
 Options:
   -t, --target LANG    Transpile target. One of:

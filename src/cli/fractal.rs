@@ -1,4 +1,5 @@
-//! Separate sparse-overlay emission from applying it to an existing app.
+//! Separate sparse-overlay emission from applying it to an existing app,
+//! and verify an applied overlay.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -10,6 +11,7 @@ use crate::ingest::ingest_app;
 const USAGE: &str = "\
 Usage: fractal emit [--file PATH]... [--whole-app] [--survey] [--report PATH] [APP] [-o OUT]
        fractal apply [OVERLAY] [APP]
+       fractal verify --report PATH [--ruby CMD] [--require PATH]... [--all] [--keep DIR] [OVERLAY] [APP]
 
 emit   Write only changed files in the app's directory structure.
        APP defaults to .; OUT defaults to out/fractal.
@@ -22,8 +24,18 @@ apply  Copy overlay files onto APP, replacing matching files and adding new file
        OVERLAY defaults to out/fractal; APP defaults to .
        Files absent from the overlay stay unchanged. Apply never deletes files.
        Source and destination entries must not be symlinks.
+verify Boot APP in Ruby before and after applying OVERLAY, compare what Ruby
+       can observe of the compiled modules, and restore APP's files.
+       --report PATH is the emit report of the build that wrote OVERLAY.
+       --ruby CMD runs Ruby in APP (default: ruby), for example
+       'bundle exec ruby'.
+       --require PATH is required first, relative to APP (config/environment).
+       --all fingerprints every named module, not only the compiled ones.
+       --keep DIR keeps both fingerprints, and copies of the replaced files.
+       Exits 1 when any difference, unobserved rewrite or unverified
+       method is found.
 
-The shipped roundhouse binary also accepts: roundhouse fractal emit|apply.
+The shipped roundhouse binary also accepts: roundhouse fractal emit|apply|verify.
 ";
 
 #[derive(Default)]
@@ -40,9 +52,10 @@ enum Command {
     Help,
     Emit(Emit),
     Apply { overlay: PathBuf, app: PathBuf },
+    Verify(fractal::verify::Options),
 }
 
-/// Run `fractal emit|apply` or `roundhouse fractal emit|apply`.
+/// Run `fractal emit|apply|verify` or `roundhouse fractal emit|apply|verify`.
 pub fn run(arguments: &[String]) -> ExitCode {
     let command = match parse(arguments) {
         Ok(command) => command,
@@ -67,6 +80,20 @@ pub fn run(arguments: &[String]) -> ExitCode {
         Command::Apply { overlay, app } => fractal::apply(&overlay, &app).map(|count| {
             eprintln!("fractal: applied {count} file(s) from {} to {}", overlay.display(), app.display());
         }),
+        Command::Verify(options) => {
+            return match fractal::verify::verify(&options) {
+                Ok(outcome) => {
+                    for line in outcome.render().lines() {
+                        eprintln!("fractal: {line}");
+                    }
+                    if outcome.verified() { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+                }
+                Err(error) => {
+                    eprintln!("fractal: {error}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -79,7 +106,7 @@ pub fn run(arguments: &[String]) -> ExitCode {
 
 fn parse(arguments: &[String]) -> Result<Command, String> {
     let Some((command, arguments)) = arguments.split_first() else {
-        return Err("expected emit or apply".into());
+        return Err("expected emit, apply or verify".into());
     };
     match command.as_str() {
         "-h" | "--help" => Ok(Command::Help),
@@ -122,8 +149,49 @@ fn parse(arguments: &[String]) -> Result<Command, String> {
             }
             Ok(Command::Emit(options))
         }
-        _ => Err(format!("unknown command: {command}; expected emit or apply")),
+        "verify" => parse_verify(arguments),
+        _ => Err(format!("unknown command: {command}; expected emit, apply or verify")),
     }
+}
+
+fn parse_verify(arguments: &[String]) -> Result<Command, String> {
+    let mut report = None;
+    let mut ruby = vec!["ruby".to_string()];
+    let mut requires = Vec::new();
+    let mut all = false;
+    let mut keep = None;
+    let mut paths = Vec::new();
+    let mut arguments = arguments.iter();
+    while let Some(argument) = arguments.next() {
+        let (flag, inline) = match argument.split_once('=') {
+            Some((flag, value)) if flag.starts_with("--") => (flag, Some(value.to_string())),
+            _ => (argument.as_str(), None),
+        };
+        let mut value = |name: &str| inline.clone().or_else(|| arguments.next().cloned()).ok_or(format!("{name} requires a value"));
+        match flag {
+            "-h" | "--help" => return Ok(Command::Help),
+            "--report" => report = Some(PathBuf::from(value("--report")?)),
+            "--ruby" => ruby = value("--ruby")?.split_whitespace().map(str::to_string).collect(),
+            "--require" => requires.push(value("--require")?),
+            "--keep" => keep = Some(PathBuf::from(value("--keep")?)),
+            "--all" => all = true,
+            flag if flag.starts_with('-') => return Err(format!("unknown verify flag: {flag}")),
+            _ => paths.push(PathBuf::from(argument)),
+        }
+    }
+    if paths.len() > 2 {
+        return Err("verify expects at most OVERLAY and APP".into());
+    }
+    let mut paths = paths.into_iter();
+    Ok(Command::Verify(fractal::verify::Options {
+        overlay: paths.next().unwrap_or_else(|| PathBuf::from("out/fractal")),
+        app: paths.next().unwrap_or_else(|| PathBuf::from(".")),
+        report: report.ok_or("verify requires --report PATH, the emit report of the build")?,
+        ruby,
+        requires,
+        all,
+        keep,
+    }))
 }
 
 /// Decide what to ingest, analyze it, and emit only the generated files.

@@ -26,6 +26,8 @@
 //! - [`rewrite`]: applies the proposals, refusing any that leave the
 //!   file, overlap, move a line, or break the parse.
 //! - [`tree`]: emits the sparse overlay and applies it to the base app.
+//! - [`verify`]: boots the app before and after the overlay and compares
+//!   what Ruby can observe of the compiled code (not in the browser build).
 //!
 //! [`stages`] is not part of a build: it shows the compiled files after
 //! each pass, for the browser pass explorer (`wasm/fractal/`).
@@ -44,6 +46,8 @@ pub mod scope;
 pub mod select;
 pub mod stages;
 pub mod tree;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod verify;
 
 use std::path::Path;
 

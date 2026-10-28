@@ -40,7 +40,9 @@ yaml-rust2 = { version = "0.13.0", default-features = false }
 # Pin the reviewed tag so installers without Cargo.lock still resolve Prism 2.
 rubydex = { git = "https://github.com/Shopify/rubydex", tag = "v0.4.2" }
 
-[target.'cfg(target_os = "macos")'.dependencies]
+# macOS process probes, and the signal dispositions `fractal verify` holds
+# while an overlay is applied (any Unix).
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]

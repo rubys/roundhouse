@@ -1,4 +1,4 @@
-//! `fractal emit|apply`: emit a sparse overlay, then apply it to an app.
+//! `fractal emit|apply|verify`: emit a sparse overlay, apply it to an app, or verify it.
 
 use std::process::ExitCode;
 
