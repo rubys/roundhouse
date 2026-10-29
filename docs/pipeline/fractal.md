@@ -193,6 +193,20 @@ booting anything. The overlay must also hold exactly those files, and
 restored, so an extra file would be left in the app, and a missing one
 would compare the original with itself.
 
+A pass that lowers an expression (`lower-duration`) changes the bytecode
+of the line it rewrites by design
+([`Pass::changes_bytecode`](../../src/emit/fractal/pass.rs)), so for its
+rewrites the first two conditions read differently. A rewrite is observed
+when a method that both boots define in the same place spans its line,
+and that method's bytecode may differ on the rewritten lines only. Its
+other lines (each one's instructions, across the method's blocks, with
+jump labels named by order rather than offset, in the body, the catch
+tables and the optional parameters' defaults) and the shape of its
+instruction sequences (headers and catch tables, without the stack depth)
+must compile as before. That the rewritten line does what it did rests on
+the pass and its tests, not on `verify`. A rewrite in a block outside a
+method (a `scope` lambda) has no method to sit in, and is unobserved.
+
 Equal fingerprints show the rewritten app defines the same methods with
 the same bytecode. They do not cover state the fingerprint leaves out:
 values of class-level instance variables (only their names), methods Rails
@@ -202,7 +216,8 @@ browser build.
 
 ## Passes
 
-One pass is registered, `inline-delegate`.
+Two passes are registered, and run in this order: `inline-delegate` and
+`lower-duration`.
 
 ### `inline-delegate`
 
@@ -267,6 +282,100 @@ values, a `NoMethodError` raised inside the target, and the error for a
 nil target. That comparison runs only where `ruby -e 'require
 "active_support/core_ext/module/delegation"'` works.
 
+### `lower-duration`
+
+[`passes/lower_duration.rs`](../../src/emit/fractal/passes/lower_duration.rs).
+`5.days.ago` builds an `ActiveSupport::Duration` and its parts hash in
+`Numeric#days`, then `Duration#ago` calls the private `#sum`, which builds
+a second hash to pass `Time#advance` its keywords. For a Duration with one
+part, `sum` comes down to one call on `::Time.current`, and the pass
+writes that call, with the number folded, in place of the chain:
+
+| Written | Rewritten |
+| --- | --- |
+| `5.days.ago` | `::Time.current.advance(days: -5)` |
+| `1.fortnight.after` | `::Time.current.advance(weeks: 2)` |
+| `3.months.from_now` | `::Time.current.advance(months: 3)` |
+| `2.hours.ago` | `::Time.current.since(-7200)` |
+| `30.seconds.until` | `::Time.current.since(-30)` |
+
+Days, weeks, months and years stay calendar arithmetic (`advance`), so a
+day across a DST change is still a day of the wall clock, as in Rails.
+Writing a day as 86,400 seconds (`since(-432000)`) would give a different
+result for windows that cross a DST change; the runtime test checks that
+it catches exactly that.
+
+It rewrites only what it can reproduce exactly, and declines everything
+else with a reason:
+
+- the receiver is an integer literal that fits 32 bits (not a variable, a
+  constant or a float, whose class the source does not settle), the unit
+  is one Active Support defines on `Numeric` or `Integer` (`second` to
+  `year`, singular or plural, and `fortnight`), and the direction is
+  `ago`, `until`, `before`, `since`, `from_now` or `after`;
+- both calls use `.` (not `&.`), pass no block, and the direction gets no
+  argument (`5.days.ago(time)` checks `time.acts_like?` first);
+- the chain is on one line, inside a `def`, block or lambda: a chain run
+  once, as the file loads (a constant's value), saves nothing, and
+  `verify` could not check it;
+- the file activates no refinement with `using`;
+- `Gemfile.lock` resolves activesupport 8.2.0.alpha, whose `Duration` it
+  was checked against (rails/rails main);
+- the app's source defines none of the methods the rewrite takes out (the
+  unit, its `Duration` constructor, the direction, `sum`, `new`,
+  `initialize`) where it could run instead of Active Support's
+  ([`passes/duration_definitions.rs`](../../src/emit/fractal/passes/duration_definitions.rs)):
+  in a reopening of `Integer`, `Numeric` or `ActiveSupport::Duration` (by
+  full lexical name, so an app's own `Billing::Duration` does not count),
+  on one of them as an explicit receiver or in a block passed to a call on
+  one (`Integer.class_eval do`), or in a module mixed into one of them,
+  followed through modules that include it. Only the sites relying on a
+  defined name are declined.
+
+The scan sees literal names and constant receivers only; a method defined
+on a class held in a variable, or under a computed name, is beyond what the
+source shows. Before parsing, it reads only files that name `Duration`, or
+that name `Integer` or `Numeric` after `class` or `<<`, or before `.`, `&.`
+or `::`, however spaced (not a type annotation's `::Integer`, nor a
+whole-line comment). The pass also trusts that `Time.current` returns a
+time or a date, which `Duration#sum` checks with `acts_like?` and the
+rewrite does not.
+
+Per call, against rails/rails main (f39c8aa) on Ruby 4.0.9 with
+`Time.zone = "America/Chicago"`, 500k calls per process and one expression
+per process (time is the median of three runs):
+
+| Expression | Objects / bytes | ns interp / YJIT / ZJIT | Site ISEQ | YJIT code + metadata | ZJIT code + metadata |
+| --- | --- | --- | --- | --- | --- |
+| `5.days.ago` | 37 / 2,456 B | 11,383 / 5,962 / 7,731 | 568 B | 251 + 1,091 KB | 316 + 2,280 KB |
+| `::Time.current.advance(days: -5)` | 34 / 2,096 B | 10,420 / 5,583 / 7,011 | 640 B | 243 + 1,065 KB | 308 + 2,259 KB |
+| `5.hours.ago` | 6 / 520 B | 1,843 / 646 / 965 | 568 B | 180 + 809 KB | 212 + 2,097 KB |
+| `::Time.current.since(-18000)` | 4 / 320 B | 1,166 / 334 / 494 | 640 B | 172 + 782 KB | 204 + 2,050 KB |
+| `3.months.from_now` | 42 / 2,656 B | 13,224 / 7,176 / 9,140 | 568 B | 242 + 1,088 KB | 320 + 2,278 KB |
+| `::Time.current.advance(months: 3)` | 39 / 2,296 B | 11,840 / 6,710 / 8,580 | 640 B | 234 + 1,062 KB | 312 + 2,257 KB |
+
+The rewrite saves the Duration (40 B), its parts hash and, for `advance`,
+the hash `sum` builds for its keywords (160 B each): 3 objects and 360 B a
+call for days, weeks, months and years, 2 objects and 200 B for seconds,
+minutes and hours. That is 6-10% of the time for `advance`, where
+`Time#advance`'s calendar arithmetic (13 Rationals and 3 Dates) dominates,
+and 37-49% for `since`. Nothing is retained per call either way (1-6 live slots
+after 10,000 calls and a full GC, which is interpreter and JIT state), and
+peak RSS moves by under 0.6 MB (26-30 MB per process). The call site's ISEQ
+grows by 72 B, but the JITs no longer compile Duration's methods, so their
+code and metadata shrink by 8 KB and 21-47 KB.
+
+[`tests/fractal_lower_duration.rs`](../../tests/fractal_lower_duration.rs)
+pins the rewrites and every decline. Where Ruby can load
+`active_support/time`, it also builds a model with every unit, direction
+and a spread of numbers (576 chains), runs the pass, and compares each
+result before and after under `travel_to`: in six zones and with none (so
+`Time.current` is the local `Time.now`), at instants whose windows cross
+DST changes (Lord Howe's half-hour one among them), a month end and a
+leap day. That is 27,648 observations of class, value, offset, `utc?`,
+nanoseconds and zone name, and it checks that the comparison fails for the
+seconds lowering above.
+
 ### Removed: `inline-enum-predicates`
 
 The first pass, `inline-enum-predicates`, was removed. It rewrote a call
@@ -284,8 +393,10 @@ remains in the git history.
 
 Implement [`Pass`](../../src/emit/fractal/pass.rs) in a module of
 [`passes/`](../../src/emit/fractal/passes/): a name, a one-line
-`summary` (what the pass explorer shows), a `scope`,
-and a `run` that reads a [`Unit`](../../src/emit/fractal/pass.rs) and
+`summary` (what the pass explorer shows), a `scope`, `changes_bytecode`
+when its rewrites compile to different bytecode by design (so `verify`
+confines the difference to its lines instead of reporting it), and a
+`run` that reads a [`Unit`](../../src/emit/fractal/pass.rs) and
 returns a `Proposal` of `Edit`s (spans of the unit's file and their
 replacement text) and declined sites. [`Context`](../../src/emit/fractal/pass.rs)
 gives app-wide facts read from source without ingest: every Ruby file of
@@ -313,8 +424,11 @@ way a build applies them. It writes nothing. The explorer shows the
 complete selected file at each stage, but `fractal emit` writes only
 changed files. Use `fractal apply` to overwrite those files in the base app.
 
-The example compiles a model whose simple `delegate` call
-`inline-delegate` writes out, and whose `prefix:` call it declines.
+The examples exercise each pass. The Article model has a simple
+`delegate` call that `inline-delegate` writes out, and a `prefix:` call
+it declines. The Event model has Duration chains in methods and a
+`scope` that `lower-duration` rewrites, and ones it declines: a constant's
+value, a non-literal receiver, a time passed to `ago`.
 [`site/fractal.html`](../../site/fractal.html) introduces Fractal and
 links to the explorer.
 

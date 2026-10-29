@@ -50,6 +50,16 @@ pub trait Pass {
     /// [`Context::app_sources`] need no ingest.
     fn scope(&self) -> Scope;
 
+    /// Whether the code this pass writes compiles to different bytecode
+    /// from the code it replaces. `inline-delegate` writes the source Active
+    /// Support would `module_eval`, so the bytecode is the same; a pass that
+    /// lowers an expression to a cheaper one changes it by design, and
+    /// `fractal verify` then checks that the bytecode changed only on the
+    /// rewritten lines.
+    fn changes_bytecode(&self) -> bool {
+        false
+    }
+
     /// Propose edits to `unit`, or decline with reasons.
     fn run(&self, context: &Context<'_>, unit: &Unit<'_>) -> Proposal;
 }
@@ -208,7 +218,7 @@ pub struct Edit {
 /// Call it once per build: a pass may keep what it learned about the app
 /// (an app-wide read) for the rest of the build.
 pub fn registered() -> Vec<Box<dyn Pass>> {
-    vec![Box::new(super::passes::InlineDelegate::default())]
+    vec![Box::new(super::passes::InlineDelegate::default()), Box::new(super::passes::LowerDuration::default())]
 }
 
 /// Directories [`Context::app_sources`] skips only at the app root.

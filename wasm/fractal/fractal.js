@@ -12,10 +12,36 @@
 
 import { createClient } from "../lib/wasm-client.mjs";
 
-// A small app to compile. The registered pass, `inline-delegate`, writes
-// the simple `delegate` calls out as the methods Active Support would
-// generate, and declines the one with `prefix:`. Nothing here is from a
-// real application.
+// Small apps to compile, one per registered pass. In the Article model,
+// `inline-delegate` writes the simple `delegate` calls out as the methods
+// Active Support would generate, and declines the one with `prefix:`. In
+// the Event model, `lower-duration` writes each literal Duration
+// chain as the one Time call its Duration would make, and declines a
+// constant's value, a non-literal receiver and a time passed to `ago`.
+// Nothing here is from a real application.
+const LOCKFILE = `GEM
+  remote: https://rubygems.org/
+  specs:
+    activerecord (8.2.0.alpha)
+      activemodel (= 8.2.0.alpha)
+      activesupport (= 8.2.0.alpha)
+    activesupport (8.2.0.alpha)
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+  activerecord
+
+BUNDLED WITH
+   2.6.9
+`;
+
+const APPLICATION_RECORD = `class ApplicationRecord < ActiveRecord::Base
+  primary_abstract_class
+end
+`;
+
 const EXAMPLES = {
   article: {
     label: "Article model",
@@ -37,29 +63,41 @@ class Article < ApplicationRecord
   def byline = "by #{name}"
 end
 `,
-      "app/models/application_record.rb": `class ApplicationRecord < ActiveRecord::Base
-  primary_abstract_class
-end
-`,
+      "app/models/application_record.rb": APPLICATION_RECORD,
       // Passes read gem versions from here: inline-delegate reproduces the
       // source this Active Support generates.
-      "Gemfile.lock": `GEM
-  remote: https://rubygems.org/
-  specs:
-    activerecord (8.2.0.alpha)
-      activemodel (= 8.2.0.alpha)
-      activesupport (= 8.2.0.alpha)
-    activesupport (8.2.0.alpha)
+      "Gemfile.lock": LOCKFILE,
+    },
+  },
+  event: {
+    label: "Event model",
+    file: "app/models/event.rb",
+    src: {
+      "app/models/event.rb": `# frozen_string_literal: true
 
-PLATFORMS
-  ruby
+class Event < ApplicationRecord
+  LISTED_UNTIL = 14.days.from_now
 
-DEPENDENCIES
-  activerecord
+  scope :past, -> { where(ends_at: ...7.days.ago) }
 
-BUNDLED WITH
-   2.6.9
+  def starting_soon?
+    starts_at < 3.days.from_now
+  end
+
+  def recently_edited?
+    edited_at.present? && edited_at > 2.hours.ago
+  end
+
+  def registration_closes = 1.fortnight.after
+
+  def announced_at = notice_days.days.ago
+
+  def reminder_at = 30.minutes.ago(starts_at)
+end
 `,
+      "app/models/application_record.rb": APPLICATION_RECORD,
+      // lower-duration reproduces what this Active Support's Duration calls.
+      "Gemfile.lock": LOCKFILE,
     },
   },
 };
@@ -294,6 +332,7 @@ function render() {
 }
 
 function wire() {
+  els.example.hidden = Object.keys(EXAMPLES).length < 2;
   els.example.innerHTML = Object.entries(EXAMPLES).map(([k, e]) => `<option value="${k}">${esc(e.label)}</option>`).join("");
   els.example.onchange = () => { loadExample(els.example.value); result = null; stage = null; schedule(); };
   els.file.onchange = () => { file = els.file.value; outPath = file; schedule(); };

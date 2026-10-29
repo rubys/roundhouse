@@ -14,6 +14,14 @@
 //! defined on the rewrite's line. A rewrite no method sits on was never
 //! checked, so it fails rather than passing vacuously.
 //!
+//! A pass that lowers an expression to a cheaper one changes the bytecode of
+//! the line it rewrites by design ([`super::pass::Pass::changes_bytecode`]). For
+//! its rewrites, a method that both boots define in the same place and whose
+//! lines span the rewrite observes it, and its bytecode may differ on the
+//! rewritten lines only: every other line, and the shape of its
+//! instruction sequences, must compile as before. That the rewritten line
+//! does what it did rests on the pass, not on this check.
+//!
 //! Identical bytecode is not the whole story. Constant lookup depends on the
 //! lexical scope the code was compiled in, which the bytecode does not
 //! record, and code compiled from a string (`module_eval`) has a different
@@ -141,6 +149,15 @@ struct MethodPrint {
     relative_constants: Vec<String>,
     #[serde(default)]
     listing: Option<String>,
+    /// Line => digest of the instructions on it, for a method in a compiled
+    /// file.
+    #[serde(default)]
+    lines: Option<BTreeMap<String, String>>,
+    /// Digest of the method's bytecode apart from its instructions.
+    #[serde(default)]
+    shape: Option<String>,
+    #[serde(default)]
+    last_line: Option<u32>,
 }
 
 /// Verify `options.overlay` against the app it was built from.
@@ -402,6 +419,11 @@ fn compare(original: &Fingerprint, rewritten: &Fingerprint, rewrites: &[RewriteI
             .unwrap_or_default()
     };
 
+    // `path:line` of the rewrites made by passes that change bytecode by
+    // design, which a method spanning them may differ on.
+    let bytecode_changing: BTreeSet<String> = super::pass::registered().iter().filter(|pass| pass.changes_bytecode()).map(|pass| pass.name().to_string()).collect();
+    let lowered_lines: BTreeSet<&str> = rewrites.iter().filter(|rewrite| bytecode_changing.contains(&rewrite.pass)).map(|rewrite| rewrite_line(&rewrite.at)).collect();
+
     for name in original.modules.keys().chain(rewritten.modules.keys()).collect::<BTreeSet<_>>() {
         match (original.modules.get(name), rewritten.modules.get(name)) {
             (Some(before), Some(after)) if before != after => {
@@ -435,7 +457,15 @@ fn compare(original: &Fingerprint, rewritten: &Fingerprint, rewrites: &[RewriteI
         {
             observed_lines.insert(before_location.clone());
         }
-        let because = explain(before.source_location.as_ref().or(after.source_location.as_ref()));
+        let lowered_here = lowered_within(before, after, &lowered_lines);
+        if !lowered_here.is_empty() {
+            observed_lines.extend(lowered_here.iter().map(|line| line.to_string()));
+        }
+        let mut because = explain(before.source_location.as_ref().or(after.source_location.as_ref()));
+        if !lowered_here.is_empty() {
+            let sites: Vec<String> = rewrites.iter().filter(|rewrite| lowered_here.contains(&rewrite_line(&rewrite.at))).map(|rewrite| format!("{} [{}]", rewrite.at, rewrite.pass)).collect();
+            because = format!(" (rewritten at {})", sites.join(", "));
+        }
         let fields: [(&str, String, String); 7] = [
             ("owner", before.owner.clone(), after.owner.clone()),
             ("visibility", before.visibility.clone(), after.visibility.clone()),
@@ -449,7 +479,11 @@ fn compare(original: &Fingerprint, rewritten: &Fingerprint, rewrites: &[RewriteI
             if before_value == after_value {
                 continue;
             }
-            if field == "bytecode"
+            if field == "bytecode" && !lowered_here.is_empty() {
+                // The rewritten lines may compile differently; every other
+                // line of the method must not.
+                outcome.differences.extend(differences_off_lines(name, before, after, &lowered_here, &because));
+            } else if field == "bytecode"
                 && let (Some(before_listing), Some(after_listing)) = (&before.listing, &after.listing)
             {
                 outcome.differences.push(format!("{name}: bytecode differs{because}: {}", first_difference(before_listing, after_listing)));
@@ -481,6 +515,40 @@ fn compare(original: &Fingerprint, rewritten: &Fingerprint, rewrites: &[RewriteI
         }
     }
     outcome
+}
+
+/// The `path:line`s of `lowered_lines` inside a method that both boots
+/// define in the same place with the same extent.
+fn lowered_within<'line>(before: &MethodPrint, after: &MethodPrint, lowered_lines: &BTreeSet<&'line str>) -> Vec<&'line str> {
+    let (Some(location), Some(last_line)) = (&before.source_location, before.last_line) else { return Vec::new() };
+    if after.source_location.as_ref() != Some(location) || after.last_line != Some(last_line) {
+        return Vec::new();
+    }
+    let Some((path, first_line)) = location.rsplit_once(':').and_then(|(path, line)| Some((path, line.parse::<u32>().ok()?))) else { return Vec::new() };
+    lowered_lines
+        .iter()
+        .copied()
+        .filter(|at| at.rsplit_once(':').is_some_and(|(at_path, line)| at_path == path && line.parse::<u32>().is_ok_and(|line| first_line <= line && line <= last_line)))
+        .collect()
+}
+
+/// Where a method's bytecode differs other than on `lowered` lines: in its
+/// shape (a sequence's header or catch table), or on another line.
+fn differences_off_lines(name: &str, before: &MethodPrint, after: &MethodPrint, lowered: &[&str], because: &str) -> Vec<String> {
+    let (Some(before_lines), Some(after_lines)) = (&before.lines, &after.lines) else {
+        return vec![format!("{name}: bytecode differs{because}, and the fingerprint has no per-line bytecode to confine the difference to the rewritten lines")];
+    };
+    let mut differences = Vec::new();
+    if before.shape != after.shape {
+        differences.push(format!("{name}: bytecode differs outside the rewritten lines, in a sequence's header or catch table{because}"));
+    }
+    let rewritten: BTreeSet<&str> = lowered.iter().filter_map(|at| at.rsplit_once(':').map(|(_, line)| line)).collect();
+    for line in before_lines.keys().chain(after_lines.keys()).collect::<BTreeSet<_>>() {
+        if !rewritten.contains(line.as_str()) && before_lines.get(line) != after_lines.get(line) {
+            differences.push(format!("{name}: bytecode differs on line {line}, which no rewrite that changes bytecode is on{because}"));
+        }
+    }
+    differences
 }
 
 /// The first place two normalised listings differ, with some context.

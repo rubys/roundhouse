@@ -121,6 +121,52 @@ module Fingerprint
     found
   end
 
+  LABEL = /\Alabel_\d+\z/
+
+  # The bytecode of a method and every block, rescue and ensure clause in
+  # it, split by the line each instruction belongs to, for a pass that
+  # changes the bytecode of the lines it rewrites by design: `fractal verify`
+  # then checks that every other line compiles as it did. Labels are named
+  # by order of appearance rather than offset, so an instruction more on one
+  # line does not rename the jump targets on the next. Returns line =>
+  # digest, and a digest of the rest of the shape (each sequence's header
+  # and catch table), which leaves out the stack depth a rewritten line may
+  # change.
+  def by_line(value)
+    lines = Hash.new { |hash, line| hash[line] = [] }
+    shape = []
+    pending = [value]
+    until pending.empty?
+      sequence = pending.shift
+      _magic, _major, _minor, _format, misc, label, path, _absolute_path, first_line, type, locals, parameters, catch_table, body = sequence
+      labels = {}
+      rename = lambda do |operand|
+        if operand.is_a?(Symbol) && operand.match?(LABEL)
+          labels[operand] ||= :"label_#{labels.size}"
+        elsif operand.is_a?(Array) && operand[0] == ISEQ_MAGIC
+          pending << operand
+          :child_sequence
+        else
+          normalize(operand)
+        end
+      end
+      line = first_line
+      body.each do |entry|
+        case entry
+        when Integer then line = entry
+        when Array then lines[line] << entry.map { |operand| rename.(operand) }
+        else lines[line] << rename.(entry)
+        end
+      end
+      # Optional positional parameters name the labels their defaults jump
+      # to, so they are renamed with the body's labels too.
+      parameters = parameters.merge(opt: parameters[:opt].map { |operand| rename.(operand) }) if parameters.is_a?(Hash) && parameters[:opt]
+      shape << [label, relative(path), first_line, type, locals, parameters, misc.except(*POSITION_KEYS, :stack_max), catch_table.map { |row| row.map { |operand| rename.(operand) } }]
+    end
+    digest = ->(object) { Digest::SHA256.hexdigest(object.inspect.gsub(/func_ptr: \d+/, "func_ptr: _").gsub(ADDRESS, "0x_")) }
+    [lines.to_h { |line, instructions| [line.to_s, digest.(instructions)] }, digest.(shape)]
+  end
+
   # `namespace`'s own definition of `name`, past anything prepended to it.
   def own_method(namespace, name)
     method = reflect(namespace, :instance_method, name)
@@ -145,7 +191,11 @@ module Fingerprint
       entry["bytecode"] = Digest::SHA256.hexdigest(listing)
       entry["evaluated"] = iseq.absolute_path.nil?
       entry["relative_constants"] = relative_constants(raw).uniq.sort
-      entry["listing"] = listing if file && @compiled.include?(File.expand_path(file))
+      if file && @compiled.include?(File.expand_path(file))
+        entry["listing"] = listing
+        entry["lines"], entry["shape"] = by_line(raw)
+        entry["last_line"] = raw[4][:code_location]&.[](2)
+      end
     else
       # A C function, an attribute reader or writer, or another method
       # without bytecode.

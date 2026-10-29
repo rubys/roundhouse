@@ -90,8 +90,9 @@
     </p>
     <p class="status-line">
       Status: early. The pipeline is built, and the <a href="fractal/">pass
-      explorer</a> runs it in your browser. One pass is registered,
-      <code>inline-delegate</code>, and <code>fractal verify</code> checks an
+      explorer</a> runs it in your browser. Two passes are registered,
+      <code>inline-delegate</code> and <code>lower-duration</code>, and
+      <code>fractal verify</code> checks an
       overlay by booting the app before and after it and comparing what Ruby
       can observe of the compiled code.
     </p>
@@ -237,7 +238,8 @@
       parse error or warning the original did not.
     </p>
 
-    <h3>The registered pass: <code>inline-delegate</code></h3>
+    <h3>The registered passes</h3>
+    <p><code>inline-delegate</code></p>
     <p>
       <code>delegate :name, to: :author</code> makes Active Support build Ruby
       source for each method at boot and <code>module_eval</code> it. The pass
@@ -249,6 +251,19 @@
       it was checked against, and no app definition of <code>delegate</code>
       a class body could call instead), and declines everything else with a
       reason.
+    </p>
+    <p><code>lower-duration</code></p>
+    <p>
+      <code>5.days.ago</code> builds an <code>ActiveSupport::Duration</code>
+      and two hashes only to call <code>::Time.current.advance(days: -5)</code>.
+      The pass writes that call in place of the chain, with the number folded,
+      which saves 3 objects and 360 bytes a call. Days, weeks, months and
+      years stay calendar arithmetic, so the result across a DST change is
+      the one Rails gives. It rewrites only an integer literal receiver with a
+      unit and direction Active Support defines, inside a method, block or
+      lambda, with the Active Support version it was checked against and no
+      app definition of the methods it takes out, and declines everything
+      else with a reason.
     </p>
 
     <h3>Why the first pass was removed</h3>

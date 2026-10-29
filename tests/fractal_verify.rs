@@ -36,12 +36,17 @@ impl Fixture {
     /// with `rewritten`, and a report naming a rewrite at each of `rewrites`
     /// (`path:line:col`).
     fn new(name: &str, original: &str, rewritten: &str, rewrites: &[&str]) -> Self {
+        Fixture::with_pass(name, original, rewritten, rewrites, "test-pass")
+    }
+
+    /// As [`Fixture::new`], with the rewrites made by `pass`.
+    fn with_pass(name: &str, original: &str, rewritten: &str, rewrites: &[&str], pass: &str) -> Self {
         let root = std::env::temp_dir().join(format!("roundhouse-fractal-verify-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         put(&root.join("app"), MODEL, original);
         put(&root.join("overlay"), MODEL, rewritten);
-        put(&root.join("overlay"), MANIFEST, &format!(r#"{{"compiled": ["{MODEL}"], "passes": ["test-pass"], "rewritten": ["{MODEL}"]}}"#));
-        let rewrites: Vec<String> = rewrites.iter().map(|at| format!(r#"{{"at": "{at}", "pass": "test-pass", "from": "", "to": ""}}"#)).collect();
+        put(&root.join("overlay"), MANIFEST, &format!(r#"{{"compiled": ["{MODEL}"], "passes": ["{pass}"], "rewritten": ["{MODEL}"]}}"#));
+        let rewrites: Vec<String> = rewrites.iter().map(|at| format!(r#"{{"at": "{at}", "pass": "{pass}", "from": "", "to": ""}}"#)).collect();
         put(&root, "report.json", &format!(r#"{{"compiled": ["{MODEL}"], "rewritten": ["{MODEL}"], "rewrites": [{}]}}"#, rewrites.join(", ")));
         Fixture { root }
     }
@@ -271,4 +276,51 @@ fn an_interrupt_during_the_rewritten_boot_still_restores_the_app() {
         .unwrap();
     assert_eq!(output.status.code(), Some(1), "verify survives the interrupt and fails: {output:?}");
     assert_eq!(fs::read_to_string(fixture.app().join(MODEL)).unwrap(), EVALUATED);
+}
+
+/// A method with a Duration chain on line 4, before `lower-duration`
+/// rewrites it. Loading it needs no Active Support: nothing calls it.
+const CHAIN: &str = "class Order\n  def recent\n    window = 1\n    [window, 5.days.ago, [1].map { 2.hours.ago }]\n  end\nend\n";
+
+/// The same method after the rewrite: different bytecode on line 4 only.
+const LOWERED: &str = "class Order\n  def recent\n    window = 1\n    [window, ::Time.current.advance(days: -5), [1].map { ::Time.current.since(-7200) }]\n  end\nend\n";
+
+#[test]
+fn a_lowering_pass_may_change_the_bytecode_of_its_rewritten_lines_only() {
+    if !ruby_available() {
+        return;
+    }
+    let rewrites = ["lib/order.rb:4:14", "lib/order.rb:4:36"];
+    let outcome = Fixture::with_pass("lowered", CHAIN, LOWERED, &rewrites, "lower-duration").verify();
+    assert!(outcome.verified(), "{}", outcome.render());
+    assert_eq!(outcome.observed, rewrites);
+
+    // A pass that keeps bytecode gets no such allowance.
+    let outcome = Fixture::new("kept", CHAIN, LOWERED, &rewrites).verify();
+    assert!(outcome.differences.iter().any(|difference| difference.starts_with("Order#recent: bytecode differs: ")), "{:?}", outcome.differences);
+
+    // Nor does a line the lowering pass did not rewrite.
+    let elsewhere = LOWERED.replace("window = 1", "window = 2");
+    let outcome = Fixture::with_pass("lowered-elsewhere", CHAIN, &elsewhere, &rewrites, "lower-duration").verify();
+    assert!(!outcome.verified());
+    assert_eq!(outcome.differences.len(), 1, "{:?}", outcome.differences);
+    assert!(outcome.differences[0].starts_with("Order#recent: bytecode differs on line 3, which no rewrite that changes bytecode is on"), "{}", outcome.differences[0]);
+}
+
+#[test]
+fn a_lowered_default_argument_verifies_although_its_labels_move() {
+    if !ruby_available() {
+        return;
+    }
+    // The labels an optional parameter's default jumps to are bytecode
+    // offsets, which move when the default's line compiles to more code.
+    let original = "class Order\n  def recent(since = 5.days.ago, mode = 1)\n    [since, mode]\n  end\nend\n";
+    let lowered = "class Order\n  def recent(since = ::Time.current.advance(days: -5), mode = 1)\n    [since, mode]\n  end\nend\n";
+    let outcome = Fixture::with_pass("lowered-default", original, lowered, &["lib/order.rb:2:22"], "lower-duration").verify();
+    assert!(outcome.verified(), "{}", outcome.render());
+
+    // A changed line after the defaults still fails.
+    let elsewhere = lowered.replace("[since, mode]", "[mode, since]");
+    let outcome = Fixture::with_pass("lowered-default-elsewhere", original, &elsewhere, &["lib/order.rb:2:22"], "lower-duration").verify();
+    assert!(outcome.differences.iter().any(|difference| difference.contains("differs on line 3")), "{:?}", outcome.differences);
 }

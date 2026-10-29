@@ -253,8 +253,8 @@ impl<'parse> Visit<'parse> for VisibilityFinder {
 
 /// Finds any call to `using` in a file, direct or through a send with a
 /// literal name.
-struct RefinementFinder {
-    found: bool,
+pub(crate) struct RefinementFinder {
+    pub(crate) found: bool,
 }
 
 impl<'parse> Visit<'parse> for RefinementFinder {

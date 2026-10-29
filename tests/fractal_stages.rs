@@ -97,11 +97,11 @@ fn content<'a>(s: &'a Stages, stage: usize, path: &str) -> &'a str {
 fn the_registered_passes_read_the_lockfile_and_sources_from_memory() {
     let registered = fractal::pass::registered();
     let passes: Vec<&dyn Pass> = registered.iter().map(|pass| pass.as_ref()).collect();
-    assert_eq!(passes.iter().map(|pass| pass.name()).collect::<Vec<_>>(), ["inline-delegate"]);
+    assert_eq!(passes.iter().map(|pass| pass.name()).collect::<Vec<_>>(), ["inline-delegate", "lower-duration"]);
     let model = "class Article < ApplicationRecord\n  delegate :name, to: :author\n\n  def author = nil\nend\n";
     let lock = "GEM\n  remote: https://rubygems.org/\n  specs:\n    activesupport (8.2.0.alpha)\n\nBUNDLED WITH\n   2.6.9\n";
     let s = stages(&[(ARTICLE_RB, model), ("app/models/application_record.rb", BASE), ("Gemfile.lock", lock)], &[ARTICLE_RB], &[], &passes);
-    assert_eq!(s.stages.len(), 2);
+    assert_eq!(s.stages.len(), 3);
     assert_eq!(s.stages[1].pass, "inline-delegate");
     assert_eq!(s.stages[1].rewrites.len(), 1, "{:?}", s.stages[1].declined);
     assert!(content(&s, 1, ARTICLE_RB).contains("  def name(...);  _ = author;  _.name(...);"), "{}", content(&s, 1, ARTICLE_RB));
@@ -120,6 +120,58 @@ fn the_registered_passes_read_the_lockfile_and_sources_from_memory() {
     );
     assert!(s.stages[1].rewrites.is_empty());
     assert!(s.stages[1].declined[0].reason.contains("lib/patch.rb:2"), "{:?}", s.stages[1].declined);
+}
+
+/// The explorer's Event example (`wasm/fractal/fractal.js`): keep
+/// the two in step.
+const EVENT: &str = r#"# frozen_string_literal: true
+
+class Event < ApplicationRecord
+  LISTED_UNTIL = 14.days.from_now
+
+  scope :past, -> { where(ends_at: ...7.days.ago) }
+
+  def starting_soon?
+    starts_at < 3.days.from_now
+  end
+
+  def recently_edited?
+    edited_at.present? && edited_at > 2.hours.ago
+  end
+
+  def registration_closes = 1.fortnight.after
+
+  def announced_at = notice_days.days.ago
+
+  def reminder_at = 30.minutes.ago(starts_at)
+end
+"#;
+
+#[test]
+fn the_explorer_event_example_lowers_its_literal_duration_chains() {
+    let registered = fractal::pass::registered();
+    let passes: Vec<&dyn Pass> = registered.iter().map(|pass| pass.as_ref()).collect();
+    let lock = "GEM\n  remote: https://rubygems.org/\n  specs:\n    activesupport (8.2.0.alpha)\n\nBUNDLED WITH\n   2.6.9\n";
+    let path = "app/models/event.rb";
+    let s = stages(&[(path, EVENT), ("app/models/application_record.rb", BASE), ("Gemfile.lock", lock)], &[path], &[], &passes);
+    assert!(s.skipped.is_empty(), "{:?}", s.skipped);
+    assert_eq!(s.stages[2].pass, "lower-duration");
+    let rewrites: Vec<(&str, &str)> = s.stages[2].rewrites.iter().map(|rewrite| (rewrite.from.as_str(), rewrite.to.as_str())).collect();
+    assert_eq!(
+        rewrites,
+        [
+            ("7.days.ago", "::Time.current.advance(days: -7)"),
+            ("3.days.from_now", "::Time.current.advance(days: 3)"),
+            ("2.hours.ago", "::Time.current.since(-7200)"),
+            ("1.fortnight.after", "::Time.current.advance(weeks: 2)"),
+        ]
+    );
+    let declined: Vec<&str> = s.stages[2].declined.iter().map(|decline| decline.reason.as_str()).collect();
+    assert_eq!(declined.len(), 3, "{declined:?}");
+    assert!(declined[0].contains("runs once, as the file loads"), "{}", declined[0]);
+    assert!(declined[1].contains("something other than an integer literal"), "{}", declined[1]);
+    assert!(declined[2].contains("passes a time to `ago`"), "{}", declined[2]);
+    assert_eq!(content(&s, 2, path).lines().count(), EVENT.lines().count());
 }
 
 #[test]
