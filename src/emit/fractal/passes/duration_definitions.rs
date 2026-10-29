@@ -1,16 +1,18 @@
 //! Where the app's own source defines a method that could run in place of
-//! one of the Active Support methods `lower-duration` takes out of a call:
-//! `Numeric#days` and its siblings, `Integer#months` and `#years`, the
-//! `ActiveSupport::Duration` constructors, and `Duration#ago`, `#since`,
-//! their aliases and the private `#sum` they call.
+//! one of the Active Support methods `lower-duration` takes out of a call,
+//! or newly calls: `Numeric#days` and its siblings, `Integer#months` and
+//! `#years`, the `ActiveSupport::Duration` constructors, `Duration#ago`,
+//! `#since`, their aliases and the private `#sum` they call, and the `Time`,
+//! `TimeWithZone` and `TimeZone` methods between `Time.current` and Ruby's
+//! own `Time` arithmetic (`Time.current`, `#since`, `#advance`, `#change`,
+//! `#plus_without_duration`, `TimeZone#now`).
 //!
-//! Only definitions that can land on `Integer`, `Numeric` or
-//! `ActiveSupport::Duration` (or its singleton class) matter. An instance
-//! method `days` of an ordinary class cannot, and neither can a top-level
-//! `def`, which defines a private method of `Object` that `Numeric`'s and
-//! `Duration`'s own methods come before. A definition counts when it is:
+//! Only definitions that can land on one of [`TARGETS`] (or its singleton
+//! class) matter. An instance method `days` of an ordinary class cannot, and
+//! neither can a top-level `def`, which defines a private method of `Object`
+//! that the targets' own methods come before. A definition counts when it is:
 //!
-//! - in a `class` or `module` body for one of those three (reopened by its
+//! - in a `class` or `module` body for one of them (reopened by its
 //!   full lexical name: `class Integer`, or `class Duration` inside
 //!   `module ActiveSupport`), its `class << self`, or a block inside it;
 //! - made on one of them as an explicit receiver (`def Integer.x`,
@@ -37,7 +39,7 @@ use super::super::definitions::literal_name;
 
 /// The classes whose methods `lower-duration` relies on keeping Active
 /// Support's definitions, by full name.
-pub const TARGETS: &[&str] = &["Integer", "Numeric", "ActiveSupport::Duration"];
+pub const TARGETS: &[&str] = &["Integer", "Numeric", "ActiveSupport::Duration", "Time", "ActiveSupport::TimeWithZone", "ActiveSupport::TimeZone"];
 
 /// Calls that define, alias or remove the methods their arguments name.
 const NAMING_CALLS: &[&str] = &[
@@ -51,7 +53,7 @@ const SEND_CALLS: &[&str] = &["send", "__send__", "public_send"];
 const MIXING_CALLS: &[&str] = &["include", "prepend", "extend"];
 
 /// Each of `names` the app defines where it could run in place of Active
-/// Support's on `Integer`, `Numeric` or `ActiveSupport::Duration`, with the
+/// Support's on one of [`TARGETS`], with the
 /// `path:line` of every such definition, in the order found.
 pub fn blocking_definitions(sources: &[SourceFile], root: &Path, names: &BTreeSet<String>) -> BTreeMap<String, Vec<String>> {
     let mut sites = BTreeMap::new();
@@ -102,10 +104,13 @@ impl Targets {
     fn may_be_named_in(&self, text: &str) -> bool {
         match self {
             Targets::Module(name) => text.contains(name.as_str()),
-            // `Duration` anywhere. `Integer` and `Numeric` appear in most
-            // files' type annotations, so only where a reopening or a call
-            // could use them.
-            Targets::Classes => text.contains("Duration") || ["Integer", "Numeric"].iter().any(|name| names_as_receiver_or_body(text, name)),
+            // `Duration`, `TimeWithZone` and `TimeZone` anywhere. `Integer`,
+            // `Numeric` and `Time` appear in most files' type annotations, so
+            // only where a reopening or a call could use them.
+            Targets::Classes => {
+                ["Duration", "TimeWithZone", "TimeZone"].iter().any(|name| text.contains(name))
+                    || ["Integer", "Numeric", "Time"].iter().any(|name| names_as_receiver_or_body(text, name))
+            }
         }
     }
 }
@@ -348,14 +353,15 @@ mod tests {
             ("eval.rb", "ActiveSupport::Duration.class_eval do\n  def since = nil\nend\n"),
             ("singleton.rb", "def Integer.days = nil\nclass << ActiveSupport::Duration\n  def days = nil\nend\n"),
             ("unrelated.rb", "Integer.define_method(:weeks) { 1 }\n"),
+            ("time.rb", "class Time\n  def self.current = now\nend\nclass ActiveSupport::TimeWithZone\n  alias_method :since, :+\nend\nclass DateTime\n  def since = nil\nend\n"),
             ("spaced.rb", "class  Numeric\n  def days = hours\nend\nclass\tInteger\n  def days = 2\nend\n"),
             ("scoped.rb", "Numeric::define_method(:days) { hours }\nInteger\n  .send(:define_method, :ago) { }\n"),
         ];
         assert_eq!(
-            blocking(&files, &["days", "ago", "since", "sum"]),
+            blocking(&files, &["days", "ago", "since", "sum", "current"]),
             [
                 "duration.rb:3", "duration.rb:5", "eval.rb:2", "integer.rb:2", "numeric.rb:2", "path.rb:2", "receiver.rb:1", "receiver.rb:2", "scoped.rb:1", "scoped.rb:2",
-                "singleton.rb:1", "singleton.rb:3", "spaced.rb:2", "spaced.rb:5",
+                "singleton.rb:1", "singleton.rb:3", "spaced.rb:2", "spaced.rb:5", "time.rb:2", "time.rb:5",
             ]
         );
     }
@@ -377,6 +383,13 @@ mod tests {
             ("T.let(1, Integer)", false),
             ("BigInteger.new", false),
             ("subclass Integer", false),
+            ("class Time; end", true),
+            ("Time.now", true),
+            ("ActiveSupport::TimeWithZone.prepend(M)", true),
+            ("class ActiveSupport::TimeZone; end", true),
+            ("DateTime.now", false),
+            ("#: (Time) -> Time", false),
+            ("Timeout.timeout(1) { }", false),
         ] {
             assert_eq!(Targets::Classes.may_be_named_in(text), named, "{text}");
         }

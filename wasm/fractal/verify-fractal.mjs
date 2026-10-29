@@ -96,7 +96,12 @@ await page.evaluate(() => {
 });
 s = await state();
 console.log(s.status, "|", s.chips.join(" → "), "|", s.file);
-for (const lowered of ["::Time.current.advance(days: -7)", "::Time.current.advance(days: 3)", "::Time.current.since(-7200)", "::Time.current.advance(weeks: 2)"]) {
+for (const lowered of [
+  "(::Time.zone ? ::Time.zone.now.plus_without_duration(-604800) : ::Time.now.advance(days: -7))",
+  "(::Time.zone ? ::Time.zone.now.plus_without_duration(259200) : ::Time.now.advance(days: 3))",
+  "(::Time.zone ? ::ActiveSupport::TimeWithZone.new(::Time.now.utc + -7200, ::Time.zone) : ::Time.now + -7200)",
+  "(::Time.zone ? ::Time.zone.now.plus_without_duration(1209600) : ::Time.now.advance(weeks: 2))",
+]) {
   if (!s.lines.some((t) => t.includes(lowered))) fail(`expected ${lowered} in the compiled file: ${JSON.stringify(s.lines)}`);
 }
 for (const kept of ["LISTED_UNTIL = 14.days.from_now", "notice_days.days.ago", "30.minutes.ago(starts_at)"]) {

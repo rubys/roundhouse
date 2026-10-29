@@ -199,11 +199,16 @@ of the line it rewrites by design
 rewrites the first two conditions read differently. A rewrite is observed
 when a method that both boots define in the same place spans its line,
 and that method's bytecode may differ on the rewritten lines only. Its
-other lines (each one's instructions, across the method's blocks, with
-jump labels named by order rather than offset, in the body, the catch
-tables and the optional parameters' defaults) and the shape of its
-instruction sequences (headers and catch tables, without the stack depth)
-must compile as before. That the rewritten line does what it did rests on
+other lines (each one's instructions, across the method's blocks) and the
+shape of its instruction sequences (headers and catch tables, without the
+stack depth) must compile as before. A jump label is named by the line it
+is placed on rather than by offset or by its order in the sequence, in the
+body, the catch tables and the optional parameters' defaults, so neither
+more instructions on a rewritten line nor more branches (a conditional
+the rewrite writes) renames the labels another line jumps to. On its own
+line a label is also numbered among that line's labels; from another line,
+a header or a catch table it is only "a label on line *n*". That the
+rewritten line does what it did rests on
 the pass and its tests, not on `verify`. A rewrite in a block outside a
 method (a `scope` lambda) has no method to sit in, and is unobserved.
 
@@ -288,22 +293,48 @@ nil target. That comparison runs only where `ruby -e 'require
 `5.days.ago` builds an `ActiveSupport::Duration` and its parts hash in
 `Numeric#days`, then `Duration#ago` calls the private `#sum`, which builds
 a second hash to pass `Time#advance` its keywords. For a Duration with one
-part, `sum` comes down to one call on `::Time.current`, and the pass
-writes that call, with the number folded, in place of the chain:
+part, `sum` comes down to one call on `::Time.current`, which is
+`::Time.zone ? ::Time.zone.now : ::Time.now`. The pass follows that call
+down to Ruby's own `Time` arithmetic where it can, and writes the result,
+with the number folded, in place of the chain:
 
 | Written | Rewritten |
 | --- | --- |
-| `5.days.ago` | `::Time.current.advance(days: -5)` |
-| `1.fortnight.after` | `::Time.current.advance(weeks: 2)` |
+| `5.days.ago` | `(::Time.zone ? ::Time.zone.now.plus_without_duration(-432000) : ::Time.now.advance(days: -5))` |
+| `1.fortnight.after` | `(::Time.zone ? ::Time.zone.now.plus_without_duration(1209600) : ::Time.now.advance(weeks: 2))` |
 | `3.months.from_now` | `::Time.current.advance(months: 3)` |
-| `2.hours.ago` | `::Time.current.since(-7200)` |
-| `30.seconds.until` | `::Time.current.since(-30)` |
+| `2.hours.ago` | `(::Time.zone ? ::ActiveSupport::TimeWithZone.new(::Time.now.utc + -7200, ::Time.zone) : ::Time.now + -7200)` |
+| `30.seconds.until` | `(::Time.zone ? ::ActiveSupport::TimeWithZone.new(::Time.now.utc + -30, ::Time.zone) : ::Time.now + -30)` |
 
-Days, weeks, months and years stay calendar arithmetic (`advance`), so a
-day across a DST change is still a day of the wall clock, as in Rails.
-Writing a day as 86,400 seconds (`since(-432000)`) would give a different
-result for windows that cross a DST change; the runtime test checks that
-it catches exactly that.
+- **Seconds, minutes and hours.** `TimeWithZone#since` adds the seconds
+  to its UTC time and wraps the sum in its zone, and `Time.zone.now` is
+  `Time.now.utc` wrapped in the zone, so the pass writes one wrap around
+  `::Time.now.utc + s`, skipping the intermediate `TimeWithZone`. With no
+  zone, `Time#since` is `Time.now + s`.
+- **Days, weeks and fortnights.** These stay calendar arithmetic, so a day
+  across a DST change is still a day of the wall clock, as in Rails.
+  `TimeWithZone#advance` hands the call to its local time, a UTC `Time`
+  that holds the wall clock, through `method_missing`, which wraps the
+  result back in the zone. If the result's wall-clock time occurs twice,
+  the wrap keeps the original's offset. If it is skipped, it moves forward
+  an hour. A UTC `Time` has no DST, so there a day is exactly 86,400
+  seconds. Instead of `advance` (three `Date`s, a hash and the
+  `Rational`s for the subsecond), the pass forwards Ruby's own `Time#+` the same way, under
+  the name Active Support keeps for it, `plus_without_duration`. The wrap
+  is the one `advance` gets. With no zone, `Time.now` is a local time,
+  which does have DST, so that branch keeps `::Time.now.advance`.
+- **Months and years.** These stay `::Time.current.advance`. Ruby has no
+  month arithmetic on `Time`. Doing it with `Date#>>` needs the time twice,
+  and an expression cannot hold it without a local variable, which would
+  change the method's header.
+
+Writing a day as 86,400 seconds of the zone's UTC time (`since(-432000)`,
+or `::Time.zone.now + -432000`) would give a different result for windows
+that cross a DST change. The runtime test checks that it catches both.
+
+The conditional is `Time.current`'s own, so the rewrite reads `Time.zone`
+as many times as the original does. Its branches add labels to the
+rewritten line, which `verify` allows (see above).
 
 It rewrites only what it can reproduce exactly, and declines everything
 else with a reason:
@@ -321,11 +352,15 @@ else with a reason:
 - the file activates no refinement with `using`;
 - `Gemfile.lock` resolves activesupport 8.2.0.alpha, whose `Duration` it
   was checked against (rails/rails main);
-- the app's source defines none of the methods the rewrite takes out (the
-  unit, its `Duration` constructor, the direction, `sum`, `new`,
-  `initialize`) where it could run instead of Active Support's
+- the app's source defines none of the methods the rewrite takes out or
+  newly calls (the unit, its `Duration` constructor, the direction, `sum`,
+  `new`, `initialize`; for seconds, minutes and hours also `current`,
+  `now`, `since`, `+` and `in_time_zone`; for days, weeks and fortnights
+  also `current`, `advance`, `change` and `plus_without_duration`) where it
+  could run instead of Active Support's
   ([`passes/duration_definitions.rs`](../../src/emit/fractal/passes/duration_definitions.rs)):
-  in a reopening of `Integer`, `Numeric` or `ActiveSupport::Duration` (by
+  in a reopening of `Integer`, `Numeric`, `ActiveSupport::Duration`,
+  `Time`, `ActiveSupport::TimeWithZone` or `ActiveSupport::TimeZone` (by
   full lexical name, so an app's own `Billing::Duration` does not count),
   on one of them as an explicit receiver or in a block passed to a call on
   one (`Integer.class_eval do`), or in a module mixed into one of them,
@@ -334,36 +369,56 @@ else with a reason:
 
 The scan sees literal names and constant receivers only; a method defined
 on a class held in a variable, or under a computed name, is beyond what the
-source shows. Before parsing, it reads only files that name `Duration`, or
-that name `Integer` or `Numeric` after `class` or `<<`, or before `.`, `&.`
-or `::`, however spaced (not a type annotation's `::Integer`, nor a
-whole-line comment). The pass also trusts that `Time.current` returns a
-time or a date, which `Duration#sum` checks with `acts_like?` and the
-rewrite does not.
+source shows. Before parsing, it reads only files that name `Duration`,
+`TimeWithZone` or `TimeZone`, or that name `Integer`, `Numeric` or `Time`
+after `class` or `<<`, or before `.`, `&.` or `::`, however spaced (not a
+type annotation's `::Integer`, nor a whole-line comment). `Time.now` and
+`Time.current` put most of a Rails app's files through that filter, so the
+scan parses most of the app once per build. The pass also trusts that
+`Time.now` returns a time, which `Duration#sum` checks with `acts_like?`
+and the rewrite does not, and that the app leaves Ruby's `Time` and `Date`
+and the rest of Active Support's time methods as they are.
 
 Per call, against rails/rails main (f39c8aa) on Ruby 4.0.9 with
 `Time.zone = "America/Chicago"`, 500k calls per process and one expression
-per process (time is the median of three runs):
+per process (time is the median of three runs; peak RSS is interpreter to
+ZJIT, measured in separate runs without allocation tracing). For each unit
+the table shows the chain, the previous rewrite (`::Time.current`), and
+this one:
 
-| Expression | Objects / bytes | ns interp / YJIT / ZJIT | Site ISEQ | YJIT code + metadata | ZJIT code + metadata |
-| --- | --- | --- | --- | --- | --- |
-| `5.days.ago` | 37 / 2,456 B | 11,383 / 5,962 / 7,731 | 568 B | 251 + 1,091 KB | 316 + 2,280 KB |
-| `::Time.current.advance(days: -5)` | 34 / 2,096 B | 10,420 / 5,583 / 7,011 | 640 B | 243 + 1,065 KB | 308 + 2,259 KB |
-| `5.hours.ago` | 6 / 520 B | 1,843 / 646 / 965 | 568 B | 180 + 809 KB | 212 + 2,097 KB |
-| `::Time.current.since(-18000)` | 4 / 320 B | 1,166 / 334 / 494 | 640 B | 172 + 782 KB | 204 + 2,050 KB |
-| `3.months.from_now` | 42 / 2,656 B | 13,224 / 7,176 / 9,140 | 568 B | 242 + 1,088 KB | 320 + 2,278 KB |
-| `::Time.current.advance(months: 3)` | 39 / 2,296 B | 11,840 / 6,710 / 8,580 | 640 B | 234 + 1,062 KB | 312 + 2,257 KB |
+| Expression | Objects / bytes | ns interp / YJIT / ZJIT | Site ISEQ | YJIT code + metadata | ZJIT code + metadata | Peak RSS |
+| --- | --- | --- | --- | --- | --- | --- |
+| `5.days.ago` | 37 / 2,456 B | 13,237 / 6,969 / 9,635 | 568 B | 416 + 1,167 KB | 368 + 2,102 KB | 25-29 MB |
+| `::Time.current.advance(days: -5)` | 34 / 2,096 B | 11,885 / 6,395 / 8,609 | 640 B | 412 + 1,141 KB | 356 + 2,081 KB | 24-29 MB |
+| `(::Time.zone ? ::Time.zone.now.plus_without_duration(-432000) : ::Time.now.advance(days: -5))` | 15 / 840 B | 6,502 / 2,616 / 4,089 | 1,048 B | 368 + 1,054 KB | 308 + 2,023 KB | 24-28 MB |
+| `5.hours.ago` | 6 / 520 B | 1,943 / 681 / 1,108 | 568 B | 316 + 932 KB | 280 + 1,937 KB | 23-29 MB |
+| `::Time.current.since(-18000)` | 4 / 320 B | 1,203 / 307 / 540 | 640 B | 304 + 899 KB | 268 + 1,915 KB | 23-28 MB |
+| `(::Time.zone ? ::ActiveSupport::TimeWithZone.new(::Time.now.utc + -18000, ::Time.zone) : ::Time.now + -18000)` | 3 / 240 B | 493 / 219 / 291 | 1,432 B | 288 + 867 KB | 256 + 1,889 KB | 23-28 MB |
+| `3.months.from_now` | 42 / 2,656 B | 13,713 / 7,246 / 9,852 | 568 B | 416 + 1,164 KB | 372 + 2,101 KB | 25-29 MB |
+| `::Time.current.advance(months: 3)` (unchanged) | 39 / 2,296 B | 13,035 / 7,292 / 9,914 | 640 B | 400 + 1,138 KB | 360 + 2,080 KB | 25-29 MB |
 
-The rewrite saves the Duration (40 B), its parts hash and, for `advance`,
-the hash `sum` builds for its keywords (160 B each): 3 objects and 360 B a
-call for days, weeks, months and years, 2 objects and 200 B for seconds,
-minutes and hours. That is 6-10% of the time for `advance`, where
-`Time#advance`'s calendar arithmetic (13 Rationals and 3 Dates) dominates,
-and 37-49% for `since`. Nothing is retained per call either way (1-6 live slots
-after 10,000 calls and a full GC, which is interpreter and JIT state), and
-peak RSS moves by under 0.6 MB (26-30 MB per process). The call site's ISEQ
-grows by 72 B, but the JITs no longer compile Duration's methods, so their
-code and metadata shrink by 8 KB and 21-47 KB.
+For days, weeks and fortnights, the chain's Duration (40 B) and two hashes
+(160 B each) are gone, and so is everything `Time#advance` allocates
+between the zone's local time and the wrap: the copy of its options, three
+`Date`s (`to_date`, `gregorian` and `Date#advance`), `change`'s hash, the `Rational`s it
+builds for the subsecond, and the `Time.utc` they make. Against the chain
+that is 22 objects and 1,616 B a call fewer, and 2.4 to 2.7 times faster
+under YJIT and ZJIT; against the previous rewrite, 19 objects and 1,256 B
+fewer, and 2.1 to 2.4 times faster. Most of the 15 objects left are the
+zone's work, which the original does too: `Time.now`, the `TimeWithZone`
+it wraps, the local time, Ruby's `+`, TZInfo's two period lookups (a
+`Timestamp`, two `Rational`s and a period each, and the array of candidate
+periods for the local time) and the result. For seconds, minutes and
+hours, the intermediate `TimeWithZone` is gone too: 3 objects and 240 B,
+about 70% of the YJIT time and half of the ZJIT time of the previous
+rewrite. Nothing is retained per call either way (3-8 live slots after
+10,000 calls and a full GC, which is interpreter and JIT state). The JITs
+no longer compile `Time#advance`, `#change` and the `Date` methods, so their
+code and metadata shrink by 44 + 87 KB and 48 + 58 KB in the days process.
+Peak RSS moves by about 1 MB or less. The cost is the call site, which
+now holds both branches and the constant lookups: its ISEQ grows from
+640 B to 1,048 B for days and 1,432 B for seconds, once per site rather
+than per call. Months and years are as before.
 
 [`tests/fractal_lower_duration.rs`](../../tests/fractal_lower_duration.rs)
 pins the rewrites and every decline. Where Ruby can load
@@ -374,7 +429,7 @@ result before and after under `travel_to`: in six zones and with none (so
 DST changes (Lord Howe's half-hour one among them), a month end and a
 leap day. That is 27,648 observations of class, value, offset, `utc?`,
 nanoseconds and zone name, and it checks that the comparison fails for the
-seconds lowering above.
+two seconds lowerings above.
 
 ### Removed: `inline-enum-predicates`
 

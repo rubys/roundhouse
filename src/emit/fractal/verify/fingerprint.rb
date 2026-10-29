@@ -127,11 +127,15 @@ module Fingerprint
   # it, split by the line each instruction belongs to, for a pass that
   # changes the bytecode of the lines it rewrites by design: `fractal verify`
   # then checks that every other line compiles as it did. Labels are named
-  # by order of appearance rather than offset, so an instruction more on one
-  # line does not rename the jump targets on the next. Returns line =>
-  # digest, and a digest of the rest of the shape (each sequence's header
-  # and catch table), which leaves out the stack depth a rewritten line may
-  # change.
+  # by the line they are placed on, not by offset or by their order in the
+  # sequence, so neither an instruction more on one line nor a branch more
+  # (a rewrite that writes a conditional) renames the jump targets on
+  # another. Within its own line a label also gets its order among that
+  # line's labels; seen from another line, or from the header and catch
+  # table, it is only "a label on line n", since a rewrite may add labels
+  # before it on its own line. Returns line => digest, and a digest of the
+  # rest of the shape (each sequence's header and catch table), which
+  # leaves out the stack depth a rewritten line may change.
   def by_line(value)
     lines = Hash.new { |hash, line| hash[line] = [] }
     shape = []
@@ -139,10 +143,27 @@ module Fingerprint
     until pending.empty?
       sequence = pending.shift
       _magic, _major, _minor, _format, misc, label, path, _absolute_path, first_line, type, locals, parameters, catch_table, body = sequence
-      labels = {}
-      rename = lambda do |operand|
+      placed = {}
+      placed_on = Hash.new(0)
+      line = first_line
+      body.each do |entry|
+        case entry
+        when Integer then line = entry
+        when Symbol
+          if entry.match?(LABEL) && !placed.key?(entry)
+            placed[entry] = [line, placed_on[line]]
+            placed_on[line] += 1
+          end
+        end
+      end
+      # `from` is the line the operand is on, or nil for the shape.
+      rename = lambda do |operand, from|
         if operand.is_a?(Symbol) && operand.match?(LABEL)
-          labels[operand] ||= :"label_#{labels.size}"
+          on, order = placed[operand]
+          if on.nil? then :label_unplaced
+          elsif on == from then :"label_#{on}_#{order}"
+          else :"label_#{on}"
+          end
         elsif operand.is_a?(Array) && operand[0] == ISEQ_MAGIC
           pending << operand
           :child_sequence
@@ -154,14 +175,14 @@ module Fingerprint
       body.each do |entry|
         case entry
         when Integer then line = entry
-        when Array then lines[line] << entry.map { |operand| rename.(operand) }
-        else lines[line] << rename.(entry)
+        when Array then lines[line] << entry.map { |operand| rename.(operand, line) }
+        else lines[line] << rename.(entry, line)
         end
       end
       # Optional positional parameters name the labels their defaults jump
       # to, so they are renamed with the body's labels too.
-      parameters = parameters.merge(opt: parameters[:opt].map { |operand| rename.(operand) }) if parameters.is_a?(Hash) && parameters[:opt]
-      shape << [label, relative(path), first_line, type, locals, parameters, misc.except(*POSITION_KEYS, :stack_max), catch_table.map { |row| row.map { |operand| rename.(operand) } }]
+      parameters = parameters.merge(opt: parameters[:opt].map { |operand| rename.(operand, nil) }) if parameters.is_a?(Hash) && parameters[:opt]
+      shape << [label, relative(path), first_line, type, locals, parameters, misc.except(*POSITION_KEYS, :stack_max), catch_table.map { |row| row.map { |operand| rename.(operand, nil) } }]
     end
     digest = ->(object) { Digest::SHA256.hexdigest(object.inspect.gsub(/func_ptr: \d+/, "func_ptr: _").gsub(ADDRESS, "0x_")) }
     [lines.to_h { |line, instructions| [line.to_s, digest.(instructions)] }, digest.(shape)]

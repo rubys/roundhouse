@@ -279,18 +279,20 @@ fn an_interrupt_during_the_rewritten_boot_still_restores_the_app() {
 }
 
 /// A method with a Duration chain on line 4, before `lower-duration`
-/// rewrites it. Loading it needs no Active Support: nothing calls it.
-const CHAIN: &str = "class Order\n  def recent\n    window = 1\n    [window, 5.days.ago, [1].map { 2.hours.ago }]\n  end\nend\n";
+/// rewrites it, and a branch after it. Loading it needs no Active Support:
+/// nothing calls it.
+const CHAIN: &str = "class Order\n  def recent\n    window = 1\n    list = [window, 5.days.ago, [1].map { 2.hours.ago }]\n    window > 0 ? list : []\n  end\nend\n";
 
-/// The same method after the rewrite: different bytecode on line 4 only.
-const LOWERED: &str = "class Order\n  def recent\n    window = 1\n    [window, ::Time.current.advance(days: -5), [1].map { ::Time.current.since(-7200) }]\n  end\nend\n";
+/// The same method after the rewrite: different bytecode on line 4 only,
+/// although the rewrite adds branches (and so labels) before line 5's.
+const LOWERED: &str = "class Order\n  def recent\n    window = 1\n    list = [window, (::Time.zone ? ::Time.zone.now.plus_without_duration(-432000) : ::Time.now.advance(days: -5)), [1].map { (::Time.zone ? ::ActiveSupport::TimeWithZone.new(::Time.now.utc + -7200, ::Time.zone) : ::Time.now + -7200) }]\n    window > 0 ? list : []\n  end\nend\n";
 
 #[test]
 fn a_lowering_pass_may_change_the_bytecode_of_its_rewritten_lines_only() {
     if !ruby_available() {
         return;
     }
-    let rewrites = ["lib/order.rb:4:14", "lib/order.rb:4:36"];
+    let rewrites = ["lib/order.rb:4:21", "lib/order.rb:4:43"];
     let outcome = Fixture::with_pass("lowered", CHAIN, LOWERED, &rewrites, "lower-duration").verify();
     assert!(outcome.verified(), "{}", outcome.render());
     assert_eq!(outcome.observed, rewrites);
@@ -315,7 +317,7 @@ fn a_lowered_default_argument_verifies_although_its_labels_move() {
     // The labels an optional parameter's default jumps to are bytecode
     // offsets, which move when the default's line compiles to more code.
     let original = "class Order\n  def recent(since = 5.days.ago, mode = 1)\n    [since, mode]\n  end\nend\n";
-    let lowered = "class Order\n  def recent(since = ::Time.current.advance(days: -5), mode = 1)\n    [since, mode]\n  end\nend\n";
+    let lowered = "class Order\n  def recent(since = (::Time.zone ? ::Time.zone.now.plus_without_duration(-432000) : ::Time.now.advance(days: -5)), mode = 1)\n    [since, mode]\n  end\nend\n";
     let outcome = Fixture::with_pass("lowered-default", original, lowered, &["lib/order.rb:2:22"], "lower-duration").verify();
     assert!(outcome.verified(), "{}", outcome.render());
 

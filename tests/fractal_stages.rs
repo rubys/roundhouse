@@ -160,10 +160,10 @@ fn the_explorer_event_example_lowers_its_literal_duration_chains() {
     assert_eq!(
         rewrites,
         [
-            ("7.days.ago", "::Time.current.advance(days: -7)"),
-            ("3.days.from_now", "::Time.current.advance(days: 3)"),
-            ("2.hours.ago", "::Time.current.since(-7200)"),
-            ("1.fortnight.after", "::Time.current.advance(weeks: 2)"),
+            ("7.days.ago", "(::Time.zone ? ::Time.zone.now.plus_without_duration(-604800) : ::Time.now.advance(days: -7))"),
+            ("3.days.from_now", "(::Time.zone ? ::Time.zone.now.plus_without_duration(259200) : ::Time.now.advance(days: 3))"),
+            ("2.hours.ago", "(::Time.zone ? ::ActiveSupport::TimeWithZone.new(::Time.now.utc + -7200, ::Time.zone) : ::Time.now + -7200)"),
+            ("1.fortnight.after", "(::Time.zone ? ::Time.zone.now.plus_without_duration(1209600) : ::Time.now.advance(weeks: 2))"),
         ]
     );
     let declined: Vec<&str> = s.stages[2].declined.iter().map(|decline| decline.reason.as_str()).collect();

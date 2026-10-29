@@ -94,16 +94,16 @@ fn a_literal_duration_chain_becomes_the_call_its_duration_would_make() {
     assert_eq!(plan.report.declined[0].at, "app/models/event.rb:4:11");
     assert!(plan.report.declined[0].reason.contains("runs once, as the file loads"), "{}", plan.report.declined[0].reason);
     let expected = SIMPLE
-        .replace("5.days.ago", "::Time.current.advance(days: -5)")
-        .replace("2.hours.ago", "::Time.current.since(-7200)")
-        .replace("7.days.ago", "::Time.current.advance(days: -7)")
-        .replace("1.minute.since", "::Time.current.since(60)")
+        .replace("5.days.ago", "(::Time.zone ? ::Time.zone.now.plus_without_duration(-432000) : ::Time.now.advance(days: -5))")
+        .replace("2.hours.ago", "(::Time.zone ? ::ActiveSupport::TimeWithZone.new(::Time.now.utc + -7200, ::Time.zone) : ::Time.now + -7200)")
+        .replace("7.days.ago", "(::Time.zone ? ::Time.zone.now.plus_without_duration(-604800) : ::Time.now.advance(days: -7))")
+        .replace("1.minute.since", "(::Time.zone ? ::ActiveSupport::TimeWithZone.new(::Time.now.utc + 60, ::Time.zone) : ::Time.now + 60)")
         .replace("1.month.from_now", "::Time.current.advance(months: 1)")
-        .replace("1.fortnight.after", "::Time.current.advance(weeks: 2)")
+        .replace("1.fortnight.after", "(::Time.zone ? ::Time.zone.now.plus_without_duration(1209600) : ::Time.now.advance(weeks: 2))")
         .replace("1.year.after", "::Time.current.advance(years: 1)")
-        .replace("30.seconds.until", "::Time.current.since(-30)")
-        .replace("-3.weeks.before", "::Time.current.advance(weeks: 3)")
-        .replace("0.days.ago", "::Time.current.advance(days: 0)");
+        .replace("30.seconds.until", "(::Time.zone ? ::ActiveSupport::TimeWithZone.new(::Time.now.utc + -30, ::Time.zone) : ::Time.now + -30)")
+        .replace("-3.weeks.before", "(::Time.zone ? ::Time.zone.now.plus_without_duration(1814400) : ::Time.now.advance(weeks: 3))")
+        .replace("0.days.ago", "(::Time.zone ? ::Time.zone.now.plus_without_duration(0) : ::Time.now.advance(days: 0))");
     assert_eq!(plan.report.rewrites.len(), 10, "{:?}", plan.report.rewrites);
     assert_eq!(plan.rewritten, [(MODEL.to_string(), expected.clone())]);
     assert_eq!(expected.lines().count(), SIMPLE.lines().count());
@@ -173,13 +173,38 @@ fn a_refinement_an_unverified_active_support_or_an_app_definition_declines() {
     );
     let plan = build_plan(&own_days);
     assert_eq!(plan.report.rewrites.len(), 1, "{:?}", plan.report.rewrites);
-    assert_eq!(plan.report.rewrites[0].to, "::Time.current.since(-18000)");
+    assert_eq!(plan.report.rewrites[0].to, "(::Time.zone ? ::ActiveSupport::TimeWithZone.new(::Time.now.utc + -18000, ::Time.zone) : ::Time.now + -18000)");
     assert_eq!(plan.report.declined.len(), 1, "{:?}", plan.report.declined);
     assert!(
         plan.report.declined[0].reason.contains("the app defines `days` where it could run instead of Active Support's (config/initializers/days.rb:2)"),
         "{}",
         plan.report.declined[0].reason
     );
+
+    // An app `TimeWithZone#plus_without_duration` blocks only the days the
+    // rewrite would forward to it.
+    let own_plus = app_directory(
+        "own-plus",
+        &[
+            (MODEL, model),
+            ("Gemfile.lock", &lockfile(VERIFIED_ACTIVESUPPORT_VERSION)),
+            ("config/initializers/time.rb", "module ActiveSupport\n  class TimeWithZone\n    def plus_without_duration(other) = super\n  end\nend\n"),
+        ],
+    );
+    let plan = build_plan(&own_plus);
+    assert_eq!(plan.report.rewrites.len(), 1, "{:?}", plan.report.rewrites);
+    assert!(plan.report.rewrites[0].to.contains("::Time.now.utc + -18000"), "{}", plan.report.rewrites[0].to);
+    assert_eq!(plan.report.declined.len(), 1, "{:?}", plan.report.declined);
+    assert!(plan.report.declined[0].reason.contains("`plus_without_duration`") && plan.report.declined[0].reason.contains("config/initializers/time.rb:3"), "{}", plan.report.declined[0].reason);
+
+    // An app `Time.current` blocks both: the rewrites no longer call it.
+    let own_current = app_directory(
+        "own-current",
+        &[(MODEL, model), ("Gemfile.lock", &lockfile(VERIFIED_ACTIVESUPPORT_VERSION)), ("lib/clock.rb", "class << Time\n  def current = now\nend\n")],
+    );
+    let plan = build_plan(&own_current);
+    assert!(plan.rewritten.is_empty(), "{:?}", plan.report.rewrites);
+    assert!(plan.report.declined.iter().all(|decline| decline.reason.contains("`current`") && decline.reason.contains("lib/clock.rb:2")), "{:?}", plan.report.declined);
 
     // An app `Duration#ago`, mixed in from a module, blocks every `ago`.
     let own_ago = app_directory(
@@ -288,8 +313,12 @@ fn the_comparison_catches_a_lowering_that_counts_days_in_seconds() {
     let app = app_directory("seconds", &[]);
     fs::create_dir_all(&app).unwrap();
     fs::write(app.join("original.rb"), "module Sites\n  def self.all = [-> { 5.days.ago }]\nend\n").unwrap();
-    fs::write(app.join("seconds.rb"), "module Sites\n  def self.all = [-> { ::Time.current.since(-432000) }]\nend\n").unwrap();
     fs::write(app.join("compare.rb"), COMPARE).unwrap();
-    let output = Command::new("ruby").env("TZ", "America/New_York").arg(app.join("compare.rb")).arg(app.join("original.rb")).arg(app.join("seconds.rb")).output().unwrap();
-    assert!(!output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+    // Seconds from the zone's UTC time, rather than from its wall clock, are
+    // as wrong as seconds from `Time.current`.
+    for wrong in ["::Time.current.since(-432000)", "(::Time.zone ? ::Time.zone.now + -432000 : ::Time.now.advance(days: -5))"] {
+        fs::write(app.join("seconds.rb"), format!("module Sites\n  def self.all = [-> {{ {wrong} }}]\nend\n")).unwrap();
+        let output = Command::new("ruby").env("TZ", "America/New_York").arg(app.join("compare.rb")).arg(app.join("original.rb")).arg(app.join("seconds.rb")).output().unwrap();
+        assert!(!output.status.success(), "{wrong}: {}", String::from_utf8_lossy(&output.stdout));
+    }
 }

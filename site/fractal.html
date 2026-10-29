@@ -255,13 +255,23 @@
     <p><code>lower-duration</code></p>
     <p>
       <code>5.days.ago</code> builds an <code>ActiveSupport::Duration</code>
-      and two hashes only to call <code>::Time.current.advance(days: -5)</code>.
-      The pass writes that call in place of the chain, with the number folded,
-      which saves 3 objects and 360 bytes a call. Days, weeks, months and
-      years stay calendar arithmetic, so the result across a DST change is
-      the one Rails gives. It rewrites only an integer literal receiver with a
-      unit and direction Active Support defines, inside a method, block or
-      lambda, with the Active Support version it was checked against and no
+      and two hashes only to call <code>::Time.current.advance(days: -5)</code>,
+      and <code>advance</code> then builds three <code>Date</code>s, another hash
+      and several <code>Rational</code>s to move the zone's wall clock by five
+      days. The pass writes what that comes down to in Ruby's own
+      <code>Time</code> arithmetic, with the number folded: the zone's local
+      time plus 432,000 seconds, wrapped back in the zone as Active Support
+      wraps it (<code>::Time.zone.now.plus_without_duration(-432000)</code>),
+      and <code>::Time.now.advance(days: -5)</code> when there is no zone.
+      That is 15 objects and 840 bytes a call instead of 37 and 2,456, and
+      about 2.5 times faster under YJIT and ZJIT. Hours, minutes and seconds
+      become <code>::Time.now.utc + s</code> wrapped once in the zone. Days
+      and weeks stay wall-clock days, so the result across a DST change is
+      the one Rails gives; months and years keep
+      <code>::Time.current.advance</code>. It rewrites only an integer literal
+      receiver with a unit and direction Active Support defines, inside a
+      method, block or lambda, with the Active Support version it was checked
+      against and no
       app definition of the methods it takes out, and declines everything
       else with a reason.
     </p>

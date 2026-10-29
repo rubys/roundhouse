@@ -1,25 +1,43 @@
-//! `lower-duration`: write `5.days.ago` as the call Active Support's
-//! `Duration` makes for it, without building the `Duration`.
+//! `lower-duration`: write `5.days.ago` as what Active Support's
+//! `Duration` does for it, in calls on the time itself, without building
+//! the `Duration`.
 //!
 //! `5.days.ago` allocates an `ActiveSupport::Duration` and its parts hash in
 //! `Numeric#days`, then `Duration#ago` calls the private `#sum`, which builds
 //! a second hash for `Time#advance`'s keywords. For a `Duration` with a single
-//! part, `sum` comes down to one call on `::Time.current`:
+//! part, `sum` comes down to one call on `::Time.current`, which is
+//! `::Time.zone ? ::Time.zone.now : ::Time.now`, and each of those calls
+//! comes down to Ruby's own `Time` arithmetic:
 //!
-//! - seconds, minutes and hours: `since(sign * n * seconds_per_unit)`;
-//! - days, weeks, months and years: `advance(unit => sign * n)`, which is
+//! - seconds, minutes and hours: `since(sign * n * seconds_per_unit)`. On a
+//!   `TimeWithZone` that adds the seconds to its UTC time and wraps the sum
+//!   in the zone, so the pass writes that wrap around `::Time.now.utc + s`,
+//!   and `::Time.now + s` for a process with no zone;
+//! - days, weeks and fortnights: `advance(unit => sign * n)`, which is
 //!   calendar arithmetic, so a day across a DST change is still a day of the
-//!   wall clock (fortnights are weeks, twice as many).
+//!   wall clock. A `TimeWithZone` hands `advance` to its local time, a UTC
+//!   `Time` holding the wall clock, and wraps the result in the zone the way
+//!   every forwarded method is wrapped. On a UTC `Time` a day is exactly
+//!   86,400 seconds, so the pass forwards Ruby's own `Time#+` instead
+//!   (`plus_without_duration`, Active Support's name for it), with the
+//!   seconds folded. A process with no zone keeps `::Time.now.advance`: a
+//!   local `Time` does have DST;
+//! - months and years: `advance(unit => sign * n)` on `::Time.current`. Ruby
+//!   has no month arithmetic on `Time`, and doing it with `Date#>>` needs the
+//!   time twice, which an expression with no local variable cannot have.
 //!
 //! The pass writes that call, with the integer folded, in place of the
-//! chain: `5.days.ago` becomes `::Time.current.advance(days: -5)` and
-//! `2.hours.from_now` becomes `::Time.current.since(7200)`. It handles an
-//! integer literal receiver, every unit Active Support defines on `Numeric`
-//! and `Integer` (singular and plural), and `ago`, `until`, `before`, `since`,
-//! `from_now` and `after` with no argument and no block, on one line.
-//! It rewrites only inside a `def`, block or lambda: a chain evaluated once
-//! as the file loads (a constant's value) saves nothing. Everything else in
-//! the shape `<receiver>.<unit>.<direction>` is declined with the reason.
+//! chain: `5.days.ago` becomes
+//! `(::Time.zone ? ::Time.zone.now.plus_without_duration(-432000) : ::Time.now.advance(days: -5))`
+//! and `2.hours.from_now` becomes
+//! `(::Time.zone ? ::ActiveSupport::TimeWithZone.new(::Time.now.utc + 7200, ::Time.zone) : ::Time.now + 7200)`.
+//! It handles an integer literal receiver, every unit Active Support defines
+//! on `Numeric` and `Integer` (singular and plural), and `ago`, `until`,
+//! `before`, `since`, `from_now` and `after` with no argument and no block,
+//! on one line. It rewrites only inside a `def`, block or lambda: a chain
+//! evaluated once as the file loads (a constant's value) saves nothing.
+//! Everything else in the shape `<receiver>.<unit>.<direction>` is declined
+//! with the reason.
 //!
 //! The rewrite rests on the methods it takes out keeping Active Support's
 //! definitions, so it declines unless `Gemfile.lock` resolves the version
@@ -39,9 +57,11 @@ use crate::span::Span;
 
 /// The `activesupport` version whose `Numeric#days` and its siblings,
 /// `Integer#months` and `#years`, `Duration.days` and its siblings,
-/// `Duration#initialize`, `#since`, `#ago`, their aliases and `#sum` this
-/// pass reproduces, checked against rails/rails main. Every other version
-/// is declined rather than assumed to behave the same.
+/// `Duration#initialize`, `#since`, `#ago`, their aliases and `#sum`, and
+/// whose `Time.current`, `Time#since`, `#advance` and `#+`, `TimeZone#now`
+/// and `TimeWithZone#since`, `#advance` and `#method_missing`, this pass
+/// reproduces, checked against rails/rails main. Every other version is
+/// declined rather than assumed to behave the same.
 pub const VERIFIED_ACTIVESUPPORT_VERSION: &str = "8.2.0.alpha";
 
 /// How `sum` applies one part of a Duration to a time.
@@ -50,8 +70,26 @@ enum Application {
     /// `time.since(sign * number * seconds)`.
     Since { seconds: i64 },
     /// `time.advance(part => sign * number)`, where `number` is the receiver
-    /// times `factor`.
+    /// times `factor`: a whole number of days of `days` each, which a
+    /// `TimeWithZone`'s wall-clock `Time` (a UTC one) can add as seconds.
+    Days { part: &'static str, factor: i64, days: i64 },
+    /// `time.advance(part => sign * number)`, where `number` is the receiver
+    /// times `factor`: months, whose length varies.
     Advance { part: &'static str, factor: i64 },
+}
+
+impl Application {
+    /// Active Support methods, besides the Duration's, that the original
+    /// calls and the rewrite does not, or the other way around. The app
+    /// defining one of these on `Time`, `TimeWithZone` or `TimeZone` blocks
+    /// the rewrite ([`super::duration_definitions::TARGETS`]).
+    fn time_methods(self) -> &'static [&'static str] {
+        match self {
+            Application::Since { .. } => &["current", "now", "since", "+", "in_time_zone"],
+            Application::Days { .. } => &["current", "advance", "change", "plus_without_duration"],
+            Application::Advance { .. } => &[],
+        }
+    }
 }
 
 /// A unit method: the `Duration` constructor it calls and how `sum` applies
@@ -69,12 +107,12 @@ const UNITS: &[UnitMethod] = &[
     UnitMethod { spelled: "minutes", constructor: "minutes", application: Application::Since { seconds: 60 } },
     UnitMethod { spelled: "hour", constructor: "hours", application: Application::Since { seconds: 3600 } },
     UnitMethod { spelled: "hours", constructor: "hours", application: Application::Since { seconds: 3600 } },
-    UnitMethod { spelled: "day", constructor: "days", application: Application::Advance { part: "days", factor: 1 } },
-    UnitMethod { spelled: "days", constructor: "days", application: Application::Advance { part: "days", factor: 1 } },
-    UnitMethod { spelled: "week", constructor: "weeks", application: Application::Advance { part: "weeks", factor: 1 } },
-    UnitMethod { spelled: "weeks", constructor: "weeks", application: Application::Advance { part: "weeks", factor: 1 } },
-    UnitMethod { spelled: "fortnight", constructor: "weeks", application: Application::Advance { part: "weeks", factor: 2 } },
-    UnitMethod { spelled: "fortnights", constructor: "weeks", application: Application::Advance { part: "weeks", factor: 2 } },
+    UnitMethod { spelled: "day", constructor: "days", application: Application::Days { part: "days", factor: 1, days: 1 } },
+    UnitMethod { spelled: "days", constructor: "days", application: Application::Days { part: "days", factor: 1, days: 1 } },
+    UnitMethod { spelled: "week", constructor: "weeks", application: Application::Days { part: "weeks", factor: 1, days: 7 } },
+    UnitMethod { spelled: "weeks", constructor: "weeks", application: Application::Days { part: "weeks", factor: 1, days: 7 } },
+    UnitMethod { spelled: "fortnight", constructor: "weeks", application: Application::Days { part: "weeks", factor: 2, days: 7 } },
+    UnitMethod { spelled: "fortnights", constructor: "weeks", application: Application::Days { part: "weeks", factor: 2, days: 7 } },
     UnitMethod { spelled: "month", constructor: "months", application: Application::Advance { part: "months", factor: 1 } },
     UnitMethod { spelled: "months", constructor: "months", application: Application::Advance { part: "months", factor: 1 } },
     UnitMethod { spelled: "year", constructor: "years", application: Application::Advance { part: "years", factor: 1 } },
@@ -109,7 +147,7 @@ impl Pass for LowerDuration {
     }
 
     fn summary(&self) -> &'static str {
-        "Writes `5.days.ago` as the `::Time.current.advance(days: -5)` that Active Support's Duration would call, without building the Duration."
+        "Writes `5.days.ago` as the Ruby `Time` arithmetic Active Support's Duration comes down to, without building the Duration."
     }
 
     /// Everything the pass needs it reads from source through [`Context`]:
@@ -163,6 +201,7 @@ fn relied_on_names() -> BTreeSet<String> {
     UNITS
         .iter()
         .flat_map(|unit| [unit.spelled, unit.constructor])
+        .chain(UNITS.iter().flat_map(|unit| unit.application.time_methods().iter().copied()))
         .chain(DIRECTIONS.iter().map(|(name, _)| *name))
         .chain(ALWAYS_RELIED_ON.iter().copied())
         .map(str::to_string)
@@ -269,11 +308,19 @@ fn lowered(
     let number: i32 = integer.value().try_into().map_err(|_| "the integer literal does not fit in 32 bits".to_string())?;
     let number = i64::from(number);
     let call = match unit_method.application {
-        Application::Since { seconds } => format!("::Time.current.since({})", sign * number * seconds),
+        Application::Since { seconds } => {
+            let seconds = sign * number * seconds;
+            format!("(::Time.zone ? ::ActiveSupport::TimeWithZone.new(::Time.now.utc + {seconds}, ::Time.zone) : ::Time.now + {seconds})")
+        }
+        Application::Days { part, factor, days } => {
+            let number = sign * (number * factor);
+            format!("(::Time.zone ? ::Time.zone.now.plus_without_duration({}) : ::Time.now.advance({part}: {number}))", number * days * 86_400)
+        }
         Application::Advance { part, factor } => format!("::Time.current.advance({part}: {})", sign * (number * factor)),
     };
     let mut relied_on = vec![unit_method.spelled, unit_method.constructor, direction];
     relied_on.extend(ALWAYS_RELIED_ON);
+    relied_on.extend(unit_method.application.time_methods());
     relied_on.sort();
     relied_on.dedup();
     Ok((call, relied_on))
