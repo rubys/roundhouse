@@ -180,6 +180,8 @@ mod assert_routing;
 mod class_new_constants;
 #[path = "emit_and_run/i18n_subtree.rs"]
 mod i18n_subtree;
+#[path = "emit_and_run/i18n_subtree_json.rs"]
+mod i18n_subtree_json;
 #[path = "emit_and_run/i18n_values.rs"]
 mod i18n_values;
 #[path = "emit_and_run/i18n_locale_tag.rs"]
