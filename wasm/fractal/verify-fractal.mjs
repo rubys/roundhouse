@@ -56,8 +56,9 @@ if (s.chips.join(",") !== "source,inline-delegate") fail(`expected source → in
 if (!/^1 rewrite/.test(s.status)) fail(`expected 1 rewrite, got "${s.status}"`);
 if (!s.lines.some((t) => t.includes("def name(...);"))) fail(`delegation not rewritten: ${JSON.stringify(s.lines)}`);
 if (!s.lines.some((t) => t.includes("delegate :time_zone, to: :author, prefix: true"))) fail(`prefixed delegation should stay: ${JSON.stringify(s.lines)}`);
+// The notes render a reason's `code` spans as <code>, so textContent has no backticks.
 const notes = await page.evaluate(() => document.getElementById("notes").textContent);
-if (!notes.includes("passes `prefix:`")) fail(`expected the prefix decline in the notes: ${notes}`);
+if (!notes.includes("passes prefix:; only to: alone is rewritten")) fail(`expected the prefix decline in the notes: ${notes}`);
 
 console.log("=== edit app/models/article.rb ===");
 await page.evaluate(() => {
