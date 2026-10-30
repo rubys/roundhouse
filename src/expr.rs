@@ -23,6 +23,12 @@ use crate::ty::Ty;
 pub const RESOLVED_CLASS_REF: u64 = 1 << 2;
 /// The value is a proven class/module object, rather than a nominal instance.
 pub const CLASS_OBJECT_VALUE: u64 = 1 << 5;
+/// Positive instance provenance for generated model-indexer key lowering.
+/// A nominal `Ty::Class` alone is not instance evidence.
+pub const INDEXER_INSTANCE_VALUE: u64 = 1 << 37;
+/// A class-valued query, possibly an unknown subclass. Unlike
+/// `CLASS_OBJECT_VALUE`, this does not establish exact class identity.
+pub const INDEXER_CLASS_QUERY_VALUE: u64 = 1 << 38;
 /// This receiver's operator call is backed by a registered method definition.
 pub const RESOLVED_OPERATOR_RECEIVER: u64 = 1 << 6;
 /// The cast's type was declared by source, rather than synthesized by lowering.
