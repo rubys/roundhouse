@@ -79,13 +79,16 @@ module ActiveRecord
   end
 
   class Relation
-    def lock: (?(bool | String)? _locking) -> Relation
+    def lock: (?(bool | String)? locking) -> Relation
     def create_or_find_by: (Hash[Symbol, untyped] conditions) -> Base
     def create_or_find_by!: (Hash[Symbol, untyped] conditions) -> Base
   end
 
   class Base
     def self.lock: (?(bool | String)? locking) -> Relation
+    def readonly?: () -> bool
+    def readonly!: () -> Base
+    def _raise_readonly_record_error: () -> nil
     def assign_attributes: (Hash[String | Symbol, untyped] attributes) -> nil
     def _assign_mass_attribute: (String name, untyped value) -> nil
     def _unknown_mass_attribute: (String name) -> nil

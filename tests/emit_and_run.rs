@@ -158,6 +158,8 @@ mod job_rest_params;
 mod regexp_constants;
 #[path = "emit_and_run/upsert.rs"]
 mod upsert;
+#[path = "emit_and_run/relation_parts.rs"]
+mod relation_parts;
 #[path = "support/relation_fork.rs"]
 mod relation_fork_contract;
 #[path = "emit_and_run/relation_fork.rs"]

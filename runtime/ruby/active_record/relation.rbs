@@ -113,6 +113,11 @@ module ActiveRecord
     def without: (*untyped records) -> Relation
     def or: (Relation other) -> Relation
     def or!: (Relation other) -> Relation
+    def and: (Relation other) -> Relation
+    def readonly: (?bool value) -> Relation
+    def readonly_value!: (bool value) -> Relation
+    def lock_clause!: (String clause) -> Relation
+    def and!: (Relation other) -> Relation
     def push_where: (String sql) -> Relation
     def push_where_cols: (String sql, Array[String] cols, ?bool null_clause) -> Relation
     def pop_where: () -> String?
@@ -200,6 +205,8 @@ module ActiveRecord
     def unscope: (?where: Symbol | String | Array[Symbol | String]?) -> Relation
     def unscope!: (?where: Symbol | String | Array[Symbol | String]?) -> Relation
     def unscope_where: () -> Relation
+    def unscope_parts: (Array[Symbol] parts) -> Relation
+    def unscope_part!: (Symbol part) -> Relation
     def unscope_where!: () -> Relation
     def arel: () -> Arel::SelectManager
     def none: () -> Relation

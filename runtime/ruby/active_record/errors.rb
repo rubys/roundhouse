@@ -197,7 +197,7 @@ module ActiveRecord
     end
   end
 
-  # Raised by app code; no runtime path marks a record read-only yet.
+  # Raised saving or destroying a read-only record (connection.rb), or by app code.
   class ReadOnlyRecord < ActiveRecordError
     def initialize(message = "ActiveRecord::ReadOnlyRecord")
       super(message)

@@ -169,7 +169,7 @@ fn discard_all_is_refused_not_silent() {
 
 #[test]
 fn an_unscope_other_than_where_columns_is_refused() {
-    for call in ["unscope(:order)", "unscope(where: nil)", "unscope(where: some_cols)"] {
+    for call in ["unscope(:select)", "unscope(where: nil)", "unscope(where: some_cols)"] {
         let src = format!("class Article < ApplicationRecord\n  include Discard::Model\n\n  def self.plain(some_cols = nil)\n    order(:id).{call}\n  end\nend\n");
         let mut app = ingest_app_from_tree(tree(Some(LOCK), SCHEMA, &[("article", &src)])).expect("ingest");
         let errs = errors(&mut app);
