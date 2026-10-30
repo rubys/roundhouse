@@ -2064,19 +2064,61 @@ end
         }
     }
 
+    // The RSpec files among them: a `*_spec.rb` whose top level is an
+    // example group (a `*_spec.rb` holding a test class is read as
+    // before). When there are any, RSpec's helper files are read once:
+    // what they configure applies to every spec file.
+    let is_spec = |f: &PathBuf| f.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with("_spec.rb"));
+    let mut rspec_files: crate::det::HashSet<PathBuf> = crate::det::HashSet::default();
+    for f in test_files.iter().filter(|f| is_spec(f)) {
+        if let Ok(source) = vfs.read(f) {
+            if super::spec::is_rspec_source(&source) {
+                rspec_files.insert(f.clone());
+            }
+        }
+    }
+    let mut spec_config = super::spec::SpecConfig::default();
+    if !rspec_files.is_empty() {
+        for helper in ["spec/spec_helper.rb", "spec/rails_helper.rb"] {
+            let path = dir.join(helper);
+            if path_has_symlink_component(vfs, dir, &path) || !vfs.exists(&path) {
+                continue;
+            }
+            if let Some(source) = read_or_ledger(vfs, &path)? {
+                spec_config.read_helper(&source, &path.display().to_string())?;
+            }
+        }
+        // `Dir[Rails.root.join("spec/support/**/*.rb")].sort.each { |f| require f }`.
+        let support = dir.join("spec/support");
+        if spec_config.loads_support_dir && !path_has_symlink_component(vfs, dir, &support) && vfs.is_dir(&support) {
+            let mut files = read_test_rb_files(vfs, dir, &support)?;
+            files.sort();
+            for file in files {
+                if let Some(source) = read_or_ledger(vfs, &file)? {
+                    spec_config.read_support(&source, &file.display().to_string())?;
+                }
+            }
+        }
+        spec_config.finish(&dir.join("spec/rails_helper.rb").display().to_string())?;
+    }
+
     for entry in test_files {
+        // In an app with RSpec files, RSpec runs only `*_spec.rb` files;
+        // the rest of its spec folder (support files, helpers) is read
+        // above or not at all, never as a Minitest file.
+        let in_spec_dir = entry.strip_prefix(dir).is_ok_and(|rel| rel.iter().next().is_some_and(|c| c == "spec"));
+        if !rspec_files.is_empty() && in_spec_dir && !is_spec(&entry) {
+            continue;
+        }
         let Some(source) = read_or_ledger(vfs, &entry)? else { continue };
-        // An RSpec file in a listed folder (`test_paths: [spec/models]`):
-        // a `*_spec.rb` whose top level is an example group. RSpec loads
-        // its own helper, never `test/test_helper.rb`, so nothing from
-        // that file is spliced into its modules. A `*_spec.rb` holding a
-        // test class is read as before.
-        if entry.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with("_spec.rb"))
-            && super::spec::is_rspec_source(&source)
-        {
-            if let Some(tms) =
-                unwrap_or_record(super::spec::ingest_spec_files(&source, &entry.display().to_string()))?
-            {
+        // RSpec loads its own helper, never `test/test_helper.rb`, so
+        // nothing from that file is spliced into a spec's modules.
+        if rspec_files.contains(&entry) {
+            if let Some(tms) = unwrap_or_record(super::spec::ingest_spec_files_with(
+                &source,
+                &entry.display().to_string(),
+                &spec_config,
+            ))? {
                 for mut tm in tms {
                     // Names are unique within one spec file, but two files
                     // can give the same one (`article/comments_spec.rb` and
@@ -12168,7 +12210,7 @@ fn splice_test_case_setup(tm: &mut TestModule, case_setup: &crate::expr::Expr) {
 /// The qualified one is rewritten to the bare one here rather than by
 /// keeping the module around, so there is exactly one definition of the
 /// value in the emitted file.
-fn splice_test_helpers(tm: &mut TestModule, helpers: &[LibraryClass]) {
+pub(super) fn splice_test_helpers(tm: &mut TestModule, helpers: &[LibraryClass]) {
     // Candidate pool: every shared instance method the class does not
     // already define itself (its own definition wins, as Ruby's class
     // body beats an included module).

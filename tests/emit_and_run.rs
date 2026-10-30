@@ -66,6 +66,8 @@ mod branch_local_join;
 mod utc_zone_time;
 #[path = "emit_and_run/rspec_specs.rs"]
 mod rspec_specs;
+#[path = "emit_and_run/mocha_app_answers.rs"]
+mod mocha_app_answers;
 #[path = "emit_and_run/discard.rs"]
 mod discard;
 #[path = "emit_and_run/callback_abort.rs"]

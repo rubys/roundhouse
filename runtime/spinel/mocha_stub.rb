@@ -27,7 +27,15 @@ class MochaStub
     @expected = expected
     @seen = 0
     @raises = ""
+    @generation = GENERATION[0]
     PENDING.push(self) if expected >= 0
+  end
+
+  # Filed in THIS test: `clear!` starts a new generation between tests,
+  # so an answer slot (`MochaSlots`) skips what earlier tests filed
+  # without each slot needing a clear of its own.
+  def live?
+    @generation == GENERATION[0]
   end
 
   # `stubs(:m)` — no count to meet.
@@ -70,6 +78,7 @@ class MochaStub
   # on spinel, while a constant is typed by every use it has.
   ANY_INSTANCE = {}
   PENDING = []
+  GENERATION = [0]
 
   def self.file_any_instance(name, stub)
     ANY_INSTANCE[name] = stub
@@ -87,6 +96,7 @@ class MochaStub
   def self.clear!
     PENDING.clear
     ANY_INSTANCE.clear
+    GENERATION[0] = GENERATION[0] + 1
     nil
   end
 
