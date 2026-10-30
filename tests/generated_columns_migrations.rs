@@ -236,10 +236,13 @@ fn reference_removal_aliases_still_remove_ordinary_references() {
         ("remove_reference", "author"),
         ("remove_belongs_to", "reviewer"),
     ] {
+        // `t.references "author"` is an `author_id` column with an index,
+        // as Rails creates it; `remove_reference :people, :author` removes both
+        let target_column = format!("{target}_id");
         let mut schema = reference_schema();
         let before = table(&schema, "people");
         assert!(matches!(
-            &column(before, target).col_type,
+            &column(before, &target_column).col_type,
             ColumnType::Reference { .. }
         ));
 
@@ -254,14 +257,20 @@ fn reference_removal_aliases_still_remove_ordinary_references() {
             people
                 .columns
                 .iter()
-                .all(|column| column.name.as_str() != target)
+                .all(|column| column.name.as_str() != target_column)
+        );
+        assert!(
+            people
+                .indexes
+                .iter()
+                .all(|index| index.columns.iter().all(|c| c.as_str() != target_column))
         );
         assert_eq!(column(people, "name").default.as_deref(), Some("keep"));
         assert!(!column(people, "name").nullable);
         let other_reference = if target == "author" {
-            "reviewer"
+            "reviewer_id"
         } else {
-            "author"
+            "author_id"
         };
         assert!(matches!(
             &column(people, other_reference).col_type,
