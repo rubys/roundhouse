@@ -108,7 +108,7 @@ end
       while out.bytesize < n
         # Match the other two drains' per-read deadline. EOF or timeout
         # discards this incomplete drain; Request checks the byte count.
-        if io.wait_readable(5).nil?
+        if io.wait_readable(Tep::BODY_READ_TIMEOUT).nil?
           return ""
         end
         chunk = Sock.sp_net_recv_some(fd, n - out.bytesize).b

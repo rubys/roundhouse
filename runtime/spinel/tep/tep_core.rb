@@ -131,6 +131,15 @@ module Tep
   # leaves the default — an override too large to represent is not a cap.
   MAX_BODY_BYTES_DEFAULT = 100 * 1024 * 1024
 
+  # How long a body drain waits for the next bytes of a request body
+  # before it drops the connection. Each recv starts the wait again, so
+  # this bounds a pause, not the whole upload. 30s is Puma's
+  # first_data_timeout, which Puma also restarts on every wakeup
+  # (Server#reactor_wakeup -> Client#set_timeout). It was 5s: a phone
+  # uploading a photo over a mobile link pauses longer than that, and the
+  # drain closed the connection with half the body read.
+  BODY_READ_TIMEOUT = 30
+
   def self.max_body_from_env
     v = Tep.decimal_byte_count(ENV["TEP_MAX_BODY_BYTES"] || "")
     v > 0 && v < BYTE_COUNT_CEILING ? v : MAX_BODY_BYTES_DEFAULT
