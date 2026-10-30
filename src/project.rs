@@ -12143,6 +12143,7 @@ fn ensure_seed_sql(
     else {
         return Ok(files);
     };
+    let content = content + &emit::shared::seed_sql::render_migration_stamps(app);
     let mut files: Vec<(String, String)> =
         files.into_iter().filter(|(p, _)| p != "db/seed.sql").collect();
     files.push(("db/seed.sql".to_string(), content));

@@ -1,0 +1,23 @@
+module ActiveRecord
+  class MigrationError < StandardError
+  end
+
+  # Rails' db:migrate / db:prepare over the adapter seam. See
+  # `migrator.rb`: a migration is [version, "" or why it cannot run,
+  # statement, ...].
+  module Migrator
+    SCHEMA_MIGRATIONS_DDL: String
+    INTERNAL_METADATA_DDL: String
+
+    def self.set_up?: () -> bool
+    def self.any_tables?: () -> bool
+    def self.applied_versions: () -> Array[String]
+    def self.pending: (Array[Array[String]] migrations) -> Array[Array[String]]
+    def self.migrate: (Array[Array[String]] migrations, String environment) -> Integer
+    def self.prepare: (Array[String] schema_statements, Array[String] schema_versions, Array[Array[String]] migrations, String environment) -> Integer
+    def self.boot: (Array[String] schema_statements, Array[String] schema_versions, Array[Array[String]] migrations, String environment) -> Array[String]
+    def self.load_schema: (Array[String] schema_statements, Array[String] schema_versions, String environment) -> void
+    def self.record_environment: (String environment) -> void
+    def self.run_in_transaction: (Array[String] statements) -> void
+  end
+end

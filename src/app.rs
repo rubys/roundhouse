@@ -79,6 +79,12 @@ pub struct EachValidatorCall {
 pub struct App {
     pub schema_version: u32,
     pub schema: Schema,
+    /// `db/migrate/*.rb` in version order, each with the schema changes it
+    /// makes, read whatever the schema source is (schema.rb stays
+    /// canonical for the schema itself): what an emitted app's `db:migrate`
+    /// applies to a database an earlier build created.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub migrations: Vec<crate::schema::Migration>,
     pub models: Vec<Model>,
     /// Non-model classes living under `app/models/` (e.g. specialized
     /// has_many proxies). Classified at ingest time by superclass:
@@ -1147,6 +1153,7 @@ impl App {
     pub fn new() -> Self {
         Self {
             schema_version: Self::SCHEMA_VERSION,
+            migrations: Vec::new(),
             schema: Schema::default(),
             binary_assets: Vec::new(),
             i18n: crate::i18n::Catalog::default(),

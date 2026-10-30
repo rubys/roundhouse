@@ -344,3 +344,31 @@ fn is_ignorable(e: &Expr) -> bool {
 fn sql_str(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
+
+/// What `rails db:schema:load` records beside the schema: the migrations
+/// the schema includes count as applied (schema.rb's `version:` and older),
+/// and the environment is noted. Appended to `db/seed.sql` so a database
+/// loaded from it is one the emitted app's `db:migrate` knows the state of
+/// (it is the development database, as `storage/development.sqlite3` is):
+/// a migration newer than schema.rb stays pending. Empty for an app
+/// without migrations.
+pub fn render_migration_stamps(app: &App) -> String {
+    if app.migrations.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    out.push_str("\n-- The migrations the schema includes count as applied, as `rails db:schema:load` records them.\n");
+    out.push_str("CREATE TABLE IF NOT EXISTS \"schema_migrations\" (\"version\" varchar NOT NULL PRIMARY KEY);\n");
+    out.push_str("CREATE TABLE IF NOT EXISTS \"ar_internal_metadata\" (\"key\" varchar NOT NULL PRIMARY KEY, \"value\" varchar, \"created_at\" datetime(6) NOT NULL, \"updated_at\" datetime(6) NOT NULL);\n");
+    let rows: Vec<String> = app
+        .migrations
+        .iter()
+        .filter(|m| m.in_schema && !m.version.is_empty())
+        .map(|m| format!("('{}')", m.version))
+        .collect();
+    if !rows.is_empty() {
+        out.push_str(&format!("INSERT OR IGNORE INTO \"schema_migrations\" (\"version\") VALUES {};\n", rows.join(", ")));
+    }
+    out.push_str("INSERT OR IGNORE INTO \"ar_internal_metadata\" (\"key\", \"value\", \"created_at\", \"updated_at\") VALUES ('environment', 'development', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);\n");
+    out
+}

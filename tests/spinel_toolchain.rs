@@ -114,6 +114,8 @@ mod lambda_signatures;
 mod native_http;
 #[path = "spinel_toolchain/action_controller_head.rs"]
 mod action_controller_head;
+#[path = "spinel_toolchain/db_migrate.rs"]
+mod db_migrate;
 #[path = "support/conditional_get.rs"]
 mod conditional_get_contract;
 #[path = "spinel_toolchain/conditional_get.rs"]

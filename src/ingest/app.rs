@@ -443,6 +443,56 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
         }
     }
 
+    // `db/migrate*/*.rb`, in filename order across every migrate directory.
+    // A long-lived app sometimes splits old migrations into `db/migrate-YYYY`
+    // siblings of `db/migrate` (Procore's `db/migrate-2010` … `db/migrate-2023`).
+    // Sorted by filename alone (not full path) since Rails' timestamp prefix is
+    // what makes the order chronological — the directory a file happens to live
+    // in isn't.
+    let mut migrate_dirs: Vec<PathBuf> = Vec::new();
+    let default_migrate_dir = dir.join("db/migrate");
+    if vfs.is_dir(&default_migrate_dir) {
+        migrate_dirs.push(default_migrate_dir);
+    }
+    let db_dir = dir.join("db");
+    if vfs.is_dir(&db_dir) {
+        for entry in vfs.read_dir(&db_dir)? {
+            let is_sibling_migrate_dir = vfs.is_dir(&entry)
+                && entry
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("migrate-"));
+            if is_sibling_migrate_dir {
+                migrate_dirs.push(entry);
+            }
+        }
+    }
+    let mut migration_files: Vec<PathBuf> = Vec::new();
+    for migrate_dir in &migrate_dirs {
+        migration_files.extend(read_rb_files(vfs, migrate_dir)?);
+    }
+    migration_files.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+    // Each migration as `rails db:migrate` runs it, whatever the schema
+    // source below: an emitted app's `db:migrate` applies the ones a
+    // database has not seen. Folded into a scratch schema of their own, so
+    // one the fold cannot follow is recorded as not renderable rather than
+    // failing an app whose schema.rb never needed it.
+    let mut migration_sources: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+    for entry in migration_files {
+        let Some(source) = read_or_ledger(vfs, &entry)? else { continue };
+        migration_sources.push((entry, source));
+    }
+    {
+        let mut scratch = super::schema::MigrationFold::default();
+        for (entry, source) in &migration_sources {
+            app.migrations.push(super::schema::record_migration(
+                source,
+                &entry.display().to_string(),
+                &mut scratch,
+            ));
+        }
+    }
+
     if let Ok(entries) = vfs.read_dir(&dir.join("config/environments")) {
         let mut envs: Vec<String> = entries
             .iter()
@@ -463,6 +513,12 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
             {
                 app.schema = schema;
             }
+            // Rails records the migrations up to `define(version: ...)` as
+            // applied when it loads schema.rb; newer ones stay pending
+            let loaded = schema_rb_version(&source);
+            for m in &mut app.migrations {
+                m.in_schema = matches!((loaded, m.version.parse::<u128>()), (Some(v), Ok(mv)) if mv <= v);
+            }
         }
     } else if vfs.exists(&structure_path) {
         // `config.active_record.schema_format = :sql` apps (Postgres,
@@ -476,54 +532,34 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
             ))? {
                 app.schema = schema;
             }
+            // structure.sql ends with the versions it was dumped at
+            // (`INSERT INTO "schema_migrations" (version) VALUES (...)`)
+            let text = String::from_utf8_lossy(&source);
+            for m in &mut app.migrations {
+                m.in_schema = !m.version.is_empty() && text.contains(&format!("'{}'", m.version));
+            }
         }
     } else {
         // No schema.rb or structure.sql (never migrated locally,
         // gitignored, or a migrations-only app) — recover the same
-        // column facts by folding every `db/migrate*/*.rb` in
-        // filename order across every migrate directory. A long-lived
-        // app sometimes splits old migrations into `db/migrate-YYYY`
-        // siblings of `db/migrate` (Procore's `db/migrate-2010` …
-        // `db/migrate-2023`); folding only `db/migrate` would silently
-        // miss every table those older migrations created. Sorted by
-        // filename alone (not full path) since Rails' timestamp prefix
-        // is what makes the order chronological — the directory a file
-        // happens to live in isn't. schema.rb / structure.sql stay
-        // canonical when either exists: they're the already-folded form.
-        let mut migrate_dirs: Vec<PathBuf> = Vec::new();
-        let default_migrate_dir = dir.join("db/migrate");
-        if vfs.is_dir(&default_migrate_dir) {
-            migrate_dirs.push(default_migrate_dir);
-        }
-        let db_dir = dir.join("db");
-        if vfs.is_dir(&db_dir) {
-            for entry in vfs.read_dir(&db_dir)? {
-                let is_sibling_migrate_dir = vfs.is_dir(&entry)
-                    && entry
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|n| n.starts_with("migrate-"));
-                if is_sibling_migrate_dir {
-                    migrate_dirs.push(entry);
-                }
-            }
-        }
+        // column facts by folding every migration (above: every
+        // migrate directory, in filename order). schema.rb /
+        // structure.sql stay canonical when either exists: they're the
+        // already-folded form.
         if !migrate_dirs.is_empty() {
-            let mut files: Vec<PathBuf> = Vec::new();
-            for migrate_dir in &migrate_dirs {
-                files.extend(read_rb_files(vfs, migrate_dir)?);
-            }
-            files.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
             let mut schema = crate::schema::Schema::default();
-            for entry in files {
-                let Some(source) = read_or_ledger(vfs, &entry)? else { continue };
+            for (entry, source) in &migration_sources {
                 unwrap_or_record(ingest_migration(
-                    &source,
+                    source,
                     &entry.display().to_string(),
                     &mut schema,
                 ))?;
             }
             app.schema = schema;
+            // the fold is every migration's end state
+            for m in &mut app.migrations {
+                m.in_schema = true;
+            }
         }
     }
 
@@ -12649,6 +12685,22 @@ fn locale_literal(value: &str) -> Option<String> {
         _ => return None,
     };
     (!name.is_empty()).then(|| name.to_string())
+}
+
+/// The `version:` of schema.rb's `ActiveRecord::Schema[8.1].define(version:
+/// 2026_10_02_110112)`, digits only.
+fn schema_rb_version(source: &[u8]) -> Option<u128> {
+    let text = String::from_utf8_lossy(source);
+    let at = text.find(".define(")?;
+    let rest = &text[at..];
+    let v = rest.find("version:")?;
+    let digits: String = rest[v + "version:".len()..]
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '_')
+        .filter(|c| *c != '_')
+        .collect();
+    digits.parse().ok()
 }
 
 /// `config.assume_ssl = true` on an uncommented line of an environment

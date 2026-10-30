@@ -121,6 +121,7 @@ require_relative "runtime/active_record_serialization"
 require_relative "runtime/active_record_relation_ext"
 require_relative "runtime/arel_predicates"
 require_relative "config/schema"
+require_relative "config/migrations"
 require_relative "runtime/action_dispatch"
 require_relative "runtime/action_controller"
 # Replace the portable character walk only after loading the shared policy.

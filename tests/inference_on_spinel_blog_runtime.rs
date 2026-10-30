@@ -520,7 +520,13 @@ fn untyped_subexpressions_baseline() {
     // the same collector measures 1109 total on main and 1114 here.
     // Only Base#assign_attributes adds sites (+5). Both totals include
     // the same 3 sanitize_sql_like sites, excluded here (1126 -> 1111).
-    const CEILING: usize = 1111;
+    // MEASURED 1143 on 2026-10-30 (main 816747ef measures 1111):
+    // `ActiveRecord::Migrator` runs `db:migrate` / `db:prepare` over the
+    // adapter seam. Its parameters and the rows it reads back are vars on
+    // this RBS-less probe (`boot` +8, `load_schema` +9, `prepare` +7,
+    // `pending` +5, `migrate` +2, `record_environment` +1); every other
+    // method's count is unchanged, and migrator.rbs types all 32.
+    const CEILING: usize = 1143;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

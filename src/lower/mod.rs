@@ -46,6 +46,7 @@ pub mod routes_to_library;
 pub mod segment_pattern;
 pub mod scope_chain;
 pub mod schema_to_library;
+pub mod migrations_to_library;
 pub mod seeds_to_library;
 pub mod test_module_to_library;
 pub mod create_block;
@@ -1701,6 +1702,7 @@ pub use routes_to_library::{
     url_options_helper_name,
 };
 pub use schema_to_library::{lower_schema_module_functions, lower_schema_to_library_functions};
+pub use migrations_to_library::lower_migrations_module_functions;
 pub use seeds_to_library::lower_seeds_to_library_functions;
 pub use test_module_to_library::{
     lower_test_module_to_library_class, lower_test_modules_to_library_classes,
