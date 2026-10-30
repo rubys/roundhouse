@@ -110,21 +110,31 @@ The supported subset:
   or both, and `type: :model`, `:lib` or `:request` metadata;
 - `let`, `let!`, `subject`, `subject(:name)`, `described_class`, and the
   implicit `subject` (`described_class.new`);
-- `before`, `before(:each)`, `before(:example)`;
+- `before` and `after`, bare or `(:each)` / `(:example)`; `after` hooks
+  run inner group first, after the example whether it passed or not;
 - `it`, `specify`, `example`; an example without a block, and `xit`,
   are pending in RSpec and are not tests here;
 - `expect(x)` and `is_expected` with `to`, `not_to` and `to_not`, and the
   matchers `eq`, `eql`, `equal`, `be(x)`, `be_nil`, `be_truthy`,
   `be_falsey`, `be_a`, `be_an`, `be_kind_of`, `be_a_kind_of`,
   `be_instance_of`, `be_an_instance_of`, `be_<predicate>`,
-  `have_<predicate>`, and `include` of plain values.
+  `have_<predicate>`, and `include` of plain values;
+- `expect { }.to raise_error` with no argument (any `Exception`), a
+  class, a literal message (equal to the error's message, or matched by a
+  Regexp), or both; `expect { }.not_to raise_error`;
+- `expect { }.to change { value }` and `change(receiver, :message)`, bare
+  or with `by`, `by_at_least`, `by_at_most`, `from` and `to`; a collection
+  or String value is copied before the block runs, as RSpec does. RSpec
+  also compares the value's `hash` before and after; roundhouse does not,
+  so another object changed in place with an unchanged `==` is not seen
+  as a change.
 
 Anything else is refused by name: `roundhouse check` reports it, and
 `--continue` lists every refused construct and leaves out the examples
 that need it. Roundhouse does not read `spec/rails_helper.rb` or
 `spec/spec_helper.rb` yet, so configuration there (included modules,
 global hooks) does not reach the examples, and neither do test doubles,
-`expect { }` block expectations, shared examples or `after` hooks.
+shared examples or `around` hooks.
 
 ## `extensions`
 
