@@ -3053,7 +3053,7 @@ module ActiveRecord
         # scalar elements escape as-is. An empty list is Rails' none
         # predicate (`1=0`): never `IN ()`. Pure — NullRelation is set by
         # `mark_null!` from `none` / lasting positive `where` only.
-        ids = val.map { |x| x.is_a?(Base) ? x._primary_key_value : x }
+        ids = val.map { |x| x.is_a?(Base) ? x._primary_key_value : column_bound_value(col, x) }
         if ids.empty?
           "1=0"
         elsif ids.any? { |x| x.nil? || x.is_a?(Range) || x.is_a?(Bounds) }
@@ -3075,8 +3075,24 @@ module ActiveRecord
         # be a record OR a collection, and only the runtime knows.
         "#{qcol} = #{bind_literal(val._primary_key_value)}"
       else
-        "#{qcol} = #{bind_literal(val)}"
+        "#{qcol} = #{bind_literal(column_bound_value(col, val))}"
       end
+    end
+
+    # A hash condition's value as Rails casts it through the column's
+    # type: a boolean against an integer column (`is_not_deleted
+    # smallint`, `where(is_not_deleted: true)`) is 1 or 0, which
+    # PostgreSQL's integer compares with and its TRUE does not. Every
+    # other value, and a column of another table, binds as given.
+    def column_bound_value(col, val)
+      return val unless integer_column?(col)
+      return 1 if val == true
+      return 0 if val == false
+      val
+    end
+
+    def integer_column?(col)
+      !col.include?(".") && @model.schema_column_types[col.to_sym] == :integer
     end
 
     # Rails' Range condition: `where(score: 5..9)` is `>=` and `<=`, an

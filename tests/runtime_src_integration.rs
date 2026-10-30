@@ -1273,7 +1273,11 @@ fn every_runtime_method_body_concretely_typed() {
     // active_record/connection.rb); a `where` bind that may be a Relation
     // is read untyped before its `to_sql` or its escape (+2 in
     // active_record/relation.rb).
-    const CEILING: usize = 916;
+    // MEASURED 923 on 2026-10-30 (on 916): a hash condition's boolean is
+    // cast through its column's type (`column_bound_value`), reading the
+    // condition's value and the model's column types untyped (+7 in
+    // active_record/relation.rb).
+    const CEILING: usize = 923;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

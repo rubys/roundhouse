@@ -2739,6 +2739,43 @@ pub fn mentions_model_chain_start(expr: &Expr, models: &HashSet<ClassId>) -> boo
     found
 }
 
+/// Whether `rewrite_send` inlines a model's `method(args)` call: `insert_all(rows)`,
+/// and `insert_all!(rows)` with no `returning:` or a literal column list. The
+/// strict targets report the other forms, which only the Ruby-family runtime has.
+pub fn inlines_insert_all(method: &str, args: &[Expr], has_block: bool) -> bool {
+    if has_block {
+        return false;
+    }
+    match method {
+        "insert_all" => args.len() == 1,
+        "insert_all!" => match args {
+            [_] => true,
+            [_, options] => insert_all_returning_columns(options).is_some(),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// The columns of an `insert_all!` options Hash that is exactly a literal
+/// `returning:` list (`returning: %w[id title]`), else `None`.
+fn insert_all_returning_columns(options: &Expr) -> Option<Vec<String>> {
+    let ExprNode::Hash { entries, .. } = &*options.node else { return None };
+    let [(k, v)] = entries.as_slice() else { return None };
+    if !matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "returning") {
+        return None;
+    }
+    let ExprNode::Array { elements, .. } = &*v.node else { return None };
+    elements
+        .iter()
+        .map(|e| match &*e.node {
+            ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+            ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// True when `expr` calls `<Model>.insert_all(rows)` (or `insert_all!`). Gate for the
 /// call-site expansion in `rewrite_send`.
 pub fn mentions_model_insert_all(expr: &Expr, models: &HashSet<ClassId>) -> bool {
@@ -4602,25 +4639,9 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                 // Only a literal column list (Strings or Symbols) lowers;
                 // anything else declines.
                 if method.as_str() == "insert_all!" && !args.is_empty() && args.len() <= 2 && block.is_none() {
-                    let returning: Option<Vec<String>> = match args.get(1).map(|a| &*a.node) {
+                    let returning: Option<Vec<String>> = match args.get(1) {
                         None => Some(vec!["id".to_string()]),
-                        Some(ExprNode::Hash { entries, .. }) if entries.len() == 1 => {
-                            let (k, v) = &entries[0];
-                            let key_ok = matches!(&*k.node,
-                                ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "returning");
-                            match (&*v.node, key_ok) {
-                                (ExprNode::Array { elements, .. }, true) => elements
-                                    .iter()
-                                    .map(|e| match &*e.node {
-                                        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
-                                        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
-                                        _ => None,
-                                    })
-                                    .collect(),
-                                _ => None,
-                            }
-                        }
-                        _ => None,
+                        Some(options) => insert_all_returning_columns(options),
                     };
                     if let Some(columns) = returning {
                         let attrs = Symbol::from("__attrs");

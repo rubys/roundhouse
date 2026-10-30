@@ -761,6 +761,13 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::NotApplicable,
         return_kind: Some(ReturnKind::ClassRef("ActiveRecord::Result")),
     },
+    CatalogedMethod {
+        name: "insert!",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbWrite,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::ClassRef("ActiveRecord::Result")),
+    },
     // The one bulk write with a return type, because it is the one
     // with a LOWERING: `scope_chain` inlines `Model.insert_all(rows)`
     // to `rows.each { … }`, whose value is `rows` — an Array of

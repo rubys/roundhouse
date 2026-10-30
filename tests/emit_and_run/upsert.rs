@@ -197,3 +197,30 @@ fn insert_is_unsupported_on_strict_targets() {
         .emit(roundhouse::project::BuildTarget::Rust);
     assert!(errors.iter().any(|e| e.contains("`insert` is the Ruby-family runtime's")), "{errors:#?}");
 }
+
+/// A call the lowering inlines is not one the strict targets lack: only
+/// the forms it declines reach the runtime's `insert_all`.
+#[test]
+fn an_inlined_insert_all_is_not_reported_on_strict_targets() {
+    let (_emitted, errors) = keystore_app()
+        .edit(
+            "app/models/keystore.rb",
+            "  def self.put(key, value)\n",
+            "  def self.seed(rows)\n    Keystore.insert_all(rows)\n    Keystore.insert_all!(rows, returning: %w[id])\n  end\n\n  def self.put(key, value)\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Rust);
+    assert!(!errors.iter().any(|e| e.contains("is the Ruby-family runtime's") && e.contains("insert_all")), "{errors:#?}");
+}
+
+/// `insert!` is cataloged, so a strict target reports it as it reports `insert`.
+#[test]
+fn insert_bang_is_unsupported_on_strict_targets() {
+    let (_emitted, errors) = keystore_app()
+        .edit(
+            "app/models/keystore.rb",
+            "  def self.put(key, value)\n",
+            "  def self.add!(key, value)\n    Keystore.insert!({key: key, value: value})\n  end\n\n  def self.put(key, value)\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.iter().any(|e| e.contains("`insert!` is the Ruby-family runtime's")), "{errors:#?}");
+}

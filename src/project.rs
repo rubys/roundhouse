@@ -8080,9 +8080,10 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
         let answers_result = matches!(&expr.ty, Some(crate::ty::Ty::Class { id, .. }) if id.0.as_str() == "ActiveRecord::Result");
         let answers_rows = matches!(&expr.ty, Some(crate::ty::Ty::Array { elem }) if **elem == crate::ty::Ty::Untyped);
         if !matches!(target, "jruby" | "spinel")
-            && let crate::expr::ExprNode::Send { recv: Some(_), method, .. } = &*expr.node
+            && let crate::expr::ExprNode::Send { recv: Some(_), method, args, block, .. } = &*expr.node
             && ((matches!(method.as_str(), "upsert" | "upsert_all" | "insert" | "insert!" | "insert_all!") && answers_result)
                 || (method.as_str() == "insert_all" && answers_rows))
+            && !crate::lower::scope_chain::inlines_insert_all(method.as_str(), args, block.is_some())
         {
             let construct = if method.as_str().starts_with("upsert") { "upsert" } else { "insert_all" };
             emit::diagnostics::report_unsupported(
