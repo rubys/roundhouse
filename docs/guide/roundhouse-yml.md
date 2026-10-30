@@ -110,21 +110,51 @@ The supported subset:
   or both, and `type: :model`, `:lib` or `:request` metadata;
 - `let`, `let!`, `subject`, `subject(:name)`, `described_class`, and the
   implicit `subject` (`described_class.new`);
-- `before`, `before(:each)`, `before(:example)`;
+- `before` and `after`, bare or `(:each)` / `(:example)`; `after` hooks
+  run inner group first, after the example whether it passed or not;
 - `it`, `specify`, `example`; an example without a block, and `xit`,
   are pending in RSpec and are not tests here;
 - `expect(x)` and `is_expected` with `to`, `not_to` and `to_not`, and the
   matchers `eq`, `eql`, `equal`, `be(x)`, `be_nil`, `be_truthy`,
   `be_falsey`, `be_a`, `be_an`, `be_kind_of`, `be_a_kind_of`,
   `be_instance_of`, `be_an_instance_of`, `be_<predicate>`,
-  `have_<predicate>`, and `include` of plain values.
+  `have_<predicate>`, and `include` of plain values;
+- `expect { }.to raise_error` with no argument (any `Exception`), a
+  class, a literal message (equal to the error's message, or matched by a
+  Regexp), or both; `expect { }.not_to raise_error`;
+- `expect { }.to change { value }` and `change(receiver, :message)`, bare
+  or with `by`, `by_at_least`, `by_at_most`, `from` and `to`; a collection
+  or String value is copied before the block runs, as RSpec does. RSpec
+  also compares the value's `hash` before and after; roundhouse does not,
+  so another object changed in place with an unchanged `==` is not seen
+  as a change.
+
+Roundhouse reads `spec/spec_helper.rb` and `spec/rails_helper.rb`, and
+the `spec/support/` files they load with the generated
+`Dir[...support...].each { |f| require f }` line:
+
+- in `RSpec.configure`: `before` and `after` hooks (also `prepend_` and
+  `append_`), `include` of a module a support file defines,
+  `infer_spec_type_from_file_location!`, and settings that change no
+  verdict (fixture paths, ordering, backtraces, formatters, the
+  transaction mode);
+- a hook or `include` filtered by `type:` applies to that type; one
+  filtered by other metadata applies to no supported example, because
+  such examples are refused themselves;
+- methods the helper files define at the top level, for the examples
+  that call them;
+- `RSpec::Matchers.define`, so a spec that uses the custom matcher is
+  refused rather than misread.
+
+Every example starts from an emptied database with `test/fixtures`
+loaded, whatever the transaction mode. A `spec/fixtures` folder is not
+read.
 
 Anything else is refused by name: `roundhouse check` reports it, and
 `--continue` lists every refused construct and leaves out the examples
-that need it. Roundhouse does not read `spec/rails_helper.rb` or
-`spec/spec_helper.rb` yet, so configuration there (included modules,
-global hooks) does not reach the examples, and neither do test doubles,
-`expect { }` block expectations, shared examples or `after` hooks.
+that need it. Not read yet: test doubles, shared examples and contexts,
+`around` hooks, `before(:all)` and `before(:suite)`, and modules from
+gems (`config.include FactoryBot::Syntax::Methods`).
 
 ## `extensions`
 
