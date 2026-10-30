@@ -110,21 +110,76 @@ The supported subset:
   or both, and `type: :model`, `:lib` or `:request` metadata;
 - `let`, `let!`, `subject`, `subject(:name)`, `described_class`, and the
   implicit `subject` (`described_class.new`);
-- `before`, `before(:each)`, `before(:example)`;
+- `before` and `after`, bare or `(:each)` / `(:example)`; `after` hooks
+  run inner group first, after the example whether it passed or not;
 - `it`, `specify`, `example`; an example without a block, and `xit`,
   are pending in RSpec and are not tests here;
 - `expect(x)` and `is_expected` with `to`, `not_to` and `to_not`, and the
   matchers `eq`, `eql`, `equal`, `be(x)`, `be_nil`, `be_truthy`,
   `be_falsey`, `be_a`, `be_an`, `be_kind_of`, `be_a_kind_of`,
   `be_instance_of`, `be_an_instance_of`, `be_<predicate>`,
-  `have_<predicate>`, and `include` of plain values.
+  `have_<predicate>`, and `include` of plain values;
+- `expect { }.to raise_error` with no argument (any `Exception`), a
+  class, a literal message (equal to the error's message, or matched by a
+  Regexp), or both; `expect { }.not_to raise_error`;
+- `expect { }.to change { value }` and `change(receiver, :message)`, bare
+  or with `by`, `by_at_least`, `by_at_most`, `from` and `to`; a collection
+  or String value is copied before the block runs, as RSpec does. RSpec
+  also compares the value's `hash` before and after; roundhouse does not,
+  so another object changed in place with an unchanged `==` is not seen
+  as a change.
+- in a request spec (`type: :request`, or `spec/requests` with
+  `infer_spec_type_from_file_location!`), the integration session's
+  `get`, `post` and the other verbs, and on its `response`:
+  `have_http_status` (an Integer, a status Symbol, or the generic
+  `:success` / `:successful`, `:redirect`, `:missing` / `:not_found`,
+  `:error` / `:server_error`, as rspec-rails reads them: `:redirect` is
+  the five redirect codes Rack's `redirect?` names, not every 3xx),
+  `redirect_to`, and the status predicates of `Rack::Response::Helpers`
+  (`be_successful`, `be_ok`, `be_not_found`, `be_redirect`, ...).
+- rspec-mocks, read as the Mocha chains Roundhouse serves for Minitest
+  suites: `allow(x).to receive(:m)` is `x.stubs(:m)`, `expect(x).to
+  receive(:m)` is `x.expects(:m)` (once, as in RSpec), `not_to receive`
+  is `.never`; `with`, `and_return`, `and_raise`, `and_yield`, `once`,
+  `twice`, `thrice`, `exactly` / `at_least` / `at_most(n).times`,
+  `receive_messages`, `allow_any_instance_of` / `expect_any_instance_of`
+  (`any_instance`), and `double` / `instance_double` / `class_double` as
+  Mocha's `stub` (the check that the class defines the doubled methods
+  is dropped). In `with`, `anything`, `instance_of`, `kind_of`,
+  `any_args`, `no_args` and `hash_including` keep their meaning; other
+  argument matchers, and a constant, Regexp or Range argument (RSpec
+  matches it with `===`, Mocha with `==`), are refused, as are spies
+  (`have_received`), `and_call_original` and block implementations.
+  What Roundhouse serves of Mocha on each target is what these chains
+  get: on Spinel a stub returning a value from an app method is not
+  served yet, and the test fails at that line.
+
+Roundhouse reads `spec/spec_helper.rb` and `spec/rails_helper.rb`, and
+the `spec/support/` files they load with the generated
+`Dir[...support...].each { |f| require f }` line:
+
+- in `RSpec.configure`: `before` and `after` hooks (also `prepend_` and
+  `append_`), `include` of a module a support file defines,
+  `infer_spec_type_from_file_location!`, and settings that change no
+  verdict (fixture paths, ordering, backtraces, formatters, the
+  transaction mode);
+- a hook or `include` filtered by `type:` applies to that type; one
+  filtered by other metadata applies to no supported example, because
+  such examples are refused themselves;
+- methods the helper files define at the top level, for the examples
+  that call them;
+- `RSpec::Matchers.define`, so a spec that uses the custom matcher is
+  refused rather than misread.
+
+Every example starts from an emptied database with `test/fixtures`
+loaded, whatever the transaction mode. A `spec/fixtures` folder is not
+read.
 
 Anything else is refused by name: `roundhouse check` reports it, and
 `--continue` lists every refused construct and leaves out the examples
-that need it. Roundhouse does not read `spec/rails_helper.rb` or
-`spec/spec_helper.rb` yet, so configuration there (included modules,
-global hooks) does not reach the examples, and neither do test doubles,
-`expect { }` block expectations, shared examples or `after` hooks.
+that need it. Not read yet: test doubles, shared examples and contexts,
+`around` hooks, `before(:all)` and `before(:suite)`, and modules from
+gems (`config.include FactoryBot::Syntax::Methods`).
 
 ## `extensions`
 
