@@ -20417,6 +20417,8 @@ mod bigdecimal_clamp;
 mod partial_binop;
 #[path = "emit_and_run/union_block_params.rs"]
 mod union_block_params;
+#[path = "emit_and_run/tuple_element_param.rs"]
+mod tuple_element_param;
 #[path = "emit_and_run/format_once.rs"]
 mod format_once;
 #[path = "emit_and_run/condition_lambda_record.rs"]
