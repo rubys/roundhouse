@@ -40,6 +40,14 @@ const TAG_LIST: &str = r##"class TagList
     text.to_s.split(" ").filter_map { |w| next w.size if w == "bar"; w.start_with?("#") && w.delete_prefix("#") }
   end
 
+  def self.skipping_false(text)
+    text.to_s.split(" ").filter_map { |w| next false if w == "bar"; w.start_with?("#") && w.delete_prefix("#") }
+  end
+
+  def self.skipping_true(text)
+    text.to_s.split(" ").filter_map { |w| next true if w == "bar"; w.start_with?("#") && w.delete_prefix("#") }
+  end
+
   def self.flags(text)
     text.to_s.split(" ").filter_map { |w| w.start_with?("#") }
   end
@@ -58,8 +66,8 @@ const ASSERTIONS: &str = r##"
 text = "#Foo bar #Baz"
 items = [{ "type" => "Hashtag", "name" => "#Foo" }, { "type" => "Note", "name" => "x" }, { "type" => "Hashtag" }]
 raise ItemTags.names(items).inspect unless ItemTags.names(items) == ["foo"]
-got = [TagList.names(text), TagList.bare(text), TagList.skipping(text), TagList.flags(text), TagList.marked(text), TagList.tagged(text)]
-want = [["foo", "baz"], ["Foo", "Baz"], ["Foo", 3, "Baz"], [true, true], ["Foo", false, "Baz"], ["#Foo", "#Baz"]]
+got = [TagList.names(text), TagList.bare(text), TagList.skipping(text), TagList.skipping_false(text), TagList.skipping_true(text), TagList.flags(text), TagList.marked(text), TagList.tagged(text)]
+want = [["foo", "baz"], ["Foo", "Baz"], ["Foo", 3, "Baz"], ["Foo", "Baz"], ["Foo", true, "Baz"], [true, true], ["Foo", false, "Baz"], ["#Foo", "#Baz"]]
 raise got.inspect unless got == want
 puts "filter_map passed"
 "##;
@@ -96,6 +104,9 @@ fn a_filter_map_of_cond_and_value_yields_the_values_type() {
     assert_eq!(sig_line(&list, "self.names"), "def self.names: (untyped text) -> Array[String]");
     // A `next` value is an element too.
     assert_eq!(sig_line(&list, "self.skipping"), "def self.skipping: (untyped text) -> Array[(Integer | String)]");
+    // `next false` is dropped like the `&&`'s false; `next true` is kept.
+    assert_eq!(sig_line(&list, "self.skipping_false"), "def self.skipping_false: (untyped text) -> Array[String]");
+    assert_eq!(sig_line(&list, "self.skipping_true"), "def self.skipping_true: (untyped text) -> Array[(bool | String)]");
     // A real Bool keeps its `true`s.
     assert_eq!(sig_line(&list, "self.flags"), "def self.flags: (untyped text) -> Array[bool]");
     // `map` and `select` are unchanged.

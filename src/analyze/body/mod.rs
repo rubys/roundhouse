@@ -6693,7 +6693,8 @@ fn filter_map_and_value(body: &Expr) -> Option<Ty> {
 }
 
 /// Collect the types of this block's `next` values (a bare `next` is
-/// nil) into `yielded`, leaving out the blocks and loops inside it,
+/// nil; a literal `next false` adds nothing, since `filter_map` drops
+/// it) into `yielded`, leaving out the blocks and loops inside it,
 /// which own their `next`. `false` on a `break`, or a `next` value with
 /// no type yet.
 fn block_exits(e: &Expr, yielded: &mut Vec<Ty>) -> bool {
@@ -6704,6 +6705,8 @@ fn block_exits(e: &Expr, yielded: &mut Vec<Ty>) -> bool {
                 yielded.push(Ty::Nil);
                 true
             }
+            // `filter_map` drops a `next false` as it drops the `&&`'s false: no element
+            Some(v) if matches!(&*v.node, ExprNode::Lit { value: crate::expr::Literal::Bool { value: false } }) => true,
             Some(v) => match &v.ty {
                 Some(ty) => {
                     yielded.push(ty.clone());
