@@ -44,6 +44,13 @@
 //! methods, `include` directives and replayed class-body calls. Only
 //! the instance methods go, and only when both facts hold.
 //!
+//! The exception is a replayed class-body call that DECORATES a pruned
+//! method: `statsd_count_if(:login_from_session, "…")` (and `memoize`,
+//! `helper_method`, …) takes the method's name as its leading symbol
+//! and raises `ArgumentError: could not find method login_from_session
+//! for SessionLogin` when the module no longer defines it. Those
+//! calls go with the method they name.
+//!
 //! Class-side methods are left alone on purpose. A concern's
 //! `class_methods do` block is dead for the same reason — campfire's
 //! `Authentication.allow_unauthenticated_access` calls a bare
@@ -56,7 +63,8 @@
 
 use crate::app::App;
 use crate::dialect::MethodReceiver;
-use crate::ident::ClassId;
+use crate::expr::{Expr, ExprNode, Literal};
+use crate::ident::{ClassId, Symbol};
 use crate::det::HashSet;
 
 pub fn apply_spliced_concern_body_prune(app: &mut App) {
@@ -98,6 +106,21 @@ pub fn apply_spliced_concern_body_prune(app: &mut App) {
         if !spliced.contains(&lc.name) || still_included.contains(&lc.name) {
             continue;
         }
+        let pruned: HashSet<Symbol> = lc
+            .methods
+            .iter()
+            .filter(|m| matches!(m.receiver, MethodReceiver::Instance))
+            .map(|m| m.name.clone())
+            .collect();
         lc.methods.retain(|m| !matches!(m.receiver, MethodReceiver::Instance));
+        lc.unknown_calls.retain(|call| !decorates(call, &pruned));
     }
+}
+
+/// A receiverless class-body call whose leading argument is the symbol
+/// of one of `names`.
+fn decorates(call: &Expr, names: &HashSet<Symbol>) -> bool {
+    let ExprNode::Send { recv: None, args, .. } = &*call.node else { return false };
+    let Some(first) = args.first() else { return false };
+    matches!(&*first.node, ExprNode::Lit { value: Literal::Sym { value } } if names.contains(value))
 }

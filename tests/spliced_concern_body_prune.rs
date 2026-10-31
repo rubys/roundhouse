@@ -125,3 +125,45 @@ fn a_non_controller_includer_keeps_the_methods() {
          methods:\n{module}"
     );
 }
+
+#[test]
+fn a_class_body_call_decorating_a_pruned_method_goes_with_it() {
+    // `statsd_count_if(:name, …)` raises "could not find method" when the
+    // module no longer defines `name`. a large app's SessionLogin hit this;
+    // an app module stands in for `StatsD::Instrument` here, whose
+    // macros the module body replays the same way.
+    let instrument = r#"module Instrument
+  def count_if(name, key)
+    raise ArgumentError, "could not find method #{name} for #{self}" unless method_defined?(name)
+  end
+end
+"#;
+    let instrumented = r#"module Authorization
+  extend ActiveSupport::Concern
+  extend Instrument
+
+  ROLE = "admin"
+
+  def ensure_can_administer
+    head :forbidden unless Current.user.can_administer?
+  end
+
+  count_if(:ensure_can_administer, "auth.administer")
+end
+"#;
+    let app = app(&[
+        ("app/models/instrument.rb", instrument),
+        ("app/controllers/concerns/authorization.rb", instrumented),
+    ]);
+    let module = emitted(&app, "authorization.rb");
+    assert!(
+        !module.contains("def ensure_can_administer"),
+        "the instance method is pruned:\n{module}"
+    );
+    assert!(
+        !module.contains("count_if(:ensure_can_administer"),
+        "the decorator naming the pruned method goes with it:\n{module}"
+    );
+    assert!(module.contains("extend Instrument"), "{module}");
+    assert!(module.contains("ROLE = \"admin\""), "{module}");
+}
