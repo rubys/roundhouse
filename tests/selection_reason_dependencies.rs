@@ -5,7 +5,7 @@ use std::{collections::HashMap, path::PathBuf};
 #[path = "support/reason_returns.rs"]
 mod reason_returns;
 
-fn check(body: &str, instance: bool, depth: usize, gradual: bool, _forward: &str) {
+fn check(body: &str, instance: bool, depth: usize, gradual: bool, forward: &str) {
     let prefix = if instance { "" } else { "self." };
     let receiver = if instance { "Probe.new" } else { "Probe" };
     let fallback = if gradual { ":fallback" } else { "\"fallback\"" };
@@ -86,8 +86,14 @@ end
     assert!(!baseline.is_null(), "missing pinned-main case: {body}");
     // The historical fixture records the concrete control, not permission
     // to erase an opaque return. Data-dependent probes must stay unknown.
-    let known_value = if gradual { None } else { baseline["value"].as_str() };
-    let known_forward = if gradual { None } else {
+    let known_value = if gradual { None } else if forward == "(Integer | String | nil)" {
+        Some("(Integer | String)")
+    } else { baseline["value"].as_str() };
+    // Explicit projection bounds include normal misses and mixed element types.
+    // The pinned-main JSON remains the historical observation, unchanged.
+    let known_forward = if gradual { None } else if forward != "untyped" {
+        Some(forward)
+    } else {
         match baseline["forward"].as_str() {
             Some("untyped") => known_value,
             other => other,
@@ -99,13 +105,13 @@ end
 #[test]
 fn six_review_witnesses() {
     for (body, gradual, forward) in [
-        (r###"["ok"].dig(JSON.parse("0"))"###, false, "untyped"),
+        (r###"["ok"].dig(JSON.parse("0"))"###, false, "String?"),
         (
             r###"{"k" => "ok"}.dig(JSON.parse('"k"'))"###,
             false,
-            "untyped",
+            "String?",
         ),
-        (r###"["ok"].dig(0) { JSON.parse(raw) }"###, false, "untyped"),
+        (r###"["ok"].dig(0) { JSON.parse(raw) }"###, false, "String?"),
         (
             r###"["ok"].as_json { JSON.parse(raw) }.first"###,
             false,
@@ -151,43 +157,43 @@ fn dig_receiver_shapes_and_hops() {
         (
             r###"{JSON.parse('"k"') => "ok"}.dig("k")"###,
             false,
-            "untyped",
+            "String?",
         ),
         (
             r###"{"k" => {JSON.parse('"nested"') => "ok"}}.dig("k", "nested")"###,
             false,
             "untyped",
         ),
-        (r###"["ok", 1].dig(JSON.parse("0"))"###, false, "untyped"),
+        (r###"["ok", 1].dig(JSON.parse("0"))"###, false, "(Integer | String | nil)"),
         (
             r###"items = ["ok"]; index = JSON.parse("0"); items.dig(index)"###,
             false,
-            "untyped",
+            "String?",
         ),
         (
             r###"items = {"k" => "ok"}; key = JSON.parse('"k"'); items.dig(key)"###,
             false,
-            "untyped",
+            "String?",
         ),
         (
             r###"["ok"]&.dig(JSON.parse("0")) { JSON.parse(raw) }"###,
             false,
-            "untyped",
+            "String?",
         ),
         (
             r###"[["ok"], nil].first&.dig(JSON.parse("0"))"###,
             false,
-            "untyped",
+            "String?",
         ),
         (
             r###"[["ok"], {"k" => "ok"}].first.dig(JSON.parse("0"))"###,
             false,
-            "untyped",
+            "String?",
         ),
         (
             r###"[{"k" => "ok"}, ["ok"]].first.dig(JSON.parse('"k"'))"###,
             false,
-            "untyped",
+            "String?",
         ),
         (
             r###"{"k" => "ok"}.with_indifferent_access.dig(JSON.parse('"k"'))"###,
@@ -261,27 +267,27 @@ fn dig_reflective_aliases() {
         (
             r###"["ok"].try(:dig, JSON.parse("0")) { JSON.parse(raw) }"###,
             false,
-            "untyped",
+            "String?",
         ),
         (
             r###"["ok"].try!(:dig, JSON.parse("0")) { JSON.parse(raw) }"###,
             false,
-            "untyped",
+            "String?",
         ),
         (
             r###"["ok"].send(:dig, JSON.parse("0")) { JSON.parse(raw) }"###,
             false,
-            "untyped",
+            "String?",
         ),
         (
             r###"{"k" => "ok"}.public_send("dig", JSON.parse('"k"')) { JSON.parse(raw) }"###,
             false,
-            "untyped",
+            "String?",
         ),
         (
             r###"["ok"].__send__(:send, :dig, JSON.parse("0")) { JSON.parse(raw) }"###,
             false,
-            "untyped",
+            "String?",
         ),
     ] {
         for instance in [false, true] {
