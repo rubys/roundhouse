@@ -20566,3 +20566,6 @@ mod model_class_attribute;
 mod record_slice_app;
 #[path = "emit_and_run/record_slice.rs"]
 mod record_slice;
+
+#[path = "emit_and_run/csrf_meta_tag_alias.rs"]
+mod csrf_meta_tag_alias;

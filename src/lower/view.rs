@@ -60,7 +60,8 @@ pub(crate) fn pluralize_helper_call(count: Expr, word: Expr) -> Expr {
 /// emitters pull out the bits they need.
 #[derive(Debug)]
 pub enum ViewHelperKind<'a> {
-    /// `<%= csrf_meta_tags %>` — no args.
+    /// `<%= csrf_meta_tags %>` (or Rails' alias `csrf_meta_tag`) — no
+    /// args.
     CsrfMetaTags,
     /// `<%= csp_meta_tag %>` — no args.
     CspMetaTag,
@@ -597,7 +598,7 @@ pub fn classify_view_helper<'a>(
     args: &'a [Expr],
 ) -> Option<ViewHelperKind<'a>> {
     match (method, args.len()) {
-        ("csrf_meta_tags", 0) => Some(ViewHelperKind::CsrfMetaTags),
+        ("csrf_meta_tags" | "csrf_meta_tag", 0) => Some(ViewHelperKind::CsrfMetaTags),
         ("csp_meta_tag", 0) => Some(ViewHelperKind::CspMetaTag),
         ("javascript_importmap_tags", 0) => {
             Some(ViewHelperKind::JavascriptImportmapTags { entry: None })
@@ -1350,6 +1351,12 @@ mod tests {
     #[test]
     fn classifies_csrf_meta_tags() {
         let kind = classify_view_helper("csrf_meta_tags", &[]).unwrap();
+        assert!(matches!(kind, ViewHelperKind::CsrfMetaTags));
+    }
+
+    #[test]
+    fn classifies_csrf_meta_tag_alias() {
+        let kind = classify_view_helper("csrf_meta_tag", &[]).unwrap();
         assert!(matches!(kind, ViewHelperKind::CsrfMetaTags));
     }
 
