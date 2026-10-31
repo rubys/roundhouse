@@ -195,6 +195,7 @@ module ActionView
     def self.digested_asset_path: (String source) -> String
     def self.url_for: (String target) -> String
     def self.image_url: (String source, ?skip_pipeline: bool) -> String
+    def self.asset_url: (String source, ?skip_pipeline: bool) -> String
     def self.image_tag: (String source, ?Hash[Symbol, untyped] opts) -> String
     def self.path_to_javascript: (String source, ?skip_pipeline: bool) -> String
     def self.javascript_path: (String source, ?skip_pipeline: bool) -> String
