@@ -361,6 +361,9 @@ module ActionDispatch
         if pp.start_with?("*")
           # Rails' glob is `.+?` and a `.+` requirement's span is `.+`: an empty one (`/files//edit`) is no match.
           return nil if glob_rest(path_parts, i, i + extra + 1).empty?
+          # A requirement that admits `/` runs on the whole span, as Rails reads it over the rest of the path.
+          span_pattern = segment_pattern_for(seg_constraints, pp)
+          return nil if !span_pattern.empty? && !segment_pattern_match(span_pattern, glob_rest(path_parts, i, i + extra + 1))
           params[pp[1..]] = glob_rest(path_parts, i, i + extra + 1)
         elsif pp.start_with?(":")
           name = pp[1..]
