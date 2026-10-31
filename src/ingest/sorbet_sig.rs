@@ -77,8 +77,43 @@ pub fn ingest_sorbet_declarations(
                 .get(&(class.clone(), name.clone()))
                 .is_some_and(|(instance, singleton)| *instance && *singleton)
         });
+        for ty in methods.values_mut() {
+            *ty = unnamed_relation_is_gradual(ty);
+        }
     }
     (out, abstracts)
+}
+
+/// A relation type that does not name its model, `ActiveRecord::Relation`
+/// (`::AssociationRelation`, `::Associations::CollectionProxy`) with no
+/// arguments, is `untyped`. Sorbet's per-model `Foo::PrivateRelation` has no
+/// RBS spelling, so signatures write the bare Rails class; the registry has
+/// no class of that name, and reading it as one made every query on the
+/// value (`where`, `exists?`, `find_by`, `each`) a `no known method`. The
+/// model it ranges over is not written down, so neither is the element type.
+fn unnamed_relation_is_gradual(ty: &Ty) -> Ty {
+    let go = unnamed_relation_is_gradual;
+    match ty {
+        Ty::Class { id, args } if args.is_empty() && matches!(
+            id.0.as_str().trim_start_matches("::"),
+            "ActiveRecord::Relation" | "ActiveRecord::AssociationRelation" | "ActiveRecord::Associations::CollectionProxy"
+        ) => Ty::Untyped,
+        Ty::Class { id, args } => Ty::Class { id: id.clone(), args: args.iter().map(go).collect() },
+        Ty::Array { elem } => Ty::Array { elem: std::sync::Arc::new(go(elem)) },
+        Ty::Hash { key, value } => Ty::Hash { key: std::sync::Arc::new(go(key)), value: std::sync::Arc::new(go(value)) },
+        Ty::Tuple { elems } => Ty::Tuple { elems: elems.iter().map(go).collect() },
+        Ty::Union { variants } => Ty::Union { variants: variants.iter().map(go).collect() },
+        Ty::Fn { params, block, ret, effects } => Ty::Fn {
+            params: params
+                .iter()
+                .map(|p| Param { name: p.name.clone(), ty: std::sync::Arc::new(go(&p.ty)), kind: p.kind.clone() })
+                .collect(),
+            block: block.as_ref().map(|b| std::sync::Arc::new(go(b))),
+            ret: std::sync::Arc::new(go(ret)),
+            effects: effects.clone(),
+        },
+        other => other.clone(),
+    }
 }
 
 /// Which sides of a class define each method name: `(instance,
