@@ -1278,7 +1278,7 @@ fn extract_path_params(path: &str, params: &mut Vec<String>) {
 /// `following`), so the collection (`news_index`, `/news`) and the member
 /// (`news`, `/news/:id`) keep apart (Rails' `Resource#collection_name`).
 /// A singleton resource has no collection and keeps its name.
-fn collection_name(singular: &str, plural: &str) -> String {
+pub(crate) fn collection_name(singular: &str, plural: &str) -> String {
     if singular == plural {
         format!("{plural}_index")
     } else {
