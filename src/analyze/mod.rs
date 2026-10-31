@@ -7931,16 +7931,19 @@ pub(crate) fn fold_param_observations(
     }
 }
 
-/// Join call-site parameter evidence, with pending information as the identity.
+/// Join call-site parameter evidence, dropping only provisional observations.
 /// Computed and declared unknowns can hold arbitrary runtime values, whether
 /// they arrive bare or beside a concrete arm. Their reasons join before any
 /// pending arm is removed, so grouping cannot erase a gradual observation.
-/// Nil beside a runtime unknown remains nilable and unknown (#617).
+/// Nil alone cannot absorb an unknown, including a still-pending producer
+/// (#617). A non-nil concrete observation can absorb Pending, never a real
+/// runtime unknown.
 pub(crate) fn unify_param_ty(stored: Ty, observed: Ty) -> Ty {
     let pending = |t: &Ty| matches!(t, Ty::Untyped { why } if why.is_pending_only());
     let joined = crate::analyze::body::drop_pending_arms(crate::analyze::body::union_of(stored, observed));
     let Ty::Union { variants } = joined else { return joined };
-    let mut kept: Vec<Ty> = variants.into_iter().filter(|v| !pending(v)).collect();
+    let informative = variants.iter().any(|v| !matches!(v, Ty::Nil | Ty::Untyped { .. } | Ty::Var { .. }));
+    let mut kept: Vec<Ty> = variants.into_iter().filter(|v| !informative || !pending(v)).collect();
     match kept.len() {
         0 => Ty::pending_untyped(),
         1 => kept.pop().unwrap(),
@@ -10968,5 +10971,8 @@ mod gradual_parameter_join_tests {
         }
         let joined = unify_param_ty(Ty::Sym, Ty::gradual_untyped());
         assert!(joined.has_untyped_arm(), "a bare gradual observation is a real value: {joined:?}");
+        let nil_pending = body::union_of(Ty::Nil, Ty::pending_untyped());
+        assert!(unify_param_ty(Ty::Nil, Ty::pending_untyped()).inference_eq(&nil_pending));
+        assert!(unify_param_ty(Ty::Sym, nil_pending).inference_eq(&body::union_of(Ty::Sym, Ty::Nil)));
     }
 }

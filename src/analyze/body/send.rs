@@ -1971,6 +1971,17 @@ impl<'a> BodyTyper<'a> {
                             }
                         }
                     }
+                    // A source body exists but has not been harvested yet.
+                    // An external ancestor cannot turn that missing inference
+                    // into a sticky arbitrary-value observation (GraphQL's
+                    // synthesized object/field forwarders are one example).
+                    if (!instance_side && cls.source_class_methods.contains(method)
+                        && !cls.class_methods.contains_key(method))
+                        || (instance_side && cls.source_instance_methods.contains(method)
+                            && !cls.instance_methods.contains_key(method))
+                    {
+                        return Ty::pending_untyped();
+                    }
                     if !instance_side && let Some(ty) = cls.class_methods.get(method) {
                         // Same projection the relation arm uses. A source
                         // `def self.pluck` / `pick` declines only this
@@ -4524,6 +4535,24 @@ mod whitelist_reason_tests {
 mod source_receiver_reason_tests {
     use super::*;
     use crate::det::HashMap;
+
+    #[test]
+    fn unharvested_source_methods_are_pending_before_an_external_ancestor() {
+        let id = ClassId(Symbol::from("SourceType"));
+        let mut info = crate::analyze::ClassInfo::default();
+        info.parent = Some(ClassId(Symbol::from("ExternalBase")));
+        info.source_instance_methods.insert(Symbol::from("value"));
+        info.source_class_methods.insert(Symbol::from("load"));
+        let classes = [(id.clone(), info)].into_iter().collect();
+        let typer = BodyTyper::new(&classes);
+        let receiver = Ty::Class { id, args: vec![].into() };
+        for (method, instance) in [("value", true), ("load", false)] {
+            let result = typer.dispatch_on(Some(&receiver), &Symbol::from(method), None, &[], instance);
+            assert!(result.inference_eq(&Ty::pending_untyped()), "{method}: {result:?}");
+        }
+        let external = typer.dispatch_on(Some(&receiver), &Symbol::from("external"), None, &[], true);
+        assert!(external.inference_eq(&Ty::untyped()), "{external:?}");
+    }
 
     #[test]
     fn source_contracts_require_matching_method_sides_and_runtime_json_receivers() {

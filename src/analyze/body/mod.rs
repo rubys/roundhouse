@@ -4235,7 +4235,7 @@ pub(crate) fn multiassign_target_ty(rhs: &Option<Ty>, index: usize) -> Option<Ty
         Some(Ty::Relation { of }) => Some(Ty::Class { id: of.clone(), args: vec![].into() }),
         Some(Ty::Tuple { elems }) => elems.get(index).cloned(),
         Some(ty @ Ty::Untyped { .. }) => Some(ty.clone()),
-        Some(Ty::Var { .. }) => Some(Ty::pending_untyped()),
+        Some(ty @ Ty::Var { .. }) => Some(ty.clone()),
         _ => None,
     };
     selected.map(|ty| ty.computed())
