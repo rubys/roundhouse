@@ -637,6 +637,17 @@ fn handler_parts(
         };
         let key = key.as_str();
         let not_literal = || format!("`{method}`'s `{key}:` isn't a literal");
+        // `report: true` sends the error to Rails.error before the retry
+        // or discard; the worker has no error reporter to send it to.
+        if key == "report" {
+            match &*v.node {
+                ExprNode::Lit { value: Literal::Bool { value: false } } => continue,
+                ExprNode::Lit { value: Literal::Bool { value: true } } => {
+                    return Err(format!("`{method}`'s `report: true` isn't supported: the worker has no error reporter"));
+                }
+                _ => return Err(not_literal()),
+            }
+        }
         if !retry {
             return Err(format!("`discard_on`'s `{key}:` isn't supported"));
         }
@@ -669,8 +680,6 @@ fn handler_parts(
                 priority = Some(*value);
             }
             "jitter" => jitter = Some(literal_number(v).ok_or_else(not_literal)?),
-            // Reports the error before the retry; the push is the same.
-            "report" if matches!(&*v.node, ExprNode::Lit { value: Literal::Bool { .. } }) => {}
             _ => return Err(format!("`retry_on`'s `{key}:` isn't supported")),
         }
     }

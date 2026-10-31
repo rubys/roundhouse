@@ -231,13 +231,18 @@ module ActiveJob
       else
         PERFORM_UNKNOWN_CLASS
       end
-    rescue StandardError => e
+    rescue Exception => e
+      # ActiveJob's perform_now rescues Exception for `rescue_from`, and
+      # re-raises what no handler takes; the worker sees only a
+      # StandardError as a job failure.
       gone = e.is_a?(ActiveJob::DeserializationError)
       handler = JobRegistry.handler_for(name, e)
       if handler < 0 || (handler == 0 && gone && JobRegistry.discards_deserialization_error(name))
         PERFORM_DISCARDED
       elsif handler > 0 && jid != "" && retry_job(job, jid, JobRegistry.retry_rule(handler))
         PERFORM_RETRIED
+      elsif !e.is_a?(StandardError)
+        raise e
       elsif gone
         note_failure("ActiveJob::DeserializationError", e.message)
       else
@@ -251,10 +256,12 @@ module ActiveJob
   # the rule's wait, as `retry_job` does. False when the tries are used
   # up, so the error goes on to Sidekiq's own retry rules.
   def self.retry_job(job, jid, rule)
+    # ActiveJob's `executions_for`: a job enqueued before per-handler
+    # counters existed counts its executions instead.
     counts = job["exception_executions"]
-    tries = counts[rule.key].to_i + 1
+    tries = (counts.is_a?(Hash) ? counts[rule.key].to_i : job["executions"].to_i) + 1
     return false if rule.attempts > 0 && tries >= rule.attempts
-    counts[rule.key] = tries
+    counts[rule.key] = tries if counts.is_a?(Hash)
     job["executions"] = job["executions"].to_i + 1
     job["provider_job_id"] = jid
     job["queue_name"] = rule.queue unless rule.queue == ""

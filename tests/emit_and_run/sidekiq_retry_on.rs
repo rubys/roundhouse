@@ -384,6 +384,7 @@ const UNCARRIED: &str = r##"class UncarriedJob < ApplicationJob
   retry_on Sticky, wait: ->(n) { n * 2 }
   retry_on Net::ReadTimeout
   discard_on(Gone) { |job, error| job.title }
+  discard_on Sticky, report: true
 
   def perform(name)
     name
@@ -404,7 +405,8 @@ fn an_uncarried_handler_is_an_error_only_under_sidekiq() {
     let (_, errors) = overlay()
         .edit("config/environments/production.rb", "  config.active_job.queue_adapter = :solid_queue\n", SIDEKIQ)
         .emit(BuildTarget::Ruby);
-    assert_eq!(errors.len(), 3, "{errors:#?}");
+    assert_eq!(errors.len(), 4, "{errors:#?}");
+    assert!(errors.iter().any(|e| e.contains("`discard_on`'s `report: true` isn't supported")), "{errors:#?}");
     assert!(errors.iter().any(|e| e.contains("`retry_on`'s `wait:` isn't a literal")), "{errors:#?}");
     assert!(errors.iter().any(|e| e.contains("`Net::ReadTimeout` isn't an exception class")), "{errors:#?}");
     assert!(errors.iter().any(|e| e.contains("a block on `discard_on` isn't supported")), "{errors:#?}");

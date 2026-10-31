@@ -56,6 +56,7 @@ require_relative "sidekiq_envelope"
 
 class Sticky < StandardError; end
 class Slippery < StandardError; end
+class Halt < Exception; end
 
 # The oracle's jobs (tests/sidekiq_worker/oracle_jobs.rb), plus the
 # Phase 2 push jobs, two whose record is gone, and four with the
@@ -69,6 +70,8 @@ module JobRegistry
       raise Sticky, ActiveJob::Arguments.str_at(args, 0) + " sticks"
     elsif job_class == "PolyJob"
       raise Slippery, ActiveJob::Arguments.str_at(args, 0) + " slips"
+    elsif job_class == "HaltJob" || job_class == "LooseHaltJob"
+      raise Halt, ActiveJob::Arguments.str_at(args, 0) + " halts"
     elsif job_class == "BoomJob"
       raise ArgumentError, "boom \"" + ActiveJob::Arguments.str_at(args, 0) + "\"\nsecond line"
     elsif job_class == "GoneJob" || job_class == "GoneQuietJob"
@@ -99,6 +102,9 @@ module JobRegistry
     end
     if job_class == "PolyJob"
       return 4 if e.is_a?(Sticky) || e.is_a?(Slippery)
+    end
+    if job_class == "HaltJob"
+      return -1 if e.is_a?(Halt)
     end
     0
   end
@@ -290,6 +296,24 @@ r = aj_run(pushed("DurationJob", "default"))
 check("unlimited retries to its queue", r[0] == retried && r[1] == "300.0" && r[2].include?("\"queue\":\"low\""), r[2])
 check("with its priority", r[2].include?("\"queue_name\":\"low\",\"priority\":5,"), r[2])
 check("searched last-declared first", aj_run(pushed("OrderJob", "default"))[0] == ActiveJob::PERFORM_DISCARDED.to_s, "")
+# A job enqueued before per-handler counters (no exception_executions)
+# counts its executions, as ActiveJob's `executions_for` does.
+legacy = pushed("FixedWaitJob", "default").sub("\"exception_executions\":{},", "")
+r = aj_run(legacy)
+check("no counters: retried", r[0] == retried, r[0] + " " + legacy)
+check("no counters: counts executions", r[2].include?("\"executions\":1,") && !r[2].include?("exception_executions"), r[2])
+
+# ActiveJob's perform_now rescues Exception for its handlers, and
+# re-raises what no handler takes.
+check("an Exception a handler takes", aj_run(pushed("HaltJob", "default"))[0] == ActiveJob::PERFORM_DISCARDED.to_s, "")
+escaped = "nothing"
+begin
+  aj_run(pushed("LooseHaltJob", "default"))
+rescue Halt => e
+  escaped = e.message
+end
+check("an Exception no handler takes escapes", escaped == "x halts", escaped)
+
 check("in process, retry_on does nothing",
   ActiveJob.perform_parsed(payload("FixedWaitJob")) == ActiveJob::PERFORM_FAILED, "")
 
