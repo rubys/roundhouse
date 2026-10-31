@@ -24,7 +24,10 @@ use super::util::method_name_for_action;
 /// pure-assignment filters add no dispatch noise (and filter-free
 /// controllers emit byte-identical dispatchers).
 pub(super) enum PreambleStmt {
-    Call { filter: Filter, halt_check: bool },
+    Call {
+        filter: Filter,
+        halt_check: bool,
+    },
     Block {
         body: Expr,
         only: Vec<Symbol>,
@@ -40,7 +43,9 @@ pub(super) enum PreambleStmt {
         halt_check: bool,
     },
     /// Always-on head of `process_action` — not a before_action.
-    Lead { body: Expr },
+    Lead {
+        body: Expr,
+    },
 }
 
 /// Build the `process_action(action_name)` dispatcher:
@@ -80,6 +85,10 @@ pub(super) struct WrapFilters {
     /// Declaration order, inherited first — the first is OUTERMOST
     /// (ActiveSupport runs arounds in the order they were set).
     pub around: Vec<Filter>,
+    /// Preamble boundary at each around registration, before any hoisted prepends.
+    pub around_before: Vec<usize>,
+    /// Callback-free action bodies need their before/around nesting here.
+    pub ordered_before: bool,
     /// Declaration order; emitted REVERSED, since ActiveSupport runs
     /// after callbacks in reverse (`callbacks.rb`: "then runs the after
     /// callbacks in reverse order"). Named targets and block-form
@@ -105,7 +114,12 @@ pub(super) fn dispatcher_bodies<'a>(
     for stmt in preamble.iter().chain(&wraps.after) {
         match stmt {
             PreambleStmt::Call { filter, .. } => out.extend(filter_guards(filter)),
-            PreambleStmt::Block { body, if_cond_expr, unless_cond_expr, .. } => {
+            PreambleStmt::Block {
+                body,
+                if_cond_expr,
+                unless_cond_expr,
+                ..
+            } => {
                 out.push(body);
                 out.extend([if_cond_expr, unless_cond_expr].into_iter().flatten());
             }
@@ -127,6 +141,8 @@ pub(super) fn synthesize_process_action(
     wraps: &WrapFilters,
     reads_action_name: bool,
     missing: &[Symbol],
+    string_selector: bool,
+    preserve_result: bool,
 ) -> MethodDef {
     let mut stmts: Vec<Expr> = Vec::new();
 
@@ -137,8 +153,12 @@ pub(super) fn synthesize_process_action(
     // a different parameter name. A filter body runs inside
     // this method, so a parameter named `action_name` would hide the
     // String reader from a bare `action_name` in the body.
-    let param = if reads_action_name { ROUTED_ACTION } else { "action_name" };
-    if reads_action_name {
+    let param = if reads_action_name {
+        ROUTED_ACTION
+    } else {
+        "action_name"
+    };
+    if reads_action_name && !string_selector {
         // Explicit `self` so Rust emits `self.assign_action_name(...)`
         // against the shim's `&mut self` method (a receiverless Send
         // becomes a bare function call). Also feeds `mutates_self`
@@ -166,12 +186,19 @@ pub(super) fn synthesize_process_action(
             method: Symbol::from("raise"),
             args: vec![
                 syn(ExprNode::Const {
-                    path: vec![Symbol::from("AbstractController"), Symbol::from("ActionNotFound")],
+                    path: vec![
+                        Symbol::from("AbstractController"),
+                        Symbol::from("ActionNotFound"),
+                    ],
                 }),
                 syn(ExprNode::StringInterp {
                     parts: vec![
-                        crate::expr::InterpPart::Text { value: "The action '".to_string() },
-                        crate::expr::InterpPart::Expr { expr: var_ref(param) },
+                        crate::expr::InterpPart::Text {
+                            value: "The action '".to_string(),
+                        },
+                        crate::expr::InterpPart::Expr {
+                            expr: var_ref(param),
+                        },
                         crate::expr::InterpPart::Text {
                             value: format!("' could not be found for {}", enclosing_class.as_str()),
                         },
@@ -182,17 +209,21 @@ pub(super) fn synthesize_process_action(
             parenthesized: false,
         });
         syn(ExprNode::If {
-            cond: include_check(missing, &[], param),
+            cond: include_check(missing, &[], var_ref(param), string_selector),
             then_branch: raise,
             else_branch: empty_seq(),
         })
     });
 
+    let mut before_stmts = Vec::new();
+    // Boundaries index callbacks, not their expanded halt checks.
+    let mut before_boundaries = vec![0];
     for p in preamble {
         let (stmt, halt_check) = match p {
-            PreambleStmt::Call { filter, halt_check } => {
-                (filter_dispatch_stmt(filter, param), *halt_check)
-            }
+            PreambleStmt::Call { filter, halt_check } => (
+                filter_dispatch_stmt(filter, param, string_selector),
+                *halt_check,
+            ),
             PreambleStmt::Block {
                 body,
                 only,
@@ -211,6 +242,7 @@ pub(super) fn synthesize_process_action(
                     if_cond_expr,
                     unless_cond_expr,
                     param,
+                    string_selector,
                 ) {
                     Some(cond) => syn(ExprNode::If {
                         cond,
@@ -223,12 +255,43 @@ pub(super) fn synthesize_process_action(
             }
             PreambleStmt::Lead { body } => (body.clone(), false),
         };
-        stmts.push(stmt);
+        before_stmts.push(stmt);
         if halt_check {
-            stmts.push(halt_if_performed());
+            let mut halt = halt_if_performed();
+            if preserve_result {
+                if let ExprNode::If { then_branch, .. } = &mut *halt.node {
+                    *then_branch = syn(ExprNode::Return {
+                        value: syn(ExprNode::Lit {
+                            value: Literal::Bool { value: false },
+                        }),
+                    });
+                }
+            }
+            before_stmts.push(halt);
         }
+        before_boundaries.push(before_stmts.len());
     }
 
+    let ordered = wraps.ordered_before && !wraps.around.is_empty();
+    let outer_before = if ordered {
+        before_boundaries[wraps.around_before[0]]
+    } else {
+        before_stmts.len()
+    };
+    stmts.extend_from_slice(&before_stmts[..outer_before]);
+    if preserve_result {
+        stmts.push(result_assignment(syn(ExprNode::Lit {
+            value: Literal::Nil,
+        })));
+        if ordered {
+            stmts.push(local_assignment(
+                HALTED,
+                syn(ExprNode::Lit {
+                    value: Literal::Bool { value: false },
+                }),
+            ));
+        }
+    }
     if !publics.is_empty() || !inherited.is_empty() {
         // `around_action :m` — `m` runs the action by yielding, so the
         // dispatch becomes the block it is handed. Under the filter's
@@ -236,13 +299,27 @@ pub(super) fn synthesize_process_action(
         // is what Rails' skipped callback does. lobsters'
         // `track_story_reads` loads the story and the read ribbon the
         // story page renders, then bumps the ribbon after it.
-        let mut dispatch = case_dispatch(publics, inherited, deferred_tails, param);
-        for f in wraps.around.iter().rev() {
+        let mut dispatch = case_dispatch(
+            publics,
+            inherited,
+            deferred_tails,
+            param,
+            string_selector,
+            preserve_result,
+        );
+        let mut inner_before = before_stmts.len();
+        for (i, f) in wraps.around.iter().enumerate().rev() {
+            if ordered {
+                let boundary = before_boundaries[wraps.around_before[i]];
+                dispatch = nested_befores(&before_stmts[boundary..inner_before], dispatch);
+                inner_before = boundary;
+            }
             let wrapped = syn(ExprNode::Send {
                 recv: None,
                 method: f.target.clone(),
                 args: vec![],
-                block: Some(syn(ExprNode::Lambda { extra_params: Vec::new(),
+                block: Some(syn(ExprNode::Lambda {
+                    extra_params: Vec::new(),
                     params: vec![],
                     rest_param: None,
                     block_param: None,
@@ -251,17 +328,24 @@ pub(super) fn synthesize_process_action(
                 })),
                 parenthesized: false,
             });
-            dispatch = match filter_cond(f, param) {
-                Some(cond) => syn(ExprNode::If { cond, then_branch: wrapped, else_branch: dispatch }),
+            dispatch = match filter_cond(f, param, string_selector) {
+                Some(cond) => syn(ExprNode::If {
+                    cond,
+                    then_branch: wrapped,
+                    else_branch: dispatch,
+                }),
                 None => wrapped,
             };
         }
         stmts.push(dispatch);
         // `after_action :m` — after the action returns (a halted chain
         // returned above; an action that raised is in the rescue).
+        let mut after_stmts = Vec::new();
         for a in wraps.after.iter().rev() {
-            stmts.push(match a {
-                PreambleStmt::Call { filter, .. } => filter_dispatch_stmt(filter, param),
+            after_stmts.push(match a {
+                PreambleStmt::Call { filter, .. } => {
+                    filter_dispatch_stmt(filter, param, string_selector)
+                }
                 PreambleStmt::Block {
                     body,
                     only,
@@ -279,6 +363,7 @@ pub(super) fn synthesize_process_action(
                     if_cond_expr,
                     unless_cond_expr,
                     param,
+                    string_selector,
                 ) {
                     Some(cond) => syn(ExprNode::If {
                         cond,
@@ -291,6 +376,15 @@ pub(super) fn synthesize_process_action(
                 PreambleStmt::Lead { body } => body.clone(),
             });
         }
+        if ordered && !after_stmts.is_empty() {
+            stmts.push(syn(ExprNode::If {
+                cond: var_ref(HALTED),
+                then_branch: empty_seq(),
+                else_branch: syn(ExprNode::Seq { exprs: after_stmts }),
+            }));
+        } else {
+            stmts.extend(after_stmts);
+        }
         // Rails writes the CSP header in middleware, after the
         // controller — including an around_action that served a cached
         // page and did not yield. Only a chain that narrowed (or
@@ -301,6 +395,9 @@ pub(super) fn synthesize_process_action(
         }
     }
 
+    if preserve_result {
+        stmts.push(var_ref(RESULT));
+    }
     let mut body = match stmts.len() {
         0 => syn(ExprNode::Seq { exprs: vec![] }),
         1 => stmts.into_iter().next().unwrap(),
@@ -321,10 +418,16 @@ pub(super) fn synthesize_process_action(
             .map(|h| RescueClause {
                 classes: h.classes.clone(),
                 binding: Some(exc.clone()),
-                body: h.body.clone(),
+                body: if preserve_result {
+                    syn(ExprNode::Seq {
+                        exprs: vec![h.body.clone(), var_ref(exc.as_str())],
+                    })
+                } else {
+                    h.body.clone()
+                },
             })
             .collect();
-        clauses.extend(cause_fallback_clause(rescues, &exc));
+        clauses.extend(cause_fallback_clause(rescues, &exc, preserve_result));
         body = syn(ExprNode::BeginRescue {
             body,
             rescues: clauses,
@@ -335,7 +438,9 @@ pub(super) fn synthesize_process_action(
     }
 
     if let Some(guard) = not_found_guard {
-        body = syn(ExprNode::Seq { exprs: vec![guard, body] });
+        body = syn(ExprNode::Seq {
+            exprs: vec![guard, body],
+        });
     }
 
     // Whole-cloth synthesis — attribute the dispatcher scaffolding to
@@ -379,8 +484,12 @@ pub(super) fn synthesize_process_action(
         // whatever it returns; concretely each action body terminates
         // in render/redirect (returns Nil), so dispatch returns Nil.
         signature: Some(crate::lower::typing::fn_sig(
-            vec![(param_sym, Ty::Sym)],
-            Ty::Nil,
+            vec![(param_sym, if string_selector { Ty::Str } else { Ty::Sym })],
+            if preserve_result {
+                Ty::Untyped
+            } else {
+                Ty::Nil
+            },
         )),
         effects: EffectSet::default(),
         enclosing_class: Some(enclosing_class),
@@ -415,7 +524,11 @@ pub(super) fn synthesize_process_action(
 /// `Exception`: what an app wraps and re-raises is an application
 /// error. No clause when a handler already covers every
 /// `StandardError` (the fallback could never run).
-fn cause_fallback_clause(rescues: &[RescueHandler], exc: &Symbol) -> Option<RescueClause> {
+fn cause_fallback_clause(
+    rescues: &[RescueHandler],
+    exc: &Symbol,
+    preserve_result: bool,
+) -> Option<RescueClause> {
     let catch_all = rescues.iter().flat_map(|h| h.classes.iter()).any(|c| {
         matches!(&*c.node, ExprNode::Const { path }
             if path.len() == 1 && matches!(path[0].as_str(), "StandardError" | "Exception"))
@@ -426,11 +539,20 @@ fn cause_fallback_clause(rescues: &[RescueHandler], exc: &Symbol) -> Option<Resc
     let unhandled = "__unhandled";
     let rescued = || var_ref(exc.as_str());
     let cause_of = |recv: Expr| {
-        syn(ExprNode::Send { recv: Some(recv), method: Symbol::from("cause"), args: vec![], block: None, parenthesized: false })
+        syn(ExprNode::Send {
+            recv: Some(recv),
+            method: Symbol::from("cause"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        })
     };
     let assign_rescued = |value: Expr| {
         syn(ExprNode::Assign {
-            target: crate::expr::LValue::Var { id: VarId(0), name: exc.clone() },
+            target: crate::expr::LValue::Var {
+                id: VarId(0),
+                name: exc.clone(),
+            },
             value,
         })
     };
@@ -444,14 +566,24 @@ fn cause_fallback_clause(rescues: &[RescueHandler], exc: &Symbol) -> Option<Resc
         })
     };
     let or = |left: Expr, right: Expr| {
-        syn(ExprNode::BoolOp { op: crate::expr::BoolOpKind::Or, surface: Default::default(), left, right })
+        syn(ExprNode::BoolOp {
+            op: crate::expr::BoolOpKind::Or,
+            surface: Default::default(),
+            left,
+            right,
+        })
     };
     let matches_any = |classes: &[Expr]| {
         let mut tests = classes.iter().map(is_a);
-        let first = tests.next().expect("a rescue_from names at least one class");
+        let first = tests
+            .next()
+            .expect("a rescue_from names at least one class");
         tests.fold(first, or)
     };
-    let all_classes: Vec<Expr> = rescues.iter().flat_map(|h| h.classes.iter().cloned()).collect();
+    let all_classes: Vec<Expr> = rescues
+        .iter()
+        .flat_map(|h| h.classes.iter().cloned())
+        .collect();
     let nil_check = syn(ExprNode::Send {
         recv: Some(rescued()),
         method: Symbol::from("nil?"),
@@ -472,10 +604,22 @@ fn cause_fallback_clause(rescues: &[RescueHandler], exc: &Symbol) -> Option<Resc
         parenthesized: false,
     });
     let dispatch = rescues.iter().fold(reraise, |else_branch, h| {
-        syn(ExprNode::If { cond: matches_any(&h.classes), then_branch: h.body.clone(), else_branch })
+        syn(ExprNode::If {
+            cond: matches_any(&h.classes),
+            then_branch: if preserve_result {
+                syn(ExprNode::Seq {
+                    exprs: vec![h.body.clone(), rescued()],
+                })
+            } else {
+                h.body.clone()
+            },
+            else_branch,
+        })
     });
     Some(RescueClause {
-        classes: vec![syn(ExprNode::Const { path: vec![Symbol::from("StandardError")] })],
+        classes: vec![syn(ExprNode::Const {
+            path: vec![Symbol::from("StandardError")],
+        })],
         binding: Some(Symbol::from(unhandled)),
         body: syn(ExprNode::Seq {
             exprs: vec![assign_rescued(cause_of(var_ref(unhandled))), walk, dispatch],
@@ -499,7 +643,9 @@ pub(super) fn halt_if_performed() -> Expr {
     syn(ExprNode::If {
         cond: performed,
         then_branch: syn(ExprNode::Return {
-            value: syn(ExprNode::Lit { value: Literal::Nil }),
+            value: syn(ExprNode::Lit {
+                value: Literal::Nil,
+            }),
         }),
         else_branch: empty_seq(),
     })
@@ -508,7 +654,7 @@ pub(super) fn halt_if_performed() -> Expr {
 /// `set_X if [:a, :b, ...].include?(action_name)` — or unconditionally
 /// (no filter `only:` / `except:`) just `set_X`. `param` names the
 /// dispatcher parameter that holds the action Symbol.
-fn filter_dispatch_stmt(f: &Filter, param: &str) -> Expr {
+fn filter_dispatch_stmt(f: &Filter, param: &str, string_selector: bool) -> Expr {
     let target_call = syn(ExprNode::Send {
         recv: None,
         method: f.target.clone(),
@@ -516,7 +662,7 @@ fn filter_dispatch_stmt(f: &Filter, param: &str) -> Expr {
         block: None,
         parenthesized: false,
     });
-    match filter_cond(f, param) {
+    match filter_cond(f, param, string_selector) {
         Some(cond) => syn(ExprNode::If {
             cond,
             then_branch: target_call,
@@ -527,7 +673,7 @@ fn filter_dispatch_stmt(f: &Filter, param: &str) -> Expr {
 }
 
 /// The guard a filter runs under, `None` when it always runs.
-fn filter_cond(f: &Filter, param: &str) -> Option<Expr> {
+fn filter_cond(f: &Filter, param: &str, string_selector: bool) -> Option<Expr> {
     cond_from_guards(
         &f.only,
         &f.except,
@@ -536,6 +682,7 @@ fn filter_cond(f: &Filter, param: &str) -> Option<Expr> {
         &f.if_cond_expr,
         &f.unless_cond_expr,
         param,
+        string_selector,
     )
 }
 
@@ -570,10 +717,24 @@ fn cond_from_guards(
     if_cond_expr: &Option<Expr>,
     unless_cond_expr: &Option<Expr>,
     param: &str,
+    string_selector: bool,
 ) -> Option<Expr> {
     let mut conds: Vec<Expr> = Vec::new();
     if !(only.is_empty() && except.is_empty()) {
-        conds.push(include_check(only, except, param));
+        let selector = if string_selector {
+            // Rails' callback scopes read the original request's action_name,
+            // even when an application hook passes a different selector to super.
+            syn(ExprNode::Send {
+                recv: Some(syn(ExprNode::SelfRef)),
+                method: Symbol::from("action_name"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            })
+        } else {
+            var_ref(param)
+        };
+        conds.push(include_check(only, except, selector, string_selector));
     }
     let predicate = |name: &Symbol| {
         syn(ExprNode::Send {
@@ -623,20 +784,28 @@ fn cond_from_guards(
 /// `[:a, :b].include?(action_name)` — or for `except:`,
 /// `![:a, :b].include?(action_name)` (we pass the list through `not`
 /// upstream; this helper just builds the include? form).
-fn include_check(only: &[Symbol], except: &[Symbol], param: &str) -> Expr {
+fn include_check(
+    only: &[Symbol],
+    except: &[Symbol],
+    selector: Expr,
+    string_selector: bool,
+) -> Expr {
     let (syms, negate) = if !only.is_empty() {
         (only, false)
     } else {
         (except, true)
     };
     let array = syn(ExprNode::Array {
-        elements: syms.iter().map(|s| sym_lit(s.as_str())).collect(),
+        elements: syms
+            .iter()
+            .map(|s| selector_literal(s.as_str(), string_selector))
+            .collect(),
         style: ArrayStyle::Brackets,
     });
     let include = syn(ExprNode::Send {
         recv: Some(array),
         method: Symbol::from("include?"),
-        args: vec![var_ref(param)],
+        args: vec![selector],
         block: None,
         parenthesized: true,
     });
@@ -679,6 +848,8 @@ fn case_dispatch(
     inherited: &[Symbol],
     deferred_tails: &crate::det::HashMap<Symbol, Expr>,
     param: &str,
+    string_selector: bool,
+    preserve_result: bool,
 ) -> Expr {
     // The default render for an action whose body must not carry it —
     // see `actions_reached_by_super`. Already lowered: it was
@@ -702,7 +873,15 @@ fn case_dispatch(
         }
         Arm {
             pattern: Pattern::Lit {
-                value: Literal::Sym { value: Symbol::from(action_name) },
+                value: if string_selector {
+                    Literal::Str {
+                        value: action_name.to_string(),
+                    }
+                } else {
+                    Literal::Sym {
+                        value: Symbol::from(action_name),
+                    }
+                },
             },
             guard: None,
             body: dispatch,
@@ -713,16 +892,103 @@ fn case_dispatch(
         .map(|a| {
             let mut arm = arm_for(a.name.as_str(), Some(a.body.span));
             if let Some(tail) = deferred_tails.get(&a.name).cloned() {
-                arm.body = syn(ExprNode::Seq { exprs: vec![arm.body, tail] });
+                arm.body = if preserve_result {
+                    result_arm(arm.body, Some(tail))
+                } else {
+                    syn(ExprNode::Seq {
+                        exprs: vec![arm.body, tail],
+                    })
+                };
+            } else if preserve_result {
+                arm.body = result_arm(arm.body, None);
             }
             arm
         })
         .collect();
-    arms.extend(inherited.iter().map(|n| arm_for(n.as_str(), None)));
+    arms.extend(inherited.iter().map(|n| {
+        let mut arm = arm_for(n.as_str(), None);
+        if preserve_result {
+            arm.body = result_arm(arm.body, None);
+        }
+        arm
+    }));
     syn(ExprNode::Case {
         scrutinee: var_ref(param),
         arms,
     })
+}
+
+pub(super) const RESULT: &str = "__roundhouse_action_result";
+
+const HALTED: &str = "__roundhouse_callbacks_halted";
+
+fn local_assignment(name: &str, value: Expr) -> Expr {
+    syn(ExprNode::Assign {
+        target: crate::expr::LValue::Var {
+            id: VarId(0),
+            name: Symbol::from(name),
+        },
+        value,
+    })
+}
+
+fn result_assignment(value: Expr) -> Expr {
+    local_assignment(RESULT, value)
+}
+
+/// A before callback inside an around block halts the continuation, not
+/// the around method's own tail. Retain that tail and suppress afters.
+fn nested_befores(before: &[Expr], mut dispatch: Expr) -> Expr {
+    for statement in before.iter().rev() {
+        if let ExprNode::If {
+            cond, then_branch, ..
+        } = &*statement.node
+        {
+            if matches!(&*then_branch.node, ExprNode::Return { .. }) {
+                dispatch = syn(ExprNode::If {
+                    cond: cond.clone(),
+                    then_branch: syn(ExprNode::Seq {
+                        exprs: vec![
+                            local_assignment(
+                                HALTED,
+                                syn(ExprNode::Lit {
+                                    value: Literal::Bool { value: true },
+                                }),
+                            ),
+                            result_assignment(syn(ExprNode::Lit {
+                                value: Literal::Bool { value: false },
+                            })),
+                        ],
+                    }),
+                    else_branch: dispatch,
+                });
+                continue;
+            }
+        }
+        dispatch = syn(ExprNode::Seq {
+            exprs: vec![statement.clone(), dispatch],
+        });
+    }
+    dispatch
+}
+
+fn result_arm(action: Expr, tail: Option<Expr>) -> Expr {
+    let mut exprs = vec![result_assignment(action)];
+    exprs.extend(tail);
+    exprs.push(var_ref(RESULT));
+    syn(ExprNode::Seq { exprs })
+}
+
+fn selector_literal(name: &str, string_selector: bool) -> Expr {
+    if string_selector {
+        syn(ExprNode::Lit {
+            value: Literal::Str {
+                value: name.to_string(),
+            },
+        })
+    } else {
+        sym_lit(name)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -732,15 +998,25 @@ fn case_dispatch(
 
 fn chain_mentions_csp(preamble: &[PreambleStmt], wraps: &WrapFilters) -> bool {
     preamble.iter().chain(&wraps.after).any(|stmt| match stmt {
-        PreambleStmt::Block { body, if_cond_expr, unless_cond_expr, .. } => {
+        PreambleStmt::Block {
+            body,
+            if_cond_expr,
+            unless_cond_expr,
+            ..
+        } => {
             expr_calls(body, "content_security_policy")
-                || if_cond_expr.as_ref().is_some_and(|e| expr_calls(e, "content_security_policy"))
+                || if_cond_expr
+                    .as_ref()
+                    .is_some_and(|e| expr_calls(e, "content_security_policy"))
                 || unless_cond_expr
                     .as_ref()
                     .is_some_and(|e| expr_calls(e, "content_security_policy"))
         }
         PreambleStmt::Call { filter, .. } => {
-            filter.if_cond_expr.as_ref().is_some_and(|e| expr_calls(e, "content_security_policy"))
+            filter
+                .if_cond_expr
+                .as_ref()
+                .is_some_and(|e| expr_calls(e, "content_security_policy"))
                 || filter
                     .unless_cond_expr
                     .as_ref()
@@ -771,7 +1047,10 @@ pub(super) fn expr_calls(expr: &Expr, name: &str) -> bool {
 fn csp_header_stmt() -> Expr {
     syn(ExprNode::Send {
         recv: Some(syn(ExprNode::Const {
-            path: vec![Symbol::from("ActionDispatch"), Symbol::from("ContentSecurityPolicy")],
+            path: vec![
+                Symbol::from("ActionDispatch"),
+                Symbol::from("ContentSecurityPolicy"),
+            ],
         })),
         method: Symbol::from("write_header"),
         args: vec![syn(ExprNode::SelfRef)],
@@ -785,7 +1064,11 @@ fn syn(node: ExprNode) -> Expr {
 }
 
 fn sym_lit(s: &str) -> Expr {
-    syn(ExprNode::Lit { value: Literal::Sym { value: Symbol::from(s) } })
+    syn(ExprNode::Lit {
+        value: Literal::Sym {
+            value: Symbol::from(s),
+        },
+    })
 }
 
 fn var_ref(name: &str) -> Expr {

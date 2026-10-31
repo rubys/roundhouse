@@ -7107,6 +7107,45 @@ fn apply_models_aggregator(files: &mut Vec<(String, String)>) {
     }
 }
 
+/// Only request boundaries convert the router's Symbol to the String Rails
+/// gives the application hook. Ordinary source calls retain their arguments.
+/// Ruby's lazy dispatch compares route IDs without loading other controllers;
+/// native dispatch narrows the concrete receiver before calling its adapter.
+fn adapt_controller_hook_requests(content: &mut String, hooked: &[&crate::dialect::Controller], lazy: bool) {
+    use std::fmt::Write as _;
+    const START: &str = "# Application process_action request entry";
+    const END: &str = "# End application process_action request entry";
+    // The Ruby overlay reapplies this after the native scaffold. Restore
+    // original calls first so the test helper adopts lazy route checks too.
+    while let Some(start) = content.find(START) {
+        let Some(end) = content[start..].find(END).map(|n| start + n + END.len()) else { break };
+        let line_start = content[..start].rfind('\n').map_or(0, |n| n + 1);
+        let indent = &content[line_start..start];
+        let Some(original) = content[start..end].lines().map(str::trim)
+            .find(|line| line.starts_with("controller.process_action(")) else { break };
+        let restored = format!("{indent}{original}");
+        content.replace_range(line_start..end, &restored);
+    }
+    let mut output = String::new();
+    for line in content.split_inclusive('\n') {
+        let trimmed = line.trim();
+        let Some(argument) = trimmed.strip_prefix("controller.process_action(").and_then(|s| s.strip_suffix(')')) else {
+            output.push_str(line); continue;
+        };
+        let indent = &line[..line.len() - line.trim_start().len()];
+        writeln!(output, "{indent}# Application process_action request entry").unwrap();
+        for (i, controller) in hooked.iter().enumerate() {
+            let condition = if lazy {
+                format!("matched.controller == :{}", crate::lower::routes_to_library::controller_symbol(controller.name.0.as_str()))
+            } else { format!("controller.is_a?({})", controller.name.0) };
+            writeln!(output, "{indent}{} {condition}", if i == 0 { "if" } else { "elsif" }).unwrap();
+            writeln!(output, "{indent}  controller.{}({argument})", crate::lower::controller_to_library::action_override::ENTRY).unwrap();
+        }
+        writeln!(output, "{indent}else\n{indent}  {trimmed}\n{indent}end\n{indent}{END}").unwrap();
+    }
+    *content = output;
+}
+
 /// Replace the scaffold `main.rb`'s blog-hardcoded
 /// `instantiate_controller` (`:articles`/`:comments` only) with a
 /// dispatch generated from the app's own route table — one
@@ -7307,7 +7346,12 @@ fn apply_controller_dispatch(files: &mut [(String, String)], app: &App, lazy_req
         "    controller = case matched.controller\n{test_arms}                 else ActiveStorage::Routes.instantiate_controller(matched.controller)\n                 end"
     );
 
+    let hooked: Vec<_> = crate::lower::controller_to_library::action_override::request_controllers(&app.controllers)
+        .into_iter().filter(|c| flat.iter().any(|r| r.controller == c.name)).collect();
     for (path, content) in files.iter_mut() {
+        if (path == "main.rb" || path == "test/test_helper.rb") && !hooked.is_empty() {
+            adapt_controller_hook_requests(content, &hooked, lazy_requires);
+        }
         if path.ends_with("main.rb") && content.contains(HARDCODED) {
             *content = content.replace(HARDCODED, &generated);
         }

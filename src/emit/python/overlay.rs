@@ -538,10 +538,12 @@ fn emit_dispatch(
     out.push_str("CONTROLLERS = {\n");
     for lc in controllers {
         let class_name = last_segment(lc.name.0.as_str());
-        // Routable = defines process_action. Skips the strong-param
-        // classes and the abstract ApplicationController.
+        // A controller with an inherited source override defines the
+        // internal dispatcher instead. Both identify a routable class.
         let routable = class_name != "ApplicationController"
-            && lc.methods.iter().any(|m| m.name.as_str() == "process_action");
+            && lc.methods.iter().any(|m| {
+                matches!(m.name.as_str(), "process_action" | "_roundhouse_process_action")
+            });
         if !routable {
             continue;
         }

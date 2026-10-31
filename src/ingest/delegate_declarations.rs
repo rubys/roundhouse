@@ -1,10 +1,10 @@
 //! Parse and validate `delegate` declarations before forwarder synthesis.
 
 use super::*;
+use crate::det::{HashMap, HashSet};
 use crate::dialect::MethodVisibility;
 use crate::expr::{ExprNode, Literal};
 use crate::ident::Symbol;
-use crate::det::{HashMap, HashSet};
 
 /// One expanded `delegate` entry: `<name>` forwards to `<target>.<method>`.
 pub(super) struct Delegation {
@@ -188,10 +188,10 @@ impl<'a> DelegateEligibility<'a> {
             entries.iter().any(|entry| {
                 !self.method_targets.contains(entry.target.as_str())
                     && !supported.contains(&(
-                    entry.target.as_str().to_string(),
-                    entry.method.as_str().to_string(),
-                    synthesized_arity(entry.method.as_str()),
-                ))
+                        entry.target.as_str().to_string(),
+                        entry.method.as_str().to_string(),
+                        synthesized_arity(entry.method.as_str()),
+                    ))
             })
         }) {
             return None;
@@ -351,7 +351,90 @@ fn parse_declaration(call: &Expr) -> Option<ParsedDeclaration> {
 /// (ActiveSupport's core extensions included: `blank?`, `presence`,
 /// `try`, …; oracle `nil_public_methods.out`). Re-verify on a Rails or
 /// Ruby upgrade.
-const NIL_PUBLIC_METHODS: &[&str] = &["!", "!=", "!~", "&", "<=>", "==", "===", "=~", "^", "__id__", "__send__", "acts_like?", "as_json", "blank?", "class", "clone", "deep_dup", "define_singleton_method", "display", "dup", "duplicable?", "enum_for", "eql?", "equal?", "extend", "freeze", "frozen?", "hash", "html_safe?", "in?", "inspect", "instance_eval", "instance_exec", "instance_of?", "instance_values", "instance_variable_defined?", "instance_variable_get", "instance_variable_names", "instance_variable_set", "instance_variables", "is_a?", "itself", "kind_of?", "method", "methods", "nil?", "object_id", "presence", "presence_in", "present?", "private_methods", "protected_methods", "public_method", "public_methods", "public_send", "rationalize", "remove_instance_variable", "respond_to?", "send", "singleton_class", "singleton_method", "singleton_methods", "tap", "then", "to_a", "to_c", "to_d", "to_enum", "to_f", "to_h", "to_i", "to_json", "to_param", "to_query", "to_r", "to_s", "to_yaml", "try", "try!", "with_options", "yield_self", "|"];
+const NIL_PUBLIC_METHODS: &[&str] = &[
+    "!",
+    "!=",
+    "!~",
+    "&",
+    "<=>",
+    "==",
+    "===",
+    "=~",
+    "^",
+    "__id__",
+    "__send__",
+    "acts_like?",
+    "as_json",
+    "blank?",
+    "class",
+    "clone",
+    "deep_dup",
+    "define_singleton_method",
+    "display",
+    "dup",
+    "duplicable?",
+    "enum_for",
+    "eql?",
+    "equal?",
+    "extend",
+    "freeze",
+    "frozen?",
+    "hash",
+    "html_safe?",
+    "in?",
+    "inspect",
+    "instance_eval",
+    "instance_exec",
+    "instance_of?",
+    "instance_values",
+    "instance_variable_defined?",
+    "instance_variable_get",
+    "instance_variable_names",
+    "instance_variable_set",
+    "instance_variables",
+    "is_a?",
+    "itself",
+    "kind_of?",
+    "method",
+    "methods",
+    "nil?",
+    "object_id",
+    "presence",
+    "presence_in",
+    "present?",
+    "private_methods",
+    "protected_methods",
+    "public_method",
+    "public_methods",
+    "public_send",
+    "rationalize",
+    "remove_instance_variable",
+    "respond_to?",
+    "send",
+    "singleton_class",
+    "singleton_method",
+    "singleton_methods",
+    "tap",
+    "then",
+    "to_a",
+    "to_c",
+    "to_d",
+    "to_enum",
+    "to_f",
+    "to_h",
+    "to_i",
+    "to_json",
+    "to_param",
+    "to_query",
+    "to_r",
+    "to_s",
+    "to_yaml",
+    "try",
+    "try!",
+    "with_options",
+    "yield_self",
+    "|",
+];
 
 fn generated_name(method: &str, prefix: &DelegatePrefix, target: &str) -> String {
     match prefix {
@@ -441,4 +524,23 @@ fn collect_calls_with_args(expr: &Expr, out: &mut CallsWithArguments) {
         calls.positional_arities.insert(args.len());
         calls.has_block |= block.is_some();
     }
+}
+
+/// Names Rails declares, including a prefix, before lowering eligibility.
+pub(super) fn declared_names(call: &Expr) -> Vec<String> {
+    parse_declaration(call)
+        .map(|declaration| {
+            declaration
+                .names
+                .iter()
+                .map(|method| {
+                    generated_name(
+                        method.as_str(),
+                        &declaration.prefix,
+                        declaration.target.as_str(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }

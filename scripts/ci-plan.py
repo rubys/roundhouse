@@ -74,6 +74,7 @@ JRUBY_BIND_INPUTS = {
 }
 PARAM_BIND_TESTS = ["param_binds", "param_binds_values", "param_binds_planner", "param_binds_cleanup"]
 SPINEL_TESTS = [
+    "controller_process_action_override",
     "date_columns_spinel",
     "temporal_initialize_spinel",
     "framework_tests_spinel",
@@ -159,6 +160,9 @@ SIDEKIQ_LIVE_INPUTS = (SIDEKIQ_WORKER_INPUTS - {"runtime/spinel/sidekiq_redis.rb
 # test binary's compile included), for balancing its shards; a suite not
 # listed counts as one Spinel build.
 SPINEL_TEST_SECONDS = {
+    # Four native builds + one emit-only refusal; local elapsed 131.27s.
+    # Warm Rust binary, fresh native projects, shared three-slot lock; CI replaces this seed.
+    "controller_process_action_override": 132,
     "spinel_transaction_connection": 501,
     "spinel_stmt_cache_lru": 203,
     # Two Spinel compiles and a run; measured in #1455's CI run 40602974151.

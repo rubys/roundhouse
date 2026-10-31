@@ -24,6 +24,7 @@
 //! top by transforming each action's `body` Expr before it's hung off
 //! the synthesized `MethodDef`.
 
+pub(crate) mod action_override;
 mod broadcasts;
 mod inertia;
 mod process_action;
@@ -355,8 +356,12 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         crate::lower::view_to_library::partial_call_contracts(views, controllers, library_classes);
 
     let mut all_methods: Vec<(Vec<MethodDef>, &Controller)> = Vec::new();
+    let mut generated = crate::det::HashMap::default();
+    let mut generated_adapters = crate::det::HashMap::default();
+    let mut action_tails = crate::det::HashMap::default();
     crate::timings::phase("lower: controllers build", || {
         for controller in controllers {
+            action_override::check_source_chain(controller, library_classes, controllers);
             let json_actions = json_actions_for(controller, views);
             let text_format_actions = text_format_actions_for(controller, views);
             // `Some(map)` → this controller's routed actions (empty set if it
@@ -382,9 +387,15 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
                 library_classes,
                 concern_spliced_actions,
             );
-            let methods = build_methods(controller, controllers, &params_specs, &assoc_registry, &json_actions, &text_format_actions, routed.as_ref(), &view_ivars, &partials, format_breadth, route_id_segments, inferred_params, wrapper.as_ref(), action_check.as_ref());
-            all_methods.push((methods, controller));
+            let built = build_methods(controller, controllers, &params_specs, &assoc_registry, &json_actions, &text_format_actions, routed.as_ref(), &view_ivars, &partials, format_breadth, route_id_segments, inferred_params, wrapper.as_ref(), action_check.as_ref());
+            if let Some(index) = built.dispatcher {
+                generated.insert(controller.name.clone(), index);
+            }
+            if let Some(index) = built.adapter { generated_adapters.insert(controller.name.clone(), index); }
+            action_tails.insert(controller.name.clone(), built.deferred_tails);
+            all_methods.push((built.methods, controller));
         }
+        action_override::inherit_action_tails(&mut all_methods, controllers, &action_tails);
         subclass_template_hooks(&mut all_methods, controllers, &view_ivars, &partials);
     });
 
@@ -542,6 +553,8 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     let permitted_fields = self::params::permitted_field_tys(&params_specs);
 
     let mut out = Vec::new();
+    let mut dispatchers = crate::det::HashMap::default();
+    let mut adapters = crate::det::HashMap::default();
     // Params classes a kept `update(<params object>)` reads `to_attrs`
     // of (`typed_update::hand_update_the_attrs`).
     let mut wants_to_attrs: std::collections::BTreeSet<ClassId> = Default::default();
@@ -610,6 +623,19 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         // type, which its declared signature does not say
         // (`permitted.to_h.except(:k)` is still declared the params class).
         self::typed_update::record_to_attrs_demand(&mut methods, &params_specs, &mut wants_to_attrs);
+        // Hold the actual synthesized method aside while inspecting the
+        // complete lowered source set. Accessors and delegates on a hook's
+        // owner are application methods too, never dispatcher exemptions.
+        if let Some(index) = generated_adapters.get(&controller.name).copied() {
+            let method = methods.remove(index);
+            debug_assert_eq!(method.name.as_str(), action_override::ENTRY);
+            adapters.insert(controller.name.clone(), method);
+        }
+        if let Some(index) = generated.get(&controller.name).copied() {
+            let method = methods.remove(index);
+            debug_assert_eq!(method.name.as_str(), action_override::DISPATCH);
+            dispatchers.insert(controller.name.clone(), (index, method));
+        }
         methods.extend(collect_attr_accessor_methods(controller));
         apply_alias_methods(controller, &mut methods);
         apply_undef_methods(controller, &mut methods);
@@ -661,6 +687,14 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             crate::lower::typing::type_method_body(method, &classes, &params_ivars);
         }
     }
+    action_override::check_ancestor_collisions(&out, controllers);
+    for class in &mut out {
+        if let Some((index, dispatcher)) = dispatchers.remove(&class.name) {
+            class.methods.insert(index.min(class.methods.len()), dispatcher);
+        }
+        if let Some(adapter) = adapters.remove(&class.name) { class.methods.push(adapter); }
+    }
+    action_override::refresh_return_contracts(&mut out, controllers, &classes, &framework_ivars);
     // Append synthesized Params classes after controllers. Each becomes
     // its own `app/models/<resource>_params.{rb,ts}` file via the
     // standard per-LC emit path.
@@ -693,7 +727,7 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         None,
         None,
         None,
-    );
+    ).methods;
     methods.extend(collect_attr_accessor_methods(controller));
     apply_alias_methods(controller, &mut methods);
     apply_undef_methods(controller, &mut methods);
@@ -1123,6 +1157,15 @@ fn missing_action_check(
     Some(names)
 }
 
+struct BuiltMethods {
+    methods: Vec<MethodDef>,
+    /// Index of the actual generated dispatcher, never inferred from an
+    /// application's method name or whether its owner defines a hook.
+    dispatcher: Option<usize>,
+    adapter: Option<usize>,
+    deferred_tails: crate::det::HashMap<Symbol, Expr>,
+}
+
 fn build_methods(
     controller: &Controller,
     all_controllers: &[Controller],
@@ -1145,7 +1188,7 @@ fn build_methods(
     // Rails' ParamsWrapper for this controller, when its requests get one.
     wrapper: Option<&self::params_wrapper::WrapperSpec>,
     action_check: Option<&crate::det::HashSet<Symbol>>,
-) -> Vec<MethodDef> {
+) -> BuiltMethods {
     let mut methods: Vec<MethodDef> = controller.class_methods().cloned().collect();
 
     // Names this controller's ancestry DEFINES that the route-helper
@@ -1230,7 +1273,8 @@ fn build_methods(
     // `own_filter_inlining_is_ordered`. When it declines, every own
     // filter falls through to the preamble, which emits them in
     // declaration order.
-    let inlining_ordered = own_filter_inlining_is_ordered(controller, &privs);
+    let inlining_ordered = own_filter_inlining_is_ordered(controller, &privs)
+        && action_override::may_inline_callbacks(controller, all_controllers);
     let resolve_own = |name: &Symbol, visit: &mut dyn FnMut(&Expr)| {
         if let Some(a) = privs
             .iter()
@@ -1381,7 +1425,11 @@ fn build_methods(
     // controller nobody subclasses that way, which is all of them
     // outside campfire's one bot controller — and an empty set leaves
     // both the bodies and the dispatcher byte-identical.
-    let deferred_renders = actions_reached_by_super(controller, all_controllers);
+    let preserves_result = !action_override::may_inline_callbacks(controller, all_controllers);
+    let mut deferred_renders = actions_reached_by_super(controller, all_controllers);
+    if preserves_result {
+        deferred_renders.extend(publics.iter().map(|a| a.name.clone()));
+    }
     let mut pending_dispatcher: Option<(Vec<PreambleStmt>, process_action::WrapFilters)> = None;
 
     if !publics_inlined.is_empty() || !inherited.is_empty() || !missing.is_empty() {
@@ -1398,11 +1446,15 @@ fn build_methods(
             &privs,
             /*own_privs_inlined=*/ inlining_ordered,
         );
-        let (mut stmts, wraps) = preamble;
+        let (mut stmts, mut wraps) = preamble;
+        wraps.ordered_before = !action_override::may_inline_callbacks(controller, all_controllers);
         // ParamsWrapper runs before every callback in Rails (it wraps
         // `process_action` outside them), so it leads as `Lead` — not a
         // filter `Block` with empty guards.
         if let Some(spec) = wrapper {
+            for boundary in &mut wraps.around_before {
+                *boundary += 1;
+            }
             stmts.insert(
                 0,
                 PreambleStmt::Lead { body: self::params_wrapper::wrap_statement(spec) },
@@ -1416,6 +1468,8 @@ fn build_methods(
     // dispatcher is spliced in at index 0 afterwards so the emitted
     // method order is unchanged.
     let dispatcher_at = methods.len();
+    let mut generated_dispatcher = None;
+    let mut pending_adapter = None;
     let mut deferred_tails: crate::det::HashMap<Symbol, Expr> =
         crate::det::HashMap::default();
     for a in &publics_inlined {
@@ -1428,6 +1482,12 @@ fn build_methods(
         ));
     }
     if let Some((preamble, wraps)) = pending_dispatcher {
+        action_override::check_selectors(
+            controller,
+            all_controllers,
+            publics_inlined.iter().map(|a| a.name.clone())
+                .chain(inherited.iter().cloned()).chain(missing.iter().cloned()).collect(),
+        );
         let rescues = collect_rescue_handlers(controller, all_controllers, format_breadth);
         let reads = reads_action_name(
             controller,
@@ -1444,7 +1504,14 @@ fn build_methods(
             &wraps,
             reads,
             &missing,
+            action_override::overrides(controller, all_controllers),
+            preserves_result,
         );
+        if action_override::overrides(controller, all_controllers) {
+            dispatcher.name = Symbol::from(action_override::DISPATCH);
+            generated_dispatcher = Some(dispatcher_at);
+            pending_adapter = Some(action_override::request_adapter(controller, reads));
+        }
         // Block-form filters are inlined into `process_action` after
         // `rewrite_controller_route_helpers` has already run on action
         // bodies. A CSP block calls `service_worker_path(format: :js)`,
@@ -1507,6 +1574,7 @@ fn build_methods(
     // Class-side methods are already seeded at the start of build_methods;
     // do not append them again (duplicate defs break several emitters).
 
+    let synthesized = generated_dispatcher.map(|index| methods.remove(index));
     // Specialize `controller_name` / `controller_path` as string
     // literals so Base does not need `self.class.to_s` reflection or
     // an ActiveSupport char-walk that several AOT string emits cannot
@@ -1525,7 +1593,16 @@ fn build_methods(
         &crate::analyze::controller_view_prefix(&controller.name),
     );
 
-    methods
+    action_override::finish(&mut methods, controller, all_controllers);
+    let dispatcher = synthesized.map(|method| {
+        let index = dispatcher_at.min(methods.len());
+        methods.insert(index, method);
+        index
+    });
+    let adapter = pending_adapter.map(|method| {
+        let index = methods.len(); methods.push(method); index
+    });
+    BuiltMethods { methods, dispatcher, adapter, deferred_tails }
 }
 
 /// Replace any prior def of `name`, then push the AOT string-literal
@@ -2210,6 +2287,7 @@ fn build_filter_preamble(
                         continue;
                     }
                     if matches!(f.kind, FilterKind::Around) {
+                        wraps.around_before.push(preamble.len());
                         wraps.around.push(f);
                     } else {
                         wraps.after.push(PreambleStmt::Call { filter: f, halt_check: false });
@@ -2255,6 +2333,9 @@ fn build_filter_preamble(
     // reverse declaration order — see the comment where `prepends` is
     // declared above.
     if !prepends.is_empty() {
+        for boundary in &mut wraps.around_before {
+            *boundary += prepends.len();
+        }
         prepends.reverse();
         prepends.append(&mut preamble);
         preamble = prepends;
@@ -2681,7 +2762,7 @@ fn can_respond_within(
     found
 }
 
-fn calls_super(body: &Expr) -> bool {
+pub(super) fn calls_super(body: &Expr) -> bool {
     let mut found = matches!(&*body.node, ExprNode::Super { .. });
     body.node.for_each_child(&mut |c| found = found || calls_super(c));
     found
@@ -3073,8 +3154,10 @@ fn action_to_method(
         can_respond_within(&a.body, &resolve, &mut std::collections::BTreeSet::new())
     };
     let inheritor_modules = inheritor_view_modules(controller, all_controllers_for_params);
+    let preserves_result = !action_override::may_inline_callbacks(controller, all_controllers_for_params);
+    let source_body = if preserves_result { action_override::retain_response_values(&a.body) } else { a.body.clone() };
     let (body, deferred_tail) = lower_action_body(
-        &a.body,
+        &source_body,
         controller,
         a.name.as_str(),
         privs,
@@ -3089,6 +3172,7 @@ fn action_to_method(
         shadows,
         route_id_segments,
         deferred_renders.contains(&a.name),
+        preserves_result,
         can_respond_via_helper,
         inherited_spec,
         formats_template.as_ref(),
@@ -3143,6 +3227,8 @@ fn action_to_method(
             // `role_params`, which builds a bare Hash, still infers Hash.
             Ty::Untyped
         }
+    } else if is_public && preserves_result {
+        Ty::Untyped
     } else if is_public {
         // Routed actions terminate in render/redirect → Nil.
         Ty::Nil
@@ -3329,6 +3415,7 @@ fn lower_action_body(
     shadows: &crate::det::HashSet<Symbol>,
     route_id_segments: &crate::det::HashMap<String, Vec<bool>>,
     defer_implicit_render: bool,
+    preserve_result: bool,
     can_respond_via_helper: bool,
     inherited_params_spec: Option<&ParamsSpec>,
     formats_only_render: Option<&Symbol>,
@@ -3411,6 +3498,10 @@ fn lower_action_body(
             view_ivars.contains_key(&(module_key.clone(), format!("{action_name}_{v}")))
         });
     let html_exists = view_ivars.contains_key(&(module_key.clone(), action_name.to_string()));
+    let has_deferred_tail = is_public && defer_implicit_render
+        && crate::lower::controller::body::implicit_render_statement(
+            &unwrapped, action_name, variants, any_template_exists, html_exists,
+        ).is_some();
     let base = if !is_public {
         unwrapped
     } else if defer_implicit_render || responds_via_helper {
@@ -3494,7 +3585,7 @@ fn lower_action_body(
     let mut filtered = crate::lower::params_permit::filtered_permit_helpers(privs);
     filtered.extend(crate::lower::params_permit::filtered_permit_helpers(params_privs));
     crate::lower::params_permit::stringify_filtered_helper_reads(&mut lowered, &filtered);
-    if !defer_implicit_render {
+    if !defer_implicit_render || (preserve_result && !has_deferred_tail) {
         return (lowered, None);
     }
     // Split the synthesized tail back off, now that it has been through

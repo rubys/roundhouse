@@ -716,6 +716,46 @@ fn emit_lowered_controllers_from_lcs(
 
     lcs.iter()
         .flat_map(|lc| {
+            // A merged key can repeat a generated record accessor. Ruby
+            // keeps the last definition; make that winning method set
+            // explicit before emitting both the body and its sidecar.
+            let resolved = lc.origin.as_ref().map(|_| {
+                let mut copy = lc.clone();
+                let mut names = crate::det::HashSet::default();
+                copy.methods.reverse();
+                copy.methods.retain(|m| names.insert((
+                    m.receiver == crate::dialect::MethodReceiver::Class,
+                    m.name.clone(),
+                )));
+                copy.methods.reverse();
+                copy
+            });
+            let lc = resolved.as_ref().unwrap_or(lc);
+            // Ruby and its sidecar must describe the same final method
+            // set. A leftover synthesis collision is an emit error,
+            // before strict emission can report a usable project.
+            let mut seen = crate::det::HashSet::default();
+            let mut unique = true;
+            for method in &lc.methods {
+                if !seen.insert((
+                    method.receiver == crate::dialect::MethodReceiver::Class,
+                    &method.name,
+                )) {
+                    crate::emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+                        method.name_span,
+                        None,
+                        "controller_method_collision",
+                        format!(
+                            "{}#{} has more than one lowered definition",
+                            lc.name.0, method.name,
+                        ),
+                    ));
+                    unique = false;
+                }
+            }
+            if !unique {
+                return Vec::new();
+            }
             let file_stem = crate::naming::underscore(lc.name.0.as_str());
             let out_path = if lc.origin.is_some() {
                 PathBuf::from(format!("app/models/{file_stem}.rb"))

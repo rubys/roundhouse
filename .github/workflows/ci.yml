@@ -2283,6 +2283,14 @@ jobs:
       # Not a separate job: framework-tests-ruby needs this same MRI + scaffold bundle (#273).
       - name: cargo test --test framework_tests_ruby -- --ignored
         run: cargo test --test framework_tests_ruby -- --ignored --nocapture
+      - name: Controller dispatch against the Rails oracle
+        if: ${{ !cancelled() }}
+        env:
+          ROUNDHOUSE_CONTROLLER_ORACLE_REQUIRED: '1'
+        run: |
+          gem install --no-document actionpack -v 8.1.4
+          gem install --no-document sqlite3 -v '~> 2.9'
+          cargo test --locked --test controller_process_action_override rails_oracle_ -- --nocapture --test-threads=1
       - name: cargo test --test uuid_key_ruby -- --ignored
         if: ${{ !cancelled() }}
         run: cargo test --test uuid_key_ruby -- --ignored --nocapture

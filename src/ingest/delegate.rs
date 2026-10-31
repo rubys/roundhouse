@@ -336,7 +336,12 @@ fn synthesized_source(
             // (the local is named so that no `to:` target can be shadowed by it)
             // and any other (`false` too) is called through. Not `&.`, which
             // the lowering spells as `&&` and would answer `false` for it.
-            ("", format!("__allow_nil_target__ = {t}\n    __allow_nil_target__.nil? ? nil : __allow_nil_target__.{m}"))
+            (
+                "",
+                format!(
+                    "__allow_nil_target__ = {t}\n    __allow_nil_target__.nil? ? nil : __allow_nil_target__.{m}"
+                ),
+            )
         } else {
             ("", format!("{t}.{m}"))
         };
@@ -384,8 +389,14 @@ mod tests {
         let called_with_args = names_called_with_arguments(&lc.methods, &[]);
         let blocked_names = crate::det::HashSet::default();
         let no_targets = crate::det::HashSet::default();
-        let mut eligibility =
-            DelegateEligibility::new(&lc.methods, &called_with_args, &blocked_names, None, &no_targets, &[]);
+        let mut eligibility = DelegateEligibility::new(
+            &lc.methods,
+            &called_with_args,
+            &blocked_names,
+            None,
+            &no_targets,
+            &[],
+        );
         take_delegate_decls_from_calls(&mut lc.unknown_calls, &mut eligibility)
     }
 
@@ -562,8 +573,14 @@ mod tests {
         let called_with_args = names_called_with_arguments(&model.methods, &concern_bodies);
         let blocked_names = crate::det::HashSet::default();
         let no_targets = crate::det::HashSet::default();
-        let mut eligibility =
-            DelegateEligibility::new(&model.methods, &called_with_args, &blocked_names, None, &no_targets, &[]);
+        let mut eligibility = DelegateEligibility::new(
+            &model.methods,
+            &called_with_args,
+            &blocked_names,
+            None,
+            &no_targets,
+            &[],
+        );
         let delegates = take_delegate_decls_from_calls(&mut model.unknown_calls, &mut eligibility);
         assert!(
             delegates.is_empty(),
@@ -582,8 +599,14 @@ mod tests {
         let called_with_args = names_called_with_arguments(&model.methods, &[]);
         let blocked_names = ["title".to_string()].into_iter().collect();
         let no_targets = crate::det::HashSet::default();
-        let mut eligibility =
-            DelegateEligibility::new(&model.methods, &called_with_args, &blocked_names, None, &no_targets, &[]);
+        let mut eligibility = DelegateEligibility::new(
+            &model.methods,
+            &called_with_args,
+            &blocked_names,
+            None,
+            &no_targets,
+            &[],
+        );
         let delegates = take_delegate_decls_from_calls(&mut model.unknown_calls, &mut eligibility);
         assert!(
             delegates.is_empty(),
@@ -699,4 +722,8 @@ mod tests {
             "a setter's fixed arity exempts it from the call-site-arguments heuristic"
         );
     }
+}
+
+pub(crate) fn declared_names(call: &Expr) -> Vec<String> {
+    declarations::declared_names(call)
 }

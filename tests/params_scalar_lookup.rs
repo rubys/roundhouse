@@ -39,7 +39,19 @@ fn emitted(body: &str, helper: &str) -> String {
         .map(|(path, source)| (path.into(), source.into_bytes())).collect();
     let mut app = ingest_app_from_tree(tree).expect("ingest");
     roundhouse::session::analyze_and_lower(&mut app);
-    ruby::emit_lowered_controllers(&app).into_iter()
+    let files = ruby::emit_lowered_controllers(&app);
+    let sidecar = &files.iter()
+        .find(|file| file.path.to_string_lossy().ends_with("models/item_params.rbs"))
+        .expect("item params sidecar").content;
+    let mut declared = std::collections::HashSet::new();
+    for line in sidecar.lines() {
+        if let Some((name, _)) = line.trim_start().strip_prefix("def ")
+            .and_then(|method| method.split_once(':'))
+        {
+            assert!(declared.insert(name), "duplicate signature for {name}:\n{sidecar}");
+        }
+    }
+    files.into_iter()
         .find(|file| file.path.to_string_lossy().ends_with("models/item_params.rb"))
         .expect("item params").content
 }
