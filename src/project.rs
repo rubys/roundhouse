@@ -3532,9 +3532,56 @@ pub fn copy_exec_bits(src: &Path, files: &[(String, String)], dest: &Path) -> Re
 pub fn write_to_dir(files: &[(String, String)], dest: &Path) -> Result<(), String> {
     fs::create_dir_all(dest).map_err(|e| format!("mkdir {}: {e}", dest.display()))?;
     for (path, content) in files {
+        let content = if path.ends_with(".rb") { drop_late_magic_comments(content) } else { std::borrow::Cow::Borrowed(content.as_str()) };
         write_if_changed(&dest.join(path), content.as_bytes())?;
     }
     Ok(())
+}
+
+/// A file assembled from several runtime sources (test_helper.rb, boot.rb,
+/// runtime/mime.rb, runtime/i18n_locale.rb) carries each source's
+/// `# frozen_string_literal: true` where that source began. Past the first
+/// token Ruby ignores the comment and warns ("is ignored after any
+/// tokens"), and a tree under a warnings-are-errors policy refuses to
+/// boot. The line has no effect there, so it is
+/// dropped; a leading one is kept. Only an exact column-0 comment counts.
+pub fn drop_late_magic_comments(content: &str) -> std::borrow::Cow<'_, str> {
+    let is_magic = |line: &str| {
+        let line = line.trim_end();
+        ["frozen_string_literal", "shareable_constant_value"].iter().any(|key| {
+            line.strip_prefix("# ")
+                .and_then(|rest| rest.strip_prefix(key))
+                .is_some_and(|rest| rest.starts_with(": "))
+        })
+    };
+    let mut seen_token = false;
+    let mut late = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            if seen_token && is_magic(line) {
+                late = true;
+                break;
+            }
+        } else {
+            seen_token = true;
+        }
+    }
+    if !late {
+        return std::borrow::Cow::Borrowed(content);
+    }
+    let mut out = String::with_capacity(content.len());
+    let mut seen_token = false;
+    for line in content.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if !(trimmed.is_empty() || trimmed.starts_with('#')) {
+            seen_token = true;
+        } else if seen_token && is_magic(line) {
+            continue;
+        }
+        out.push_str(line);
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<(), String> {
