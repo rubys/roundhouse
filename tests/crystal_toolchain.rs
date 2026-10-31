@@ -258,3 +258,17 @@ fn controller_ivars_named_like_base_state_render() {
     let want = format!("[200, nil, {}]", serde_json::to_string(ts_controller_ivars::BODY).unwrap());
     assert!(run.status.success() && stdout.trim() == want, "{stdout}\n{}", String::from_utf8_lossy(&run.stderr));
 }
+
+#[test]
+#[ignore]
+fn controller_ivars_named_like_base_state_compile_without_application_controller() {
+    // No app ApplicationController: the emit synthesizes one under
+    // ActionController::Base, and the controller's `@status`/`@headers`
+    // still compile next to the base's members (#1625).
+    let (emitted, errors) = ts_controller_ivars::overlay()
+        .remove("app/controllers/application_controller.rb")
+        .write("app/views/probes/show.html.erb", &ts_controller_ivars::SHOW.replace("<p><%= @location %></p>\n", ""))
+        .emit(roundhouse::project::BuildTarget::Crystal);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_crystal_passes("an app with no ApplicationController and ivars named like the base's state", &emitted);
+}

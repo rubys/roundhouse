@@ -41,3 +41,18 @@ fn an_ivar_naming_no_crystal_base_member_keeps_its_name() {
     let probes = std::fs::read_to_string(emitted.join("src/controllers/probes_controller.cr")).unwrap();
     assert!(probes.contains("@is_performed = \"app flag\""), "{probes}");
 }
+
+/// With no app/controllers/application_controller.rb, the Crystal emit
+/// writes `class ApplicationController < ActionController::Base` itself; a
+/// controller under it is still a controller, and its ivars are renamed.
+#[test]
+fn an_app_ivar_is_renamed_under_a_synthesized_application_controller() {
+    let (emitted, errors) = ts_controller_ivars::overlay()
+        .remove("app/controllers/application_controller.rb")
+        .write("app/views/probes/show.html.erb", &ts_controller_ivars::SHOW.replace("<p><%= @location %></p>\n", ""))
+        .emit(BuildTarget::Crystal);
+    assert!(errors.is_empty(), "{errors:?}");
+    let probes = std::fs::read_to_string(emitted.join("src/controllers/probes_controller.cr")).unwrap();
+    assert!(!probes.contains("@status "), "probes still declares or assigns @status:\n{probes}");
+    assert!(probes.contains("@app_status = \"app status\""), "{probes}");
+}

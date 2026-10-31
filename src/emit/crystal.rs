@@ -319,9 +319,16 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         &assocs,
     );
     // Crystal names a method as Ruby does (`performed?`, `status=`).
+    // With no app ApplicationController, this emit writes one under
+    // ActionController::Base (above), which the controllers under it reach.
+    let implied: &[(&str, &str)] = if needs_app_controller {
+        &[("ApplicationController", "ActionController::Base")]
+    } else {
+        &[]
+    };
     super::controller_ivars::rename_ivars_shadowing_controller_base(&mut controller_lcs, &runtime_classes_for_typing, |name| {
         vec![name.clone()]
-    });
+    }, implied);
     let controller_synth: Vec<(String, String)> = controller_lcs
         .iter()
         .filter(|lc| lc.origin.is_some())

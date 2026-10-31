@@ -17,16 +17,20 @@
 /// `performed?` is `is_performed()`), and the ivars its bodies use, so a
 /// runtime change can't leave one out. One rename map
 /// covers every app controller, so an ivar ApplicationController sets and a
-/// subclass reads keeps one name. The new name (`app_<name>`, numbered if
-/// taken) is checked against the runtime's members and every controller's
-/// own methods and ivars. Views get the values as arguments, under their
-/// own parameter names, so nothing outside the controllers changes. The
+/// subclass reads keeps one name. `implied_parents` names the classes a
+/// target emits for the app outside `controllers`, with their parents
+/// (Crystal's synthesized `ApplicationController`). The new name
+/// (`app_<name>`, numbered if taken) is checked against the runtime's
+/// members and every controller's own methods and ivars. Views get the
+/// values as arguments, under their own parameter names, so nothing
+/// outside the controllers changes. The
 /// lowering's own framework ivars (`@params`, `@flash`, `@session`) refer
 /// to the runtime's state on purpose and keep their names.
 pub(crate) fn rename_ivars_shadowing_controller_base(
     controllers: &mut [crate::dialect::LibraryClass],
     runtime: &[crate::dialect::LibraryClass],
     method_names: impl Fn(&crate::ident::Symbol) -> Vec<crate::ident::Symbol>,
+    implied_parents: &[(&str, &str)],
 ) {
     use crate::expr::{Expr, ExprNode, LValue};
     use crate::ident::Symbol;
@@ -79,10 +83,17 @@ pub(crate) fn rename_ivars_shadowing_controller_base(
         return;
     }
     // A controller is a class whose parents lead to the runtime base.
-    let parents: crate::det::HashMap<String, Option<String>> = controllers
+    // A class the target writes itself, outside `controllers`, still links
+    // the chain (Crystal's synthesized `ApplicationController`).
+    let mut parents: crate::det::HashMap<String, Option<String>> = implied_parents
         .iter()
-        .map(|c| (c.name.0.as_str().to_string(), c.parent.as_ref().map(|p| p.0.as_str().to_string())))
+        .map(|(class, parent)| (class.to_string(), Some(parent.to_string())))
         .collect();
+    parents.extend(
+        controllers
+            .iter()
+            .map(|c| (c.name.0.as_str().to_string(), c.parent.as_ref().map(|p| p.0.as_str().to_string()))),
+    );
     let is_controller = |name: &str| {
         let mut at = Some(name.to_string());
         let mut seen = crate::det::HashSet::default();

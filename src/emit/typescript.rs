@@ -431,7 +431,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // `save_bang()`, `name=` is `set_name()`.
     super::controller_ivars::rename_ivars_shadowing_controller_base(&mut controller_lcs, &runtime_seed_classes, |name| {
         vec![name.clone(), crate::ident::Symbol::from(library::sanitize_identifier(name.as_str()))]
-    });
+    }, &[]);
     let mut expanded_extern_storage: Vec<String> =
         extern_async_names.iter().map(|s| s.to_string()).collect();
 
