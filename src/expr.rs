@@ -175,11 +175,14 @@ pub const INHERITED_ALIAS_COPY: u64 = 1 << 36;
 pub const NATIVE_KEYWORD_ARGUMENTS: u64 = 1 << 35;
 /// A retained finder dispatch: subclass arms are explicit, or hook ownership
 /// is unknown. Later registries must not relicense a framework rewrite.
-pub const FINDER_DISPATCH_FALLBACK: u64 = 1 << 37;
+/// Bits 36–39 belong to inherited aliases, format variants and indexer
+/// decisions. Bits 40–47 are reserved for future decision groups, so finder
+/// decisions start at 48.
+pub const FINDER_DISPATCH_FALLBACK: u64 = 1 << 48;
 /// Ingest qualified a bare model finder; a runtime relation keeps its late-bound self.
-pub const IMPLICIT_MODEL_FINDER_RECEIVER: u64 = 1 << 38;
+pub const IMPLICIT_MODEL_FINDER_RECEIVER: u64 = 1 << 49;
 /// Unknown-hook dynamic dispatch has no established emitted implementation.
-pub const FINDER_IMPLEMENTATION_UNKNOWN: u64 = 1 << 39;
+pub const FINDER_IMPLEMENTATION_UNKNOWN: u64 = 1 << 50;
 
 /// On a route-helper call `lower::route_format_suffix` renamed for its
 /// literal `format:` (`widget_url(w, format: :json)` to
