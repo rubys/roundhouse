@@ -1600,6 +1600,7 @@ end
     // kept or dropped after every app file is read (see
     // `keep_initializer_defined`).
     let mut initializer_defined: Vec<LibraryClass> = Vec::new();
+    let mut rate_limit_stores = Vec::new();
     // `ActionController::Base.prepend_view_path …`, applied with the class
     // bodies' own once every class is read (see `view_paths`).
     let mut view_path_ops = Vec::new();
@@ -1656,6 +1657,7 @@ end
                         }
                     }
                 }
+                rate_limit_stores.extend(super::rate_limit::initializer_stores(&bytes, &path_str));
                 app.module_mixins.extend(mixins);
                 view_path_ops.extend(super::view_paths::extract_initializer_view_paths(&bytes, &path_str));
                 app.initializer_filters.extend(extract_initializer_filters(&bytes, &path_str));
@@ -2437,6 +2439,8 @@ end
     keep_initializer_defined(&mut app, dir, &sources, initializer_defined);
     // `self.queue_adapter =` on ApplicationJob (see `App::queue_adapter`).
     apply_application_job_queue_adapter(&mut app);
+    let const_resolver = crate::timings::phase("rubydex: wait", || const_resolver.finish());
+    let (rate_limit_stores, rate_limit_store_values) = super::rate_limit::install_boot_stores(&mut app, rate_limit_stores, &const_resolver.for_sources(&sources));
     if app.queue_adapter.as_deref() == Some("sidekiq") {
         sidekiq_warnings.into_iter().for_each(warn_sidekiq);
     }
@@ -2464,6 +2468,7 @@ end
         &engine_routes.keys().cloned().collect::<HashSet<String>>(),
         app.gem_lock.as_ref(),
         &app_namespaces,
+        &rate_limit_store_values,
     );
     // Carrier provenance must not depend on where a module lives:
     // models, services, helpers and lib all use the same splice.
@@ -2531,7 +2536,6 @@ end
     // A module-nested `class XController < BaseController` names
     // `Ns::BaseController`; `include Avatar` inside `class User` names
     // `User::Avatar`. The passes above leave both as written.
-    let const_resolver = crate::timings::phase("rubydex: wait", || const_resolver.finish());
     super::written_names::resolve(&mut app, &sources, &const_resolver.for_sources(&sources));
     // Before the concern splices: they read `library_classes`, and this
     // turns `Current`'s metaprogrammed surface into real methods first.
@@ -2662,7 +2666,7 @@ end
     // concern (before the splice carries both to the includer) or on
     // the controller that called it directly.
     super::allow_browser::lower_allow_browser(&mut app);
-    super::rate_limit::lower_rate_limit(&mut app);
+    super::rate_limit::lower_rate_limit(&mut app, rate_limit_stores, &const_resolver.for_sources(&sources));
     // The concern that wraps the pagy gem's `pagy` in a bounds check.
     super::pagy::lower_pagy(&mut app)?;
     super::invisible_captcha::lower_invisible_captcha(&mut app);

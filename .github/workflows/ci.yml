@@ -2757,7 +2757,7 @@ jobs:
   # campfire-archive-build: ONCE Campfire for the spinel target, packaged
   # the way the blog archives are.
   #
-  # Published at rubys.github.io/roundhouse/campfire/spinel.tgz — NOT
+  # Published at roundhouse-rb.dev/campfire/spinel.tgz — NOT
   # under browse/, which names the source VIEWER and has no manifest for
   # this archive to render. Linked from site/apps/campfire.html.
   #
@@ -3096,7 +3096,7 @@ jobs:
   # -------------------------------------------------------------------
   # Build the Pages site: per-target manifests (real-blog fixture) +
   # static HTML/CSS/JS from site/. Per matz/spinel#314, the archives at
-  # rubys.github.io/roundhouse/browse/<target>.tgz are matz's primary
+  # roundhouse-rb.dev/browse/<target>.tgz are matz's primary
   # extraction surface for spinel-side bug repros — they need to
   # publish *current emit* even when per-target toolchain/compare jobs
   # fail (broken emit is exactly what's interesting to investigate).
@@ -3223,7 +3223,7 @@ jobs:
       - name: Build live SharedWorker blog demo (→ _site/blog)
         if: needs.plan.outputs.site == 'true'
         env:
-          ROUNDHOUSE_BASE: /roundhouse/blog/
+          ROUNDHOUSE_BASE: /blog/
         run: |
           set -euo pipefail
           DEMO="$(mktemp -d)"
@@ -3570,7 +3570,7 @@ jobs:
         run: scripts/campfire-suite-report _site/bench/campfire-suite-spinel _site/bench/campfire-suite-spinel/index.html
 
       # The per-target archives, for the e2e-<target> jobs to download and
-      # boot — the exact bytes published to rubys.github.io/roundhouse.
+      # boot — the exact bytes published to roundhouse-rb.dev.
       - name: Record archive producer evidence
         if: always()
         env:
@@ -3690,7 +3690,7 @@ jobs:
       # job, is attached after restoring this run's site-base artifact.
       # Assembly never re-emits archives or rebuilds from a newer main.
       #
-      # The bytes go live at rubys.github.io/roundhouse/campfire/spinel.tgz
+      # The bytes go live at roundhouse-rb.dev/campfire/spinel.tgz
       # (source; needs a spinel checkout) and campfire/docker.tgz (the
       # `spin pack` output with a Dockerfile; needs Docker and nothing
       # else), if publication guards pass. Both are linked from

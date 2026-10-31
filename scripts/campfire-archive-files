@@ -22,7 +22,7 @@ cat > "$TREE/README.md" <<README
 
 [ONCE Campfire](https://github.com/basecamp/once-campfire) — Basecamp's
 MIT-licensed chat app — transpiled from its Rails source by
-[Roundhouse](https://rubys.github.io/roundhouse/) and compiled
+[Roundhouse](https://roundhouse-rb.dev/) and compiled
 ahead-of-time to a native binary by the
 [Spinel](https://github.com/matz/spinel) Ruby VM.
 

@@ -426,11 +426,11 @@ pub fn target_readme(target: BuildTarget) -> String {
     let attribution = match target {
         BuildTarget::Blog => {
             "The Rails source app that [Roundhouse]\
-             (https://rubys.github.io/roundhouse/) transpiles."
+             (https://roundhouse-rb.dev/) transpiles."
         }
         _ => {
             "Transpiled from a Rails source app by [Roundhouse]\
-             (https://rubys.github.io/roundhouse/)."
+             (https://roundhouse-rb.dev/)."
         }
     };
     // Archives that ship the Playwright suite (see `ships_e2e`)

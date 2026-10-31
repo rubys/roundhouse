@@ -81,7 +81,7 @@ cd playground && node verify-playground.mjs
 
 The CI `build-site` job copies this dir into `_site/playground/` and
 regenerates `fixture.json` from the freshly-built real-blog fixture, so the
-published demo lands at `rubys.github.io/roundhouse/playground/`. It also
+published demo lands at `roundhouse-rb.dev/playground/`. It also
 bundles the Lobsters app (`RUBY_BENCH_SHA`) into `_site/lib/app-lobsters.json`
 and ONCE Campfire (`CAMPFIRE_SHA`) into `_site/lib/app-campfire.json`, then
 writes `_site/lib/apps.json` for the app selector. See the "Publishing to

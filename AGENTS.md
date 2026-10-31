@@ -8,7 +8,7 @@ needs *before* touching the code: where to look, and the invariants not to break
 Current implementation and executed CI are authoritative for behavior.
 [`RELEASES.md`](RELEASES.md) records dated snapshot claims, not a live main
 status page. The [user guide](docs/guide/README.md) describes product usage;
-the [bench page](https://rubys.github.io/roundhouse/bench/) carries measurements.
+the [bench page](https://roundhouse-rb.dev/bench/) carries measurements.
 
 ## Start here
 

@@ -10251,6 +10251,14 @@ fn require_path_for_body_const(
         None => path,
     };
     let first = path.first()?;
+    // A captured boot store is a value on Object, whose builtin class
+    // needs no require but whose carried initializer does.
+    if first == "Object" && path.len() > 1 && self_name != "Object"
+        && app.library_classes.iter().any(|class| class.name.0.as_str() == "Object"
+            && class.constants.iter().any(|(name, _)| name.as_str() == path[1]))
+    {
+        return Some("app/models/object".to_string());
+    }
     // A nested class of THIS class is still a different file:
     // `Sound::Image` lives at app/models/sound/image.rb even though the
     // reference's first segment is `Sound`. Resolve the full path before
