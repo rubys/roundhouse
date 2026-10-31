@@ -11,7 +11,7 @@ mod emit_and_run;
 
 use roundhouse::project::BuildTarget;
 
-const ROUTES: &str = "Rails.application.routes.draw do\n  namespace :admin do\n    resources :domain_allows, only: [:create]\n  end\n  resources :widgets, only: [:index]\nend\n";
+const ROUTES: &str = "Rails.application.routes.draw do\n  namespace :admin do\n    resources :domain_allows, only: [:create]\n  end\n  resources :widgets, only: [:index]\n  resources :tags, only: [:index]\nend\n";
 
 // The call sites that give the helpers their keys.
 const CONTROLLER: &str = r#"class WidgetsController < ApplicationController
@@ -23,6 +23,11 @@ const CONTROLLER: &str = r#"class WidgetsController < ApplicationController
   end
 end
 "#;
+
+// A variable inner value: its Array needs `to_query`'s recursion, so the
+// key keeps the scalar form. Only the sidecar test carries it: as a
+// scalar key it is the call Spinel refused before this change.
+const TAGS_CONTROLLER: &str = "class TagsController < ApplicationController\n  def index\n    names = [\"a\", \"b\"]\n    render plain: tags_path(filter: { names: names })\n  end\nend\n";
 
 const ASSERTIONS: &str = r#"
 require_relative "app/route_helpers"
@@ -71,12 +76,13 @@ fn example() -> emit_and_run::Overlay {
 
 #[test]
 fn a_hash_query_option_is_declared_a_hash() {
-    let (emitted, errors) = example().emit(BuildTarget::Spinel);
+    let (emitted, errors) = example().write("app/controllers/tags_controller.rb", TAGS_CONTROLLER).emit(BuildTarget::Spinel);
     assert!(errors.is_empty(), "{errors:?}");
     let sig = std::fs::read_to_string(emitted.join("app/route_helpers.rbs")).expect("read route_helpers.rbs");
     for want in [
         "def self.admin_domain_allows_path: (?domain_allow: Hash[Symbol, untyped]?) -> String",
         "def self.widgets_path: (?filter: Hash[Symbol, untyped]?, ?page: String?) -> String",
+        "def self.tags_path: (?filter: String?) -> String",
     ] {
         assert!(sig.contains(want), "no `{want}` in:\n{sig}");
     }

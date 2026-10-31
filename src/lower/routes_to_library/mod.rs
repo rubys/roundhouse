@@ -1622,11 +1622,13 @@ fn query_param_demand(
                                 // different value.
                                 let is_array = matches!(&*v.node, ExprNode::Array { .. });
                                 // A Hash only one level deep: a nested Hash or
-                                // Array value would need `to_query`'s recursion.
+                                // Array value would need `to_query`'s recursion,
+                                // whether written there or held in a variable.
                                 let is_hash = matches!(&*v.node, ExprNode::Hash { entries, kwargs: false }
                                     if entries.iter().all(|(k, v)| {
                                         matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { .. } })
                                             && !matches!(&*v.node, ExprNode::Hash { .. } | ExprNode::Array { .. })
+                                            && !matches!(v.ty.as_ref().map(Ty::peel_nilable), Some(Ty::Hash { .. } | Ty::Array { .. }))
                                     }));
                                 let helper = method
                                     .as_str()
