@@ -5,6 +5,14 @@ mod emit_and_run;
 
 use roundhouse::project::BuildTarget;
 
+const EXPECTED: &str = concat!(
+    "First=2 Second=1 Third=0\n",
+    "2 1 0\n",
+    "2 1 0\n",
+    "nil nil nil\n",
+    "Renamed\n",
+);
+
 fn app() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
         .write(
@@ -41,9 +49,11 @@ fn rails() -> String {
 
 #[test]
 fn select_aliases_read_like_columns_and_match_rails() {
+    let expected = rails();
+    assert_eq!(expected, EXPECTED);
     let run = app().run_ruby(include_str!("select_alias_index/probe.rb"));
     run.assert_passes();
-    assert_eq!(run.stdout, rails());
+    assert_eq!(run.stdout, expected);
 }
 
 // An indexer the app writes reads its key as given, on the model, an app
@@ -126,7 +136,8 @@ fn select_aliases_read_natively() {
     );
     let run = app().run_spinel_with_rbs(&script);
     run.assert_passes();
-    assert_eq!(run.stdout, rails());
+    // The native CI lane has no ActiveRecord; the Rails test pins this output.
+    assert_eq!(run.stdout, EXPECTED);
 }
 
 #[test]
