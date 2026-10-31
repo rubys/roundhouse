@@ -1010,12 +1010,12 @@ pub struct FormI18n {
 impl FormI18n {
     pub fn of(app: &crate::app::App) -> Self {
         let mut models: crate::det::HashMap<_, _> = app.models.iter()
-            .map(|m| (crate::naming::model_param_key(m.name.0.as_str()), m.i18n.clone())).collect();
+            .map(|m| (app.model_param_key(m.name.0.as_str()), m.i18n.clone())).collect();
         let bases: crate::det::HashMap<_, _> = app.models.iter().map(|m| (&m.name, m)).collect();
         let parents: crate::det::HashMap<_, _> = app.library_classes.iter()
             .filter_map(|class| class.parent.as_ref().map(|parent| (&class.name, parent))).collect();
         for class in app.library_classes.iter().filter(|class| !class.is_module) {
-            let key = crate::naming::model_param_key(class.name.0.as_str());
+            let key = app.model_param_key(class.name.0.as_str());
             if models.contains_key(&key) { continue; }
             let mut keys = vec![i18n_key(class.name.0.as_str())];
             let mut parent = class.parent.as_ref();

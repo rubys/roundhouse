@@ -8149,12 +8149,16 @@ pub(crate) fn source_finder_classes(app: &App, resolver: &ConstResolver) -> Hash
 /// Shared by ingest qualification and the typed finder registry. Retained
 /// hooks are effects, whereas expanded carriers already have concrete defs.
 pub(crate) fn record_class_side_ownership(classes: &mut HashMap<ClassId, ClassInfo>, app: &App, resolver: &ConstResolver) {
-    // Forwardable's stdlib macros define instance delegates, not finders on
-    // the extending class. An app reopening must keep its source ownership.
-    if !resolver.has_source_namespace("Forwardable") {
-        classes.entry(ClassId(Symbol::from("Forwardable"))).or_insert_with(|| ClassInfo {
-            is_module: true, ..Default::default()
-        });
+    // Explicit SDK surfaces that cannot own framework finders: Forwardable
+    // defines instance delegates; T::Sig contributes only the consumed `sig`
+    // annotation DSL. Source reopenings and existing declaration tables win.
+    // Other missing extensions remain unknown, including configurable gems.
+    for name in ["Forwardable", "T::Sig"] {
+        if !resolver.has_source_namespace(name) {
+            classes.entry(ClassId(Symbol::from(name))).or_insert_with(|| ClassInfo {
+                is_module: true, ..Default::default()
+            });
+        }
     }
     fn extensions<'a>(exprs: impl Iterator<Item = &'a Expr>, resolver: &ConstResolver) -> Vec<ClassId> {
         let mut out = Vec::new();

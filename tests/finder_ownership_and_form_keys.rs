@@ -245,3 +245,152 @@ fn standard_forwardable_keeps_known_finder_returns() {
         }
     }
 }
+
+fn native_optional_extension(gem: &str, version: &str, program: &str) {
+    let probe = emit_and_run::ruby().args(["-rrubygems", "-e", &format!(
+        "puts !Gem::Specification.find_all_by_name({gem:?}, {version:?}).empty?"
+    )]).output().expect("optional extension availability");
+    assert!(probe.status.success(), "optional extension probe");
+    if String::from_utf8_lossy(&probe.stdout).trim() == "false" {
+        eprintln!("skipping native extension oracle: missing {gem} {version}");
+        return;
+    }
+    native(&["activerecord"], &format!("gem {gem:?}, {version:?}\nrequire {gem:?}\n{program}"));
+}
+
+#[test]
+fn signature_extension_preserves_framework_finders() {
+    use roundhouse::ident::{ClassId, Symbol};
+    use roundhouse::ty::Ty;
+    let model = "class Category < ActiveRecord::Base\nextend T::Sig\ndef self.lookup; find_by_name('found'); end\ndef self.records; all.to_a; end\nend\n";
+    let probe = "class FinderProbe\ndef self.dynamic; Category.find_by_name('found'); end\ndef self.bang; Category.find_by_name!('found'); end\nend\n";
+    let check = "record = Category.create!(name: 'found')\nraise 'dynamic' unless FinderProbe.dynamic.id == record.id\nraise 'bang' unless FinderProbe.bang.id == record.id\nraise 'bare' unless Category.lookup.id == record.id\nraise 'qualified all' unless Category.records.map(&:id) == [record.id]\n";
+    native_optional_extension("sorbet-runtime", "0.5.11934", &format!("{AR}{CATEGORIES}{model}{probe}{check}"));
+    let sources = [
+        ("db/schema.rb", CATEGORIES), ("app/models/category.rb", model), ("app/models/finder_probe.rb", probe),
+        ("app/controllers/categories_controller.rb", "class CategoriesController < ActionController::Base\ndef dynamic; Category.find_by_name('found'); end\ndef bang; Category.find_by_name!('found'); end\ndef bare; Category.lookup; end\ndef records; Category.records; end\nend\n"),
+    ];
+    let tree = sources.iter().map(|(p, s)| (PathBuf::from(p), s.as_bytes().to_vec())).collect();
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).unwrap();
+    Analyzer::new(&app).analyze(&mut app);
+    let record = Ty::Class { id: ClassId(Symbol::from("Category")), args: vec![].into() };
+    for action in app.controllers[0].actions() {
+        let actual = action.body.ty.as_ref().unwrap();
+        if action.name.as_str() == "records" { assert!(!actual.is_unknown(), "receiverless all must retain its relation result"); }
+        else {
+            let expected = if action.name.as_str() == "bang" { record.clone() } else { Ty::Union { variants: vec![record.clone(), Ty::Nil].into() } };
+            assert_eq!(actual, &expected, "{}", action.name);
+        }
+    }
+    emit_and_run::empty_app().write("db/schema.rb", CATEGORIES)
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write("app/models/category.rb", model).write("app/models/finder_probe.rb", probe).run_ruby(check).assert_passes();
+}
+
+#[test]
+fn missing_gem_extensions_keep_unknown_finder_ownership() {
+    let schema = "ActiveRecord::Schema.define do\ncreate_table(:categories) { |t| t.string :name; t.string :slug }\nend\n";
+    native_optional_extension("friendly_id", "5.5.1", &format!("{AR}{schema}\nclass Category < ActiveRecord::Base\nextend FriendlyId\nfriendly_id :name, use: [:slugged, :finders]\nend\nrecord = Category.create!(name: 'Found')\nraise 'extension find ownership' unless Category.find('found').id == record.id\nraise 'find was not overridden' if Category.method(:find).owner == ActiveRecord::Base.method(:find).owner\n"));
+    for extension in ["FriendlyId", "Enumerize", "UnmodeledFinders"] {
+        let model = format!("class Category < ActiveRecord::Base\nextend {extension}\ndef self.lookup; find_by_name('found'); end\nend\n");
+        let tree = [("db/schema.rb", schema), ("app/models/category.rb", &model),
+            ("app/controllers/categories_controller.rb", "class CategoriesController < ActionController::Base\ndef dynamic; Category.find_by_name('found'); end\ndef ordinary; Category.find_by(name: 'found'); end\ndef bare; Category.lookup; end\nend\n")]
+            .into_iter().map(|(p, s)| (PathBuf::from(p), s.as_bytes().to_vec())).collect();
+        let mut app = roundhouse::ingest::ingest_app_from_tree(tree).unwrap();
+        Analyzer::new(&app).analyze(&mut app);
+        for action in app.controllers[0].actions() { assert!(action.body.ty.as_ref().unwrap().is_unknown(), "{extension} {}", action.name); }
+        let (_, errors) = emit_and_run::empty_app().write("db/schema.rb", schema)
+            .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+            .write("app/models/category.rb", &model)
+            .write("app/models/finder_probe.rb", "class FinderProbe\ndef self.value; Category.find_by_name('found'); end\nend\n")
+            .emit(BuildTarget::Ruby);
+        assert!(errors.iter().any(|error| error.contains("dynamic finder without established implementation")), "{extension}: {errors:?}");
+    }
+}
+
+#[test]
+fn source_signature_extension_keeps_its_finder_owner() {
+    let extension = "module T\nmodule Sig\ndef find_by_name(value); 'source signature owner'; end\nend\nend\n";
+    let model = "class Category < ActiveRecord::Base\nextend T::Sig\nend\n";
+    native(&["activerecord"], &format!("{AR}{CATEGORIES}{extension}{model}\nraise 'source owner' unless Category.find_by_name('found') == 'source signature owner'\n"));
+    let sources = [("db/schema.rb", CATEGORIES), ("app/models/t/sig.rb", extension), ("app/models/category.rb", model),
+        ("app/controllers/categories_controller.rb", "class CategoriesController < ActionController::Base\ndef dynamic; Category.find_by_name('found'); end\nend\n")];
+    let mut app = roundhouse::ingest::ingest_app_from_tree(sources.iter().map(|(p, s)| (PathBuf::from(p), s.as_bytes().to_vec())).collect()).unwrap();
+    Analyzer::new(&app).analyze(&mut app);
+    assert_eq!(app.controllers[0].actions().next().unwrap().body.ty.as_ref().unwrap(), &roundhouse::ty::Ty::Str);
+}
+
+fn isolated_form_i18n_case(subclass: bool) {
+    let engine = "module Blog\nclass Engine < ::Rails::Engine\nisolate_namespace Blog\nend\nend\n";
+    let schema = "ActiveRecord::Schema.define do\ncreate_table(:posts) { |t| t.string :title; t.string :type }\nend\n";
+    let post = "module Blog\nclass Post < ActiveRecord::Base\nself.table_name = 'posts'\nvalidates :title, presence: true\nend\nend\n";
+    let archived = "module Blog\nclass ArchivedPost < Post\nend\nend\n";
+    let locale = "en:\n  helpers:\n    label:\n      blog/post:\n        title: Ledger headline\n      blog/archived_post:\n        title: Archived headline\n    submit:\n      create: Publish %{model}\n      update: Amend %{model}\n  activerecord:\n    models:\n      blog/post: Journal entry\n      blog/archived_post: Archived entry\n";
+    let (class, key, label, human) = if subclass { ("Blog::ArchivedPost", "archived_post", "Archived headline", "Archived entry") }
+        else { ("Blog::Post", "post", "Ledger headline", "Journal entry") };
+    let template = "<%= form_with model: @entry, url: '/', method: :post do |form| %><%= form.label :title %><%= form.text_field :title %><%= form.submit %><% end %>";
+    let edit_template = template.replace("method: :post", "method: :patch");
+    let controller = format!("class PagesController < ActionController::Base\ndef form; @entry = {class}.new; end\ndef edit; @entry = {class}.new(title: 'Saved'); @entry.save!; end\nend\n");
+    let checks = format!(r##"
+def check_localized_form(html, persisted, invalid)
+  raise "label #{{html}}" unless html.include?('>{label}</label>')
+  text = persisted ? 'Amend {human}' : 'Publish {human}'
+  raise "submit #{{html}}" unless html.include?(%Q(value="#{{text}}"))
+  raise "relative key #{{html}}" unless html.include?('name="{key}[title]"')
+  raise "error metadata #{{html}}" unless html.include?('field_with_errors') == invalid
+end
+"##);
+    native(&["activerecord", "actionview", "actionpack", "railties"], &format!(r#"{AR}
+require 'rails/engine'
+require 'action_view'
+require 'action_controller'
+{engine}{schema}{post}{archived}
+require 'yaml'
+ActionView::Helpers::FormHelper.form_with_generates_ids = true
+view = ActionView::Base.with_empty_template_cache.new(ActionView::LookupContext.new([]), {{}}, nil)
+view.define_singleton_method(:protect_against_forgery?) {{ false }}
+I18n.backend.eager_load!
+I18n.backend.store_translations(:en, YAML.safe_load({locale:?})['en'])
+{checks}
+record = {class}.new
+view.assign(entry: record)
+check_localized_form(view.render(inline: {template:?}), false, false)
+record.valid?
+check_localized_form(view.render(inline: {template:?}), false, true)
+record = {class}.create!(title: 'Saved')
+view.assign(entry: record)
+check_localized_form(view.render(inline: {edit_template:?}), true, false)
+"#));
+    let sources = [("db/schema.rb", schema), ("lib/blog/engine.rb", engine), ("app/models/blog/post.rb", post),
+        ("app/models/blog/archived_post.rb", archived), ("config/locales/en.yml", locale)];
+    let mut app = roundhouse::ingest::ingest_app_from_tree(sources.iter().map(|(p, s)| (PathBuf::from(p), s.as_bytes().to_vec())).collect()).unwrap();
+    Analyzer::new(&app).analyze(&mut app);
+    if subclass {
+        assert!(app.library_classes.iter().any(|c| c.name.0.as_str() == class), "subclass must cover library-class construction");
+        assert!(!app.models.iter().any(|m| m.name.0.as_str() == class), "subclass must exercise the separate library metadata path");
+    }
+    else { assert!(app.models.iter().any(|m| m.name.0.as_str() == class), "base must cover model construction"); }
+    let form = roundhouse::i18n::FormI18n::of(&app);
+    assert!(form.has_errors(key), "isolated {class} must retain errors metadata at {key}");
+    assert_eq!(form.label(key, "title"), label);
+    assert_eq!(form.submit(key, "create"), format!("Publish {human}"));
+    assert_eq!(form.submit(key, "update"), format!("Amend {human}"));
+    let mut emitted = emit_and_run::empty_app().write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write("app/controllers/pages_controller.rb", &controller).write("app/views/pages/form.html.erb", template)
+        .write("app/views/pages/edit.html.erb", &edit_template);
+    for (path, source) in sources { emitted = emitted.write(path, source); }
+    emitted.run_ruby(&format!(r#"{checks}
+record = {class}.new
+check_localized_form(Views::Pages.form(record), false, false)
+record.valid?
+check_localized_form(Views::Pages.form(record), false, true)
+record = {class}.create!(title: 'Saved')
+check_localized_form(Views::Pages.edit(record), true, false)
+"#)).assert_passes();
+}
+
+#[test]
+fn isolated_model_form_i18n_keeps_labels_submit_and_errors() { isolated_form_i18n_case(false); }
+
+#[test]
+fn isolated_subclass_form_i18n_keeps_labels_submit_and_errors() { isolated_form_i18n_case(true); }

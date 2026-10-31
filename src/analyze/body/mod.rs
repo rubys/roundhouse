@@ -372,8 +372,9 @@ impl ClassInfo {
         let mut seen = crate::det::HashSet::default();
         while let Some((id, side)) = pending.pop() {
             if !seen.insert((id, side)) { continue; }
-            // A source extension can survive only as a namespace/concern,
-            // without a modeled method table. Its absence proves no owner.
+            // An extension without a table may supply methods or install hooks.
+            // Known inert SDK exceptions are registered explicitly; an absent
+            // extension table therefore keeps ownership unknown.
             let Some(class) = classes.get(id) else {
                 if side == Instance { return true; }
                 continue;
