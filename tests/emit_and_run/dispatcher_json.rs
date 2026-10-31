@@ -108,8 +108,8 @@ fn review_fixture(name: &str, oracle: bool) {
     // HTML after callback, and the child's deferred super response.
     // Keep their complete baseline observations explicit; never count them
     // as Rails parity or silently omit an observation from the comparison.
-    // The extra named-layout control also stays unsupported: only the
-    // application layout is emitted, so preserve its original residue.
+    // Unmodeled layout selectors also retain their original refusal;
+    // this includes named layouts, computed selectors, symbols and nil.
     let gaps: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(source.join("baseline-gaps.json")).unwrap()).unwrap();
     for (actual, rails) in actual.iter().zip(&expected) {
@@ -140,3 +140,8 @@ fn dispatcher_callback_template_runs() { review_fixture("template-cases", false)
 
 #[test]
 fn dispatcher_render_classes_match_rails() { review_fixture("render-classes", true); }
+
+#[test]
+fn dispatcher_layout_selectors_match_rails_or_preserve_baseline_refusal() {
+    review_fixture("layout-selectors", true);
+}

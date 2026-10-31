@@ -193,18 +193,19 @@ pub(super) fn rewrite_render_to_views(
             // produces the bare `Views::X.y(...)` call, which IS a
             // string. Trailing options (`layout: false`) are dropped.
             let to_string = method.as_str() == "render_to_string";
-            // Only the application layout is emitted. Keep a non-action
-            // template render with another named layout as source residue;
-            // lowering it would let the emitter silently wrap the page in
-            // the application layout instead. JSON and inline responses do
-            // not select a template and are unaffected.
+            // Only the application layout and literal Boolean selectors
+            // are honored by this template path. Preserve every other
+            // explicit selector, including nil and computed expressions,
+            // instead of silently substituting the application layout.
+            // JSON and inline responses do not select a template.
             if preserve_named_layout && args.iter().any(|arg| {
                 matches!(&*arg.node, ExprNode::Hash { entries, kwargs: true }
                     if entries.iter().any(|(key, value)| {
                         matches!(&*key.node, ExprNode::Lit { value: Literal::Sym { value } }
                             if value.as_str() == "layout")
-                            && matches!(&*value.node, ExprNode::Lit { value: Literal::Str { value } }
-                                if value != "application")
+                            && !(matches!(&*value.node, ExprNode::Lit { value: Literal::Str { value } }
+                                    if value == "application")
+                                || matches!(&*value.node, ExprNode::Lit { value: Literal::Bool { .. } }))
                     }))
             }) && !args.iter().any(|arg| {
                 matches!(&*arg.node, ExprNode::Hash { entries, kwargs: true }
