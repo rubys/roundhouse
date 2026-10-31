@@ -392,6 +392,140 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
     funcs
 }
 
+/// Ruby family: each generated path helper raises
+/// `ActionController::UrlGenerationError` when a required segment is nil
+/// or empty, as Rails' router does, instead of building
+/// "/articles//comments" (roundhouse#1475). The guard is
+///
+/// ```ruby
+/// raise ActionController::UrlGenerationError.missing_segments(
+///   "comments", "create", ["article_id"], [article_id]) if article_id.to_s.empty?
+/// ```
+///
+/// with one `to_s.empty?` per required positional segment (`nil.to_s` is
+/// `""`). Optional segments keep their `nil` default. A format variant
+/// (`article_comments_json_path`) takes its base route's guard. The
+/// strict targets' helpers take typed segments, so a nil can't reach them.
+pub fn guard_required_segments(funcs: &mut [LibraryFunction], app: &App) {
+    let mut targets: crate::det::HashMap<String, (String, String)> = Default::default();
+    for route in flatten_routes_for_helpers(app).iter().filter(|r| r.named) {
+        let controller = route.controller.0.as_str();
+        let controller = crate::naming::underscore(controller.strip_suffix("Controller").unwrap_or(controller));
+        targets
+            .entry(format!("{}_path", route.as_name))
+            .or_insert_with(|| (controller, route.action.as_str().to_string()));
+    }
+    // A format variant is built from its base route, so it takes the same
+    // guard (CodeRabbit on #1491).
+    let declared: crate::det::HashSet<String> = targets.keys().cloned().collect();
+    for (name, (as_name, _)) in format_variant_demand(app, &declared) {
+        if let Some(target) = targets.get(&format!("{as_name}_path")).cloned() {
+            targets.entry(name).or_insert(target);
+        }
+    }
+    let span = Span::synthetic();
+    for f in funcs.iter_mut() {
+        if f.module_path.last().map(|s| s.as_str()) != Some("RouteHelpers") {
+            continue;
+        }
+        let Some((controller, action)) = targets.get(f.name.as_str()) else { continue };
+        let param_tys: Vec<Ty> = match &f.signature {
+            Some(Ty::Fn { params, .. }) => params.iter().map(|p| (*p.ty).clone()).collect(),
+            _ => Vec::new(),
+        };
+        let required: Vec<(Symbol, Ty)> = f
+            .params
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.default.is_none() && !p.keyword && !p.rest)
+            .map(|(i, p)| (p.name.clone(), param_tys.get(i).cloned().unwrap_or(Ty::Untyped)))
+            .collect();
+        if required.is_empty() {
+            continue;
+        }
+        let read = |name: &Symbol, ty: &Ty| with_ty(Expr::new(span, ExprNode::Var { id: VarId(0), name: name.clone() }), ty.clone());
+        let send = |recv: Expr, method: &str, args: Vec<Expr>, ty: Ty| {
+            with_ty(
+                Expr::new(span, ExprNode::Send { recv: Some(recv), method: Symbol::from(method), args, block: None, parenthesized: true }),
+                ty,
+            )
+        };
+        let blank = |name: &Symbol, ty: &Ty| {
+            let text = send(read(name, ty), "to_s", vec![], Ty::Str);
+            send(text, "empty?", vec![], Ty::Bool)
+        };
+        let cond = required
+            .iter()
+            .map(|(n, t)| blank(n, t))
+            .reduce(|a, b| {
+                with_ty(
+                    Expr::new(
+                        span,
+                        ExprNode::BoolOp {
+                            op: crate::expr::BoolOpKind::Or,
+                            surface: crate::expr::BoolOpSurface::Symbol,
+                            left: a,
+                            right: b,
+                        },
+                    ),
+                    Ty::Bool,
+                )
+            })
+            .expect("a required segment");
+        let array = |elements: Vec<Expr>| Expr::new(span, ExprNode::Array { elements, style: ArrayStyle::Brackets });
+        let error_class = Expr::new(
+            span,
+            ExprNode::Const { path: vec![Symbol::from("ActionController"), Symbol::from("UrlGenerationError")] },
+        );
+        // Each value as a `String?` (`p.nil? ? nil : p.to_s`): Rails shows a
+        // given value as its `to_param` and a nil as `nil`, and the runtime
+        // takes them typed.
+        let opt_str = Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
+        let shown = |name: &Symbol, ty: &Ty| {
+            with_ty(
+                Expr::new(
+                    span,
+                    ExprNode::If {
+                        cond: send(read(name, ty), "nil?", vec![], Ty::Bool),
+                        then_branch: with_ty(Expr::new(span, ExprNode::Lit { value: Literal::Nil }), Ty::Nil),
+                        else_branch: send(read(name, ty), "to_s", vec![], Ty::Str),
+                    },
+                ),
+                opt_str.clone(),
+            )
+        };
+        let error = send(
+            error_class,
+            "missing_segments",
+            vec![
+                lit_str(controller.clone()),
+                lit_str(action.clone()),
+                array(required.iter().map(|(n, _)| lit_str(n.as_str().to_string())).collect()),
+                array(required.iter().map(|(n, t)| shown(n, t)).collect()),
+            ],
+            Ty::Untyped,
+        );
+        let raise = with_ty(
+            Expr::new(span, ExprNode::Send { recv: None, method: Symbol::from("raise"), args: vec![error], block: None, parenthesized: false }),
+            Ty::Nil,
+        );
+        let guard = with_ty(
+            Expr::new(
+                span,
+                ExprNode::If {
+                    cond,
+                    then_branch: raise,
+                    else_branch: with_ty(Expr::new(span, ExprNode::Lit { value: Literal::Nil }), Ty::Nil),
+                },
+            ),
+            Ty::Nil,
+        );
+        let ty = f.body.ty.clone();
+        let body = std::mem::replace(&mut f.body, Expr::new(span, ExprNode::Seq { exprs: vec![] }));
+        f.body = Expr { ty, ..Expr::new(span, ExprNode::Seq { exprs: vec![guard, body] }) };
+    }
+}
+
 /// `a && b`, for the resolver's arm conditions.
 fn and(a: Expr, b: Expr) -> Expr {
     Expr::new(
