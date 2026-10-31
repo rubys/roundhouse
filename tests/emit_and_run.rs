@@ -20575,6 +20575,8 @@ mod page_caching;
 mod route_requirement_span;
 #[path = "emit_and_run/boot_program.rs"]
 mod boot_program;
+#[path = "emit_and_run/route_helper_segment_escape.rs"]
+mod route_helper_segment_escape;
 
 #[path = "emit_and_run/route_dot_span.rs"]
 mod route_dot_span;

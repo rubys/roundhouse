@@ -255,6 +255,32 @@ module ActionView
       out
     end
 
+    # A path param's value in a URL a route helper writes, as Rails'
+    # `Journey::Router::Utils.escape_segment`: the unreserved bytes, the
+    # sub-delims and `:` `@` as they are, every other byte (`/` too) as
+    # `%XX`, so `site_path("a/b")` is `/sites/a%2Fb`. Here rather than on
+    # the Router, because a route helper already reaches this module on
+    # every target (its query keys go through `url_encode`).
+    def self.escape_segment(s)
+      hex = "0123456789ABCDEF"
+      printable = " !\"\#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+      bytes = s.bytes
+      out = ""
+      i = 0
+      while i < bytes.length
+        b = erb_url_byte(bytes, i)
+        if (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) ||
+           b == 45 || b == 46 || b == 95 || b == 126 || b == 33 || b == 36 ||
+           (b >= 38 && b <= 44) || b == 58 || b == 59 || b == 61 || b == 64
+          out = out + printable[b - 32, 1].to_s
+        else
+          out = out + "%" + hex[b / 16, 1].to_s + hex[b % 16, 1].to_s
+        end
+        i += 1
+      end
+      out
+    end
+
     # Not `bytes[i]` inline, nor `bytes[i] || 0`: the inline read types as Integer | nil, which Elixir refuses arithmetic on, and Rust's Vec<i64> has no `unwrap_or`.
     def self.erb_url_byte(bytes, i)
       raise ArgumentError, "erb_url_byte: index outside the bytes" if i < 0 || i >= bytes.length
