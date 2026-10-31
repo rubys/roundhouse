@@ -987,10 +987,12 @@ pub(crate) fn apply_library_partial_render_lowering(lcs: &mut [LibraryClass], ap
     if contracts.is_empty() {
         return;
     }
+    let helper_modules = helper_module_ids(app);
     for lc in lcs.iter_mut() {
+        let in_helper = helper_modules.contains(&lc.name);
         for m in &mut lc.methods {
             let in_scope: Vec<Symbol> = m.params.iter().map(|p| p.name.clone()).collect();
-            rewrite_library_partial_render(&mut m.body, &contracts, &in_scope);
+            rewrite_library_partial_render(&mut m.body, &contracts, &in_scope, in_helper);
         }
     }
 }
@@ -1012,22 +1014,13 @@ fn hash_locals(arg: Option<&Expr>) -> Vec<(Symbol, Expr)> {
         .collect()
 }
 
-fn rewrite_library_partial_render(
-    expr: &mut Expr,
-    contracts: &crate::det::HashMap<
-        (String, String),
-        crate::lower::view_to_library::PartialCallContract,
-    >,
-    in_scope: &[Symbol],
-) {
+fn library_partial_render(expr: &Expr) -> Option<(String, Vec<(Symbol, Expr)>)> {
     use crate::expr::Literal;
-    expr.node
-        .for_each_child_mut(&mut |c| rewrite_library_partial_render(c, contracts, in_scope));
-    let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { return };
+    let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { return None };
     if method.as_str() != "render" && method.as_str() != "render_to_string" {
-        return;
+        return None;
     }
-    let Some(first) = args.first() else { return };
+    let first = args.first()?;
     let mut partial: Option<String> = None;
     let mut locals: Vec<(Symbol, Expr)> = Vec::new();
     match &*first.node {
@@ -1061,13 +1054,34 @@ fn rewrite_library_partial_render(
                 }
             }
         }
-        _ => return,
+        _ => return None,
     }
-    let Some(pname) = partial else { return };
-    let Some((dir, base)) = pname.rsplit_once('/') else { return };
-    let module_camel = crate::naming::camelize(&crate::naming::snake_case(dir));
-    let stem = base.trim_start_matches('_').to_string();
-    let Some(contract) = contracts.get(&(module_camel.clone(), stem.clone())) else { return };
+    Some((partial?, locals))
+}
+
+fn library_partial_key(pname: &str) -> Option<(String, String)> {
+    let (dir, base) = pname.rsplit_once('/')?;
+    Some((
+        crate::naming::camelize_path(&crate::naming::snake_case(dir)),
+        base.trim_start_matches('_').to_string(),
+    ))
+}
+
+fn rewrite_library_partial_render(
+    expr: &mut Expr,
+    contracts: &crate::det::HashMap<
+        (String, String),
+        crate::lower::view_to_library::PartialCallContract,
+    >,
+    in_scope: &[Symbol],
+    in_helper: bool,
+) {
+    use crate::expr::Literal;
+    expr.node
+        .for_each_child_mut(&mut |c| rewrite_library_partial_render(c, contracts, in_scope, in_helper));
+    let Some((pname, locals)) = library_partial_render(expr) else { return };
+    let Some((module_camel, stem)) = library_partial_key(&pname) else { return };
+    let Some(contract) = contracts.get(&(module_camel.clone(), stem)) else { return };
     let span = expr.span;
     let nil = || sp_expr(ExprNode::Lit { value: Literal::Nil });
     let locals_lookup = |name: &str| -> Option<Expr> {
@@ -1095,7 +1109,9 @@ fn rewrite_library_partial_render(
     let mut view_args: Vec<Expr> = Vec::new();
     view_args.push(lookup(&contract.record).unwrap_or_else(nil));
     for n in &contract.closure {
-        view_args.push(lookup(n).unwrap_or_else(nil));
+        // Not the helper's same-named param: the partial's ivar is the rendering template's, which `rewrite_helper_ivars` reaches.
+        let ivar = in_helper.then(|| Expr::new(span, ExprNode::Ivar { name: Symbol::from(n.as_str()) }));
+        view_args.push(locals_lookup(n).or(ivar).or_else(|| param_lookup(n)).unwrap_or_else(nil));
     }
     view_args.extend(contract.extras_args(
         locals_lookup,
@@ -3499,13 +3515,9 @@ fn is_base_controller(lc: &LibraryClass) -> bool {
 /// reader this pass synthesizes would collide with it, and the app's
 /// own method is the one that should win.
 fn helper_read_ivars(app: &App) -> std::collections::BTreeSet<Symbol> {
-    let helper_modules: BTreeSet<ClassId> = app
-        .helper_method_index
-        .values()
-        .filter(|id| !app.controllers.iter().any(|c| &c.name == *id))
-        .cloned()
-        .collect();
+    let helper_modules = helper_module_ids(app);
     let mut out = std::collections::BTreeSet::new();
+    let mut rendered: Vec<(String, String)> = Vec::new();
     for lc in &app.library_classes {
         if !helper_modules.contains(&lc.name) {
             continue;
@@ -3515,6 +3527,19 @@ fn helper_read_ivars(app: &App) -> std::collections::BTreeSet<Symbol> {
                 collect_ivar_reads(default, &mut out);
             }
             collect_ivar_reads(&m.body, &mut out);
+            collect_library_partial_keys(&m.body, &mut rendered);
+        }
+    }
+    if !rendered.is_empty() {
+        let contracts = crate::lower::view_to_library::partial_call_contracts(
+            &app.views,
+            &app.controllers,
+            &app.library_classes,
+        );
+        for key in &rendered {
+            if let Some(contract) = contracts.get(key) {
+                out.extend(contract.closure.iter().map(|n| Symbol::from(n.as_str())));
+            }
         }
     }
     let controller_methods: crate::det::HashSet<Symbol> = app
@@ -3530,6 +3555,21 @@ fn helper_read_ivars(app: &App) -> std::collections::BTreeSet<Symbol> {
         .collect();
     out.retain(|n| !controller_methods.contains(n));
     out
+}
+
+fn helper_module_ids(app: &App) -> BTreeSet<ClassId> {
+    app.helper_method_index
+        .values()
+        .filter(|id| !app.controllers.iter().any(|c| &c.name == *id))
+        .cloned()
+        .collect()
+}
+
+fn collect_library_partial_keys(e: &Expr, out: &mut Vec<(String, String)>) {
+    if let Some(key) = library_partial_render(e).and_then(|(name, _)| library_partial_key(&name)) {
+        out.push(key);
+    }
+    e.node.for_each_child(&mut |c| collect_library_partial_keys(c, out));
 }
 
 fn collect_ivar_reads(e: &Expr, out: &mut std::collections::BTreeSet<Symbol>) {
@@ -4413,6 +4453,19 @@ fn rewrite_helper_calls(
             view_visible,
         )
     });
+
+    // Not left on `self` in a view or helper module: a helper reached as `self.x` is the bare `x` below, and the module function has no such method. A same-named param keeps `self`, which a bare call would read instead.
+    if let ExprNode::Send { recv: Some(r), method, .. } = &*expr.node {
+        if rewrite_request
+            && matches!(&*r.node, ExprNode::SelfRef)
+            && (index.contains_key(method) || view_visible.contains(method))
+            && !own_methods.contains(method)
+            && !own_params.contains(method)
+        {
+            let ExprNode::Send { recv, .. } = &mut *expr.node else { unreachable!() };
+            *recv = None;
+        }
+    }
 
     // Destructive `<lvalue>.<m>!(args)` on a frozen string raises under
     // spinel (frozen literals) — lobsters' link_to_different_page does

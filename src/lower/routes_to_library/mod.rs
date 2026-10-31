@@ -151,7 +151,7 @@ fn build_route_new(r: &FlatRoute, class_id: &ClassId, route_ty: &Ty) -> Expr {
     let controller_sym = controller_symbol(r.controller.0.as_str());
     let mut args = vec![
         lit_str(verb_str.to_string()),
-        lit_str(r.path.clone()),
+        lit_str(crate::lower::segment_pattern::dispatch_path(&r.path, &r.seg_patterns)),
         lit_sym(Symbol::from(controller_sym)),
         lit_sym(r.action.clone()),
     ];

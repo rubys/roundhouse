@@ -126,6 +126,26 @@ fn compile_seg_patterns(
     let mut out = Vec::with_capacity(other_constraints.len());
     let mut suffixes: Vec<String> = Vec::new();
     for (name, rx) in other_constraints {
+        if let Some(span) = crate::lower::segment_pattern::dot_span(rx) {
+            let segments: Vec<&str> = path.split('/').collect();
+            let at = segments.iter().position(|s| s.strip_prefix(':') == Some(name.as_str()));
+            let last = at.is_some_and(|i| i + 1 == segments.len());
+            let spans = segments.iter().filter(|s| s.starts_with('*')).count()
+                + out.iter().filter(|(k, _): &&(String, String)| k.starts_with('*')).count();
+            // The router spans one run of whole segments: a `.+` param inside a segment (`/@:name`), or beside another span, has no split it can find.
+            if at.is_none() || spans > 0 || (!last && !span.slash_follows) {
+                return (Vec::new(), Some((name.clone(), rx.clone())));
+            }
+            out.push((crate::lower::segment_pattern::span_key(name), String::new()));
+            if last {
+                if span.exts.is_empty() {
+                    out.push(("format_suffix".to_string(), crate::lower::segment_pattern::NEVER.to_string()));
+                } else {
+                    suffixes.extend(span.exts);
+                }
+            }
+            continue;
+        }
         match crate::lower::segment_pattern::compile(rx) {
             Some(pattern) => out.push((name.clone(), pattern)),
             None => match crate::lower::segment_pattern::split_format_lookahead(rx)
