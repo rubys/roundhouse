@@ -1,13 +1,14 @@
 //! A yielding call cannot return its receiver when its block always unwinds.
 //! Track local proc aliases without confusing a lambda's local return with a
 //! proc's return from the enclosing method.
-use super::{BodyTyper, Expr, ExprNode, LValue, Literal, Symbol, Ty};
+use super::{BodyTyper, Ctx, Expr, ExprNode, LValue, Literal, Symbol, Ty};
 use crate::det::HashMap;
 
 #[derive(Clone, PartialEq)]
 enum Exit {
     Return,
     LocalReturn,
+    Uncertain,
     Raise(Option<Symbol>),
 }
 
@@ -39,7 +40,9 @@ impl BodyTyper<'_> {
     fn callback_exit(&self, value: &Expr, env: &Callbacks) -> Option<Option<Exit>> {
         match &*value.node {
             ExprNode::Var { name, .. } => env.get(name).cloned(),
-            ExprNode::Lambda { body, .. } => Some(self.exit_from(body, &mut env.clone(), false)),
+            ExprNode::Lambda { body, .. } => {
+                Some(self.exit_from(body, &mut Callbacks::default(), false))
+            }
             ExprNode::Send {
                 recv,
                 method,
@@ -53,7 +56,7 @@ impl BodyTyper<'_> {
                 let ExprNode::Lambda { body, .. } = &*block.node else {
                     return None;
                 };
-                Some(self.exit_from(body, &mut env.clone(), method.as_str() == "proc"))
+                Some(self.exit_from(body, &mut Callbacks::default(), method.as_str() == "proc"))
             }
             _ => None,
         }
@@ -62,7 +65,13 @@ impl BodyTyper<'_> {
     fn exit_from(&self, expr: &Expr, env: &mut Callbacks, returns_escape: bool) -> Option<Exit> {
         let flow = |e: &Expr, env: &mut Callbacks| self.exit_from(e, env, returns_escape);
         match &*expr.node {
-            ExprNode::Lambda { .. } => None, // Creating a callback does not call it.
+            // These reads and callback construction cannot rebind local aliases.
+            ExprNode::Lambda { .. }
+            | ExprNode::Var { .. }
+            | ExprNode::Ivar { .. }
+            | ExprNode::Const { .. }
+            | ExprNode::Lit { .. }
+            | ExprNode::SelfRef => None,
             ExprNode::Return { .. } => Some(if returns_escape {
                 Exit::Return
             } else {
@@ -74,7 +83,7 @@ impl BodyTyper<'_> {
                 } => Some(Symbol::from("RuntimeError")),
                 _ => None,
             })),
-            ExprNode::Break { .. } | ExprNode::Next { .. } => None,
+            ExprNode::Break { .. } | ExprNode::Next { .. } => Some(Exit::LocalReturn),
             ExprNode::Seq { exprs } => {
                 for e in exprs {
                     if let Some(exit) = flow(e, env) {
@@ -107,10 +116,18 @@ impl BodyTyper<'_> {
                 }
                 let yes = flow(then_branch, &mut env.clone());
                 let no = flow(else_branch, &mut env.clone());
-                if yes == no { yes } else { None }
+                env.clear();
+                if yes == no {
+                    yes
+                } else {
+                    Some(Exit::Uncertain)
+                }
             }
-            ExprNode::BoolOp { left, .. } => flow(left, env),
-            ExprNode::While { cond, .. } => flow(cond, env),
+            ExprNode::BoolOp { left, .. } | ExprNode::While { cond: left, .. } => {
+                let exit = flow(left, env);
+                env.clear();
+                exit
+            }
             ExprNode::BeginRescue {
                 body,
                 rescues,
@@ -120,29 +137,49 @@ impl BodyTyper<'_> {
                 if let Some(exit) = ensure.as_ref().and_then(|e| flow(e, &mut env.clone())) {
                     return Some(exit);
                 }
-                match flow(body, &mut env.clone()) {
+                let result = match flow(body, &mut env.clone()) {
                     Some(Exit::Raise(Some(class))) => {
+                        let mut caught = None;
                         for rescue in rescues {
-                            let catches = rescue.classes.is_empty() || rescue.classes.iter().any(|c| {
-                                matches!(&*c.node, ExprNode::Const { path } if {
-                                    let name = path.iter().map(Symbol::as_str).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::");
-                                    name == class.as_str() || matches!(name.as_str(), "Exception" | "StandardError")
-                                })
-                            });
+                            // An alias or an unmodeled subclass may catch this
+                            // exception. A textual class name cannot prove a miss.
+                            let mut catches = rescue.classes.is_empty();
+                            for c in &rescue.classes {
+                                let Some(Ty::Class { id, .. }) = c.ty.as_ref() else {
+                                    env.clear();
+                                    return None;
+                                };
+                                if !matches!(
+                                    id.0.as_str(),
+                                    "RuntimeError" | "TypeError" | "Exception" | "StandardError"
+                                ) {
+                                    env.clear();
+                                    return None;
+                                }
+                                catches |= id.0 == class
+                                    || matches!(id.0.as_str(), "Exception" | "StandardError");
+                            }
                             if catches {
-                                return flow(&rescue.body, &mut env.clone());
+                                caught = Some(flow(&rescue.body, &mut env.clone()));
+                                break;
                             }
                         }
-                        Some(Exit::Raise(Some(class)))
+                        caught.unwrap_or(Some(Exit::Raise(Some(class))))
                     }
                     Some(Exit::Raise(None)) if !rescues.is_empty() => None,
                     other => other,
-                }
+                };
+                env.clear();
+                result
             }
-            ExprNode::RescueModifier { expr, fallback } => match flow(expr, env) {
-                Some(Exit::Raise(_)) => flow(fallback, &mut env.clone()),
-                other => other,
-            },
+            ExprNode::RescueModifier { expr, fallback } => {
+                let result = match flow(expr, env) {
+                    Some(Exit::Raise(_)) => flow(fallback, &mut env.clone()),
+                    other => other,
+                };
+                env.clear();
+                result
+            }
             ExprNode::Send {
                 recv,
                 method,
@@ -160,8 +197,10 @@ impl BodyTyper<'_> {
                 }
                 if matches!(method.as_str(), "call" | "[]") {
                     if let Some(callback) = recv.as_ref().and_then(|r| self.callback_exit(r, env)) {
+                        env.clear();
                         return callback.filter(|e| !matches!(e, Exit::LocalReturn));
                     }
+                    env.clear();
                     return None;
                 }
                 if self.kernel_receiver(recv.as_ref())
@@ -175,13 +214,6 @@ impl BodyTyper<'_> {
                         } else {
                             "TypeError"
                         })),
-                        Some(ExprNode::Const { path }) => Some(Symbol::from(
-                            path.iter()
-                                .map(Symbol::as_str)
-                                .filter(|p| !p.is_empty())
-                                .collect::<Vec<_>>()
-                                .join("::"),
-                        )),
                         _ => None,
                     };
                     return Some(Exit::Raise(class));
@@ -192,9 +224,15 @@ impl BodyTyper<'_> {
                 if block.is_none() && matches!(expr.ty, Some(Ty::Bottom)) {
                     return Some(Exit::Raise(None));
                 }
+                if !self.kernel_callback_constructor(recv.as_ref(), method, args) {
+                    env.clear();
+                }
                 None
             }
-            _ => None,
+            _ => {
+                env.clear();
+                None
+            }
         }
     }
 
@@ -211,6 +249,11 @@ impl BodyTyper<'_> {
             "BasicObject",
             "Object",
             "Kernel",
+            "Proc",
+            "Exception",
+            "StandardError",
+            "RuntimeError",
+            "TypeError",
             "Array",
             "Hash",
             "String",
@@ -235,47 +278,49 @@ impl BodyTyper<'_> {
             })
     }
 
-    pub(super) fn block_has_pending_calls(&self, block: &Expr) -> bool {
-        fn pending(typer: &BodyTyper<'_>, expr: &Expr) -> bool {
-            let scan = |e: &Expr| pending(typer, e);
-            match &*expr.node {
-                ExprNode::Lambda { .. } => false,
-                ExprNode::Send {
-                    recv,
-                    args,
-                    block,
-                    method,
-                    ..
-                } => {
-                    // Creating a core callback cannot execute its body, even
-                    // while its callable signature has not been harvested.
-                    if typer.kernel_callback_constructor(recv.as_ref(), method, args) {
-                        return recv.as_ref().is_some_and(scan) || args.iter().any(scan);
-                    }
-                    if matches!(expr.ty, Some(Ty::Var { .. }))
-                        || matches!(expr.ty, Some(Ty::Untyped { why }) if why.is_pending_only())
-                    {
-                        return true;
-                    }
-                    recv.as_ref().is_some_and(scan)
-                        || args.iter().any(scan)
-                        || (!matches!(method.as_str(), "proc" | "lambda" | "define_method")
-                            && block.as_ref().is_some_and(|b| match &*b.node {
-                                ExprNode::Lambda { body, .. } => scan(body),
-                                _ => false,
-                            }))
-                }
-                _ => {
-                    let mut found = false;
-                    expr.node.for_each_child(&mut |c| found |= scan(c));
-                    found
-                }
-            }
-        }
+    pub(super) fn block_has_pending_calls(&self, block: &Expr, ctx: &Ctx) -> bool {
         let ExprNode::Lambda { body, .. } = &*block.node else {
             return false;
         };
-        pending(self, body)
+        let body = match &*body.node {
+            ExprNode::Seq { exprs } if exprs.len() == 1 => &exprs[0],
+            _ => body,
+        };
+        let ExprNode::Send {
+            recv,
+            method,
+            block: None,
+            ..
+        } = &*body.node
+        else {
+            return false;
+        };
+        if !matches!(body.ty, Some(Ty::Var { .. }))
+            && !matches!(body.ty, Some(Ty::Untyped { why }) if why.is_pending_only())
+        {
+            return false;
+        }
+        // Only an unconditional call to a declared source helper is pending
+        // control flow. Unknown proc calls and conditional calls are real
+        // runtime uncertainty; treating them as pending would erase values.
+        let owner = recv
+            .as_ref()
+            .and_then(|r| r.ty.as_ref())
+            .or(ctx.self_ty.as_ref());
+        let Some(Ty::Class { id, .. }) = owner else {
+            return false;
+        };
+        let Some(class) = self.classes.get(id) else {
+            return false;
+        };
+        let class_side = recv
+            .as_ref()
+            .map_or(ctx.class_side, |r| self.is_class_object(r, ctx));
+        if class_side {
+            class.source_class_methods.contains(method)
+        } else {
+            class.source_instance_methods.contains(method)
+        }
     }
 
     pub(super) fn block_always_unwinds(&self, block: &Expr) -> bool {

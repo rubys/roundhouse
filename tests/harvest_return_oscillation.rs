@@ -316,3 +316,17 @@ end
         assert!(rbs.contains("def self.value: (untyped raw) -> untyped"), "{parser}: {rbs}");
     }
 }
+
+
+#[test]
+fn mutable_callback_aliases_and_rescue_aliases_are_not_unwind_proofs() {
+    for body in [
+        r#"JSON.parse(raw).tap { p = Kernel.proc { return :escaped }; if raw.empty?; nil; else; p = -> { 42 }; end; p.call } rescue :fallback"#,
+        r#"JSON.parse(raw).tap { p = Kernel.proc { return :escaped }; q = Kernel.proc { p.call }; p = -> { 42 }; q.call } rescue :fallback"#,
+        r#"JSON.parse(raw).tap { begin; Kernel.raise("x", "y"); rescue OurError; nil; end } rescue :fallback"#,
+    ] {
+        let source = format!("OurError = TypeError\nmodule Probe\n def self.value(raw); {body}; end\nend\n");
+        let (_, rbs) = declarations_for(&source);
+        assert!(rbs.contains("def self.value: (untyped raw) -> untyped"), "{body}: {rbs}");
+    }
+}

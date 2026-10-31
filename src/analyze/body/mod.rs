@@ -2586,7 +2586,7 @@ impl<'a> BodyTyper<'a> {
                 // into sticky evidence of a normal receiver value.
                 if send::literal_call_target(method, args).is_some_and(|(name, _)| matches!(name, "tap" | "then" | "yield_self")
                         && self.core_yielding_call(recv.as_ref(), recv_ty.as_ref(), &Symbol::from(name)))
-                    && block.as_ref().is_some_and(|b| self.block_has_pending_calls(b))
+                    && block.as_ref().is_some_and(|b| self.block_has_pending_calls(b, ctx))
                 {
                     return Ty::pending_untyped();
                 }

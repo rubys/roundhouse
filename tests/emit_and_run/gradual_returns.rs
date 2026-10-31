@@ -164,3 +164,35 @@ end
         );
     }
 }
+
+#[test]
+fn mutable_callback_and_rescue_aliases_match_cruby() {
+    for body in [
+        r#"JSON.parse(raw).tap { p = Kernel.proc { return :escaped }; if raw.empty?; nil; else; p = -> { 42 }; end; p.call } rescue :fallback"#,
+        r#"JSON.parse(raw).tap { p = Kernel.proc { return :escaped }; q = Kernel.proc { p.call }; p = -> { 42 }; q.call } rescue :fallback"#,
+        r#"JSON.parse(raw).tap { begin; Kernel.raise("x", "y"); rescue OurError; nil; end } rescue :fallback"#,
+    ] {
+        let source =
+            format!("OurError = TypeError\nmodule Probe\n def self.value(raw); {body}; end\nend\n");
+        let assertion = "raise 'lost Integer' unless Probe.value('42') == 42\nputs 'ok'\n";
+        let original = Command::new("ruby")
+            .args(["-rjson", "-e", &format!("{source}\n{assertion}")])
+            .output()
+            .unwrap();
+        assert!(
+            original.status.success(),
+            "{}",
+            String::from_utf8_lossy(&original.stderr)
+        );
+        let emitted = super::emit_and_run::empty_app()
+            .write("db/schema.rb", "ActiveRecord::Schema.define do\nend\n")
+            .write("lib/probe.rb", &source)
+            .run_ruby(assertion);
+        emitted.assert_passes();
+        assert_eq!(
+            emitted.stdout,
+            String::from_utf8_lossy(&original.stdout),
+            "{body}"
+        );
+    }
+}
