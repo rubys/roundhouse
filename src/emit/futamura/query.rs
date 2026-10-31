@@ -257,7 +257,10 @@ impl<'a> Specializer<'a> {
                 _ => Err(format!("`{}` is not assigned exactly once", name.as_str())),
             },
             ExprNode::Const { path } => {
-                let name = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+                // `::Shop` is a path with an empty first segment (ingest keeps
+                // the root so qualification passes leave it alone); a model is
+                // named without it.
+                let name = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
                 match self.models.get(name.as_str()) {
                     Some(m) => Ok(Chain::new(m.name.clone(), None)),
                     None => Err(format!("`{name}` is not a model")),

@@ -1812,3 +1812,27 @@ mod runtime_stats {
         }
     }
 }
+
+mod rooted_constants {
+    use std::path::PathBuf;
+
+    use roundhouse::analyze::Analyzer;
+    use roundhouse::emit::futamura::specialize;
+    use roundhouse::ingest::ingest_app_from_tree;
+
+    #[test]
+    fn a_rooted_model_constant_roots_a_chain_like_the_bare_one() {
+        let files: Vec<(&str, &str)> = vec![
+            ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"rooms\", force: :cascade do |t|\n    t.string \"name\", null: false\n  end\nend\n"),
+            ("app/models/room.rb", "class Room < ApplicationRecord\nend\n"),
+            ("app/services/lookup/finder.rb", "module Lookup\n  class Finder\n    def self.named(x)\n      ::Room.where(name: x).to_a\n    end\n  end\nend\n"),
+        ];
+        let tree: std::collections::HashMap<PathBuf, Vec<u8>> =
+            files.iter().map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec())).collect();
+        let mut app = ingest_app_from_tree(tree).expect("ingest");
+        Analyzer::new(&app).analyze(&mut app);
+        let mut tree_files: Vec<(String, String)> = files.iter().map(|(p, c)| (p.to_string(), c.to_string())).collect();
+        let report = specialize(&app, &mut tree_files).unwrap();
+        assert_eq!(report.specialized.len(), 1, "{:?}", report.residue);
+    }
+}
