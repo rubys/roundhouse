@@ -257,17 +257,22 @@ module ActiveJob
   end
 
   # Run the held jobs `only` names (all of them when it is empty), in
-  # the order they were enqueued, and answer how many ran. A job one of
-  # them enqueues is held behind it and runs in the same pass. Jobs
-  # `only` leaves out stay held.
+  # the order they were enqueued, and answer how many ran. Only the jobs
+  # held when the call starts run: Rails' `flush_enqueued_jobs` walks a
+  # snapshot (`jobs.dup`), so a job one of them enqueues stays held
+  # behind it for a later call. That is what ends a job that re-enqueues
+  # itself (an interrupted job-iteration job continues from its cursor
+  # as a new enqueue). Jobs `only` leaves out stay held.
   def self.perform_held(only)
     ran = 0
     i = 0
-    while i < HELD.length
+    limit = HELD.length
+    while i < limit && i < HELD.length
       if only.empty? || only.include?(HELD_NAMES[i])
         work = HELD[i]
         HELD.delete_at(i)
         HELD_NAMES.delete_at(i)
+        limit = limit - 1
         work.call
         ran = ran + 1
       else
