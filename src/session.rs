@@ -41,13 +41,15 @@ use crate::diagnostic::Diagnostic;
 /// entry points that want source-shaped IR (LSP/MCP/preview/check) call
 /// `Analyzer` directly and skip the lowerings on purpose.
 pub fn analyze_and_lower(app: &mut App) -> Vec<Diagnostic> {
-    crate::lower::i18n_translate::with_plan_cache(|| {
-        let mut analyzer = crate::analyze::Analyzer::new(app);
-        analyzer.analyze(app);
-        app.helper_diagnostics = Some(crate::analyze::diagnose_helper_modules(app));
-        crate::timings::phase("post-analyze lowerings", || {
-            crate::lower::apply_post_analyze_lowerings(app, analyzer.class_registry())
-        })
+    analyze_and_lower_with_target(app, crate::build_target::BuildTarget::Ruby)
+}
+
+fn analyze_and_lower_with_target(app: &mut App, target: crate::build_target::BuildTarget) -> Vec<Diagnostic> {
+    let mut analyzer = crate::analyze::Analyzer::new(app);
+    analyzer.analyze(app);
+    app.helper_diagnostics = Some(crate::analyze::diagnose_helper_modules(app));
+    crate::timings::phase("post-analyze lowerings", || {
+        crate::lower::apply_post_analyze_lowerings_for(app, analyzer.class_registry(), target)
     })
 }
 
@@ -56,6 +58,25 @@ pub fn analyze_and_lower(app: &mut App) -> Vec<Diagnostic> {
 /// columns as the Array Rails reads types them so
 /// (`lower::array_columns`); every other target sees the ingested app.
 pub fn analyze_and_lower_for(app: &mut App, target: crate::build_target::BuildTarget) -> Vec<Diagnostic> {
+    if matches!(target, crate::build_target::BuildTarget::Ruby | crate::build_target::BuildTarget::Jruby | crate::build_target::BuildTarget::Spinel) {
+        app.native_library_keywords = true;
+        for class in &mut app.library_classes {
+            for method in &mut class.methods {
+                for param in &mut method.params {
+                    if param.from_keyword {
+                        param.keyword = true;
+                        param.from_keyword = false;
+                    }
+                    if param.from_kwrest {
+                        param.keyword = true;
+                        param.rest = true;
+                        param.default = None;
+                        param.from_kwrest = false;
+                    }
+                }
+            }
+        }
+    }
     if target.stores_array_columns() {
         crate::lower::array_columns::store_arrays(app);
     }
@@ -80,6 +101,6 @@ pub fn analyze_and_lower_for(app: &mut App, target: crate::build_target::BuildTa
         refused.extend(crate::ingest::app::refuse_numericality_allow_on_untyped(app, target.as_str()));
     }
     refused.extend(crate::lower::untyped_subclass_diagnostics(app));
-    refused.extend(analyze_and_lower(app));
+    refused.extend(analyze_and_lower_with_target(app, target));
     refused
 }

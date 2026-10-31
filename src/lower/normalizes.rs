@@ -304,7 +304,7 @@ fn rewrite(e: &mut Expr, normalized: &HashMap<ClassId, Vec<Symbol>>, owner: Opti
             if !attrs.contains(key) || is_normalizer_call(v) {
                 continue;
             }
-            *v = call_normalizer(&class, key, v.clone());
+            *v = normalize_condition(&class, key, v.clone());
         }
     }
 }
@@ -342,6 +342,84 @@ fn normalize_value_for(e: &Expr, normalized: &HashMap<ClassId, Vec<Symbol>>, own
 
 /// Already wrapped — the rewrite must be idempotent, since a body can be
 /// visited twice (a concern's copy and its includer's).
+/// A finder condition's value as Rails normalizes it: a scalar through
+/// the attribute's normalizer, an Array element by element. A nil
+/// element stays nil, since a finder never normalizes nil, not even
+/// under `apply_to_nil: true` (`where(note: [nil])` is `"note" IS
+/// NULL`). Before, the whole Array went to the normalizer, which
+/// normalized its `to_s`.
+fn normalize_condition(model: &ClassId, attr: &Symbol, value: Expr) -> Expr {
+    if let ExprNode::Array { elements, style } = &*value.node
+        && !elements.iter().any(|e| matches!(&*e.node, ExprNode::Splat { .. }))
+    {
+        let elements = elements
+            .iter()
+            .map(|e| {
+                if matches!(&*e.node, ExprNode::Lit { value: Literal::Nil }) || is_normalizer_call(e) {
+                    e.clone()
+                } else {
+                    call_normalizer(model, attr, e.clone())
+                }
+            })
+            .collect();
+        let mut array = Expr::new(value.span, ExprNode::Array { elements, style: style.clone() });
+        array.ty = value.ty.clone();
+        return array;
+    }
+    let Some(Ty::Array { elem }) = value.ty.clone() else {
+        return call_normalizer(model, attr, value);
+    };
+    // `titles.map { |element| Model._normalize_title(element) }`, with
+    // a nil guard when an element can be nil.
+    let span = value.span;
+    let name = Symbol::from("element");
+    let mut read = Expr::new(span, ExprNode::Var { id: VarId(0), name: name.clone() });
+    read.ty = Some(elem.as_ref().clone());
+    let normalized = call_normalizer(model, attr, read.clone());
+    let can_be_nil = match elem.as_ref() {
+        Ty::Nil | Ty::Untyped => true,
+        Ty::Union { variants } => variants.contains(&Ty::Nil),
+        _ => false,
+    };
+    let body = if can_be_nil {
+        let mut nil_check = Expr::new(
+            span,
+            ExprNode::Send { recv: Some(read), method: Symbol::from("nil?"), args: vec![], block: None, parenthesized: false },
+        );
+        nil_check.ty = Some(Ty::Bool);
+        let mut if_ = Expr::new(
+            span,
+            ExprNode::If {
+                cond: nil_check,
+                then_branch: Expr::new(span, ExprNode::Lit { value: Literal::Nil }),
+                else_branch: normalized,
+            },
+        );
+        if_.ty = Some(elem.as_ref().clone());
+        if_
+    } else {
+        normalized
+    };
+    let block = Expr::new(
+        span,
+        ExprNode::Lambda {
+            extra_params: Vec::new(),
+            params: vec![name],
+            rest_param: None,
+            block_param: None,
+            body,
+            block_style: crate::expr::BlockStyle::Brace,
+        },
+    );
+    let ty = value.ty.clone();
+    let mut map = Expr::new(
+        span,
+        ExprNode::Send { recv: Some(value), method: Symbol::from("map"), args: vec![], block: Some(block), parenthesized: false },
+    );
+    map.ty = ty;
+    map
+}
+
 fn is_normalizer_call(e: &Expr) -> bool {
     matches!(&*e.node, ExprNode::Send { method, .. } if method.as_str().starts_with("_normalize_"))
 }

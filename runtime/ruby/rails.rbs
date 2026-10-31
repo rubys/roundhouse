@@ -60,10 +60,10 @@ module Rails
     def increment_str: (String key, Integer amount, Integer ttl) -> Integer
     def forget: (String k) -> void
     def clear: () -> void
-    def read: (String | Symbol | Array[untyped] key) -> untyped
-    def write: (String | Symbol | Array[untyped] key, untyped value) -> untyped
-    def delete: (String | Symbol | Array[untyped] key) -> untyped
-    def exist?: (String | Symbol | Array[untyped] key) -> bool
+    def read: (String | Symbol | Array[untyped] key, ?Hash[untyped, untyped] opts) -> untyped
+    def write: (String | Symbol | Array[untyped] key, untyped value, ?Hash[untyped, untyped] opts) -> untyped
+    def delete: (String | Symbol | Array[untyped] key, ?Hash[untyped, untyped] opts) -> untyped
+    def exist?: (String | Symbol | Array[untyped] key, ?Hash[untyped, untyped] opts) -> bool
   end
 
   class Logger

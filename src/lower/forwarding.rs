@@ -150,7 +150,12 @@ pub(super) fn apply_with_plans(
         plans: &crate::det::HashMap<crate::span::Span, KeywordPolicy>,
         names: &ConstructorNames,
     ) {
-        if plans.get(&e.span) == Some(&KeywordPolicy::Legacy) {
+        if plans.get(&e.span) == Some(&KeywordPolicy::NativeLibrary) {
+            e.decisions |= crate::expr::NATIVE_KEYWORD_ARGUMENTS;
+        }
+        if plans.get(&e.span) == Some(&KeywordPolicy::Legacy)
+            && e.decisions & crate::expr::NATIVE_KEYWORD_ARGUMENTS == 0
+        {
             // `lower::kwsplat` resolves a callee through the receiver's
             // class (or the enclosing class for a receiverless call) and
             // decides there whether the Hash stays positional, expands

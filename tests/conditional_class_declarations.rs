@@ -113,7 +113,6 @@ const REOPENED: &[(&str, &str)] = &[
 ];
 
 #[test]
-#[ignore = "fork spec: conditional declarations"]
 fn a_conditional_declaration_reopened_in_another_file_is_named() {
     let script = "p Gqlc::Q::V.instance_methods(false).sort\n";
     assert_eq!(native(REOPENED, &format!("require \"gqlc/q_ext\"\n{script}"), &[]), "[:a, :b]\n");
@@ -127,7 +126,7 @@ fn a_conditional_declaration_reopened_in_another_file_is_named() {
         ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
         ("config/application.rb", "require \"gqlc/q_ext\"\n"),
         ("roundhouse.yml", ""),
-        ("Gemfile.lock", "GEM\n  remote: https://rubygems.org/\n  specs:\n\nDEPENDENCIES\n  gqlc!\n"),
+        ("Gemfile.lock", "PATH\n  remote: vendor/gems/gqlc-1.0.0\n  specs:\n    gqlc (1.0.0)\n\nDEPENDENCIES\n  gqlc!\n"),
     ]
     .into_iter()
     .chain(gem.iter().map(|(path, text)| (path.as_str(), *text)))

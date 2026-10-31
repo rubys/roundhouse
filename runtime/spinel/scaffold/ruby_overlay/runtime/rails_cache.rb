@@ -147,7 +147,7 @@ module Rails
       increment_str(key, amount, expires_in.to_i)
     end
 
-    def read(key)
+    def read(key, opts = {})
       k = key.to_s
       s = shard_of(k)
       entry = @shards[s][k]
@@ -171,14 +171,14 @@ module Rails
       value
     end
 
-    def delete(key)
+    def delete(key, opts = {})
       k = key.to_s
       s = shard_of(k)
       @mutexes[s].synchronize { @shards[s].delete(k) }
       nil
     end
 
-    def exist?(key)
+    def exist?(key, opts = {})
       !read(key).nil?
     end
 

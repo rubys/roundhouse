@@ -69,6 +69,7 @@ impl Diagnostic {
             DiagnosticKind::GradualUntyped { .. } => "gradual_untyped",
             DiagnosticKind::UnresolvedType { .. } => "unresolved_type",
             DiagnosticKind::Unsupported { .. } => "unsupported",
+            DiagnosticKind::IngestUnsupported { .. } => "ingest_unsupported",
             DiagnosticKind::MissingPreload { .. } => "missing_preload",
             DiagnosticKind::Parse { .. } => "parse",
             DiagnosticKind::BlankUnlowered { .. } => "blank_unlowered",
@@ -130,6 +131,14 @@ impl Diagnostic {
             kind,
             message,
         }
+    }
+
+    /// Construct an `IngestUnsupported` diagnostic: the construct whose
+    /// ingest failed a support file (`App::ingest_drops`), which the
+    /// walk then left out of the IR.
+    pub fn ingest_unsupported(span: Span, detail: impl Into<String>) -> Self {
+        let kind = DiagnosticKind::IngestUnsupported { detail: detail.into() };
+        Diagnostic { span, severity: Self::default_severity(&kind), message: Self::stub_text(&kind), kind }
     }
 
     /// Construct a `Parse` diagnostic for a Prism syntax error. `span`
@@ -195,6 +204,9 @@ impl Diagnostic {
             }
             DiagnosticKind::Unsupported { target, construct, .. } => {
                 Self::unsupported_text(target.as_ref(), construct)
+            }
+            DiagnosticKind::IngestUnsupported { detail } => {
+                format!("{detail}; ingest left this file's classes, modules and constants out of the emitted app")
             }
             DiagnosticKind::MissingPreload { association, .. } => {
                 format!("query does not preload :{}", association.as_str())
@@ -488,6 +500,10 @@ pub enum DiagnosticKind {
         construct: Symbol,
         detail: String,
     },
+    /// A support file (`lib/`, a gem's source, …) whose class ingest
+    /// failed at a construct, which the walk left out of the IR
+    /// (`App::ingest_drops`). Anchored at that construct.
+    IngestUnsupported { detail: String },
     /// Iterating a typed relation reads a member association the
     /// originating query didn't `includes`/`preload`/`eager_load` —
     /// the static N+1 finding (`analyze::preload`, roundhouse#64).

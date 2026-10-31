@@ -15,6 +15,10 @@
 //!   names an app module with an `included` hook, which may define the
 //!   writer at run time (`base.singleton_class.send(:attr_accessor,
 //!   *NAMES)`), when no runtime base answers the class side;
+//! * an `alias_method` of a method an app ancestor defines (one the
+//!   body defines itself was already copied by the walk; one naming a
+//!   method only a dropped macro would define raises NameError as the
+//!   class loads, so it stays dropped);
 //! * any of these, or `delegate`, in the class's own `class << self`
 //!   ([`crate::expr::SINGLETON_BODY`]) of a module or of a class no
 //!   runtime base gives class methods to.
@@ -30,7 +34,7 @@ use crate::det::HashSet;
 
 use crate::App;
 use crate::dialect::MethodReceiver;
-use crate::expr::{Expr, ExprNode, LValue};
+use crate::expr::{Expr, ExprNode, LValue, Literal};
 
 /// `Module` / `Class` methods every Ruby class answers, plus `delegate`,
 /// which the Ruby family's runtime defines on `Module`
@@ -80,6 +84,7 @@ const CORE_CLASSES: &[&str] = &[
 
 pub(super) fn mark(app: &mut App) {
     let mut class_side: std::collections::BTreeMap<String, HashSet<String>> = Default::default();
+    let mut instance_side: std::collections::BTreeMap<String, HashSet<String>> = Default::default();
     let mut parents: std::collections::BTreeMap<String, Option<String>> = Default::default();
     for lc in app.library_classes.iter().filter(|lc| lc.origin.is_none()) {
         let name = lc.name.0.as_str().to_string();
@@ -87,6 +92,10 @@ pub(super) fn mark(app: &mut App) {
             .entry(name.clone())
             .or_default()
             .extend(lc.methods.iter().filter(|m| m.receiver == MethodReceiver::Class).map(|m| m.name.as_str().to_string()));
+        instance_side
+            .entry(name.clone())
+            .or_default()
+            .extend(lc.methods.iter().filter(|m| m.receiver == MethodReceiver::Instance).map(|m| m.name.as_str().to_string()));
         if !lc.is_module {
             let parent = lc.parent.as_ref().map(|p| p.0.as_str().to_string());
             let entry = parents.entry(name).or_insert(None);
@@ -123,11 +132,17 @@ pub(super) fn mark(app: &mut App) {
         .map(|lc| lc.name.0.as_str().to_string())
         .collect();
     let models: HashSet<String> = app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
-    let index = Index { class_side: &class_side, parents: &parents, models: &models, hooked: &hooked };
+    let index = Index { class_side: &class_side, instance_side: &instance_side, parents: &parents, models: &models, hooked: &hooked };
     for lc in app.library_classes.iter_mut().filter(|lc| lc.origin.is_none()) {
         let name = lc.name.0.as_str().to_string();
         let singleton_ok = lc.is_module || index.answered_by_app(&name);
         let constants: HashSet<String> = lc.constants.iter().map(|(n, _)| n.as_str().to_string()).collect();
+        let alias_copies: HashSet<(String, bool)> = lc
+            .methods
+            .iter()
+            .filter(|m| m.body.decisions & crate::expr::INHERITED_ALIAS_COPY != 0)
+            .map(|m| (m.name.as_str().to_string(), m.receiver == MethodReceiver::Class))
+            .collect();
         for expr in &mut lc.unknown_calls {
             if expr.decisions & crate::expr::REPLAYED_CLASS_BODY != 0 || expr.span.is_synthetic() {
                 continue;
@@ -135,7 +150,8 @@ pub(super) fn mark(app: &mut App) {
             if expr.decisions & crate::expr::SINGLETON_BODY != 0 && !singleton_ok {
                 continue;
             }
-            let check = Check { owner: &name, index: &index, constants: &constants };
+            let singleton = expr.decisions & crate::expr::SINGLETON_BODY != 0;
+            let check = Check { owner: &name, index: &index, constants: &constants, alias_copies: &alias_copies, singleton };
             if check.statement(expr) {
                 expr.decisions |= crate::expr::BODY_STATEMENT;
             }
@@ -160,6 +176,7 @@ fn resolve(class_side: &std::collections::BTreeMap<String, HashSet<String>>, nam
 
 struct Index<'a> {
     class_side: &'a std::collections::BTreeMap<String, HashSet<String>>,
+    instance_side: &'a std::collections::BTreeMap<String, HashSet<String>>,
     parents: &'a std::collections::BTreeMap<String, Option<String>>,
     models: &'a HashSet<String>,
     hooked: &'a HashSet<String>,
@@ -169,14 +186,25 @@ impl Index<'_> {
     /// Whether `name` or an app ancestor of it defines the class method
     /// `method`.
     fn defines(&self, name: &str, method: &str) -> bool {
+        self.defined_from(self.class_side, Some(name), method)
+    }
+
+    /// Whether an app ancestor of `name`, not `name` itself, defines
+    /// `method` on the class side or the instance side.
+    fn inherits(&self, name: &str, method: &str, class_side: bool) -> bool {
+        let side = if class_side { self.class_side } else { self.instance_side };
+        self.defined_from(side, self.parents.get(name).and_then(|p| p.as_deref()), method)
+    }
+
+    fn defined_from(&self, side: &std::collections::BTreeMap<String, HashSet<String>>, start: Option<&str>, method: &str) -> bool {
         let mut seen: Vec<&str> = Vec::new();
-        let mut at = Some(name);
+        let mut at = start;
         while let Some(class) = at {
             if seen.contains(&class) {
                 return false;
             }
             seen.push(class);
-            if self.class_side.get(class).is_some_and(|methods| methods.contains(method)) {
+            if side.get(class).is_some_and(|methods| methods.contains(method)) {
                 return true;
             }
             at = self.parents.get(class).and_then(|p| p.as_deref());
@@ -227,6 +255,11 @@ struct Check<'a> {
     owner: &'a str,
     index: &'a Index<'a>,
     constants: &'a HashSet<String>,
+    /// The statement is in the class's own `class << self`.
+    /// The methods `ingest::inherited_alias` copied under an alias's
+    /// name, with whether each is on the class side.
+    alias_copies: &'a HashSet<(String, bool)>,
+    singleton: bool,
 }
 
 impl Check<'_> {
@@ -248,6 +281,28 @@ impl Check<'_> {
             ExprNode::Assign { target: LValue::Attr { recv, name }, value }
             | ExprNode::OpAssign { target: LValue::Attr { recv, name }, value, .. } => {
                 matches!(&*recv.node, ExprNode::SelfRef) && self.writer(name.as_str()) && self.walk(value)
+            }
+            // `alias_method :subject, :sub`: the walk copied an alias of a
+            // method the body defines, so `sub` is inherited or comes from
+            // a macro; only an app ancestor's method is known to be there,
+            // or one `ingest::inherited_alias` resolved and gave the class
+            // a copy of under the alias's name.
+            ExprNode::Send { recv, method, args, block: None, .. }
+                if method.as_str() == "alias_method"
+                    && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) =>
+            {
+                let name = |arg: &Expr| match &*arg.node {
+                    ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+                    ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+                    _ => None,
+                };
+                match args.as_slice() {
+                    [to, from] => {
+                        name(to).is_some_and(|to| self.alias_copies.contains(&(to, self.singleton)))
+                            || name(from).is_some_and(|from| self.index.inherits(self.owner, &from, self.singleton))
+                    }
+                    _ => false,
+                }
             }
             // A call on the class is one of Ruby's own `Module` methods. One
             // to its own class methods is `app_extension_calls`' (without

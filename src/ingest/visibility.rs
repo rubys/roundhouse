@@ -12,6 +12,12 @@ use super::util::{constant_id_str, flatten_statements, module_name_path, symbol_
 use super::{IngestError, IngestResult};
 
 use crate::ingest::prism_api::PrismLocation;
+
+thread_local! {
+    /// The statement the walk is at: where a refusal happened
+    /// (`super::error_site`).
+    static STATEMENT: std::cell::Cell<Option<(usize, usize)>> = const { std::cell::Cell::new(None) };
+}
 const PRIVATE_HOOKS: &[&str] = &[
     "initialize", "initialize_copy", "initialize_dup", "initialize_clone",
 ];
@@ -110,6 +116,72 @@ pub(super) fn conditional_definition<'pr>(node: &Node<'pr>) -> Option<(bool, Vec
         })
     });
     (defines && only_defs).then_some((negated, arms))
+}
+
+/// A class-body `if` / `unless` whose branches define a method but hold
+/// a statement [`conditional_definition`] does not admit: that statement,
+/// and why it keeps the conditional refused.
+fn refused_conditional_definition<'pr>(node: &Node<'pr>) -> Option<(Node<'pr>, &'static str)> {
+    if console_only(node) || conditional_definition(node).is_some() {
+        return None;
+    }
+    let mut arms: Vec<Vec<Node<'pr>>> = Vec::new();
+    let body = |statements: Option<ruby_prism::StatementsNode<'pr>>| -> Vec<Node<'pr>> {
+        statements.map(|s| flatten_statements(s.as_node())).unwrap_or_default()
+    };
+    if let Some(branch) = node.as_if_node() {
+        branch.if_keyword_loc()?;
+        branch.end_keyword_loc()?;
+        arms.push(body(branch.statements()));
+        let mut next = branch.subsequent();
+        while let Some(sub) = next {
+            if let Some(elsif) = sub.as_if_node() {
+                arms.push(body(elsif.statements()));
+                next = elsif.subsequent();
+            } else {
+                arms.push(body(sub.as_else_node()?.statements()));
+                next = None;
+            }
+        }
+    } else if let Some(branch) = node.as_unless_node() {
+        branch.end_keyword_loc()?;
+        arms.push(body(branch.statements()));
+        if let Some(other) = branch.else_clause() {
+            arms.push(body(other.statements()));
+        }
+    } else {
+        return None;
+    }
+    if !arms.iter().flatten().any(|stmt| definition(stmt).is_some()) {
+        return None;
+    }
+    let admitted = |stmt: &Node<'_>| {
+        definition(stmt).is_some()
+            || conditional_accessor(stmt).is_some()
+            || conditional_definition(stmt).is_some()
+            || stmt.as_class_node().is_some()
+            || stmt.as_module_node().is_some()
+    };
+    let stmt = arms.into_iter().flatten().find(|stmt| !admitted(stmt))?;
+    let why = if stmt.as_call_node().is_some_and(|c| c.receiver().is_none() && marker(&c)) {
+        "a visibility declaration inside a load-time conditional definition is not modeled \
+         (the visibility in effect after it would depend on the branch taken)"
+    } else if stmt.as_if_node().is_some() || stmt.as_unless_node().is_some() || stmt.as_case_node().is_some() {
+        "a conditional nested in a load-time conditional definition is not modeled"
+    } else if stmt.as_singleton_class_node().is_some() {
+        "`class << self` inside a load-time conditional definition is not modeled"
+    } else if stmt.as_constant_write_node().is_some() {
+        "a constant assigned in a load-time conditional definition is not modeled"
+    } else if stmt.as_alias_method_node().is_some()
+        || stmt.as_call_node().is_some_and(|c| {
+            c.receiver().is_none() && matches!(constant_id_str(&c.name()), "attr_reader" | "attr_writer" | "attr_accessor" | "alias_method")
+        })
+    {
+        "an accessor or alias declared in a load-time conditional definition is not modeled"
+    } else {
+        "a load-time conditional definition whose branch holds a statement other than a `def` is not modeled"
+    };
+    Some((stmt, why))
 }
 
 /// A bare `attr_reader` / `attr_writer` / `attr_accessor` of literal
@@ -462,10 +534,14 @@ impl Visibility {
     }
 
     fn unsupported(file: &str, message: impl Into<String>) -> IngestError {
-        IngestError::Unsupported {
+        let err = IngestError::Unsupported {
             file: file.into(),
             message: message.into(),
+        };
+        if let Some((start, end)) = STATEMENT.get() {
+            super::error_site::note(&err, start, end);
         }
+        err
     }
 
     fn define(
@@ -530,8 +606,14 @@ impl Visibility {
             let same = positions.iter().all(|p| self.alternatives.get(p).map(|(s, _)| *s) == statement);
             let branches: HashSet<usize> = positions.iter().filter_map(|p| self.alternatives.get(p).map(|(_, b)| *b)).collect();
             let covered = statement.and_then(|s| self.exhaustive.get(&s)).is_some_and(|n| branches.len() == *n && branches.len() == positions.len());
-            if !same || !covered {
+            if !same {
                 return Err(Self::unsupported(file, "conditional or dynamic visibility declarations are not modeled"));
+            }
+            if !covered {
+                return Err(Self::unsupported(
+                    file,
+                    format!("visibility change for `{name}`, which a load-time conditional defines in only some branches, is not modeled"),
+                ));
             }
         }
         let alternatives = positions.len() > 1 && positions.iter().all(|p| self.alternatives.contains_key(p));
@@ -566,13 +648,21 @@ impl Visibility {
         for (index, (_, stmts)) in arms.iter().enumerate() {
             for stmt in stmts {
                 let at = stmt.location().start_offset();
+                STATEMENT.set(Some((at, stmt.location().end_offset())));
                 self.defaults.insert(at, default);
                 if conditional_definition(stmt).is_some() {
                     self.walk_conditional(stmt, class_side, default, file)?;
                     continue;
                 }
-                // A declaration has its own pass and namespace.
+                // A declaration has its own pass and namespace, but not
+                // one on the singleton class.
                 if stmt.as_class_node().is_some() || stmt.as_module_node().is_some() {
+                    if class_side {
+                        return Err(Self::unsupported(
+                            file,
+                            "a class or module declared in a load-time conditional inside `class << self` is not modeled",
+                        ));
+                    }
                     continue;
                 }
                 if let Some(call) = conditional_accessor(stmt) {
@@ -793,12 +883,26 @@ impl Visibility {
         file: &str,
         module_owner: Option<&ClassId>,
     ) -> IngestResult<()> {
+        let outer = STATEMENT.get();
+        let walked = self.walk_statements(body, class_side, file, module_owner);
+        STATEMENT.set(outer);
+        walked
+    }
+
+    fn walk_statements(
+        &mut self,
+        body: Option<Node<'_>>,
+        class_side: bool,
+        file: &str,
+        module_owner: Option<&ClassId>,
+    ) -> IngestResult<()> {
         let Some(body) = body else { return Ok(()) };
         // A new lexical body always starts public. A marker in the enclosing
         // class must not privatize def self.x or leak into class_methods.
         let mut default = MethodVisibility::Public;
         let mut module_function = false;
         for statement in flatten_statements(body) {
+            STATEMENT.set(Some((statement.location().start_offset(), statement.location().end_offset())));
             let offset = statement.location().start_offset();
             self.defaults.insert(offset, default);
             // A load-time conditional's definitions take the visibility in
@@ -983,8 +1087,15 @@ impl Visibility {
                 }
                 // A `def` is handled above. Anything else — an `if` that
                 // wraps a definition, a modifier that does not — still
-                // has to be rejected when it hides a marker or a `def`.
-                Self::reject_dynamic_declarations(node, file)?;
+                // has to be rejected when it hides a marker or a `def`;
+                // a conditional definition says which statement keeps it
+                // refused.
+                if let Err(err) = Self::reject_dynamic_declarations(node, file) {
+                    return Err(match self.conditionals.then(|| refused_conditional_definition(node)).flatten() {
+                        Some((at, message)) => super::error_site::at(Self::unsupported(file, message), &at),
+                        None => err,
+                    });
+                }
                 continue;
             };
             if call.receiver().is_some() {

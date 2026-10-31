@@ -462,6 +462,17 @@ fn inherited_hooks_exclude_factories_through_the_entire_ancestry() {
             "Owner::Parent",
             None,
         ),
+        // An included module's own hook can give its includer one.
+        (
+            "module Tracking; def self.included(base) = base.define_singleton_method(:inherited) { |child| child.name.split(\"::\") }; end; class Parent; include Tracking; end",
+            "Parent",
+            None,
+        ),
+        (
+            "module Tracking; class << self; def append_features(base) = super; end; end; class Grandparent; include Tracking; end; class Parent < Grandparent; end",
+            "Parent",
+            None,
+        ),
     ] {
         let factory = format!("{declarations}\nclass Owner; Child = Class.new({parent}) {{}}; end");
         let raw = ingest(&factory, "Owner::Child.new", extra);
@@ -549,6 +560,10 @@ fn ruby_inherited_hooks_observe_anonymous_factories_and_named_headers() {
         (
             "class Parent < StandardError; def self.inherited(child); child.define_singleton_method(:new) { 7 } if child.name.nil?; end; end",
             "Owner::Child.new.message",
+        ),
+        (
+            "module Tracking; def self.included(base) = base.define_singleton_method(:inherited) { |child| child.name.split(\"::\") }; end; class Parent; include Tracking; end",
+            "Owner::Child.new",
         ),
     ] {
         let factory =
@@ -1060,6 +1075,168 @@ fn assert_refused_factory(declarations: &str, parent: &str) {
             .contains_key(&ClassId(Symbol::from("Owner::Child"))),
         "{declarations}"
     );
+}
+
+// Mixins into a constructor ancestor of a module that defines no
+// construction method (`new`, `allocate`, `initialize`, `inherited`) and no
+// mixin hook. action_policy runs the last one, guarded for JRuby.
+const MIXINS_WITHOUT_CONSTRUCTION: &[&str] = &[
+    "module Ext\n def namespace = name\nend\nModule.include(Ext)",
+    "module Ext\n def namespace = name\nend\n::Module.include(Ext)",
+    "module Ext\n def namespace = name\nend\nModule.send(:include, Ext)",
+    "module Ext\n def namespace = name\nend\nModule.public_send(:include, Ext)",
+    "module Ext\n def namespace = name\nend\nModule.method(:include).call(Ext)",
+    "module Ext\n def namespace = name\nend\nModule.prepend(Ext)",
+    "module Ext\n def namespace = name\nend\nModule.extend(Ext)",
+    "module Ext\n def namespace = name\nend\nModule.singleton_class.include(Ext)",
+    "module Ext\n def namespace = name\nend\nclass Module\n include Ext\nend",
+    "module Ext\n def namespace = name\nend\nClass.include(Ext)",
+    "module Ext\n def namespace = name\nend\nClass.prepend(Ext)",
+    "module Ext\n def namespace = name\nend\nObject.include(Ext)",
+    "module Ext\n def namespace = name\nend\nBasicObject.include(Ext)",
+    "module Base\n def label = 1\nend\nmodule Ext\n include Base\nend\nModule.include(Ext)",
+    "module Outer\n module Ext\n def namespace = name\n end\n ::Module.include(Ext) if RUBY_PLATFORM.match?(/java/i)\nend",
+];
+
+#[test]
+fn mixins_without_construction_methods_keep_factories() {
+    for &extra in MIXINS_WITHOUT_CONSTRUCTION {
+        let raw = ingest(
+            "class Owner\n Child = Class.new(StandardError) {}\nend",
+            "Owner::Child.new.message",
+            Some(extra),
+        );
+        let (source, analyzer) = analyzed(raw, true);
+        assert!(
+            analyzer
+                .class_registry()
+                .contains_key(&ClassId(Symbol::from("Owner::Child"))),
+            "{extra}"
+        );
+        assert_eq!(
+            send_type(
+                &source.controllers[0].actions().next().unwrap().body,
+                "message"
+            ),
+            Some(Ty::Str),
+            "{extra}"
+        );
+    }
+}
+
+#[test]
+fn a_dead_jruby_mixin_keeps_model_factory_constants() {
+    let boom_errors = |ext: &str| {
+        let app = ingest_files(&[
+            (
+                "db/schema.rb",
+                "ActiveRecord::Schema.define(version: 1) do\n  create_table \"articles\" do |t|\n    t.string \"title\"\n  end\nend\n",
+            ),
+            (
+                "config/routes.rb",
+                "Rails.application.routes.draw do\nend\n",
+            ),
+            (
+                "app/models/application_record.rb",
+                "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+            ),
+            (
+                "app/models/article.rb",
+                "class Article < ApplicationRecord\n  Boom = Class.new(StandardError)\n\n  def explode!\n    raise Boom, \"no\"\n  end\nend\n",
+            ),
+            (
+                "lib/namespace.rb",
+                &format!(
+                    "module Namespace\n  module Ext\n{ext}\n  end\n\n  ::Module.include(Ext) if RUBY_PLATFORM.match?(/java/i)\nend\n"
+                ),
+            ),
+        ]);
+        let (app, _) = analyzed(app, true);
+        errors(&app)
+            .into_iter()
+            .filter(|error| error.to_string().contains("Boom"))
+            .count()
+    };
+    assert_eq!(boom_errors("    def namespace = name"), 0);
+    assert_ne!(boom_errors("    def new(*) = 7"), 0);
+}
+
+#[test]
+fn mixins_that_may_change_construction_refuse_factories() {
+    for declarations in [
+        // Each construction method, and its other spellings.
+        "module Ext\n def new(*) = 7\nend\nModule.include(Ext)",
+        "module Ext\n def allocate = 7\nend\nModule.include(Ext)",
+        "module Ext\n def initialize(*) = nil\nend\nClass.prepend(Ext)",
+        "module Ext\n def inherited(child) = nil\nend\nObject.extend(Ext)",
+        "module Ext\n def build = 7\n alias new build\nend\nModule.extend(Ext)",
+        "module Ext\n attr_reader :new\nend\nModule.extend(Ext)",
+        "module Ext\n def new(*) = 7\nend\n::Module.include(Ext)",
+        "module Ext\n def new(*) = 7\nend\nModule.send(:include, Ext)",
+        "module Ext\n def new(*) = 7\nend\nModule.method(:include).call(Ext)",
+        "module Ext\n def new(*) = 7\nend\nclass Module\n include Ext\nend",
+        "module Ext\n def new(*) = 7\nend\nClass.include(Ext)",
+        "module Ext\n def new(*) = 7\nend\nObject.include(Ext)",
+        // A hook of the module runs when it is mixed in.
+        "module Ext\n def self.included(base) = base.singleton_class.define_method(:new) { |*| 7 }\nend\nModule.include(Ext)",
+        "module Ext\n class << self\n def extended(base) = nil\n end\nend\nModule.extend(Ext)",
+        "module Hooks\n def included(base) = nil\nend\nmodule Ext\n extend Hooks\nend\nModule.include(Ext)",
+        "class Module\n def included(base) = nil\nend\nmodule Ext; end\nModule.include(Ext)",
+        // A module it includes, a later opening, or a mutation elsewhere.
+        "module Base\n def new(*) = 7\nend\nmodule Ext\n include Base\nend\nModule.extend(Ext)",
+        "module Ext; end\nModule.include(Ext)\nmodule Ext\n def inherited(child) = nil\nend",
+        "module Ext; end\nExt.define_method(:new) { |*| 7 }\nModule.include(Ext)",
+        // No source body shows the module's methods.
+        "Module.include(External::Ext)",
+        "Ext = Module.new { def new(*) = 7 }\nModule.include(Ext)",
+        "ext = Module.new { def new(*) = 7 }\nModule.include(ext)",
+        "Module.include(*[Comparable])",
+        // A reopening shows only part of a core or framework module.
+        "module Kernel\n def namespace = name\nend\nModule.include(Kernel)",
+        "module ActiveRecord\n module SignedId\n def namespace = name\n end\nend\nObject.include(ActiveRecord::SignedId)",
+        "module ActiveRecord\n module SignedId\n def namespace = name\n end\nend\nmodule Ext\n include ActiveRecord::SignedId\nend\nModule.include(Ext)",
+    ] {
+        assert_refused_factory(declarations, "Object");
+    }
+}
+
+#[test]
+fn ruby_keeps_class_new_under_mixins_without_construction_methods() {
+    for mixin in MIXINS_WITHOUT_CONSTRUCTION {
+        let program = format!(
+            "{mixin}\nclass Owner; Child = Class.new(StandardError) {{}}; end\nraise 'changed' unless Owner::Child.superclass == StandardError && Owner::Child.new('x').message == 'x'\nputs 'kept'"
+        );
+        let output = std::process::Command::new("ruby")
+            .args(["-e", &program])
+            .output()
+            .expect("Ruby mixin control");
+        assert!(
+            output.status.success(),
+            "{mixin}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "kept\n", "{mixin}");
+    }
+    for mixin in [
+        "module Ext\n def new(*) = 7\nend\nClass.prepend(Ext)",
+        "module Ext\n def new(*) = 7\nend\nModule.extend(Ext)",
+        "module Ext\n def inherited(child) = raise('hook')\nend\nObject.extend(Ext)",
+        "module Ext\n def self.included(base) = base.singleton_class.define_method(:new) { |*| 7 }\nend\nModule.include(Ext)",
+        "module Base\n def new(*) = 7\nend\nmodule Ext\n include Base\nend\nModule.extend(Ext)",
+    ] {
+        let program = format!(
+            "{mixin}\nbegin\n class Owner; Child = Class.new(StandardError) {{}}; end\n puts Owner::Child.is_a?(Class) ? 'kept' : 'changed'\nrescue RuntimeError\n puts 'changed'\nend"
+        );
+        let output = std::process::Command::new("ruby")
+            .args(["-e", &program])
+            .output()
+            .expect("Ruby mixin control");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "changed\n",
+            "{mixin}"
+        );
+    }
 }
 
 #[test]

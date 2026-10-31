@@ -1798,18 +1798,31 @@ module ActiveStorage
   # Rails' `ActiveStorage::PurgeJob`, in the shape a lowered app job's
   # `perform_later` takes: recorded by name (`assert_enqueued_jobs
   # only: ActiveStorage::PurgeJob`), run inline, queued behind the
-  # request, or held for the test adapter.
+  # request, or held for the test adapter. The work is `perform`, as in
+  # Rails, so an app that reopens the job to change it is the one that
+  # runs (`emit::ruby::reopen`).
   class PurgeJob
+    def perform(blob)
+      blob.purge
+      nil
+    end
+
     def self.perform_later(blob)
       ActiveJob.record_performed("ActiveStorage::PurgeJob")
       if !ActiveJob.enqueue_only
         if ActiveJob.drain_registered
-          ActiveJob.enqueue(-> { blob.purge })
+          ActiveJob.enqueue(-> {
+            new.perform(blob)
+            nil
+          })
         else
-          blob.purge
+          new.perform(blob)
         end
       else
-        ActiveJob.hold("ActiveStorage::PurgeJob", -> { blob.purge })
+        ActiveJob.hold("ActiveStorage::PurgeJob", -> {
+          new.perform(blob)
+          nil
+        })
       end
       nil
     end

@@ -25,6 +25,10 @@ pub(crate) mod expr;
 mod library;
 pub(crate) use library::install_lookup_indexes;
 mod rbs;
+/// Host-only, like the `project` tree passes that run it and whose RBS
+/// declaration spans it shares; excluded from the wasm build.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod reopen;
 pub mod shake;
 mod shared;
 pub mod source_markers;
@@ -266,6 +270,7 @@ fn materialize_models_with_param_binds(
         param_binds,
         crate::lower::model_to_library::ErrorsReaders::CreatedOnFirstRead,
         crate::lower::model_to_library::RuntimeRelation::Present,
+        &crate::lower::view_to_library::PartialStems::of(&app.views),
     ).0;
     (lcs, params_specs)
 }
@@ -953,7 +958,9 @@ fn emit_jbuilder_view_files(
 /// cross-format visibility it needs, exactly as combining jbuilder's
 /// own per-view slices did for the jbuilder-jbuilder case.
 pub(crate) fn emit_lowered_views_and_jbuilder(app: &App) -> Vec<EmittedFile> {
-    let (html_views, html_lcs) = lowered_view_lcs_pre_helper(app);
+    let (html_views, mut html_lcs) = lowered_view_lcs_pre_helper(app);
+    // Not in `lowered_view_lcs_pre_helper`: the views-only entry points serve harnesses that load the views without ActiveSupport::Notifications, which only a whole tree ships.
+    crate::lower::view_instrumentation::apply(&html_views, &mut html_lcs, app);
     let (jbuilder_views, jbuilder_lcs) = jbuilder_view_lcs_pre_helper(app);
     let html_len = html_lcs.len();
     let mut combined = html_lcs;
@@ -1245,6 +1252,7 @@ pub(crate) fn emit_spinel_with_param_binds(app: &App, param_binds: bool) -> Vec<
             &app.models,
             fixture_extras,
             &crate::lower::routes::helper_id_segments(app),
+            &crate::lower::routes::direct_helper_names(app),
             true,
         );
         // A test body writes the same relation chains an app body does —

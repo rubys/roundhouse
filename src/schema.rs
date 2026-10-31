@@ -30,6 +30,14 @@ pub struct Table {
     /// id-column changes. False also means unknown: retain the default.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub known_keyless: bool,
+    /// A composite primary key's columns in key order (structure.sql's
+    /// `PRIMARY KEY (shop_id, id)`). No column is flagged `primary_key`
+    /// for one: a model keys its records on its declared
+    /// `self.primary_key` (`ingest::app::key_composite_tables`), and a
+    /// model that declares none is refused, since Rails keys it on every
+    /// column here and this compiler does not yet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub primary_key_columns: Vec<Symbol>,
     /// `create_virtual_table "message_search_index", "fts5", ["body",
     /// "tokenize=porter"]` — a table the DB builds from a MODULE rather
     /// than from a column list. It has no rowid column of its own, no

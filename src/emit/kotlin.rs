@@ -73,9 +73,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // factory the controllers call.
     let params_specs =
         crate::lower::controller_to_library::params::collect_specs(&app.controllers);
-    let (model_lcs, model_registry) = crate::lower::lower_models_with_registry_and_params(
+    let (model_lcs, model_registry) = crate::lower::lower_models_with_registry_params_and_views(
         &app.models,
         &app.schema,
+        &app.views,
         view_extras,
         &params_specs,
     );
@@ -220,6 +221,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             &app.models,
             test_extras,
             &crate::lower::routes::helper_id_segments(app),
+            &crate::lower::routes::direct_helper_names(app),
         );
         for lowered in &test_lowered {
             let name = lowered.test_class.name.0.as_str();

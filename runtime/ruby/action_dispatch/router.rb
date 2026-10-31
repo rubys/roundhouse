@@ -73,7 +73,7 @@ module ActionDispatch
         parts = pattern.split("/")
         @pattern_parts = parts
         # And what `scan_routes` asks of every candidate, worked out once
-        # too: the segment count, whether the last
+        # too: the segment count, whether a
         # segment is a `*glob`, and the first segment when it is a plain
         # literal ("" when it is dynamic). Those two compares reject nearly
         # every route in the table before `match_parts` is called: `/up`,
@@ -87,8 +87,7 @@ module ActionDispatch
         # that read's `.length` for a String's).
         count = parts.length
         @part_count = count
-        tail = count > 0 ? parts[count - 1].to_s : +""
-        @globbed = tail.start_with?("*")
+        @globbed = pattern.include?("/*")
         first = count > 1 ? parts[1].to_s : +""
         @lead = first.include?(":") || first.start_with?("*") ? +"" : first
       end
@@ -321,45 +320,48 @@ module ActionDispatch
     # write into a returned-and-nil-checked hash differently.
     #
     # A `*name` GLOB segment — Rails' `*filename` on the Active Storage
-    # engine's routes — must be LAST in the pattern and takes every
-    # remaining path segment, slash-joined, as its value. A glob route
-    # therefore matches any path at least as long as its pattern; every
-    # other route still needs an exact segment count.
+    # engine's routes — takes every path segment the rest of the pattern
+    # leaves, slash-joined, as its value. A glob route therefore matches
+    # any path at least as long as its pattern; every other route still
+    # needs an exact segment count.
     def self.match_parts(pattern_parts, path_parts, int_params = +"", format = +"", seg_constraints = +"")
-      # The tail segment is bound to a local before it is asked anything,
-      # like `pp`/`ap` below: an array index read straight into a method
-      # call is what some strict emitters coerce as nilable.
-      last = pattern_parts.length - 1
-      globbed = false
-      if last >= 0
-        tail = pattern_parts[last]
-        globbed = tail.start_with?("*")
-      end
-      if globbed
-        return nil if path_parts.length < pattern_parts.length
-      elsif pattern_parts.length != path_parts.length
+      glob = glob_index(pattern_parts)
+      extra = path_parts.length - pattern_parts.length
+      if glob >= 0
+        return nil if extra < 0
+      elsif extra != 0
         return nil
       end
       # Literal segments first, allocating nothing: `/up` is the last of
       # campfire's ~180 routes, and every same-length GET route before it
       # built a params Hash (and a `:name` substring per segment) only to
       # fail on its first literal — 37% of that request's allocations.
-      return nil unless literals_match(pattern_parts, path_parts)
+      return nil unless literals_match(pattern_parts, path_parts, glob, extra)
       # The route's `(.:format)` requirement, compiled under `format`:
       # an extension must meet it, and no extension always does, as in
       # Rails (`constraints: { format: :csv }` serves `/export` too).
       unless format.empty?
         format_pattern = segment_pattern_for(seg_constraints, "format")
-        return nil if !format_pattern.empty? && !segment_pattern_match(format_pattern, format)
+        format_ok = format_pattern.empty? || segment_pattern_match(format_pattern, format)
+        # Not held like `format` (format_held_param_tail): another extension is the param's own text, as a lookahead requirement reads it (`/domains/example.com.xml`).
+        suffix_pattern = segment_pattern_for(seg_constraints, "format_suffix")
+        # Retried here rather than left to the unpeeled pass: a later route would take the stripped path first, and the pass skips a route whose format is held, where Rails keeps declaration order.
+        if !suffix_pattern.empty? && !(format_ok && segment_pattern_match(suffix_pattern, format))
+          unpeeled_path = glob_rest(path_parts, 0, path_parts.length) + "." + format
+          return match_parts(pattern_parts, unpeeled_path.split("/"), int_params, +"", seg_constraints)
+        end
+        return nil unless format_ok
       end
       params = {}
       params["format"] = format unless format.empty?
       i = 0
       while i < pattern_parts.length
         pp = pattern_parts[i]
-        ap = path_parts[i]
+        ap = path_parts[glob >= 0 && i > glob ? i + extra : i]
         if pp.start_with?("*")
-          params[pp[1..]] = glob_rest(path_parts, i)
+          # Rails' glob is `.+?` and a `.+` requirement's span is `.+`: an empty one (`/files//edit`) is no match.
+          return nil if glob_rest(path_parts, i, i + extra + 1).empty?
+          params[pp[1..]] = glob_rest(path_parts, i, i + extra + 1)
         elsif pp.start_with?(":")
           name = pp[1..]
           # `seg = ap.to_s` (not `digits_only(ap)` directly): some strict
@@ -652,11 +654,11 @@ module ActionDispatch
     # Whether every plain literal segment of the pattern (no `:` or `*`)
     # equals the path's segment at the same index. Its own method for the
     # same reason as `glob_rest` below: one `while` per method.
-    def self.literals_match(pattern_parts, path_parts)
+    def self.literals_match(pattern_parts, path_parts, glob, extra)
       i = 0
       while i < pattern_parts.length
         pp = pattern_parts[i]
-        ap = path_parts[i].to_s
+        ap = path_parts[glob >= 0 && i > glob ? i + extra : i].to_s
         unless pp.include?(":") || pp.start_with?("*")
           return false if pp != ap
         end
@@ -665,19 +667,32 @@ module ActionDispatch
       true
     end
 
-    # The path from segment `from` on, slash-joined: a `*glob`'s value.
+    # The path's segments `from` up to `stop`, slash-joined: a `*glob`'s
+    # value. A glob followed by more pattern segments (`/files/*path/edit`,
+    # or a `.+` requirement's span) stops short of the ones they take.
     # Its own method rather than a loop inside `match_parts` because the
     # Elixir lowering turns ONE `while` per method into a recursive
     # `__loop`; a second, nested one is not a shape it takes.
-    def self.glob_rest(path_parts, from)
+    def self.glob_rest(path_parts, from, stop)
       rest = []
       j = from
-      while j < path_parts.length
+      while j < stop
         seg = path_parts[j]
         rest << seg
         j += 1
       end
       rest.join("/")
+    end
+
+    # Which pattern segment is the `*glob`, -1 when none is. Its own
+    # method for the same one-`while`-per-method reason as `glob_rest`.
+    def self.glob_index(pattern_parts)
+      i = 0
+      while i < pattern_parts.length
+        return i if pattern_parts[i].start_with?("*")
+        i += 1
+      end
+      -1
     end
 
     # Where the `:` of a prefixed param segment (`~:username`) sits —

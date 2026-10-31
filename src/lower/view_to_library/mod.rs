@@ -48,9 +48,9 @@ use crate::ident::{ClassId, Symbol, VarId};
 use crate::naming::{camelize_path, last_segment, singularize, snake_case};
 use crate::span::Span;
 
-use self::extra_params::{drop_closure_names, rewritten_extras};
+use self::extra_params::{drop_closure_names, flash_params, rewritten_extras};
 
-pub(crate) use self::extra_params::flash_param_in_scope;
+pub(crate) use self::extra_params::{flash_param_in_scope, flash_slot_of, local_key_of};
 use self::form_wrapper::{FormWrapperHelper, form_wrapper_helpers};
 use self::walker::walk_body;
 
@@ -235,6 +235,7 @@ pub struct ViewLowerCtx<'a> {
     /// See the ViewCtx field of the same name.
     view_formats: std::rc::Rc<crate::det::HashSet<(ViewKey, ViewKind, String)>>,
     dyn_pools: std::rc::Rc<crate::det::HashMap<(String, Symbol), Vec<DynPoolEntry>>>,
+    partial_stems: std::rc::Rc<PartialStems>,
     /// Partials whose body renders a `file_field` — see
     /// `ViewCtx::multipart_partials`.
     multipart_partials: std::rc::Rc<crate::det::HashSet<ViewKey>>,
@@ -307,6 +308,7 @@ impl<'a> ViewLowerCtx<'a> {
             closures: std::rc::Rc::new(view_ivar_closures(&app.views, &app.controllers)),
             view_formats: std::rc::Rc::new(view_formats(&app.views)),
             dyn_pools: std::rc::Rc::new(dynamic_partial_pools(&app.controllers)),
+            partial_stems: std::rc::Rc::new(PartialStems::of(&app.views)),
             multipart_partials: std::rc::Rc::new(multipart_partials(&app.views)),
             partial_extras: std::rc::Rc::new(partial_extras_map(app)),
             request_context: std::rc::Rc::new(request_context_views(&app.views)),
@@ -409,11 +411,17 @@ pub fn lower_view_to_library_class(view: &View, app: &App) -> LibraryClass {
 fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> LibraryClass {
     let app = lx.app;
     let (dir, base) = split_view_name(view.name.as_str());
-    let stem = base.trim_start_matches('_');
+    let view_key = view_key_of(view, &lx.partial_stems);
+    // A top-level template has no graph key, so the stem is asked for
+    // directly.
+    let stem = match base.starts_with('_') {
+        true => lx.partial_stems.stem(&camelize_path(&snake_case(dir)), base),
+        false => base.to_string(),
+    };
 
     let module_id = view_module_id(dir);
     let method_name =
-        crate::lower::view::view_method_name_for(stem, view.format.as_str());
+        crate::lower::view::view_method_name_for(&stem, view.format.as_str());
 
     let known_models: &[String] = &lx.known_models;
     // Rails binds a collection element to the local named after the
@@ -433,18 +441,20 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     //
     // The arg is a positional param, so a reserved-word `as:` (`as:
     // :for`) goes through `safe_local`, as its reads do.
-    let arg_name = effective_record_arg(view, &lx.collection_element_locals, known_models);
+    let arg_name =
+        effective_record_arg(view, &lx.collection_element_locals, known_models, &lx.partial_stems);
 
     // Rewrite `@ivar` → bare `ivar` everywhere so the inferred arg name
     // (and any extra params we surface) read as plain locals in the
     // emitted body. Mirrors the controller-side ivar-to-local pass.
     // `ivar_locals` names each ivar's local once for the whole view, so
     // the params below and these reads agree (#753).
-    let closure_raw: Vec<Symbol> = view_key_of(view)
-        .and_then(|k| lx.closures.get(&k).cloned())
+    let closure_raw: Vec<Symbol> = view_key
+        .as_ref()
+        .and_then(|k| lx.closures.get(k).cloned())
         .unwrap_or_default();
     let ivar_locals = view_ivar_locals(view, &closure_raw);
-    let keys = view_key_of(view).and_then(|k| lx.locals_keys.get(&k));
+    let keys = view_key.as_ref().and_then(|k| lx.locals_keys.get(k));
     // Flash rename → ivar rewrite → extras collect, one pipeline shared
     // with the call-site contracts (see `extra_params::rewritten_extras`).
     let (rewritten, extra_params) =
@@ -541,7 +551,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     let mut extra_params = extra_params;
     if is_partial {
         let keys_map = &lx.locals_keys;
-        if let Some(keys) = view_key_of(view).and_then(|k| keys_map.get(&k).cloned()) {
+        if let Some(keys) = view_key.as_ref().and_then(|k| keys_map.get(k).cloned()) {
             for k in keys {
                 if k != arg_name && !extra_params.contains(&k) {
                     extra_params.push(k);
@@ -566,7 +576,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // hidden field with it) marks `f` as a defined?-extra in
     // collect_extra_params.
     let form_binding = (is_partial)
-        .then(|| view_key_of(view).and_then(|k| lx.partial_form_bindings.get(&k)))
+        .then(|| view_key.as_ref().and_then(|k| lx.partial_form_bindings.get(k)))
         .flatten();
     if let Some(binding) = form_binding {
         extra_params.retain(|k| k != &binding.form_local);
@@ -577,6 +587,21 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // sites pass extras by position, so they do not see the new name.
     let extra_params: Vec<String> =
         extra_params.iter().map(|k| crate::naming::safe_local(k)).collect();
+    // The flash a partial this view renders reads (`ViewCtx::own_flash`).
+    // A param a render hands a local by its slot's name holds that local
+    // there (`local_key_of`), and a strict-locals partial takes no flash.
+    let own_flash: [Option<String>; 2] = if is_partial && view.strict_locals.is_some() {
+        Default::default()
+    } else {
+        flash_params(&extra_params).map(|param| {
+            param
+                .filter(|n| {
+                    let key = local_key_of(&extra_params, n);
+                    !keys.is_some_and(|keys| keys.iter().any(|k| k == key))
+                })
+                .map(str::to_string)
+        })
+    };
 
     // Typed primary params: (name, type, required). Extras (notice/alert/…)
     // are appended afterward as nullable optionals.
@@ -818,6 +843,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
             .collect(),
         view_formats: lx.view_formats.clone(),
         dyn_pools: dyn_pools.clone(),
+        partial_stems: lx.partial_stems.clone(),
         multipart_partials: lx.multipart_partials.clone(),
         partial_extras: lx.partial_extras.clone(),
         strict_locals: lx.strict_locals.clone(),
@@ -825,6 +851,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         ivar_models: std::rc::Rc::new(view_ivar_models(app, &view.name)),
         str_ivars: std::rc::Rc::new(view_str_ivars(app, &view.name)),
         ivar_locals: std::rc::Rc::new(ivar_locals),
+        own_flash,
     };
 
     // A partial that receives a form builder as a local re-derives the
@@ -1059,6 +1086,18 @@ pub fn insert_db_stub(
     db_info.class_methods.insert(
         Symbol::from("database_path"),
         fn_sig(vec![], Ty::Str),
+    );
+    // The adapter Rails reports ("sqlite3", "postgresql"): the runtime's
+    // bulk writes pick the database's SQL spelling by it.
+    db_info.class_methods.insert(
+        Symbol::from("adapter_name"),
+        fn_sig(vec![], Ty::Str),
+    );
+    // A write that returns rows (`INSERT … RETURNING`): a statement
+    // handle, read as `prepare`'s is.
+    db_info.class_methods.insert(
+        Symbol::from("exec_returning"),
+        fn_sig(vec![(Symbol::from("sql"), Ty::Str)], Ty::Int),
     );
     let hash_config = ClassId(Symbol::from("ActiveRecord::DatabaseConfigurations::HashConfig"));
     let hash_config_methods = [
@@ -2246,6 +2285,7 @@ pub(crate) fn partial_form_bindings(
         form_param: &str,
         record_refs: &HashSet<String>,
         id_prefix: &str,
+        stems: &PartialStems,
         out: &mut Vec<(ViewKey, PartialFormBinding)>,
     ) {
         if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
@@ -2332,15 +2372,7 @@ pub(crate) fn partial_form_bindings(
                     if let (Some(p), Some(form_local), Some(record_local)) =
                         (partial, form_local, record_local)
                     {
-                        let resolved = match p.rsplit_once('/') {
-                            Some((d, n)) => Some((d.to_string(), n.to_string())),
-                            None => own_dir.map(|d| (d.to_string(), p.clone())),
-                        };
-                        if let Some((d, n)) = resolved {
-                            let key = (
-                                camelize_path(&snake_case(&d)),
-                                n.trim_start_matches('_').to_string(),
-                            );
+                        if let Some(key) = partial_name_to_key_from(&p, own_dir, stems) {
                             let model_name = record_local.clone();
                             out.push((
                                 key,
@@ -2357,13 +2389,18 @@ pub(crate) fn partial_form_bindings(
             }
         }
         e.node.for_each_child(&mut |c| {
-            render_edges(c, own_dir, form_param, record_refs, id_prefix, out)
+            render_edges(c, own_dir, form_param, record_refs, id_prefix, stems, out)
         });
     }
 
     /// Find `form_with ... do |f|` scopes and collect their render
     /// edges.
-    fn seed_scopes(e: &Expr, own_dir: Option<&str>, out: &mut Vec<(ViewKey, PartialFormBinding)>) {
+    fn seed_scopes(
+        e: &Expr,
+        own_dir: Option<&str>,
+        stems: &PartialStems,
+        out: &mut Vec<(ViewKey, PartialFormBinding)>,
+    ) {
         if let ExprNode::Send { recv: None, method, args, block: Some(block), .. } = &*e.node {
             if method.as_str() == "form_with" {
                 if let ExprNode::Lambda { extra_params, params, body, .. } = &*block.node {
@@ -2404,20 +2441,22 @@ pub(crate) fn partial_form_bindings(
                             form_param.as_str(),
                             &record_refs,
                             &id_prefix,
+                            stems,
                             out,
                         );
                     }
                 }
             }
         }
-        e.node.for_each_child(&mut |c| seed_scopes(c, own_dir, out));
+        e.node.for_each_child(&mut |c| seed_scopes(c, own_dir, stems, out));
     }
 
+    let stems = PartialStems::of(views);
     let mut edges: Vec<(ViewKey, PartialFormBinding)> = Vec::new();
     for v in views {
         let (dir, _) = split_view_name(v.name.as_str());
         let own = (!dir.is_empty()).then_some(dir);
-        seed_scopes(&v.body, own, &mut edges);
+        seed_scopes(&v.body, own, &stems, &mut edges);
     }
 
     let mut out: HashMap<ViewKey, PartialFormBinding> = HashMap::default();
@@ -2444,7 +2483,7 @@ pub(crate) fn partial_form_bindings(
             // Re-scan the newly bound partial's body for forwarded
             // edges.
             for v in views {
-                if view_key_of(v).as_ref() != Some(&key) {
+                if view_key_of(v, &stems).as_ref() != Some(&key) {
                     continue;
                 }
                 let (dir, _) = split_view_name(v.name.as_str());
@@ -2459,6 +2498,7 @@ pub(crate) fn partial_form_bindings(
                     &binding.form_local,
                     &refs,
                     &binding.id_prefix,
+                    &stems,
                     &mut next,
                 );
             }
@@ -2475,9 +2515,15 @@ pub(crate) fn render_locals_keys(
 ) -> crate::det::HashMap<(String, String), Vec<String>> {
     use std::collections::BTreeSet;
     use crate::det::HashMap;
+    use crate::lower::view::RenderPartial;
     let mut acc: HashMap<(String, String), BTreeSet<String>> = HashMap::default();
 
-    fn scan(e: &Expr, own_dir: Option<&str>, acc: &mut crate::det::HashMap<(String, String), std::collections::BTreeSet<String>>) {
+    fn scan(
+        e: &Expr,
+        own_dir: Option<&str>,
+        stems: &PartialStems,
+        acc: &mut crate::det::HashMap<(String, String), std::collections::BTreeSet<String>>,
+    ) {
         if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
             if (method.as_str() == "render" || method.as_str() == "render_to_string")
                 && !args.is_empty()
@@ -2515,18 +2561,10 @@ pub(crate) fn render_locals_keys(
                             _ => {}
                         }
                     }
-                    if let Some(p) = partial {
-                        let resolved = match p.rsplit_once('/') {
-                            Some((d, n)) => Some((d.to_string(), n.to_string())),
-                            None => own_dir.map(|d| (d.to_string(), p.clone())),
-                        };
-                        if let Some((d, n)) = resolved {
-                            let key = (
-                                camelize_path(&snake_case(&d)),
-                                n.trim_start_matches('_').to_string(),
-                            );
-                            acc.entry(key).or_default().extend(keys);
-                        }
+                    if let Some(key) =
+                        partial.and_then(|p| partial_name_to_key_from(&p, own_dir, stems))
+                    {
+                        acc.entry(key).or_default().extend(keys);
                     }
                 } else if let ExprNode::Lit { value: Literal::Str { value: pname } } =
                     &*args[0].node
@@ -2551,38 +2589,57 @@ pub(crate) fn render_locals_keys(
                             }
                         }
                     }
-                    if !keys.is_empty() {
-                        let resolved = match pname.rsplit_once('/') {
-                            Some((d, n)) => Some((d.to_string(), n.to_string())),
-                            None => own_dir.map(|d| (d.to_string(), pname.clone())),
-                        };
-                        if let Some((d, n)) = resolved {
-                            let key = (
-                                camelize_path(&snake_case(&d)),
-                                n.trim_start_matches('_').to_string(),
-                            );
-                            acc.entry(key).or_default().extend(keys);
-                        }
+                    if let Some(key) = (!keys.is_empty())
+                        .then(|| partial_name_to_key_from(pname, own_dir, stems))
+                        .flatten()
+                    {
+                        acc.entry(key).or_default().extend(keys);
                     }
+                } else if let Some(dir) = own_dir
+                    && let Some(rp) = crate::lower::view::classify_render_partial(
+                        None,
+                        method.as_str(),
+                        args,
+                        None,
+                        &|_| true,
+                        &|_| false,
+                    )
+                    && let RenderPartial::Collection { locals: Some(locals), .. }
+                    | RenderPartial::Record { locals: Some(locals), .. }
+                    | RenderPartial::Association { locals: Some(locals), .. }
+                    | RenderPartial::TypedCollection { locals: Some(locals), .. } = &rp
+                    && let Some(key) = render_partial_key(&rp, dir, stems)
+                {
+                    // `render @posts, flag: false` — the object form's
+                    // hash is its partial's locals, so its keys are the
+                    // partial's interface as an explicit `locals:` is.
+                    // Views only: a controller's `render @post` is not a
+                    // partial render.
+                    let keys = locals.iter().filter_map(|(lk, _)| match &*lk.node {
+                        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+                        _ => None,
+                    });
+                    acc.entry(key).or_default().extend(keys);
                 }
             }
         }
-        e.node.for_each_child(&mut |c| scan(c, own_dir, acc));
+        e.node.for_each_child(&mut |c| scan(c, own_dir, stems, acc));
     }
 
+    let stems = PartialStems::of(views);
     for v in views {
         let (dir, _) = split_view_name(v.name.as_str());
         let own = (!dir.is_empty()).then_some(dir);
-        scan(&v.body, own, &mut acc);
+        scan(&v.body, own, &stems, &mut acc);
     }
     for c in controllers {
         for a in c.actions() {
-            scan(&a.body, None, &mut acc);
+            scan(&a.body, None, &stems, &mut acc);
         }
     }
     for lc in library_classes {
         for m in &lc.methods {
-            scan(&m.body, None, &mut acc);
+            scan(&m.body, None, &stems, &mut acc);
         }
     }
     // A form-builder local is NOT interface: the bound partial inlines
@@ -2607,6 +2664,9 @@ pub(crate) fn render_locals_keys(
 /// and locals-or-nil for extras.
 #[derive(Clone, Debug)]
 pub struct PartialCallContract {
+    /// The partial's method — its stem, unless a template beside it
+    /// already answers to that (see [`PartialStems`]).
+    pub method: Symbol,
     pub record: String,
     pub closure: Vec<String>,
     pub extras: Vec<String>,
@@ -2629,9 +2689,10 @@ impl PartialCallContract {
     ///
     /// The first two extras are the flash pair (possibly renamed). When
     /// `caller_flash` is `Some`, those slots bind by **position**: an
-    /// explicit `locals:` value under the callee name still wins, then
-    /// the caller's flash param for that slot — not a same-named ivar
-    /// local that name lookup would prefer after rename.
+    /// explicit `locals:` value under the slot's name still wins
+    /// (`local_key_of`), then the caller's flash param for that slot —
+    /// not a same-named ivar local that name lookup would prefer after
+    /// rename.
     pub fn extras_args(
         &self,
         locals_lookup: impl Fn(&str) -> Option<Expr>,
@@ -2645,10 +2706,11 @@ impl PartialCallContract {
             .iter()
             .enumerate()
             .map(|(i, n)| {
+                let key = if self.keyword_extras { n.as_str() } else { local_key_of(&self.extras, n) };
                 if let (Some(flash), true) = (caller_flash, i < 2) {
-                    locals_lookup(n).or_else(|| param_lookup(&flash[i]))
+                    locals_lookup(key).or_else(|| param_lookup(&flash[i]))
                 } else {
-                    locals_lookup(n).or_else(|| param_lookup(n))
+                    locals_lookup(key).or_else(|| param_lookup(n))
                 }
             })
             .collect();
@@ -2682,9 +2744,10 @@ pub(crate) fn partial_call_contracts(
 ) -> crate::det::HashMap<(String, String), PartialCallContract> {
     let closures = view_ivar_closures(views, controllers);
     let keys_map = render_locals_keys(views, controllers, library_classes);
+    let stems = PartialStems::of(views);
     // Same record derivation as `build_library_class` / `partial_extras_map`
     // so `flash_locals` sees one handed name across def and callers.
-    let (collection_locals, _) = collection_element_locals_from_views(views);
+    let (collection_locals, _) = collection_element_locals_from_views(views, &stems);
     let request_context = request_context_views(views);
     let form_bindings = partial_form_bindings(views);
     let mut out = crate::det::HashMap::default();
@@ -2693,8 +2756,12 @@ pub(crate) fn partial_call_contracts(
         if dir.is_empty() || !base.starts_with('_') {
             continue;
         }
-        let stem = base.trim_start_matches('_');
-        let key = (camelize_path(&snake_case(dir)), stem.to_string());
+        let module = camelize_path(&snake_case(dir));
+        let key = stems.key(&module, base);
+        let method = crate::lower::view::view_method_name(&key.1);
+        // Contracts are looked up by the name a render spells, which is
+        // all a controller-side call site has.
+        let spelled = (module, base.trim_start_matches('_').to_string());
         // Strict locals declare the whole contract: the first local is
         // the positional record, the rest are keywords.
         let form_local = form_bindings.get(&key).map(|b| b.form_local.as_str());
@@ -2715,8 +2782,9 @@ pub(crate) fn partial_call_contracts(
                 })
                 .unwrap_or_default();
             out.insert(
-                key,
+                spelled,
                 PartialCallContract {
+                    method,
                     record: declared[0].clone(),
                     closure,
                     // The request-context keywords the def adds (`request_context_views`).
@@ -2736,7 +2804,7 @@ pub(crate) fn partial_call_contracts(
             );
             continue;
         }
-        let record = effective_record_arg(view, &collection_locals, &[]);
+        let record = effective_record_arg(view, &collection_locals, &[], &stems);
         let closure_raw: Vec<Symbol> = closures.get(&key).cloned().unwrap_or_default();
         let ivar_locals = view_ivar_locals(view, &closure_raw);
         let keys = keys_map.get(&key).map(Vec::as_slice);
@@ -2758,7 +2826,10 @@ pub(crate) fn partial_call_contracts(
             }
         }
         drop_closure_names(&mut extras, &closure_locals);
-        out.insert(key, PartialCallContract { record, closure, extras, keyword_extras: false, declared: Vec::new() });
+        out.insert(
+            spelled,
+            PartialCallContract { method, record, closure, extras, keyword_extras: false, declared: Vec::new() },
+        );
     }
     out
 }
@@ -2775,6 +2846,7 @@ pub(crate) fn action_view_ivar_map(
     // view itself doesn't read it.
     let closures = view_ivar_closures(views, controllers);
     let json_closures = crate::lower::jbuilder_to_library::jbuilder_ivar_closures(views, models);
+    let stems = PartialStems::of(views);
     let request_context = request_context_views(views);
     let mut out = crate::det::HashMap::default();
     for v in views {
@@ -2840,7 +2912,10 @@ pub(crate) fn action_view_ivar_map(
         let ivars = if v.jbuilder {
             json_closures.get(&v.name).cloned()
         } else {
-            view_key_of(v).and_then(|k| closures.get(&k)).or_else(|| closures.get(&key)).cloned()
+            view_key_of(v, &stems)
+                .and_then(|k| closures.get(&k))
+                .or_else(|| closures.get(&key))
+                .cloned()
         }
         .unwrap_or_else(|| view_read_ivars(&v.body));
         out.insert(
@@ -2928,18 +3003,19 @@ pub(crate) fn request_context_views(views: &[View]) -> crate::det::HashSet<Strin
         .map(|v| v.name.as_str().to_string())
         .collect();
     let pools = crate::det::HashMap::default();
+    let stems = PartialStems::of(views);
     loop {
         let needed: crate::det::HashSet<ViewKey> = views
             .iter()
             .filter(|v| out.contains(v.name.as_str()) && split_view_name(v.name.as_str()).1.starts_with('_'))
-            .filter_map(view_key_of)
+            .filter_map(|v| view_key_of(v, &stems))
             .collect();
         let more: Vec<String> = views
             .iter()
             .filter(|v| !out.contains(v.name.as_str()))
             .filter(|v| {
                 let (dir, _) = split_view_name(v.name.as_str());
-                render_partial_keys(&v.body, dir, &pools).iter().any(|k| needed.contains(k))
+                render_partial_keys(&v.body, dir, &pools, &stems).iter().any(|k| needed.contains(k))
             })
             .map(|v| v.name.as_str().to_string())
             .collect();
@@ -2978,6 +3054,125 @@ pub(crate) fn view_uses_bare_name(body: &Expr, name: &str) -> bool {
 /// `camelize(snake_case(dir))` plus the rendered action/partial name.
 pub(crate) type ViewKey = (String, String);
 
+/// The stem each partial goes by: its base name without the underscore,
+/// except for a partial whose method a template in the same directory
+/// already defines — `posts/_show` beside `posts/show`, or `_new` beside
+/// `new` (both `_new`, see `view_method_name`).
+///
+/// Rails tells those two apart by the underscore: `render "show"` finds
+/// the partial, the action's render finds the template. A stem has no
+/// underscore, so the pair would share one `ViewKey` and one
+/// `Views::Posts.show` — a method defined twice, which spinel refuses and
+/// CRuby settles by keeping whichever file loads last. The partial of
+/// such a pair goes by `show_partial` instead (one more `_partial` while
+/// any template in the directory, or a partial renamed before it,
+/// already defines a method that name would), for its method and its
+/// key alike; every other partial keeps its stem, so an app without a
+/// pair lowers exactly as before.
+///
+/// Every site resolving a partial name to its key or method goes through
+/// here, so the def and its callers cannot disagree.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PartialStems(crate::det::HashMap<ViewKey, String>);
+
+impl PartialStems {
+    pub(crate) fn of(views: &[View]) -> Self {
+        use crate::det::{HashMap, HashSet};
+        use std::collections::BTreeMap;
+        // Every method a template defines in its module under `stem`:
+        // ERB's format-qualified name, plus the `_into` variant the buffer
+        // pass adds beside it when it can (`buffer_variant`), or
+        // jbuilder's `<stem>_json`.
+        let methods = |v: &View, stem: &str| -> Vec<Symbol> {
+            if v.jbuilder {
+                match v.analysis_only {
+                    true => Vec::new(),
+                    false => vec![Symbol::from(format!("{stem}_json"))],
+                }
+            } else if crate::lower::view::lowers_through_view_path(v) {
+                let m = crate::lower::view::view_method_name_for(stem, v.format.as_str());
+                let into = crate::lower::view_buffer_passing::INTO_SUFFIX;
+                let variant = buffer_variant(v).then(|| Symbol::from(format!("{m}{into}")));
+                std::iter::once(m).chain(variant).collect()
+            } else {
+                Vec::new()
+            }
+        };
+        // Keyed by the MODULE a directory emits into, not the directory:
+        // `product-item/` and `product_item/` are both `Views::ProductItem`.
+        let mut templates: HashSet<(String, Symbol)> = HashSet::default();
+        // Every name each module already answers to, partial or not.
+        let mut taken: HashMap<String, HashSet<Symbol>> = HashMap::default();
+        // Each partial's formats, in name order so allocation is stable.
+        let mut partials: BTreeMap<(String, &str), Vec<&View>> = BTreeMap::new();
+        for v in views {
+            let (dir, base) = split_view_name(v.name.as_str());
+            let module = camelize_path(&snake_case(dir));
+            let stem = base.trim_start_matches('_');
+            let own = methods(v, stem);
+            let names = taken.entry(module.clone()).or_default();
+            names.insert(Symbol::from(stem));
+            names.extend(own.iter().cloned());
+            match base.starts_with('_') {
+                true => partials.entry((module, stem)).or_default().push(v),
+                false => templates.extend(own.into_iter().map(|m| (module.clone(), m))),
+            }
+        }
+        let mut renamed = HashMap::default();
+        for ((module, stem), formats) in partials {
+            let collides = formats
+                .iter()
+                .flat_map(|v| methods(v, stem))
+                .any(|m| templates.contains(&(module.clone(), m)));
+            if !collides {
+                continue;
+            }
+            // Clear of every name in the module, including the ones
+            // given out before this one.
+            let names = taken.entry(module.clone()).or_default();
+            let mut candidate = format!("{stem}_partial");
+            while names.contains(&Symbol::from(candidate.as_str()))
+                || formats.iter().flat_map(|v| methods(v, &candidate)).any(|m| names.contains(&m))
+            {
+                candidate.push_str("_partial");
+            }
+            names.insert(Symbol::from(candidate.as_str()));
+            names.extend(formats.iter().flat_map(|v| methods(v, &candidate)));
+            renamed.insert((module, stem.to_string()), candidate);
+        }
+        Self(renamed)
+    }
+
+    /// The stem of the partial `base` (`"show"` or `"_show"`) in `module`.
+    pub(crate) fn stem(&self, module: &str, base: &str) -> String {
+        let stem = base.trim_start_matches('_');
+        self.0
+            .get(&(module.to_string(), stem.to_string()))
+            .cloned()
+            .unwrap_or_else(|| stem.to_string())
+    }
+
+    pub(crate) fn key(&self, module: &str, base: &str) -> ViewKey {
+        (module.to_string(), self.stem(module, base))
+    }
+
+    /// The method a caller outside the view lowering names the partial
+    /// `base` in `dir` by (`users`, `"mention"` → `mention`).
+    pub(crate) fn method(&self, dir: &str, base: &str) -> Symbol {
+        crate::lower::view::view_method_name(&self.stem(&camelize_path(&snake_case(dir)), base))
+    }
+}
+
+/// Whether the buffer pass gives an ERB template an `_into` variant. It
+/// forwards no keyword or rest parameter (`view_buffer_passing`), and a
+/// strict-locals partial takes every local after its record as a
+/// keyword (`build_library_class`), so only one declaring a single local
+/// keeps the variant.
+fn buffer_variant(v: &View) -> bool {
+    let is_partial = split_view_name(v.name.as_str()).1.starts_with('_');
+    v.strict_locals.as_ref().filter(|_| is_partial).is_none_or(|locals| locals.len() <= 1)
+}
+
 /// Per-PARTIAL extras list ((module, method) → collect_extra_params
 /// output), so a render call site carrying an explicit `locals:` hash
 /// can bind values to the partial's trailing extra params positionally.
@@ -2991,6 +3186,7 @@ pub(super) fn partial_extras_map(
         app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
     let closures = view_ivar_closures(&app.views, &app.controllers);
     let keys_map = render_locals_keys(&app.views, &app.controllers, &app.library_classes);
+    let stems = PartialStems::of(&app.views);
     let collection_locals = collection_element_locals(&app.views, app);
     let request_context = request_context_views(&app.views);
     let mut out: crate::det::HashMap<(String, String), Vec<String>> =
@@ -3000,11 +3196,8 @@ pub(super) fn partial_extras_map(
         if dir.is_empty() || !base.starts_with('_') {
             continue;
         }
-        let arg_name = effective_record_arg(view, &collection_locals, &known_models);
-        let key = (
-            camelize_path(&snake_case(dir)),
-            base.trim_start_matches('_').to_string(),
-        );
+        let key = stems.key(&camelize_path(&snake_case(dir)), base);
+        let arg_name = effective_record_arg(view, &collection_locals, &known_models, &stems);
         let closure_raw: Vec<Symbol> = closures.get(&key).cloned().unwrap_or_default();
         let ivar_locals = view_ivar_locals(view, &closure_raw);
         let keys = keys_map.get(&key).map(Vec::as_slice);
@@ -3048,13 +3241,14 @@ fn multipart_partials(views: &[View]) -> crate::det::HashSet<ViewKey> {
         });
         found
     }
+    let stems = PartialStems::of(views);
     views
         .iter()
         .filter(|v| {
             let (_dir, base) = split_view_name(v.name.as_str());
             base.starts_with('_') && has_file_field(&v.body)
         })
-        .filter_map(view_key_of)
+        .filter_map(|v| view_key_of(v, &stems))
         .collect()
 }
 
@@ -3073,23 +3267,28 @@ pub(super) enum ViewKind {
 /// ivar closure, which both definitions take and every caller passes — so
 /// the variant a render calls is told apart here (`ViewCtx::render_format`).
 fn view_formats(views: &[View]) -> crate::det::HashSet<(ViewKey, ViewKind, String)> {
+    let stems = PartialStems::of(views);
     views
         .iter()
         .filter(|v| crate::lower::view::lowers_through_view_path(v))
         .filter_map(|v| {
             let (_dir, base) = split_view_name(v.name.as_str());
             let kind = if base.starts_with('_') { ViewKind::Partial } else { ViewKind::Template };
-            Some((view_key_of(v)?, kind, v.format.as_str().to_string()))
+            Some((view_key_of(v, &stems)?, kind, v.format.as_str().to_string()))
         })
         .collect()
 }
 
-fn view_key_of(v: &View) -> Option<ViewKey> {
+fn view_key_of(v: &View, stems: &PartialStems) -> Option<ViewKey> {
     let (dir, base) = split_view_name(v.name.as_str());
     if dir.is_empty() {
         return None;
     }
-    Some((camelize_path(&snake_case(dir)), base.trim_start_matches('_').to_string()))
+    let module = camelize_path(&snake_case(dir));
+    Some(match base.starts_with('_') {
+        true => stems.key(&module, base),
+        false => (module, base.to_string()),
+    })
 }
 
 /// Ruby-emit-path layout wrap factory: the Expr for
@@ -3117,10 +3316,10 @@ pub(crate) fn layout_wrap_expr_with(
     inner: Expr,
 ) -> Option<Expr> {
     let key: ViewKey = ("Layouts".to_string(), "application".to_string());
-    let layout = app
-        .views
-        .iter()
-        .find(|v| v.format.as_str() == "html" && view_key_of(v).as_ref() == Some(&key))?;
+    let stems = PartialStems::of(&app.views);
+    let layout = app.views.iter().find(|v| {
+        v.format.as_str() == "html" && view_key_of(v, &stems).as_ref() == Some(&key)
+    })?;
     let ivars = closures.get(&key).cloned().unwrap_or_default();
     let span = inner.span;
     let ivar = |name: &Symbol| Expr::new(span, ExprNode::Ivar { name: name.clone() });
@@ -3184,23 +3383,24 @@ pub(crate) fn view_ivar_closures(
     use std::collections::BTreeSet;
     use crate::det::HashMap;
     let pools = dynamic_partial_pools(controllers);
+    let stems = PartialStems::of(views);
     let mut closure: HashMap<ViewKey, BTreeSet<Symbol>> = HashMap::default();
     let mut edges: HashMap<ViewKey, Vec<ViewKey>> = HashMap::default();
     for v in views {
         if !crate::lower::view::lowers_through_view_path(v) {
             continue;
         }
-        let Some(key) = view_key_of(v) else { continue };
+        let Some(key) = view_key_of(v, &stems) else { continue };
         let (dir, _) = split_view_name(v.name.as_str());
         let reads: BTreeSet<Symbol> = view_read_ivars(&v.body).into_iter().collect();
         closure.entry(key.clone()).or_default().extend(reads);
-        let mut child_keys = render_partial_keys(&v.body, dir, &pools);
+        let mut child_keys = render_partial_keys(&v.body, dir, &pools, &stems);
         // A `render partial: @above` folds every pooled candidate partial's
         // ivar needs into this view, so the dispatch's arms have their
         // closure args threaded as params here. The pool entries' ivar-
         // valued locals (`locals: {tag: @tag}`) count as reads of THIS
         // view — the arm rebinds them onto the partial's declared locals.
-        let (dyn_keys, dyn_locals_ivars) = dynamic_render_edges(&v.body, dir, &pools);
+        let (dyn_keys, dyn_locals_ivars) = dynamic_render_edges(&v.body, dir, &pools, &stems);
         child_keys.extend(dyn_keys);
         closure.entry(key.clone()).or_default().extend(dyn_locals_ivars);
         edges.entry(key).or_default().extend(child_keys);
@@ -3250,7 +3450,8 @@ fn collection_element_locals(
     views: &[View],
     app: &App,
 ) -> crate::det::HashMap<ViewKey, String> {
-    let (mut out, conflicted) = collection_element_locals_from_views(views);
+    let stems = PartialStems::of(views);
+    let (mut out, conflicted) = collection_element_locals_from_views(views, &stems);
     // The partials the FRAMEWORK renders, whose call site is Action
     // Text's `render_action_text_attachment` — `render(partial:
     // attachment.to_attachable_partial_path, object: attachment, as:
@@ -3262,7 +3463,7 @@ fn collection_element_locals(
     // could be trusted to reveal. An app call site that says otherwise
     // wins, as it does for a collection.
     for binding in crate::lower::attachable::attachable_partial_bindings(app) {
-        let key = partial_name_to_key(&binding.partial, "");
+        let key = partial_name_to_key(&binding.partial, "", &stems);
         if conflicted.contains(&key) {
             continue;
         }
@@ -3276,6 +3477,7 @@ fn collection_element_locals(
 /// `App`, and `collection_element_locals`.
 fn collection_element_locals_from_views(
     views: &[View],
+    stems: &PartialStems,
 ) -> (
     crate::det::HashMap<ViewKey, String>,
     crate::det::HashSet<ViewKey>,
@@ -3285,7 +3487,7 @@ fn collection_element_locals_from_views(
     let mut conflicted: HashSet<ViewKey> = HashSet::default();
     for view in views {
         let (dir, _) = split_view_name(view.name.as_str());
-        collect_collection_element_locals(&view.body, dir, &mut out, &mut conflicted);
+        collect_collection_element_locals(&view.body, dir, stems, &mut out, &mut conflicted);
     }
     (out, conflicted)
 }
@@ -3298,10 +3500,11 @@ fn effective_record_arg(
     view: &View,
     collection_locals: &crate::det::HashMap<ViewKey, String>,
     known_models: &[String],
+    stems: &PartialStems,
 ) -> String {
     let (dir, base) = split_view_name(view.name.as_str());
     let stem = base.trim_start_matches('_');
-    view_key_of(view)
+    view_key_of(view, stems)
         .and_then(|k| collection_locals.get(&k).cloned())
         .map(|local| crate::naming::safe_local(&local))
         .unwrap_or_else(|| infer_view_arg(stem, dir, base.starts_with('_'), known_models))
@@ -3310,6 +3513,7 @@ fn effective_record_arg(
 fn collect_collection_element_locals(
     e: &Expr,
     dir: &str,
+    stems: &PartialStems,
     out: &mut crate::det::HashMap<ViewKey, String>,
     conflicted: &mut crate::det::HashSet<ViewKey>,
 ) {
@@ -3326,10 +3530,13 @@ fn collect_collection_element_locals(
             &|_| true,
             &|_| false,
         ) {
-            let key = partial_name_to_key(partial, dir);
+            let key = partial_name_to_key(partial, dir, stems);
             let local = as_name
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| key.1.clone());
+                .unwrap_or_else(|| {
+                    let base = partial.rsplit('/').next().unwrap_or(partial);
+                    base.trim_start_matches('_').to_string()
+                });
             if conflicted.contains(&key) {
                 return;
             }
@@ -3345,8 +3552,9 @@ fn collect_collection_element_locals(
             }
         }
     }
-    e.node
-        .for_each_child(&mut |c| collect_collection_element_locals(c, dir, out, conflicted));
+    e.node.for_each_child(&mut |c| {
+        collect_collection_element_locals(c, dir, stems, out, conflicted)
+    });
 }
 
 /// The partial views a body renders, as `ViewKey`s — for the render graph.
@@ -3356,9 +3564,10 @@ fn render_partial_keys(
     body: &Expr,
     dir: &str,
     pools: &crate::det::HashMap<(String, Symbol), Vec<DynPoolEntry>>,
+    stems: &PartialStems,
 ) -> Vec<ViewKey> {
     let mut out = Vec::new();
-    collect_render_keys(body, dir, pools, &mut out);
+    collect_render_keys(body, dir, pools, stems, &mut out);
     out
 }
 
@@ -3366,6 +3575,7 @@ fn collect_render_keys(
     e: &Expr,
     dir: &str,
     pools: &crate::det::HashMap<(String, Symbol), Vec<DynPoolEntry>>,
+    stems: &PartialStems,
     out: &mut Vec<ViewKey>,
 ) {
     if let ExprNode::Send { recv, method, args, block, .. } = &*e.node {
@@ -3379,15 +3589,15 @@ fn collect_render_keys(
         ) {
             // Options-ivar renders (`render @above`) fold in via
             // `dynamic_render_edges`, not the static key path.
-            if let Some(k) = render_partial_key(&rp, dir) {
+            if let Some(k) = render_partial_key(&rp, dir, stems) {
                 out.push(k);
             }
         }
     }
-    if let Some(k) = turbo_stream_partial_key(e, dir) {
+    if let Some(k) = turbo_stream_partial_key(e, dir, stems) {
         out.push(k);
     }
-    e.node.for_each_child(&mut |c| collect_render_keys(c, dir, pools, out));
+    e.node.for_each_child(&mut |c| collect_render_keys(c, dir, pools, stems, out));
 }
 
 /// The partial a `turbo_stream.<action> target, partial: "x"` call
@@ -3399,52 +3609,74 @@ fn collect_render_keys(
 /// it tells from a String by analyzed types this graph does not have.
 /// An edge for a String would thread an unrelated partial's ivars into
 /// the caller.
-fn turbo_stream_partial_key(e: &Expr, dir: &str) -> Option<ViewKey> {
+fn turbo_stream_partial_key(e: &Expr, dir: &str, stems: &PartialStems) -> Option<ViewKey> {
     let ExprNode::Send { recv, method, args, block: None, .. } = &*e.node else { return None };
     let ts = self::helpers::turbo_stream_partial(recv.as_ref(), method.as_str(), args)?;
-    Some(partial_name_to_key(ts.partial, dir))
+    Some(partial_name_to_key(ts.partial, dir, stems))
 }
 
-/// Resolve a partial-name string to its `(module, method)` ViewKey.
-/// A slash form (`"stories/subnav"`) names an explicit module; a bare
-/// name (`"active"`) resolves relative to `dir` (the rendering view's
-/// directory) — matching Rails' relative-partial-path lookup.
-pub(super) fn partial_name_to_key(name: &str, dir: &str) -> ViewKey {
-    match name.rsplit_once('/') {
-        Some((d, n)) => (camelize_path(&snake_case(d)), n.trim_start_matches('_').to_string()),
-        None => (
-            camelize_path(&snake_case(dir)),
-            name.trim_start_matches('_').to_string(),
-        ),
-    }
+/// Resolve a template-name string to its `(module, method)` ViewKey.
+/// A slash form (`"stories/show"`) names an explicit module; a bare
+/// name (`"show"`) resolves relative to `dir` (the rendering view's
+/// directory). An action template's key is its name; a partial's is
+/// [`partial_name_to_key`]'s.
+pub(super) fn template_name_to_key(name: &str, dir: &str) -> ViewKey {
+    let (d, n) = name.rsplit_once('/').unwrap_or((dir, name));
+    (camelize_path(&snake_case(d)), n.trim_start_matches('_').to_string())
 }
 
-fn render_partial_key(rp: &crate::lower::view::RenderPartial<'_>, dir: &str) -> Option<ViewKey> {
+/// Resolve a partial-name string to its `(module, method)` ViewKey, the
+/// way Rails' relative-partial-path lookup does (see
+/// [`template_name_to_key`]), under the stem `stems` gives the partial.
+pub(super) fn partial_name_to_key(name: &str, dir: &str, stems: &PartialStems) -> ViewKey {
+    let (d, n) = name.rsplit_once('/').unwrap_or((dir, name));
+    stems.key(&camelize_path(&snake_case(d)), n)
+}
+
+/// [`partial_name_to_key`] for a render outside any view directory
+/// (`own_dir` None: a controller or library body), where only a slash
+/// form names a partial.
+fn partial_name_to_key_from(
+    name: &str,
+    own_dir: Option<&str>,
+    stems: &PartialStems,
+) -> Option<ViewKey> {
+    (name.contains('/') || own_dir.is_some())
+        .then(|| partial_name_to_key(name, own_dir.unwrap_or(""), stems))
+}
+
+fn render_partial_key(
+    rp: &crate::lower::view::RenderPartial<'_>,
+    dir: &str,
+    stems: &PartialStems,
+) -> Option<ViewKey> {
     use crate::lower::view::RenderPartial;
     Some(match rp {
-        RenderPartial::Collection { name, .. } => (camelize_path(&snake_case(name)), singularize(name)),
+        RenderPartial::Collection { name, .. } => {
+            stems.key(&camelize_path(&snake_case(name)), &singularize(name))
+        }
         // `render @message` — Rails' `to_partial_path`: the record's
         // own name, in its PLURAL directory (`messages/_message`). The
         // key has to be spelled the same way `emit_render_partial`
         // spells the call, or the partial's ivar closure is threaded
         // into a module nothing renders.
-        RenderPartial::Record { name, .. } => (
-            camelize_path(&crate::naming::pluralize_snake(name)),
-            name.to_string(),
-        ),
+        RenderPartial::Record { name, .. } => {
+            stems.key(&camelize_path(&crate::naming::pluralize_snake(name)), name)
+        }
         RenderPartial::Association { method, .. } => {
-            (camelize_path(&snake_case(method)), singularize(method))
+            stems.key(&camelize_path(&snake_case(method)), &singularize(method))
         }
         RenderPartial::Named { partial, .. } | RenderPartial::CollectionNamed { partial, .. } => {
-            partial_name_to_key(partial, dir)
+            partial_name_to_key(partial, dir, stems)
         }
+        RenderPartial::TypedCollection { partial, .. } => partial_name_to_key(partial, dir, stems),
         // A full-template render is a render-graph edge like any other:
         // the caller's closure must cover the action view's.
-        RenderPartial::Template { name } => partial_name_to_key(name, dir),
+        RenderPartial::Template { name } => template_name_to_key(name, dir),
         // `render layout: "rooms/layouts/new" do … end` — an edge like any
         // other named partial: the caller's closure must cover the
         // layout's, since the layout body reads the caller's ivars.
-        RenderPartial::LayoutBlock { layout, .. } => partial_name_to_key(layout, dir),
+        RenderPartial::LayoutBlock { layout, .. } => partial_name_to_key(layout, dir, stems),
         // A dynamic name resolves to a POOL of keys, not one — folded into
         // the render graph separately (see `dynamic_render_edges`).
         RenderPartial::DynamicNamed { .. } => return None,
@@ -3512,11 +3744,12 @@ pub(crate) fn dynamic_partial_pools(
 /// ivars to suppress, and which names it binds by keyword. Consumers
 /// skip index 0 (the positional record) when binding keywords.
 fn strict_locals_by_key(views: &[View]) -> crate::det::HashMap<ViewKey, Vec<Param>> {
+    let stems = PartialStems::of(views);
     let bindings = partial_form_bindings(views);
     let mut out = crate::det::HashMap::default();
     for v in views {
         let Some(sl) = v.strict_locals.as_ref() else { continue };
-        let Some(key) = view_key_of(v) else { continue };
+        let Some(key) = view_key_of(v, &stems) else { continue };
         let form_local = bindings.get(&key).map(|b| b.form_local.as_str());
         let declared: Vec<_> = sl.iter().filter(|p| Some(p.name.as_str()) != form_local).cloned().collect();
         // Not an empty contract: the definition skips strict lowering for one, and a caller reading it as strict would bind nothing.
@@ -3637,10 +3870,11 @@ fn dynamic_render_edges(
     body: &Expr,
     dir: &str,
     pools: &crate::det::HashMap<(String, Symbol), Vec<DynPoolEntry>>,
+    stems: &PartialStems,
 ) -> (Vec<ViewKey>, Vec<Symbol>) {
     let mut keys = Vec::new();
     let mut locals_ivars = Vec::new();
-    collect_dynamic_edges(body, dir, pools, &mut keys, &mut locals_ivars);
+    collect_dynamic_edges(body, dir, pools, stems, &mut keys, &mut locals_ivars);
     (keys, locals_ivars)
 }
 
@@ -3648,6 +3882,7 @@ fn collect_dynamic_edges(
     e: &Expr,
     dir: &str,
     pools: &crate::det::HashMap<(String, Symbol), Vec<DynPoolEntry>>,
+    stems: &PartialStems,
     keys: &mut Vec<ViewKey>,
     locals_ivars: &mut Vec<Symbol>,
 ) {
@@ -3664,7 +3899,7 @@ fn collect_dynamic_edges(
         {
             if let Some(entries) = pools.get(&(dir.to_string(), Symbol::from(ivar))) {
                 for entry in entries {
-                    keys.push(partial_name_to_key(&entry.name, dir));
+                    keys.push(partial_name_to_key(&entry.name, dir, stems));
                     for (_, v) in &entry.locals {
                         if let ExprNode::Ivar { name } = &*v.node {
                             locals_ivars.push(name.clone());
@@ -3674,7 +3909,9 @@ fn collect_dynamic_edges(
             }
         }
     }
-    e.node.for_each_child(&mut |c| collect_dynamic_edges(c, dir, pools, keys, locals_ivars));
+    e.node.for_each_child(&mut |c| {
+        collect_dynamic_edges(c, dir, pools, stems, keys, locals_ivars)
+    });
 }
 
 /// The instance variables an action view READS, in first-seen order.
@@ -4660,6 +4897,9 @@ pub(super) struct ViewCtx {
     /// the dispatch never fires.
     pub(super) dyn_pools:
         std::rc::Rc<crate::det::HashMap<(String, Symbol), Vec<DynPoolEntry>>>,
+    /// The stem each rendered partial's key and method go by
+    /// ([`PartialStems`]).
+    pub(super) partial_stems: std::rc::Rc<PartialStems>,
     /// Per-partial extras list (`partial_extras_map`): the trailing
     /// nil-default params (notice/alert/defined?-marked locals) in def
     /// order. `emit_render_partial` binds an explicit `locals:` hash's
@@ -4701,6 +4941,16 @@ pub(super) struct ViewCtx {
     /// through [`ViewCtx::ivar_local`], so it names the same local the
     /// params and the body rewrite do.
     pub(super) ivar_locals: std::rc::Rc<IvarLocals>,
+    /// THIS view's flash params (`flash_params`), `notice` then `alert`,
+    /// where they hold the request's flash — what a partial it renders
+    /// reads for its own (`locals_extra_args`). A template's and a
+    /// layout's always do: the controller and the layout wrap pass the
+    /// flash. A partial's do by the same rule one render up, except a
+    /// param some render hands a local by its name, which holds that
+    /// local there. A strict-locals partial has none, and a block param
+    /// or an assigned local of the same name clears it in its scope
+    /// (`ViewCtx::shadow_flash`).
+    pub(super) own_flash: [Option<String>; 2],
 }
 
 /// Every `belongs_to`/`has_one` association name across the app's models
@@ -4867,11 +5117,39 @@ impl ViewCtx {
     pub(super) fn with_locals(&self, more: impl IntoIterator<Item = String>) -> Self {
         let mut next = self.clone();
         for n in more {
+            next.shadow_flash(&n);
             if !next.locals.iter().any(|x| x == &n) {
                 next.locals.push(n);
             }
         }
         next
+    }
+
+    /// This scope from `stmt` on, when it assigns a local named as one of
+    /// the flash params (`<% notice = "Local" %>`, at any depth): the
+    /// param holds that local from there, as a block param does.
+    pub(super) fn after_assigning(&self, stmt: &Expr) -> Option<Self> {
+        let hit: Vec<String> =
+            self.own_flash.iter().flatten().filter(|f| assigns_local(stmt, f)).cloned().collect();
+        (!hit.is_empty()).then(|| {
+            let mut next = self.clone();
+            for n in &hit {
+                next.shadow_flash(n);
+            }
+            next
+        })
+    }
+
+    /// A local named as a flash param shadows it, so a partial rendered
+    /// in its scope gets nil for that slot (`locals_extra_args`), never
+    /// the local: Rails reads the request's flash there, which only the
+    /// param held.
+    fn shadow_flash(&mut self, name: &str) {
+        for slot in &mut self.own_flash {
+            if slot.as_deref() == Some(name) {
+                *slot = None;
+            }
+        }
     }
 
     /// This scope with renders looking partials up in exactly `formats`.
@@ -4909,6 +5187,19 @@ impl ViewCtx {
     pub(super) fn render_method(&self, kind: ViewKind, module: &str, stem: &str) -> Symbol {
         crate::lower::view::view_method_name_for(stem, self.render_format(kind, module, stem))
     }
+}
+
+/// Whether `e` assigns the local `name` anywhere in it: `=`, `||=` and
+/// the other compound forms, or a multiple assignment.
+fn assigns_local(e: &Expr, name: &str) -> bool {
+    let is_it = |t: &LValue| matches!(t, LValue::Var { name: n, .. } if n.as_str() == name);
+    let mut found = match &*e.node {
+        ExprNode::Assign { target, .. } | ExprNode::OpAssign { target, .. } => is_it(target),
+        ExprNode::MultiAssign { targets, .. } => targets.iter().any(is_it),
+        _ => false,
+    };
+    e.node.for_each_child(&mut |c| found = found || assigns_local(c, name));
+    found
 }
 
 // ── small IR constructors ────────────────────────────────────────

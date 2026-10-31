@@ -1335,6 +1335,19 @@ fn emit_expr_inner(e: &Expr) -> String {
                     return format!("{}.clone()", emit_expr(value));
                 }
             }
+            // A Hash literal cast to a Hash whose values rust renders as
+            // a Value (the lowered `record.slice`): its values need not share a type,
+            // so each is boxed as it lands rather than after a
+            // `HashMap::from` that could not unify them.
+            if let (ExprNode::Hash { entries, .. }, crate::ty::Ty::Hash { key, value: value_ty }) = (&*value.node, target_ty) {
+                if !entries.is_empty() && key.is_stringish() && super::ty::rust_value_shaped(value_ty) {
+                    let pairs: Vec<String> = entries
+                        .iter()
+                        .map(|(k, v)| format!("(({}).to_string(), {})", emit_expr(k), coerce_arg_for_param_ty(v, value_ty)))
+                        .collect();
+                    return format!("std::collections::HashMap::from([{}])", pairs.join(", "));
+                }
+            }
             let coerced = coerce_arg_for_field_ty(value, target_ty);
             let raw = emit_expr(value);
             if coerced != raw {

@@ -50,6 +50,8 @@ module Rack
 end
 
 require_relative "mini_profiler/request_hook"
+require_relative "mini_profiler/railtie_methods"
 
 Rack::MiniProfiler.config.apply_railtie(Rails.env)
 RequestHooks.register(Rack::MiniProfiler::RequestHook.new)
+Rack::MiniProfiler::RailtieMethods.subscribe

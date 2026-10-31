@@ -136,6 +136,7 @@ pub fn ingest_roda_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestR
         class_attr_defaults: indexmap::IndexMap::new(),
         lexical_json_shadow: false,
         sti_subclass_names: Vec::new(),
+        select_aliases: Vec::new(),
         i18n: Default::default(),
     });
     let models_dir = dir.join("models");
@@ -862,6 +863,7 @@ impl<'f> RouteWalker<'f> {
                 as_name: None,
                 constraints,
                 scope: Default::default(),
+                action_symbol: false,
             });
         }
         app.routes = RouteTable { entries, direct_helpers: Vec::new(), redirects: Vec::new(), diagnostics: Vec::new() };

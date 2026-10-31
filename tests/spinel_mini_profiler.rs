@@ -135,6 +135,41 @@ RequestHooks.request_end(req, res)
 raise "share page: #{res.body}" unless res.body.include?("var profiler = {") && !res.body.include?("q=</script>") && !res.body.include?("<!--")
 raise "share page escaping: #{res.body}" unless res.body.include?("q=\\u003c/script\\u003e\\u003c!--")
 
+# the Railtie's subscribers: the action, its template, a partial inside it, and the SQL between them
+req = mp_request("GET", "/stories", "", "")
+res = Tep::Response.new
+RequestHooks.request_begin(req, res)
+processing = ActiveSupport::Notifications.start_processing("StoriesController", "index")
+sleep 0.003
+template = ActiveSupport::Notifications.render_start
+sleep 0.003
+ActiveSupport::Notifications.sql_open("SELECT 1 FROM x WHERE a < 'b'")
+ActiveSupport::Notifications.sql_close
+partial = ActiveSupport::Notifications.render_start
+sleep 0.003
+ActiveSupport::Notifications.render_finish("render_partial.action_view", "app/views/stories/_row.html.erb", partial)
+sleep 0.003
+ActiveSupport::Notifications.render_finish("render_template.action_view", "app/views/stories/index.html.erb", template)
+ActiveSupport::Notifications.sql_cached("SELECT 2")
+ActiveSupport::Notifications.process_action("StoriesController", "index", processing)
+res.body = "<html><body></body></html>"
+RequestHooks.request_end(req, res)
+tid = res.headers["X-MiniProfiler-Ids"].split(",")[0]
+req = mp_request("POST", "/mini-profiler-resources/results", "", "")
+req.raw_body = "id=" + tid
+req.req_headers["x-requested-with"] = "XMLHttpRequest"
+res = Tep::Response.new
+RequestHooks.request_begin(req, res)
+RequestHooks.request_end(req, res)
+tree = res.body
+raise "counts: #{tree}" unless tree.include?("\"sql_count\":2,\"cached_sql_count\":1,")
+raise "executing: #{tree}" unless tree.include?("\"name\":\"Executing: stories#index\"")
+row = tree.index("\"name\":\"Rendering: stories/_row.html.erb\"")
+raise "no partial: #{tree}" if row.nil?
+raise "partial not inside the template: #{tree}" unless tree[tree.index("\"depth\":", row), 9] == "\"depth\":3"
+raise "sql text: #{tree}" unless tree.include?("\"formatted_command_string\":\"SELECT 1 FROM x WHERE a &lt; &#39;b&#39;\"")
+raise "cached: #{tree}" unless tree.include?("\"cached\":true,") && tree.include?("\"cached\":null,")
+
 # production: the cookie gates profiling, and the controller authorizes
 Rack::MiniProfiler.config.apply_railtie(Rails::Env.new("production"))
 res = mp_page(mp_request("GET", "/", "", ""), true)

@@ -709,7 +709,14 @@ module SidekiqScheduler
       SidekiqWorker.write_dead(job)
       return nil
     end
-    SidekiqRedis.push_on(conn, queue, SidekiqEnvelope.with_enqueued_at(job, SidekiqWorker.now_ms))
+    # The pop already took the job out of the set: if the push fails, the
+    # log keeps its text, and `run` still sees the error as an outage.
+    begin
+      SidekiqRedis.push_on(conn, queue, SidekiqEnvelope.with_enqueued_at(job, SidekiqWorker.now_ms))
+    rescue StandardError => e
+      SidekiqWorker.log("WARN", "Scheduler: failed to push a job from " + set + " to " + queue + ": " + e.message + ": " + job)
+      raise e
+    end
     nil
   end
 

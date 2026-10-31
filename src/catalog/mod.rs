@@ -752,12 +752,21 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::NotApplicable,
         return_kind: Some(ReturnKind::Int),
     },
+    // The Ruby-family runtime's single-row inserts answer Rails'
+    // `ActiveRecord::Result`, as `insert_all!` does.
     CatalogedMethod {
         name: "insert",
         receiver: ReceiverContext::Class,
         effect: EffectClass::DbWrite,
         chain: ChainKind::NotApplicable,
-        return_kind: None,
+        return_kind: Some(ReturnKind::ClassRef("ActiveRecord::Result")),
+    },
+    CatalogedMethod {
+        name: "insert!",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbWrite,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::ClassRef("ActiveRecord::Result")),
     },
     // The one bulk write with a return type, because it is the one
     // with a LOWERING: `scope_chain` inlines `Model.insert_all(rows)`
@@ -785,22 +794,21 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::NotApplicable,
         return_kind: Some(ReturnKind::ClassRef("ActiveRecord::Result")),
     },
-    // The runtime's `upsert_all` answers the affected-row count, not
-    // Rails' `ActiveRecord::Result` (ledgered in docs/pipeline/runtime.md
-    // beside `insert_all`'s); typed as what the emitted code returns.
+    // The runtime's `upsert_all` answers Rails' `ActiveRecord::Result`,
+    // its `affected_rows` the count.
     CatalogedMethod {
         name: "upsert",
         receiver: ReceiverContext::Class,
         effect: EffectClass::DbWrite,
         chain: ChainKind::NotApplicable,
-        return_kind: Some(ReturnKind::Int),
+        return_kind: Some(ReturnKind::ClassRef("ActiveRecord::Result")),
     },
     CatalogedMethod {
         name: "upsert_all",
         receiver: ReceiverContext::Class,
         effect: EffectClass::DbWrite,
         chain: ChainKind::NotApplicable,
-        return_kind: Some(ReturnKind::Int),
+        return_kind: Some(ReturnKind::ClassRef("ActiveRecord::Result")),
     },
     CatalogedMethod {
         name: "touch_all",
@@ -1068,6 +1076,16 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         effect: EffectClass::Pure,
         chain: ChainKind::NotApplicable,
         return_kind: Some(ReturnKind::Str),
+    },
+    // `record.slice(:id, :name)`: the named attributes, String-keyed as
+    // Rails' indifferent Hash keys them. `lower::record_slice` grounds a
+    // typed site into reader calls; the ruby family answers the rest.
+    CatalogedMethod {
+        name: "slice",
+        receiver: ReceiverContext::Instance,
+        effect: EffectClass::Pure,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::HashStrUntyped),
     },
     CatalogedMethod {
         name: "[]",
@@ -2157,7 +2175,7 @@ mod tests {
             "save", "save!", "create", "create!", "update", "update!",
             "update_all", "destroy", "destroy!", "destroy_all",
             "delete", "delete_all", "increment!", "decrement!",
-            "touch", "touch_all", "insert", "insert_all",
+            "touch", "touch_all", "insert", "insert!", "insert_all",
             "upsert", "upsert_all",
         ] {
             let found: Vec<_> = lookup_any(m)

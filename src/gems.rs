@@ -89,7 +89,15 @@ pub(crate) const GEM_REQUIRES: &[&str] = &[
     "jwt",
     // Not the gem's entry file: it loads the Railtie whenever `Rails::VERSION` is defined, which this tree's is, with no `Rails::Railtie` under it.
     "mini_profiler",
+    "rest-client",
+    "elastic_apm",
 ];
+
+/// Requires in `GEM_REQUIRES` a tree loads only when `app/` names the
+/// constant: (require, constant). Loading rest-client pulls in
+/// http-cookie, whose circular require warns under `-w` in every app
+/// that has the gem installed, used or not.
+pub(crate) const DEMAND_REQUIRES: &[(&str, &str)] = &[("rest-client", "RestClient"), ("elastic_apm", "ElasticAPM")];
 
 /// Whether the compiler's own tables have a Ruby-family tree declare or
 /// require `gem`: the runtime gems the emitted Gemfile declares on demand
@@ -106,7 +114,7 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
     // (constant an emitted body names, gem that defines it). Only gems
     // whose absence is a RUNTIME error belong here — the list is the
     // façade's, not a survey of what an app might like.
-    const RUNTIME_GEMS: [(Marker, &str); 23] = [
+    const RUNTIME_GEMS: [(Marker, &str); 25] = [
         (Marker::Constant("BCrypt"), "bcrypt"),
         (Marker::Constant("HTMLEntities"), "htmlentities"),
         (Marker::Constant("ROTP"), "rotp"),
@@ -220,7 +228,7 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
             Marker::AnyText(&["Faraday::Retry", "request :retry", "request(:retry"]),
             "faraday-retry",
         ),
-        // Retryable and JWT, as Faraday: the real gems on this lane,
+        // Retryable, JWT and ElasticAPM, as Faraday: the real gems on this lane,
         // refused on the strict targets (`lower::ruby_family_gems`).
         (Marker::Constant("Retryable"), "retryable"),
         (Marker::Constant("JWT"), "jwt"),
@@ -228,6 +236,9 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
         // moderator: the real gem on this lane, its package
         // (`GEM_PACKAGES`) on spinel.
         (Marker::Constant("Rack::MiniProfiler"), "rack-mini-profiler"),
+        // RestClient, the same way.
+        (Marker::Constant("RestClient"), "rest-client"),
+        (Marker::Constant("ElasticAPM"), "elastic-apm"),
     ];
     &RUNTIME_GEMS
 }
@@ -671,12 +682,14 @@ const FATES: &[(&str, GemFate)] = &[
     ("uri", GemFate::Stdlib),
     ("yaml", GemFate::Stdlib),
     // ── Modeled (each row names where) ───────────────────────────
+    ("acts_as_tenant", GemFate::Modeled), // ingest/acts_as_tenant: acts_as_tenant -> belongs_to + dynamic default_scope + create stamp; validates_uniqueness_to_tenant; ActsAsTenant as CurrentAttributes (current_tenant, with_tenant, without_tenant); set_current_tenant_through_filter (not has_global_records/through/polymorphic/require_tenant/subdomain/immutability)
     ("acts_as_votable", GemFate::Modeled), // ingest/acts_as_votable: ActsAsVotable::Vote on `votes`; acts_as_votable/acts_as_voter macros -> votes_for/votes + vote_by/liked_by/unvote_by/update_cached_votes (not vote_up_for/get_voted/association extensions)
     ("addressable", GemFate::Modeled), // catalog/gems: Addressable::URI
     ("bcrypt", GemFate::Modeled),      // catalog/gems: BCrypt::*; has_secure_password
     ("commonmarker", GemFate::Modeled), // catalog/gems: Commonmarker, Commonmarker::Node
     ("devise", GemFate::Modeled), // helpers; devise_for = static 4 mappings (not model-module-driven); no Warden route guards
-    ("discard", GemFate::Modeled),     // ingest/discard: include Discard::Model -> scopes + predicates + discard/undiscard (not discard_all/undiscard_all); Relation#unscope(where:)
+    ("discard", GemFate::Modeled),
+    ("elastic-apm", GemFate::Modeled), // catalog/gems: ElasticAPM, SpanHelpers; the real gem on ruby and jruby, lower/ruby_family_gems refuses every other target     // ingest/discard: include Discard::Model -> scopes + predicates + discard/undiscard (not discard_all/undiscard_all); Relation#unscope(where:)
     ("faker", GemFate::Modeled),       // catalog/gems: Faker::*
     ("friendly_id", GemFate::Modeled), // lower/friendly_id + registry: friendly_id/friendly/to_param, Relation#friendly_find (slugged [+history] finder only; slug generation on save, :scoped/:finders/:simple_i18n unmodeled)
     ("geared_pagination", GemFate::Modeled), // registry/controllers: set_page_and_extract_portion_from
@@ -700,6 +713,7 @@ const FATES: &[(&str, GemFate)] = &[
     ("pushover", GemFate::Modeled),    // catalog/gems: Pushover
     ("rack-mini-profiler", GemFate::Modeled), // catalog/gems: Rack::MiniProfiler
     ("representable", GemFate::Modeled), // ingest/representable: Decorator + JSON, property/collection subset
+    ("rest-client", GemFate::Modeled), // catalog/gems: RestClient; the real gem on ruby and jruby, lower/ruby_family_gems refuses every other target
     ("retryable", GemFate::Modeled),   // catalog/gems: Retryable; the real gem on ruby and jruby, lower/ruby_family_gems refuses every other target
     ("rotp", GemFate::Modeled),        // catalog/gems: ROTP::*
     ("rqrcode", GemFate::Modeled),     // catalog/gems: RQRCode::QRCode
@@ -908,6 +922,7 @@ pub fn namespace_of(gem: &str) -> String {
         ("caxlsx", "Axlsx"),
         ("combine_pdf", "CombinePDF"),
         ("duckdb", "DuckDB"),
+        ("elastic-apm", "ElasticAPM"),
         ("fast_excel", "FastExcel"),
         ("graphql", "GraphQL"),
         ("htmlentities", "HTMLEntities"),

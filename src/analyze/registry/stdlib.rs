@@ -240,8 +240,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("rand", Ty::Untyped), ("bytes", Ty::Str), ("seed", Ty::Int),
     ]);
     // `OpenSSL::Random.random_bytes(n)` — lobsters' `Utils.random_str`.
-    // The openssl library's own on the ruby family; on spinel the
-    // façade alias in `runtime/spinel/facades/sponge.rb`.
+    // The openssl library's own on the ruby family, spinel's
+    // `packages/openssl` on spinel.
     register_stdlib_class(classes, "OpenSSL::Random", &[("random_bytes", Ty::Str)], &[]);
     // `Turbo::StreamsChannel` — turbo-rails' CLASS-side broadcast API,
     // the one an app reaches for when the payload is not a record's
@@ -262,14 +262,16 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // and a narrowing for the rarer `fetch(key, 3000)` / block forms —
     // the same trade the neighbours above make.
     let str_or_nil = || Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
-    register_stdlib_class(classes, "ENV", &[
+    let environment_methods = &[
         ("fetch", Ty::Str), ("[]", str_or_nil()), ("[]=", Ty::Str),
         ("key?", Ty::Bool), ("has_key?", Ty::Bool), ("include?", Ty::Bool),
         ("member?", Ty::Bool), ("key", str_or_nil()), ("delete", str_or_nil()),
         ("keys", str_arr()), ("values", str_arr()),
         ("to_h", Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) }),
         ("replace", Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) }),
-    ], &[]);
+    ];
+    register_stdlib_class(classes, "ENV", environment_methods, &[]);
+    register_stdlib_class(classes, "_RoundhouseEnvironment", &[], environment_methods);
     // `Pathname` — `Rails.root.join(...)` territory. The path-returning
     // methods answer a Pathname so a chain stays typed to its `to_s`.
     let pathname = || Ty::Class { id: ClassId(Symbol::from("Pathname")), args: vec![].into() };
@@ -1443,6 +1445,15 @@ pub(crate) const BUILTIN_BLOCK_VALUE_METHODS: &[(&str, &str)] = &[
     ("ActiveSupport::Cache::NullStore", "fetch"),
     ("ActiveSupport::Notifications", "subscribed"),
     ("ActiveJob::Continuable", "step"),
+    // rest-client: a verb given a block hands it the response and answers
+    // the block's value (a 4xx/5xx does not raise then).
+    ("RestClient", "get"),
+    ("RestClient", "post"),
+    ("RestClient", "put"),
+    ("RestClient", "patch"),
+    ("RestClient", "delete"),
+    ("RestClient", "head"),
+    ("RestClient", "options"),
 ];
 
 fn register_stdlib_class(

@@ -728,6 +728,7 @@ mod tests {
                 foreign_keys: vec![],
                 virtual_module: None,
                 known_keyless: false,
+                primary_key_columns: Vec::new(),
             },
         );
         let schema = Schema { tables };

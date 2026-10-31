@@ -104,3 +104,59 @@ fn jbuilder_merge_bang_of_an_array_is_refused() {
         "an Array merge! must be refused, not iterated as a Hash:\n{view}"
     );
 }
+
+/// A literal `merge!` stays sound beside an extract whose attribute list
+/// is dynamic (`json.call(obj, params[:extra])`): that statement is
+/// refused, a raise before it writes any key, so it sets no key the
+/// merge could collide with. Rails 8.1 + jbuilder 2.15 answers
+/// `{"label":"WIDGET","id":1,"price":5,"short":"WI"}` without `extra`.
+#[test]
+fn jbuilder_literal_merge_beside_a_refused_dynamic_extract_lowers() {
+    emit_and_run::empty_app()
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"widgets\" do |t|\n    t.string \"name\"\n    t.integer \"price\"\n  end\nend\n",
+        )
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n",
+        )
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::API\nend\n")
+        .write(
+            "app/controllers/widgets_controller.rb",
+            "class WidgetsController < ApplicationController\n  def show\n    @widget = Widget.find(params[:id])\n  end\nend\n",
+        )
+        .write(
+            "app/views/widgets/show.json.jbuilder",
+            r#"json.merge!({ label: label = @widget.name.upcase })
+json.call(@widget, :id, :price)
+json.call(@widget, params[:extra]) if params[:extra].present?
+json.short(label[0, 2])
+"#,
+        )
+        .write("config/routes.rb", "Rails.application.routes.draw do\n  resources :widgets, only: %i[show]\nend\n")
+        .run_ruby(
+            r##"
+def probe(path, query = "")
+  status, _headers, body = Main.run_rack("REQUEST_METHOD" => "GET", "PATH_INFO" => path, "QUERY_STRING" => query, "rack.input" => StringIO.new(""))
+  text = +""
+  body.each { |part| text << part }
+  [status, text]
+end
+w = Widget.create!(name: "widget", price: 5)
+got = probe("/widgets/#{w.id}.json")
+raise "show #{got.inspect}" unless got == [200, %({"label":"WIDGET","id":#{w.id},"price":5,"short":"WI"})]
+# The dynamic extract itself stays refused when it runs.
+refused = begin
+  probe("/widgets/#{w.id}.json", "extra=name")
+  nil
+rescue RuntimeError => e
+  e.message
+end
+raise "extra #{refused.inspect}" unless refused.to_s.include?("extract! with dynamic attributes")
+puts "ALL OK"
+"##,
+        )
+        .assert_passes();
+}

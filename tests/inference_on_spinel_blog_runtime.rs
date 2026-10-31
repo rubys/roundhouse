@@ -520,7 +520,30 @@ fn untyped_subexpressions_baseline() {
     // the same collector measures 1109 total on main and 1114 here.
     // Only Base#assign_attributes adds sites (+5). Both totals include
     // the same 3 sanitize_sql_like sites, excluded here (1126 -> 1111).
-    const CEILING: usize = 1111;
+    // MEASURED 1173 on 2026-10-30 against main dfd6a874 (1111): the bulk
+    // writes' rows are attribute Hashes whose values are whatever the app
+    // passes, and their parameters are vars on this RBS-less probe. Every
+    // added site is in a method the bulk writes add or change: upsert_all
+    // (+10), upsert (+1), _returned_rows (15), _insert_rows (11), insert,
+    // insert_all, insert!, insert_all! (14), _string_keyed_rows (4),
+    // _bulk_stamps (2), _database_now_sql and _same_value_sql (1 each),
+    // Arel::Nodes.quote_scalar's boolean escape (2) and
+    // Relation#bound_text (1). The RBS-paired gate types them.
+    // MEASURED 1192 on 2026-10-30 against main 3dfccb68 (1173): Relation's
+    // `and`/`and!` read the other relation's conditions and none (+10),
+    // `unscope_parts`/`unscope_part!` read the part names (+8), and `lock`
+    // reads its clause (+1). Their parameters are vars on this RBS-less
+    // probe; relation.rbs and connection.rbs type them for the RBS-paired gate.
+    // MEASURED 1209 on 2026-10-30 (on 1192): `and` refuses structurally
+    // different relations, as Rails does, and keeps the other's HAVINGs.
+    // `structurally_incompatible_with` reads the other relation's parts
+    // (+10), `and!` its HAVINGs and the check (+6), and `structural_values`
+    // its own list (+1). relation.rbs types them for the RBS-paired gate.
+    // MEASURED 1210 on 2026-10-31 (on 1209): the ruby-family Base#slice
+    // parses a temporal column's stored text into the Time its reader
+    // answers, reading the untyped `[]` value a second time (+1 in
+    // active_record/connection.rb), as `_as_json_only` does.
+    const CEILING: usize = 1210;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

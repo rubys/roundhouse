@@ -221,11 +221,30 @@ fn every_recognizer_that_reads_an_initializer_keeps_its_statement_out_of_the_led
             "config/initializers/content.rb",
             "ActionText::ContentHelper.allowed_tags = ActionText::ContentHelper.allowed_tags | %w[mark]\n",
         ),
+        ("config/initializers/view_paths.rb", "ActionController::Base.prepend_view_path \"app/views/themes/next\"\n"),
+        (
+            "config/initializers/mail_views.rb",
+            "ActiveSupport.on_load(:action_mailer) do\n  append_view_path \"app/views/mail\"\nend\n",
+        ),
     ];
     for (path, source) in consumed {
         let (_, ledger) = ingest(&[(path, source)]);
         assert!(ledger.is_empty(), "{path}: ledger listed {:?}", statements(&ledger));
     }
+}
+
+#[test]
+fn a_view_path_the_build_cannot_read_is_an_error_not_a_ledger_line() {
+    let files = tree(&[
+        ("db/schema.rb", SCHEMA),
+        ("config/initializers/view_paths.rb", "ActionController::Base.prepend_view_path(ThemeResolver.new)\n"),
+    ]);
+    let (app, diags) = prism::scope(|| ingest_app_from_tree(files));
+    app.expect("ingest");
+    assert!(!diags.iter().any(|d| matches!(d.kind, DiagnosticKind::UnconsumedInitializer { .. })), "{diags:#?}");
+    let errors: Vec<&Diagnostic> = diags.iter().filter(|d| d.severity == Severity::Error).collect();
+    assert_eq!(errors.len(), 1, "{diags:#?}");
+    assert!(errors[0].message.contains("a view path that is not a string literal"), "{:?}", errors[0].message);
 }
 
 #[test]

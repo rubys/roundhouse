@@ -499,9 +499,12 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
 
     // Property/type registries for body emit. Renamed (private) ivars are
     // excluded — a self-send of that name resolves to the method, not a prop.
+    // The temporal computed getters are props too (`CreatedAt`, not
+    // `CreatedAt()`).
     let instance_props: HashSet<String> = prop_types
         .keys()
         .chain(body_ivars.keys())
+        .chain(temporal_cols.iter())
         .chain(inherited_props.iter())
         .filter(|n| !ivar_renames.contains_key(*n))
         .cloned()

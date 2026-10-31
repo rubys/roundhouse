@@ -439,8 +439,8 @@ pub(super) fn push_schema_methods(
     // with those columns, in any order, and a partial one adds its
     // `WHERE`, without which SQLite matches no partial index. Emitted
     // only when some target has a predicate; the runtime's default
-    // answers "" for everyone else. The predicate is the one the SQLite
-    // DDL renders.
+    // answers "" for everyone else. The predicate is the one the DDL of
+    // the emit's dialect renders (`Dialect::current`).
     let mut unique: Vec<&crate::schema::Index> = table.indexes.iter().filter(|i| i.unique).collect();
     unique.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
     let mut targets: Vec<(String, Option<String>)> = Vec::new();
@@ -451,7 +451,7 @@ pub(super) fn push_schema_methods(
         if targets.iter().any(|(c, _)| *c == cols) {
             continue;
         }
-        let predicate = crate::emit::shared::schema_sql::Dialect::Sqlite
+        let predicate = crate::emit::shared::schema_sql::Dialect::current()
             .index_predicate(table, i)
             .map(str::to_string);
         targets.push((cols, predicate));
@@ -493,6 +493,62 @@ pub(super) fn push_schema_methods(
             params: vec![Param::positional(columns.clone())],
             body,
             signature: Some(fn_sig(vec![(columns, Ty::Str)], Ty::Str)),
+            effects: EffectSet::default(),
+            enclosing_class: Some(owner.0.clone()),
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+            block_param: None,
+        });
+    }
+
+    // def self._unique_index_columns(name) — the columns, joined with
+    // ", " in key order, of the unique index `name`, else "": a
+    // `unique_by:` naming an index (`upsert_all(rows, unique_by:
+    // "index_x_on_a_and_b")`) means its columns, as in Rails'
+    // `InsertAll`. Emitted only for a table with a unique index; the
+    // runtime's default answers "" for everyone else.
+    let named: Vec<(String, String)> = {
+        let mut unique: Vec<&crate::schema::Index> = table.indexes.iter().filter(|i| i.unique).collect();
+        unique.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
+        unique
+            .into_iter()
+            .filter(|i| !i.name.as_str().is_empty())
+            .map(|i| (i.name.as_str().to_string(), i.columns.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(", ")))
+            .collect()
+    };
+    if !named.is_empty() {
+        let name = Symbol::from("name");
+        let mut body = lit_str(String::new());
+        for (index, cols) in named.into_iter().rev() {
+            let cond = with_ty(
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send {
+                        recv: Some(var_ref(name.clone())),
+                        method: Symbol::from("=="),
+                        args: vec![lit_str(index)],
+                        block: None,
+                        parenthesized: false,
+                    },
+                ),
+                Ty::Bool,
+            );
+            body = with_ty(
+                Expr::new(Span::synthetic(), ExprNode::If { cond, then_branch: lit_str(cols), else_branch: body }),
+                Ty::Str,
+            );
+        }
+        methods.push(MethodDef {
+            unsupported_formals: None,
+            has_anonymous_block: false,
+            name_span: crate::span::Span::synthetic(),
+            name: Symbol::from("_unique_index_columns"),
+            receiver: MethodReceiver::Class,
+            visibility: crate::dialect::MethodVisibility::Public,
+            params: vec![Param::positional(name.clone())],
+            body,
+            signature: Some(fn_sig(vec![(name, Ty::Str)], Ty::Str)),
             effects: EffectSet::default(),
             enclosing_class: Some(owner.0.clone()),
             kind: AccessorKind::Method,
@@ -711,6 +767,10 @@ pub fn shakeable_synthesized_names(table: &Table, model: &Model) -> Vec<Symbol> 
             names.push(prev_was_name(col));
             names.extend(pending_change_methods(col).into_iter().map(|(n, _, _)| n));
         }
+    }
+    // Read only by the runtime's bulk writes (`_conflict_target`).
+    if table.indexes.iter().any(|i| i.unique) {
+        names.push(Symbol::from("_unique_index_columns"));
     }
     // Mirrors `synth_update_typed(.., bang: true)`.
     names.push(Symbol::from("update!"));

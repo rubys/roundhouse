@@ -846,5 +846,8 @@ fn a_def_in_a_constants_defining_block_is_not_a_dynamic_declaration() {
     let error = ingest_app_from_tree(tree(&[schema, model, ("app/models/fragment_cache.rb", hidden)]))
         .unwrap_err()
         .to_string();
-    assert!(error.contains("conditional or dynamic visibility"), "{error}");
+    assert!(
+        error.contains("visibility change for `store`, which a load-time conditional defines in only some branches"),
+        "{error}"
+    );
 }

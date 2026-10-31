@@ -407,11 +407,16 @@ module Rails
       nil
     end
 
-    def read(key)
+    # `opts` is Rails' entry-options Hash (`expires_in:`, `raw:`,
+    # `namespace:` ...) on every entry call, as on `fetch`. This store
+    # keeps nothing, so there is nothing to read them against; taking
+    # them is what keeps `write(k, v, expires_in: 30.minutes)` from
+    # raising on arity.
+    def read(key, opts = {})
       nil
     end
 
-    def write(key, value)
+    def write(key, value, opts = {})
       value
     end
 
@@ -419,11 +424,11 @@ module Rails
     # `user:<id>:unread_replies` on write paths, and a stale fragment
     # surviving its explicit delete would be a behaviour change, not a
     # missing optimization.
-    def delete(key)
+    def delete(key, opts = {})
       forget(key.to_s)
     end
 
-    def exist?(key)
+    def exist?(key, opts = {})
       false
     end
   end

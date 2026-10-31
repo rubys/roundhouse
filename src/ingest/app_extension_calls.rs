@@ -98,8 +98,21 @@ pub(super) fn mark(app: &mut App) {
     for model in &mut app.models {
         let owner = model.name.0.as_str().to_string();
         let mut extended: Vec<usize> = Vec::new();
+        // The model's own class methods, a Concern's spliced ones among them.
+        let own: HashSet<String> =
+            model.methods().filter(|m| m.receiver == MethodReceiver::Class).map(|m| m.name.as_str().to_string()).collect();
         for item in &mut model.body {
             let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+            // A call of its own class method (`custom_strategy :title, with: …`)
+            // runs as the class loads, as a library class's does.
+            if let ExprNode::Send { recv, method, block: None, .. } = &*expr.node
+                && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
+                && own.contains(method.as_str())
+                && !expr.span.is_synthetic()
+            {
+                expr.decisions |= crate::expr::REPLAYED_CLASS_BODY;
+                continue;
+            }
             let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
             if method.as_str() == "extend" {
                 let found: Option<Vec<usize>> = args

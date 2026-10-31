@@ -62,11 +62,18 @@ serve as specs for behavior the fork's compiler has and this one does not
 yet. A test the compiler does not pass is ignored with the group of
 behavior it waits on, `#[ignore = "fork spec: <group>"]` (load order,
 autoload, conditional declarations, class-body loops and hooks, gem
-closures, rails_dependent_by_name). Run a group's tests with `--ignored`
+closures, rails_dependent_by_name, postgresql). Run a group's tests with `--ignored`
 to see what remains; a change that makes one pass removes its `ignore`.
 Where a spec also asserts the fork's emitted layout (a file path, a
 generated line), the change that makes it pass rewrites that assertion
 for this tree's layout and keeps its comparison with native Ruby.
+
+The PostgreSQL specs compare the emitted program with native Rails on the
+same server (tests/support/pg_probe.rs). They need ROUNDHOUSE_PG_TEST_URL
+and the pg gem, and skip without them unless ROUNDHOUSE_PG_TEST_REQUIRED
+is set. Two of their groups are not yet compiler work: `postgresql native
+control`, whose native side fails on the Rails release the oracle loads,
+and `postgresql layout`, which still asserts the fork's emitted files.
 
 ## Complete local verification
 

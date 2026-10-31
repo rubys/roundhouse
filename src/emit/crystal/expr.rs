@@ -372,7 +372,9 @@ fn emit_node(n: &ExprNode) -> String {
             emit_bool_op(*op, *surface, left, right)
         }
         ExprNode::Let { name, value, body, .. } => {
-            format!("{name} = {}\n{}", emit_expr(value), emit_expr(body))
+            // Parenthesized, so the binding and its body are one value
+            // inside an array, a call's arguments or a Hash.
+            format!("({name} = {}\n{})", emit_expr(value), emit_expr(body))
         }
         ExprNode::Lambda { params, block_param, body, .. } => {
             // Crystal procs require typed params. The lowered IR

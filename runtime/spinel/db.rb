@@ -1614,7 +1614,13 @@ module Db
     rescue Exception => e
       request_error = e
     ensure
+      # Not left for the next statement to close: that may be the next request's, which would record this one's query.
       cleanup_error = nil
+      begin
+        ActiveSupport::Notifications.sql_close if sql_events?
+      rescue StandardError => e
+        cleanup_error = e
+      end
       # `Db.close` inside the lease drops `@pools` and closes `conn`.
       # Snapshot and rollback cleanup talk to SQLite, so skip them when
       # this pool is no longer the live one. The lease index still goes
@@ -1921,6 +1927,7 @@ module Db
     # A value, not `nil`: spinel compiles a method ending in a bare nil
     # as void, and `Db.with_connection { Db.exec(...) }` assigns the
     # block's value (`result = yield`), which cannot hold a void.
+    ActiveSupport::Notifications.sql_close if sql_events?
     true
   end
 
@@ -1976,6 +1983,7 @@ module Db
     record_query(sql)
     conn = current_conn
     e = write(conn, sql, true)
+    ActiveSupport::Notifications.sql_close if sql_events?
     raise "Db.exec_returning: no result for " + sql if e.nil?
     conn.qc_adopt(e)
   end
@@ -2121,11 +2129,13 @@ module Db
       if @sql_trace
         $stderr.puts "  CACHE " + sql
       end
+      ActiveSupport::Notifications.sql_cached(sql) if sql_events?
       return handle
     end
     record_query(sql)
     begin_snapshot(conn)
     ptr = conn.prepare_cached(sql)
+    ActiveSupport::Notifications.sql_prepared if sql_events?
     conn.qc_record(sql, ptr)
     ptr
   end
@@ -2145,11 +2155,13 @@ module Db
       if @sql_trace
         $stderr.puts "  CACHE " + key
       end
+      ActiveSupport::Notifications.sql_cached(sql) if sql_events?
       return handle
     end
     record_query(sql)
     begin_snapshot(conn)
     ptr = conn.prepare_cached(sql)
+    ActiveSupport::Notifications.sql_prepared if sql_events?
     i = 2
     while i < binds.length
       if binds[i] == "i"
@@ -2176,11 +2188,13 @@ module Db
     handle = conn.qc_lookup(sql, false)
     if handle != 0
       $stderr.puts "  CACHE " + sql if @sql_trace
+      ActiveSupport::Notifications.sql_cached(sql) if sql_events?
       return handle
     end
     record_query(sql)
     begin_snapshot(conn)
     ptr = conn.prepare_uncached(sql)
+    ActiveSupport::Notifications.sql_prepared if sql_events?
     conn.qc_record(sql, ptr)
     ptr
   end
@@ -2205,9 +2219,7 @@ module Db
   # No-op (single nil check) when no capture is installed.
   def self.record_query(sql)
     @query_log.push(sql) unless @query_log.nil?
-    if defined?(ActiveSupport::Notifications) && ActiveSupport::Notifications.respond_to?(:sql)
-      ActiveSupport::Notifications.sql(sql)
-    end
+    ActiveSupport::Notifications.sql_open(sql) if sql_events?
     if @sql_trace
       $stderr.puts "  SQL " + sql
     end
@@ -2217,12 +2229,25 @@ module Db
     @sql_trace
   end
 
+  # Not `sql` at record time as the other shims publish: this one times the statement, prepare and steps, and publishes when it is done.
+  def self.sql_events?
+    defined?(ActiveSupport::Notifications) && ActiveSupport::Notifications.respond_to?(:sql_open) &&
+      ActiveSupport::Notifications.sql_listening?
+  end
+
   def self.step?(stmt)
     if stmt.is_a?(Integer)
       return current_conn.qc_step?(stmt)
     end
     conn = current_conn
+    unless sql_events?
+      has_row = conn.step_checked(stmt)
+      conn.qc_record_step(stmt, has_row)
+      return has_row
+    end
+    started = ActiveSupport::Notifications.sql_step_begin
     has_row = conn.step_checked(stmt)
+    ActiveSupport::Notifications.sql_step_end(started, !has_row)
     conn.qc_record_step(stmt, has_row)
     has_row
   end
@@ -2425,6 +2450,7 @@ module Db
       conn.qc_finalize(stmt)
       return nil
     end
+    ActiveSupport::Notifications.sql_close if sql_events?
     conn.qc_install(stmt)
     conn.release(stmt)
     nil

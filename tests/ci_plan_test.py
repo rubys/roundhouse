@@ -651,12 +651,10 @@ class Routing(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertNotIn("param_binds", ci.select([path])["spinel_tests"])
 
-    def test_sponge_random_selects_native_regression_for_its_inputs_and_full_runs(self):
-        suite = "sponge_random"
+    def test_openssl_random_selects_native_regression_for_its_inputs_and_full_runs(self):
+        suite = "openssl_random"
         for path in [
-            "tests/sponge_random.rs",
-            "runtime/spinel/facades/sponge.rb",
-            "runtime/spinel/facades/sponge.rbs",
+            "tests/openssl_random.rs",
             "runtime/spinel/secure_random_stub.rb",
             "runtime/spinel/secure_random_stub.rbs",
         ]:
@@ -689,6 +687,21 @@ class Routing(unittest.TestCase):
 
         shared = ci.select(["src/emit/shared/schema_sql.rs"])
         self.assertEqual(shared["spinel_tests"], ci.SPINEL_TESTS)
+        self.assertIn(suite, ci.select([], full=True)["spinel_tests"])
+
+    def test_app_reopens_runtime_class_owns_its_pass_and_runtime_inputs(self):
+        suite = "app_reopens_runtime_class"
+        paths = [
+            "tests/app_reopens_runtime_class.rs",
+            "src/emit/ruby/reopen.rs",
+            "runtime/ruby/active_storage.rb",
+            "runtime/ruby/active_storage.rbs",
+        ]
+        for path in paths:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn(suite, plan["spinel_tests"])
+                self.assertIn("spinel-framework", plan["jobs"])
         self.assertIn(suite, ci.select([], full=True)["spinel_tests"])
 
     def test_array_column_storage_spinel_owns_its_pass_and_runtime_inputs(self):

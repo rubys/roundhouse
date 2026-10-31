@@ -173,9 +173,11 @@ module SqliteAdapter
     if v.is_a?(Integer)
       Db.escape_int(v)
     elsif v == true
-      "1"
+      # The database's own literal: SQLite's 1, PostgreSQL's TRUE (which
+      # compares with no integer).
+      Db.escape_bool_opt(true)
     elsif v == false
-      "0"
+      Db.escape_bool_opt(false)
     elsif v.nil?
       "NULL"
     elsif v.is_a?(Time)

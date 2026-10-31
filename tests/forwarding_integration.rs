@@ -168,7 +168,7 @@ fn native_keyword_value_is_rewritten_inside_emitted_controller() {
 }
 
 #[test]
-fn inherited_constructor_and_reopened_descendant_mixin_refuse_unsafe_contracts() {
+fn inherited_constructor_and_reopened_descendant_mixin_keep_native_contracts() {
     for (source, reopen, script) in [
         (
             "class Parent; def self.build(...); new(...); end; def initialize(factor:); @factor=factor; end; def factor; @factor; end; end; class Child < Parent; def initialize(factor:2); @factor=factor; end; end",
@@ -195,18 +195,16 @@ fn inherited_constructor_and_reopened_descendant_mixin_refuse_unsafe_contracts()
             .write("app/lib/probe.rb", source)
             .write("app/lib/probe_reopen.rb", reopen)
             .run_ruby(script);
-        if reopen.is_empty() {
-            // One fragment: the subclass's optional keywords are restored
-            // and `new(...)` binds them.
-            run.assert_passes();
-            assert_eq!(run.stdout, "3\n");
-        } else {
+        run.assert_passes();
+        assert_eq!(run.stdout, "3\n");
+        if !reopen.is_empty() {
+            let (_, errors) = emit_and_run::real_blog()
+                .write("app/lib/probe.rb", source)
+                .write("app/lib/probe_reopen.rb", reopen)
+                .emit_target_neutral(roundhouse::project::BuildTarget::Ruby);
             assert!(
-                run.errors.iter().any(|e| e.contains("forwarding")),
-                "errors={:?}; actual={}; stderr={}",
-                run.errors,
-                run.stdout,
-                run.stderr
+                errors.iter().any(|e| e.contains("forwarding")),
+                "{errors:?}"
             );
         }
     }

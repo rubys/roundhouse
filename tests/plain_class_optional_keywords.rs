@@ -11,6 +11,9 @@
 //! methods all fell through, and Ruby bound the whole keyword Hash to
 //! the first flattened slot with no diagnostic.
 //!
+//! Flattened-source and refusal assertions exercise target-neutral lowering.
+//! Ruby-family target-aware emission preserves the native keyword contract.
+//!
 //! Native Ruby on the same source is the oracle. A call whose keywords
 //! cannot be moved into slot order (a `**` splat, a key that is not a
 //! literal symbol, a skipped slot whose default reads the callee's
@@ -129,7 +132,7 @@ end
     assert_eq!(native(&[("builder.rb", SOURCE)], "p Kwlab::Builder.report\n"), expected);
     let (emitted, errors) = emit_and_run::real_blog()
         .write("app/lib/kwlab/builder.rb", SOURCE)
-        .emit(BuildTarget::Ruby);
+        .emit_target_neutral(BuildTarget::Ruby);
     assert!(errors.is_empty(), "{}", errors.join("\n"));
     let source = std::fs::read_to_string(emitted.join("app/models/kwlab/builder.rb")).unwrap();
     assert!(
@@ -178,7 +181,7 @@ end
     );
     let (_emitted, errors) = emit_and_run::real_blog()
         .write("app/lib/kwlab/builder.rb", &source)
-        .emit(BuildTarget::Ruby);
+        .emit_target_neutral(BuildTarget::Ruby);
     errors
 }
 
@@ -236,7 +239,7 @@ end
             "module Kwlab\n  class Builder\n    def field(name, type = nil, null: true, description: nil)\n      [name, type, null, description]\n    end\n  end\nend\n",
         )
         .write("app/lib/kwlab/caller.rb", CALLER)
-        .emit(BuildTarget::Ruby);
+        .emit_target_neutral(BuildTarget::Ruby);
     assert!(
         errors.iter().any(|e| e.contains("flattened keyword arguments not supported")),
         "not refused; errors: {errors:#?}"
@@ -271,7 +274,7 @@ end
     let (_emitted, errors) = emit_and_run::real_blog()
         .write("app/lib/kwlab/builder.rb", BASE)
         .write("app/lib/kwlab/gadget.rb", SUB)
-        .emit(BuildTarget::Ruby);
+        .emit_target_neutral(BuildTarget::Ruby);
     assert!(
         errors.iter().any(|e| e.contains("a subclass or includer redefines this method")),
         "not refused; errors: {errors:#?}"
@@ -308,7 +311,7 @@ end
     let (_emitted, errors) = emit_and_run::real_blog()
         .write("app/lib/kwlab/fields.rb", FIELDS)
         .write("app/lib/kwlab/gadget.rb", GADGET)
-        .emit(BuildTarget::Ruby);
+        .emit_target_neutral(BuildTarget::Ruby);
     assert!(
         errors.iter().any(|e| e.contains("a subclass or includer redefines this method")),
         "not refused; errors: {errors:#?}"
@@ -350,7 +353,7 @@ end
         .write("app/lib/kwlab/patch.rb", PATCH)
         .write("app/lib/kwlab/inner.rb", INNER)
         .write("app/lib/kwlab/gadget.rb", GADGET)
-        .emit(BuildTarget::Ruby);
+        .emit_target_neutral(BuildTarget::Ruby);
     assert!(
         errors.iter().any(|e| e.contains("a subclass or includer redefines this method")),
         "not refused; errors: {errors:#?}"
@@ -431,7 +434,7 @@ end
         .write("app/lib/kwlab/loud.rb", X)
         .write("app/lib/kwlab/plain.rb", A)
         .write("app/lib/kwlab/gadget.rb", B)
-        .emit(BuildTarget::Ruby);
+        .emit_target_neutral(BuildTarget::Ruby);
     assert!(errors.iter().any(|e| e.contains("flattened keyword arguments")), "not refused; errors: {errors:#?}");
 }
 
@@ -466,7 +469,7 @@ end
     let (_emitted, errors) = emit_and_run::real_blog()
         .write("app/lib/kwlab/loud.rb", LOUD)
         .write("app/lib/kwlab/gadget.rb", GADGET)
-        .emit(BuildTarget::Ruby);
+        .emit_target_neutral(BuildTarget::Ruby);
     assert!(errors.iter().any(|e| e.contains("flattened keyword arguments")), "not refused; errors: {errors:#?}");
 }
 
@@ -536,6 +539,6 @@ end
         .write("app/lib/kwlab/loud.rb", LOUD)
         .write("app/lib/kwlab/plain.rb", PREPENDING_BASE)
         .write("app/lib/kwlab/gadget.rb", CHILD)
-        .emit(BuildTarget::Ruby);
+        .emit_target_neutral(BuildTarget::Ruby);
     assert!(errors.iter().any(|e| e.contains("flattened keyword arguments")), "not refused; errors: {errors:#?}");
 }

@@ -7,8 +7,10 @@
 //! Most of the compiler's ambient state is thread-local (the ingest's source
 //! registry, diagnostics, the plan caches, the app's inflections), and a
 //! worker starts with none of it, so work handed to a worker must not read
-//! or write any: pass what it needs in through the closure.
+//! or write any implicitly: pass inputs through the closure, or install
+//! explicitly captured context with [`map_init`].
 
+/// `ROUNDHOUSE_WORKERS` caps native workers; `1` selects sequential execution.
 /// How many worker threads [`map`] would spawn for `n` items. `1` means the
 /// calling thread alone (wasm, a single available core, or fewer than two
 /// items): callers that retain per-item results can stay on a single accumulator
@@ -24,7 +26,12 @@ pub fn workers_for(n: usize) -> usize {
         if n <= 1 {
             return 1;
         }
-        std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get).min(32).min(n)
+        let available = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        let requested = std::env::var("ROUNDHOUSE_WORKERS").ok()
+            .map(|s| s.parse::<usize>().expect("ROUNDHOUSE_WORKERS must be a positive integer"))
+            .unwrap_or(available);
+        assert!(requested > 0, "ROUNDHOUSE_WORKERS must be positive");
+        requested.min(available).min(32).min(n)
     }
 }
 
@@ -32,13 +39,22 @@ pub fn workers_for(n: usize) -> usize {
 /// items from a shared counter on threads with the compiler's stack
 /// budget (the closure may walk expression trees).
 pub fn map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    map_init(items, || (), |_, item| f(item))
+}
+
+/// Like [`map`], with state initialized and dropped on each worker, including
+/// the calling thread when serial. `init` can install explicitly supplied
+/// app context; state need not be `Send`.
+pub fn map_init<T: Sync, R: Send, S>(
+    items: &[T], init: impl Fn() -> S + Sync, f: impl Fn(&mut S, &T) -> R + Sync,
+) -> Vec<R> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let workers = workers_for(items.len());
         if workers > 1 {
             let next = AtomicUsize::new(0);
-            let (next, f) = (&next, &f);
+            let (next, f, init) = (&next, &f, &init);
             let done: Vec<Vec<(usize, R)>> = std::thread::scope(|scope| {
                 let handles: Vec<_> = (0..workers)
                     .map(|_| {
@@ -46,11 +62,12 @@ pub fn map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> 
                             .name("roundhouse-par".into())
                             .stack_size(crate::stack::COMPILER_STACK_BYTES)
                             .spawn_scoped(scope, move || {
+                                let mut state = init();
                                 let mut mine = Vec::new();
                                 loop {
                                     let index = next.fetch_add(1, Ordering::Relaxed);
                                     let Some(item) = items.get(index) else { break };
-                                    mine.push((index, f(item)));
+                                    mine.push((index, f(&mut state, item)));
                                 }
                                 mine
                             })
@@ -66,7 +83,8 @@ pub fn map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> 
             return slots.into_iter().map(|r| r.expect("every item was mapped")).collect();
         }
     }
-    items.iter().map(f).collect()
+    let mut state = init();
+    items.iter().map(|item| f(&mut state, item)).collect()
 }
 
 /// `a` and `b`, concurrently where there are threads; both results, as

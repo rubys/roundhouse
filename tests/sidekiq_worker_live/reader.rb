@@ -40,8 +40,9 @@ if boom
   check("boom: failed_at", recent.(boom.failed_at), boom.failed_at.inspect)
   check("boom: queue", boom.queue == "default", boom.queue.inspect)
   check("boom: error?", boom.error?, "")
-  # Sidekiq's first backoff: 15 s, plus up to 10 s of jitter.
-  check("boom: retry score", boom.score - now > 5 && boom.score - now < 26, (boom.score - now).inspect)
+  # Sidekiq's first backoff: 15 s, plus up to 10 s of jitter, counted
+  # from the failure, so a slow run may read it with little time left.
+  check("boom: retry score", boom.score - now > 0 && boom.score - now < 26, (boom.score - now).inspect)
 end
 if mailer
   check("unknown job class: display_class", mailer.display_class == "MailerJob", mailer.display_class.inspect)

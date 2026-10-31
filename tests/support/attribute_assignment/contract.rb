@@ -24,6 +24,8 @@ begin
   raise "unknown writer accepted"
 rescue ActiveModel::UnknownAttributeError => error
   raise "unknown attribute metadata" unless error.attribute == "missing" && error.record.equal?(saved)
+  # activemodel 8.1.4's text.
+  raise "unknown attribute message: #{error.message}" unless error.message == "unknown attribute 'missing' for AttributeRecord."
 end
 begin
   saved.assign_attributes(deny: "x")

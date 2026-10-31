@@ -1267,10 +1267,28 @@ fn build_methods(
         .filter(|f| !filter_is_spliceable(f, &privs))
         .map(|f| &f.target)
         .collect();
+    // A target that some method body also calls by name (a strong-params
+    // helper validated up front with `before_action :widget_params` and
+    // read again as `widget_params[:name]`) is still live after
+    // inlining: dropping it leaves those calls dangling (NameError).
+    // Every own method counts, routed or not, and so do its parameter
+    // defaults. A dynamic send whose name is not a literal
+    // (`send(params[:step])`) may reach any of them, so it keeps every
+    // target.
+    let mut called_by_bodies: crate::det::HashSet<Symbol> = crate::det::HashSet::default();
+    let mut sends_dynamically = false;
+    for a in publics.iter().chain(helper_publics.iter()).chain(privs.iter()) {
+        collect_self_send_names(&a.body, &mut called_by_bodies, &mut sends_dynamically);
+        for default in a.formal_params().iter().filter_map(|p| p.default.as_ref()) {
+            collect_self_send_names(default, &mut called_by_bodies, &mut sends_dynamically);
+        }
+    }
     let filter_target_names: crate::det::HashSet<&Symbol> = before_filters
         .iter()
         .map(|f| &f.target)
-        .filter(|t| !called_target_names.contains(*t))
+        .filter(|t| {
+            !sends_dynamically && !called_target_names.contains(*t) && !called_by_bodies.contains(*t)
+        })
         .collect();
     // A subclassed controller keeps its filter targets: descendants
     // inherit the before_action and their preambles call the target
@@ -1466,14 +1484,16 @@ fn build_methods(
 
     // `helper_method :name` exposes a controller method to templates.
     // The lowered views are module functions with no controller
-    // instance, so each ARG-PURE marked method (no ivar reads — the
+    // instance, so each ARG-PURE marked method (no instance state — the
     // corpus members take the record as a parameter) also gets a
     // class-side clone; the bare view call rewrites to
     // `DomainsController.caption_of_button(domain)` via
-    // helper_method_index (registered at ingest). Ivar-reading marked
-    // methods stay instance-only — their view calls remain honest
-    // residue.
-    for name in controller_helper_method_names(controller) {
+    // helper_method_index (registered at ingest). The pure methods of
+    // this controller such a helper calls are cloned with it, so the
+    // clone's bare `default_room` finds a class method. Marked methods
+    // that touch instance state stay instance-only — the view calls
+    // them on `ActionController::Current.controller`.
+    for name in class_side_clone_names(controller) {
         if let Some(m) = methods
             .iter()
             .find(|m| m.name == name && m.receiver == MethodReceiver::Instance)
@@ -1590,44 +1610,55 @@ fn synthesize_controller_string_method(
     }
 }
 
-/// Names a controller marks with `helper_method :x` whose public
-/// method body is pure over its arguments - the set the view-call
-/// rewrite and the class-side clone above serve. Shared with ingest,
-/// which registers these in `app.helper_method_index`.
+/// Names a controller marks with `helper_method :x` whose method body
+/// is pure over its arguments - the set the view-call rewrite and the
+/// class-side clone above serve. Shared with ingest, which registers
+/// these in `app.helper_method_index` from the controller as written
+/// and asks again once its concerns are spliced in, the controller the
+/// clone above is made from: a name only the first answer holds is
+/// dropped (`reconcile_controller_helper_methods`), or the view would
+/// call a clone nobody made.
 ///
-/// Pure means it reads no instance state: no ivar, and none of the
-/// request's state the controller instance carries (`session`,
-/// `cookies`, `request`, `params`, ...). In Rails a helper method runs
-/// on the controller that handles the request; a class-side clone has no
-/// request, and a clone of an `authenticated?` that reads
-/// `session[:authenticated_at]` read `session` off the class, which no
-/// target can compile.
+/// Pure means it touches no instance state - see
+/// `class_side_safe_methods`. In Rails a helper method runs on the
+/// controller that handles the request; a class-side clone has no
+/// request and lives as long as the process, so a clone of an
+/// `authenticated?` that reads `session[:authenticated_at]` read
+/// `session` off the class, which no target can compile, and a clone of
+/// `@current_account ||= Account.find_by(slug: Current.slug)` memoized
+/// on the CLASS: the first request's account answered every later
+/// request.
 pub(crate) fn controller_helper_method_names(controller: &Controller) -> Vec<Symbol> {
-    use crate::expr::Literal;
+    let safe = class_side_safe_methods(controller);
+    let mut marked = helper_method_marked_names(controller);
+    marked.retain(|name| safe.contains_key(name));
+    marked
+}
 
-    const REQUEST_STATE: &[&str] = &[
-        "session", "cookies", "request", "response", "params", "flash", "headers",
-        "reset_session", "request_forgery_protection_token", "form_authenticity_token",
-    ];
-
-    fn has_ivar(e: &Expr) -> bool {
-        if matches!(&*e.node, ExprNode::Ivar { .. }) {
-            return true;
-        }
-        if let ExprNode::Send { recv: None, method, .. } = &*e.node {
-            if REQUEST_STATE.contains(&method.as_str()) {
-                return true;
+/// The methods the class-side clones need: the pure `helper_method`
+/// names and every method of this controller they reach by a bare
+/// call. A pure `last_room_visited` that calls `default_room` is cloned
+/// together with `default_room`, or the clone would call a class method
+/// nobody defined. Each callee is pure itself - a call to an impure one
+/// made the caller impure.
+fn class_side_clone_names(controller: &Controller) -> Vec<Symbol> {
+    let safe = class_side_safe_methods(controller);
+    let mut out = controller_helper_method_names(controller);
+    let mut i = 0;
+    while i < out.len() {
+        if let Some(calls) = safe.get(&out[i]) {
+            for callee in calls {
+                if !out.contains(callee) {
+                    out.push(callee.clone());
+                }
             }
         }
-        let mut found = false;
-        e.node.for_each_child(&mut |c| {
-            if has_ivar(c) {
-                found = true;
-            }
-        });
-        found
+        i += 1;
     }
+    out
+}
 
+fn helper_method_marked_names(controller: &Controller) -> Vec<Symbol> {
     let mut marked: Vec<Symbol> = Vec::new();
     for item in &controller.body {
         let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
@@ -1643,14 +1674,127 @@ pub(crate) fn controller_helper_method_names(controller: &Controller) -> Vec<Sym
             }
         }
     }
-    marked.retain(|name| {
-        controller.actions().any(|a| {
-            a.name == *name
-                && !has_ivar(&a.body)
-                && a.opt_params.iter().all(|(_, d)| !has_ivar(d))
-        })
-    });
     marked
+}
+
+/// This controller's instance methods that may run on the class, each
+/// with the methods of this controller it calls bare. A method is safe
+/// when nothing in it needs the controller instance:
+///
+/// - no ivar read or write. `@x ||= expr`, `@x = expr` and `@x += 1`
+///   write through an `LValue::Ivar` the child walk never visits, and
+///   a clone of a memoizing helper keeps its value on the class across
+///   requests;
+/// - no `self` except as the receiver of a call, no `super` and no
+///   `method(:x)` without a receiver: on the class side `self` is the
+///   class (`self.class` answers `Class`), and the parent has no
+///   class-side counterpart to `super` into;
+/// - every bare call (or `self.x` call) names a Kernel function or a
+///   method of this controller that is safe itself. Request state
+///   (`session`, `params`, `cookies`, ...), framework instance methods
+///   (`redirect_to`, `t`, `url_for`, ...) and methods inherited from a
+///   parent controller (or a concern, until the splice copies them in)
+///   are not visible here and count as instance state: such a helper
+///   stays on the instance, where the view reaches it through
+///   `ActionController::Current.controller` as Rails runs it. A pure
+///   helper misjudged that way only takes the dynamic path; an impure
+///   one cloned onto the class leaks or raises.
+///
+/// Calls make this a fixpoint: `current_account` that calls
+/// `current_slug` that reads `params[:slug]` is impure, and so is a
+/// method that calls `current_account`. Only this controller's own
+/// methods are resolved: ingest asks first on one controller file at a
+/// time, and again, like the lowering, on the controller its concerns
+/// were spliced into.
+fn class_side_safe_methods(controller: &Controller) -> crate::det::HashMap<Symbol, Vec<Symbol>> {
+    use crate::expr::LValue;
+
+    const KERNEL_FUNCTIONS: &[&str] = &[
+        "Array", "Float", "Hash", "Integer", "Rational", "String", "format", "sprintf",
+        "lambda", "proc", "loop", "raise", "fail", "puts", "print", "p", "pp", "rand",
+        "block_given?",
+    ];
+
+    fn touches_instance(
+        e: &Expr,
+        own: &crate::det::HashSet<Symbol>,
+        calls: &mut Vec<Symbol>,
+    ) -> bool {
+        match &*e.node {
+            ExprNode::Ivar { .. } | ExprNode::SelfRef | ExprNode::Super { .. } => return true,
+            ExprNode::MethodRef { recv: None, .. } => return true,
+            ExprNode::Assign { target: LValue::Ivar { .. }, .. }
+            | ExprNode::OpAssign { target: LValue::Ivar { .. }, .. } => return true,
+            ExprNode::MultiAssign { targets, .. }
+                if targets.iter().any(|t| matches!(t, LValue::Ivar { .. })) =>
+            {
+                return true;
+            }
+            ExprNode::Defined { operand } => return touches_instance(operand, own, calls),
+            ExprNode::Send { recv, method, args, block, .. }
+                if recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) =>
+            {
+                if own.contains(method) {
+                    if !calls.contains(method) {
+                        calls.push(method.clone());
+                    }
+                } else if !KERNEL_FUNCTIONS.contains(&method.as_str()) {
+                    return true;
+                }
+                return args.iter().any(|a| touches_instance(a, own, calls))
+                    || block.as_ref().is_some_and(|b| touches_instance(b, own, calls));
+            }
+            _ => {}
+        }
+        let mut found = false;
+        e.node.for_each_child(&mut |c| {
+            if !found && touches_instance(c, own, calls) {
+                found = true;
+            }
+        });
+        found
+    }
+
+    // A name also defined class-side (`def self.label` beside
+    // `def label`) is not resolved: a clone's bare `label` would reach
+    // that class method, not the instance method the original called.
+    let class_side: crate::det::HashSet<&Symbol> =
+        controller.class_methods().map(|m| &m.name).collect();
+    let own: crate::det::HashSet<Symbol> = controller
+        .actions()
+        .map(|a| a.name.clone())
+        .filter(|name| !class_side.contains(name))
+        .collect();
+
+    let mut calls_of: crate::det::HashMap<Symbol, Vec<Symbol>> = crate::det::HashMap::default();
+    let mut unsafe_names: crate::det::HashSet<Symbol> = crate::det::HashSet::default();
+    for a in controller.actions() {
+        let calls = calls_of.entry(a.name.clone()).or_default();
+        let touches = !own.contains(&a.name)
+            || touches_instance(&a.body, &own, calls)
+            || a.opt_params.iter().any(|(_, d)| touches_instance(d, &own, calls))
+            || a.kw_params
+                .iter()
+                .any(|(_, d)| d.as_ref().is_some_and(|d| touches_instance(d, &own, calls)));
+        if touches {
+            unsafe_names.insert(a.name.clone());
+        }
+    }
+    loop {
+        let newly: Vec<Symbol> = calls_of
+            .iter()
+            .filter(|(name, calls)| {
+                !unsafe_names.contains(*name) && calls.iter().any(|c| unsafe_names.contains(c))
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        if newly.is_empty() {
+            break;
+        }
+        unsafe_names.extend(newly);
+    }
+    calls_of.retain(|name, _| !unsafe_names.contains(name));
+    calls_of
 }
 
 /// Does `f` apply to the action named `action_name`?
@@ -1746,6 +1890,46 @@ fn own_filter_inlining_is_ordered(controller: &Controller, privs: &[Action]) -> 
         }
     }
     true
+}
+
+/// The names `body` calls on the controller itself: receiverless sends
+/// and sends on `self`, the dynamic sends of a literal name
+/// (`send(:name)`, `public_send`, `__send__`), and the bound methods it
+/// takes the same way (`method(:name)`, `&method(:name)`). One of those
+/// whose name is not a literal sets `dynamic`.
+fn collect_self_send_names(
+    body: &Expr,
+    out: &mut crate::det::HashSet<Symbol>,
+    dynamic: &mut bool,
+) {
+    let on_self = |recv: &Option<Expr>| {
+        recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
+    };
+    match &*body.node {
+        ExprNode::Send { recv, method, args, .. } if on_self(recv) => {
+            out.insert(method.clone());
+            let named = match (method.as_str(), args.as_slice()) {
+                ("method", [arg]) => Some(arg),
+                ("send" | "public_send" | "__send__", [arg, ..]) => Some(arg),
+                _ => None,
+            };
+            match named.map(|arg| &*arg.node) {
+                Some(ExprNode::Lit { value: crate::expr::Literal::Sym { value } }) => {
+                    out.insert(value.clone());
+                }
+                Some(ExprNode::Lit { value: crate::expr::Literal::Str { value } }) => {
+                    out.insert(Symbol::from(value.as_str()));
+                }
+                Some(_) => *dynamic = true,
+                None => {}
+            }
+        }
+        ExprNode::MethodRef { recv, name } if on_self(recv) => {
+            out.insert(name.clone());
+        }
+        _ => {}
+    }
+    body.node.for_each_child(&mut |c| collect_self_send_names(c, out, dynamic));
 }
 
 /// Return a copy of `action` with every applicable before_action

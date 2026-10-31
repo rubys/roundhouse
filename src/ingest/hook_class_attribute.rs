@@ -1,6 +1,8 @@
 //! ActiveSupport's `class_attribute` and `cattr_*` / `mattr_*` in a
 //! library class: in its own body, or in an app module's
-//! `self.included(base)` hook on the class that includes it.
+//! `self.included(base)` hook on the class that includes it. A model's
+//! `class_attribute` too: its own, or one a Concern's `included do`
+//! declares, which the concern splice put in the model's body.
 //!
 //! activemerchant 1.137.0's `PostsData` is the hook shape:
 //!
@@ -19,7 +21,10 @@
 //! - `self.name`: this class's value once written, else its
 //!   superclass's (`@name__written`, as `class_attribute::written_flag`
 //!   spells it for controllers): a subclass reads its parent's value,
-//!   live, until it writes its own;
+//!   live, until it writes its own. A model reads its own, and each app
+//!   class below it gets a reader that names its parent, as a
+//!   controller's does: a model's typing does not see through
+//!   `superclass`;
 //! - `self.name=(value)`: writes this class's own;
 //! - `self.name?` (`instance_predicate`): `!!name`;
 //! - `name` (`instance_reader`): the instance's own once written, else
@@ -46,9 +51,9 @@
 //! other code) keeps its text, as does a hook no app class includes.
 
 use crate::App;
-use crate::dialect::{LibraryClass, MethodDef, MethodReceiver};
+use crate::dialect::{MethodDef, MethodReceiver, ModelBodyItem};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
-use crate::ident::{Symbol, VarId};
+use crate::ident::{ClassId, Symbol, VarId};
 use crate::span::Span;
 
 /// One `class_attribute` or `cattr_*` / `mattr_*` declaration.
@@ -68,6 +73,7 @@ enum Kind {
 
 pub(super) fn expand(app: &mut App) {
     expand_class_bodies(app);
+    expand_model_bodies(app);
     expand_hooks(app);
 }
 
@@ -84,9 +90,122 @@ fn expand_class_bodies(app: &mut App) {
         });
         let mut added = Vec::new();
         for decl in &decls {
-            added.extend(methods(lc, &added, decl, decl.span));
+            added.extend(methods(&lc.name, Some("superclass"), &lc.methods, &added, decl, decl.span));
             lc.class_ivar_initializers.extend(class_body_seeds(decl));
         }
+        lc.methods.splice(0..0, added);
+    }
+}
+
+/// `class_attribute :live` in a model's body: written there, or declared
+/// in a Concern's `included` block that the concern splice put there.
+/// The defs go first, as a library class's do; the seed stays where the
+/// declaration stood, and runs when the class body does
+/// (`model_to_library::writes_class_ivar`). The declaring model's reader
+/// reads its own value; a model below it reads its own once written, else
+/// its parent's.
+fn expand_model_bodies(app: &mut App) {
+    let mut declared: Vec<(ClassId, Symbol)> = Vec::new();
+    for model in &mut app.models {
+        let own: Vec<MethodDef> = model
+            .body
+            .iter()
+            .filter_map(|item| match item {
+                ModelBodyItem::Method { method, .. } => Some(method.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut added = Vec::new();
+        let mut body = Vec::with_capacity(model.body.len());
+        for item in std::mem::take(&mut model.body) {
+            let ModelBodyItem::Unknown { expr, leading_comments, leading_blank_line } = &item else {
+                body.push(item);
+                continue;
+            };
+            let Some(decl @ Decl { kind: Kind::ClassAttribute { .. }, .. }) = declaration(expr, None) else {
+                body.push(item);
+                continue;
+            };
+            let defs = methods(&model.name, None, &own, &added, &decl, decl.span);
+            added.extend(defs);
+            declared.extend(decl.names.iter().map(|name| (model.name.clone(), name.clone())));
+            for (i, seed) in class_body_seeds(&decl).into_iter().enumerate() {
+                body.push(ModelBodyItem::Unknown {
+                    expr: seed,
+                    leading_comments: if i == 0 { leading_comments.clone() } else { Vec::new() },
+                    leading_blank_line: i == 0 && *leading_blank_line,
+                });
+            }
+        }
+        body.splice(
+            0..0,
+            added.into_iter().map(|method| ModelBodyItem::Method { method, leading_comments: Vec::new(), leading_blank_line: false }),
+        );
+        model.body = body;
+    }
+    if declared.is_empty() {
+        return;
+    }
+    // Each app class's superclass, as Ruby resolves it from the class's
+    // namespace: an STI subclass is a library class below its model.
+    let names: Vec<String> = app
+        .models
+        .iter()
+        .map(|m| m.name.0.as_str().to_string())
+        .chain(app.library_classes.iter().filter(|c| !c.is_module && c.origin.is_none()).map(|c| c.name.0.as_str().to_string()))
+        .collect();
+    let written = app
+        .models
+        .iter()
+        .filter_map(|m| Some((&m.name, m.parent.as_ref()?)))
+        .chain(app.library_classes.iter().filter(|c| !c.is_module && c.origin.is_none()).filter_map(|c| Some((&c.name, c.parent.as_ref()?))));
+    let parents: std::collections::BTreeMap<ClassId, ClassId> = written
+        .filter_map(|(class, parent)| {
+            let scope = class.0.as_str().rsplit_once("::").map_or("", |(scope, _)| scope);
+            let found = resolve(&names, parent.0.as_str(), scope)?;
+            Some((class.clone(), ClassId(Symbol::from(found))))
+        })
+        .collect();
+    // `self.name` per attribute a class above `class` declares and
+    // `class` neither declares nor defines a reader for.
+    let readers = |class: &ClassId, defined: &dyn Fn(&Symbol) -> bool| -> Vec<MethodDef> {
+        let Some(parent) = parents.get(class) else { return Vec::new() };
+        let mut inherited: Vec<&Symbol> = Vec::new();
+        let mut at = Some(parent);
+        let mut seen = 0;
+        while let Some(above) = at.filter(|_| seen < 32) {
+            inherited.extend(declared.iter().filter(|(owner, _)| owner == above).map(|(_, name)| name));
+            at = parents.get(above);
+            seen += 1;
+        }
+        let up = format!("::{}", parent.0.as_str());
+        let src: String = inherited
+            .iter()
+            .filter(|name| !declared.iter().any(|(owner, own)| owner == class && own == **name) && !defined(name))
+            .map(|name| class_reader(name.as_str(), Some(&up)))
+            .collect();
+        if src.is_empty() {
+            return Vec::new();
+        }
+        defs(&src)
+            .into_iter()
+            .map(|mut method| {
+                method.enclosing_class = class.0.as_str().rsplit("::").next().map(Symbol::from);
+                method
+            })
+            .collect()
+    };
+    for model in &mut app.models {
+        let added = readers(&model.name, &|name| {
+            model.methods().any(|m| m.receiver == MethodReceiver::Class && m.name == *name)
+        });
+        model.body.splice(
+            0..0,
+            added.into_iter().map(|method| ModelBodyItem::Method { method, leading_comments: Vec::new(), leading_blank_line: false }),
+        );
+    }
+    for lc in app.library_classes.iter_mut().filter(|c| !c.is_module && c.origin.is_none()) {
+        let added = readers(&lc.name, &|name| lc.methods.iter().any(|m| m.receiver == MethodReceiver::Class && m.name == *name));
         lc.methods.splice(0..0, added);
     }
 }
@@ -135,7 +254,7 @@ fn expand_hooks(app: &mut App) {
             for statement in &statements {
                 if let Statement::Declarations(decls) = statement {
                     for decl in decls {
-                        added.extend(methods(lc, &added, decl, at));
+                        added.extend(methods(&lc.name, Some("superclass"), &lc.methods, &added, decl, at));
                     }
                 }
             }
@@ -324,14 +443,14 @@ fn written(name: &str) -> String {
 
 /// The declaration's defs for `lc`, placed at `at`; a method the class
 /// defines itself (or `added` already holds) stays its own.
-fn methods(lc: &LibraryClass, added: &[MethodDef], decl: &Decl, at: Span) -> Vec<MethodDef> {
-    let mut src = String::from("class RoundhouseClassAttribute\n");
+fn methods(owner: &ClassId, up: Option<&str>, own: &[MethodDef], added: &[MethodDef], decl: &Decl, at: Span) -> Vec<MethodDef> {
+    let mut src = String::new();
     for name in &decl.names {
         let n = name.as_str();
         let w = written(n);
         match decl.kind {
             Kind::ClassAttribute { instance_reader, instance_writer, instance_predicate } => {
-                src.push_str(&format!("  def self.{n}\n    @{w} ? @{n} : superclass.{n}\n  end\n"));
+                src.push_str(&class_reader(n, up));
                 src.push_str(&format!("  def self.{n}=(value)\n    @{w} = true\n    @{n} = value\n  end\n"));
                 if instance_predicate {
                     src.push_str(&format!("  def self.{n}?\n    !!{n}\n  end\n"));
@@ -362,24 +481,38 @@ fn methods(lc: &LibraryClass, added: &[MethodDef], decl: &Decl, at: Span) -> Vec
             }
         }
     }
-    src.push_str("end\n");
-    let (parsed, _) = super::prism::scope(|| super::ingest_library_classes(src.as_bytes(), "<class_attribute>"));
-    let classes = match parsed {
-        Ok(classes) => classes,
-        Err(err) => {
-            super::survey::record(&err);
-            return Vec::new();
-        }
-    };
     let mut out: Vec<MethodDef> = Vec::new();
-    for mut method in classes.into_iter().flat_map(|c| c.methods) {
-        if lc.methods.iter().chain(added).chain(&out).any(|d| d.name == method.name && d.receiver == method.receiver) {
+    for mut method in defs(&src) {
+        if own.iter().chain(added).chain(&out).any(|d| d.name == method.name && d.receiver == method.receiver) {
             continue;
         }
         method.name_span = at;
+        method.enclosing_class = owner.0.as_str().rsplit("::").next().map(Symbol::from);
         out.push(method);
     }
     out
+}
+
+/// `self.name`: the class's own value once written, else `up`'s (the
+/// class's own alone when nothing is above it).
+fn class_reader(n: &str, up: Option<&str>) -> String {
+    match up {
+        Some(up) => format!("  def self.{n}\n    @{w} ? @{n} : {up}.{n}\n  end\n", w = written(n)),
+        None => format!("  def self.{n}\n    @{n}\n  end\n"),
+    }
+}
+
+/// The defs `body` (a class body's text) writes.
+fn defs(body: &str) -> Vec<MethodDef> {
+    let src = format!("class RoundhouseClassAttribute\n{body}end\n");
+    let (parsed, _) = super::prism::scope(|| super::ingest_library_classes(src.as_bytes(), "<class_attribute>"));
+    match parsed {
+        Ok(classes) => classes.into_iter().flat_map(|c| c.methods).collect(),
+        Err(err) => {
+            super::survey::record(&err);
+            Vec::new()
+        }
+    }
 }
 
 /// `@name__written = true; @name = default` per name, where a class body

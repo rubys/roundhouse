@@ -110,6 +110,34 @@ puts "PASS Spinel segment-pattern recognition"
     constrained_app().run_spinel(script).assert_passes();
 }
 
+/// `\w` inside a bracket (#1374): `[\w-]+` is word characters and `-`.
+/// The encoding is the lowering's own, so a regression in the bracket
+/// parse shows up here as well as in `tests/route_bracket_word_class.rs`.
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn spinel_target_reads_a_word_escape_in_a_bracket_as_the_word_class() {
+    use roundhouse::lower::segment_pattern::{compile, encode_route_constraints};
+    let program = compile(r"[\w-]+").expect("[\\w-]+ compiles");
+    let token = encode_route_constraints(&[("token".to_string(), program)]);
+    // Guard the script against a pattern it can't hold as a Ruby literal.
+    assert!(!token.contains(['"', '\\', '#']), "{token}");
+    let script = format!(
+        r#"
+R = ActionDispatch::Router
+def check(path, seg_constraints, expect_match)
+  hit = R.match_pattern("/tickets/:token", path, "", seg_constraints)
+  matched = !hit.nil?
+  raise "path=#{{path}} matched=#{{matched}} expected=#{{expect_match}}" unless matched == expect_match
+end
+token = "{token}"
+["abc", "abc_1", "abc-def", "w", "w-w"].each {{ |t| check("/tickets/" + t, token, true) }}
+["a.b", "a@b"].each {{ |t| check("/tickets/" + t, token, false) }}
+puts "PASS Spinel word class in a bracket"
+"#
+    );
+    constrained_app().run_spinel(&script).assert_passes();
+}
+
 /// The `(.:format)` requirement (`tests/routes_format_requirement.rs` has
 /// the Ruby-target and Rails cases): an extension is held to it, no
 /// extension passes, `format: false` refuses any, and a member route never

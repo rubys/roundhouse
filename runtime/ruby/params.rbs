@@ -1,4 +1,5 @@
 module Params
+  def self.expect_array: (Hash[String, Roundhouse::ParamValue], String, Array[String], Array[String]) -> Array[Hash[String, Roundhouse::ParamValue]]
   def self.filtered_values: (Hash[String, Roundhouse::ParamValue], Array[String], Hash[String, Array[String]], Hash[String, String]) -> Hash[String, Roundhouse::ParamValue]
   def self.nested_key: (Roundhouse::ParamValue | Symbol | Range[Integer]) -> (Roundhouse::ParamValue | Range[Integer])
   def self.nested_lookup: (Roundhouse::ParamValue, Roundhouse::ParamValue | Symbol | Range[Integer]) -> Roundhouse::ParamValue
@@ -24,6 +25,7 @@ module Params
   def self.scalars_only: (Array[Roundhouse::ParamValue]) -> bool
   def self.require_present: (Hash[String, Roundhouse::ParamValue], String) -> Hash[String, Roundhouse::ParamValue]
   def self.nested: (Hash[String, Roundhouse::ParamValue], String, Array[String], String) -> Roundhouse::ParamValue
+  def self.record_list: (Hash[String, Roundhouse::ParamValue] sub, String key, Array[String] allowed) -> (Array[Hash[String, Roundhouse::ParamValue]] | Hash[String, Hash[String, Roundhouse::ParamValue]] | nil)
   def self.scalar_list: (Hash[String, Roundhouse::ParamValue], String) -> Array[String]
   def self.scalar_list_provided: (Hash[String, Roundhouse::ParamValue], String) -> bool
   def self.nested_provided: (Hash[String, Roundhouse::ParamValue], String, Array[String], String) -> bool

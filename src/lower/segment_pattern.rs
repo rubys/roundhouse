@@ -218,12 +218,29 @@ fn parse_bracket(chars: &[char], i: &mut usize) -> Option<(Vec<char>, bool)> {
                 break;
             }
             Some('\\') => {
-                // An escaped char inside a bracket is always literal
-                // (`\/`, `\-`, `\]`, …) — no `\d`/anchors supported
-                // here, keeping brackets a closed, simple shape.
+                // An escaped punctuation char inside a bracket is
+                // literal (`\/`, `\-`, `\]`, …). A letter escape is a
+                // class or a control char in Ruby, never the letter:
+                // `[\w-]` is word chars and `-`, not `w` and `-`.
+                // `\d` and `\w` expand to their ASCII members (Ruby's
+                // meaning without the `u` flag); any other letter
+                // escape refuses the pattern, as it does outside.
                 *i += 1;
                 let c = *chars.get(*i)?;
                 *i += 1;
+                if c.is_ascii_alphanumeric() {
+                    match c {
+                        'd' => members.extend('0'..='9'),
+                        'w' => {
+                            members.extend('a'..='z');
+                            members.extend('A'..='Z');
+                            members.extend('0'..='9');
+                            members.push('_');
+                        }
+                        _ => return None,
+                    }
+                    continue;
+                }
                 if chars.get(*i) == Some(&'-') && chars.get(*i + 1) != Some(&']') {
                     let (lo, hi) = (c, *chars.get(*i + 1)?);
                     if lo > hi {
@@ -751,6 +768,125 @@ pub fn compile(src: &str) -> Option<String> {
     Some(encode_alternatives(&encoded))
 }
 
+// A copy of router.rb's `format_extension` list, not read from it: the runtime is Ruby source, not data lowering can load.
+const ROUTER_FORMATS: &str = "html text js css ics csv vcf vtt png jpeg jpg gif bmp tiff svg webp mpeg mp3 mp4 ogg webm otf ttf woff woff2 pdf zip gzip xml rss atom yaml json turbo_stream";
+
+/// A requirement that stops a lazy segment before one of the listed
+/// extensions, the end of the segment or the next `/` (lobsters'
+/// `DOMAINS_IDENTIFIER = /([^\/]+?)(?=\.json|\.rss|$|\/)/`): the segment
+/// itself is the greedy body (`[^\/]+`), and a trailing listed extension
+/// is the `(.:format)` Rails splits off there. Answers the body's source
+/// and the extensions, or None for any other shape.
+pub fn split_format_lookahead(src: &str) -> Option<(String, Vec<String>)> {
+    let (body, look) = src.split_once("(?=")?;
+    let look = look.strip_suffix(')')?;
+    let mut exts = Vec::new();
+    for alt in look.split('|') {
+        match alt {
+            "$" | "/" | "\\/" => {}
+            _ => {
+                let ext = alt.strip_prefix("\\.")?;
+                // Not any word: `Router.match` peels only a registered format, so another listed suffix would stay in the param.
+                if !ROUTER_FORMATS.split(' ').any(|f| f == ext) {
+                    return None;
+                }
+                exts.push(ext.to_string());
+            }
+        }
+    }
+    // Not without `$`: then the segment has to end in one of the extensions, a rule the body alone does not say.
+    if !look.split('|').any(|a| a == "$") || exts.is_empty() {
+        return None;
+    }
+    let body = body.strip_prefix('(').and_then(|b| b.strip_suffix(')')).unwrap_or(body);
+    let body = body.strip_suffix("+?").map(|b| format!("{b}+"))?;
+    Some((body, exts))
+}
+
+/// A requirement whose body is `.+` (greedy) or `.+?` (lazy), which
+/// Rails matches across `/` (lobsters' `ORIGINS_IDENTIFIER =
+/// /(.+)(?=\.json|\.rss|$|\/)/` takes `github.com/user`). The param is
+/// then a span of segments, as a `*glob` is.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DotSpan {
+    /// The extensions split off as the format when the param ends the
+    /// path: none for the greedy body, which keeps every extension
+    /// (`/origins/github.com.rss` is the identifier `github.com.rss`).
+    pub exts: Vec<String>,
+    /// Whether the span may be followed by `/`: false when a lookahead
+    /// leaves `/` out, so the param can only end the path.
+    pub slash_follows: bool,
+}
+
+/// The `.+` / `.+?` requirement `DotSpan` reads, or None for any other
+/// shape. A lookahead must list `$`; the lazy body needs one, since
+/// without it Rails splits ANY trailing extension off, which the
+/// router's registered-format peel cannot follow.
+pub fn dot_span(src: &str) -> Option<DotSpan> {
+    let (body, look) = match src.split_once("(?=") {
+        Some((body, look)) => (body, Some(look.strip_suffix(')')?)),
+        None => (src, None),
+    };
+    let body = body
+        .strip_prefix("(?:")
+        .or_else(|| body.strip_prefix('('))
+        .and_then(|b| b.strip_suffix(')'))
+        .unwrap_or(body);
+    let lazy = match body {
+        ".+" => false,
+        ".+?" => true,
+        _ => return None,
+    };
+    let Some(look) = look else {
+        return (!lazy).then_some(DotSpan { exts: Vec::new(), slash_follows: true });
+    };
+    let mut exts = Vec::new();
+    let mut end = false;
+    let mut slash_follows = false;
+    for alt in look.split('|') {
+        match alt {
+            "$" => end = true,
+            "/" | "\\/" => slash_follows = true,
+            _ => {
+                let ext = alt.strip_prefix("\\.")?;
+                if ext.is_empty() || !ext.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    return None;
+                }
+                exts.push(ext.to_string());
+            }
+        }
+    }
+    if !end || (lazy && exts.is_empty()) {
+        return None;
+    }
+    // Not any word: a lazy span leaves the listed extension to the router's peel, which takes only these.
+    if lazy && exts.iter().any(|ext| !ROUTER_FORMATS.split(' ').any(|f| f == ext)) {
+        return None;
+    }
+    if !lazy {
+        exts.clear();
+    }
+    Some(DotSpan { exts, slash_follows })
+}
+
+/// The `seg_patterns` key that marks `name` as a span of segments: the
+/// route's dispatch pattern holds it as `*name` (`dispatch_path`).
+pub fn span_key(name: &str) -> String {
+    format!("*{name}")
+}
+
+/// A route's path as the router matches it: each param marked by
+/// `span_key` becomes the `*name` segment the router spans.
+pub fn dispatch_path(path: &str, entries: &[(String, String)]) -> String {
+    path.split('/')
+        .map(|seg| match seg.strip_prefix(':') {
+            Some(name) if entries.iter().any(|(k, _)| *k == span_key(name)) => span_key(name),
+            _ => seg.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// Combine a route's already-compiled `(param_name, encoded_pattern)`
 /// pairs into the ONE string a `Route` carries as its optional
 /// `seg_constraints` positional (mirrors how `int_params` stays a
@@ -762,6 +898,9 @@ pub fn compile(src: &str) -> Option<String> {
 pub fn encode_route_constraints(entries: &[(String, String)]) -> String {
     let mut out = String::new();
     for (name, pattern) in entries {
+        if name.starts_with('*') {
+            continue;
+        }
         out.push_str(&name.chars().count().to_string());
         out.push('.');
         out.push_str(name);
@@ -774,6 +913,39 @@ pub fn encode_route_constraints(entries: &[(String, String)]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_dot_body_spans_segments() {
+        use super::{DotSpan, dot_span};
+        let span = |exts: &[&str], slash_follows| {
+            Some(DotSpan { exts: exts.iter().map(|e| e.to_string()).collect(), slash_follows })
+        };
+        assert_eq!(dot_span(r"(.+)(?=\.json|\.rss|$|\/)"), span(&[], true));
+        assert_eq!(dot_span(r"(.+?)(?=\.json|\.rss|$|\/)"), span(&["json", "rss"], true));
+        assert_eq!(dot_span(r".+"), span(&[], true));
+        assert_eq!(dot_span(r"(.+)(?=\.json|$)"), span(&[], false));
+        // Not without `$`, not a lazy body with no extension to split, not any other body.
+        assert_eq!(dot_span(r"(.+)(?=\.json|\.rss)"), None);
+        assert_eq!(dot_span(r".+?"), None);
+        assert_eq!(dot_span(r"(.+?)(?=$|\/)"), None);
+        assert_eq!(dot_span(r"([^\/]+?)(?=\.json|\.rss|$|\/)"), None);
+        assert_eq!(dot_span(r".*"), None);
+        assert_eq!(dot_span(r"(.+?)(?=\.foo|$)"), None);
+        assert_eq!(dot_span(r"(.+)(?=\.foo|$)"), span(&[], false));
+    }
+
+    #[test]
+    fn a_format_lookahead_splits_into_its_body_and_extensions() {
+        assert_eq!(
+            super::split_format_lookahead(r"([^\/]+?)(?=\.json|\.rss|$|\/)"),
+            Some((r"[^\/]+".to_string(), vec!["json".to_string(), "rss".to_string()]))
+        );
+        // Not a greedy body (it would swallow the extension), and not without `$`.
+        assert_eq!(super::split_format_lookahead(r"(.+)(?=\.json|\.rss|$|\/)"), None);
+        assert_eq!(super::split_format_lookahead(r"([^\/]+?)(?=\.json|\.rss)"), None);
+        // An extension the router does not peel would stay in the param.
+        assert_eq!(super::split_format_lookahead(r"([^\/]+?)(?=\.foo|$)"), None);
+    }
+
     use super::*;
 
     fn ok(src: &str) -> String {
@@ -811,6 +983,22 @@ mod tests {
     #[test]
     fn grouped_lazy_class_compiles() {
         ok(r"([^/])+?");
+    }
+
+    #[test]
+    fn a_word_escape_inside_a_bracket_is_the_word_class() {
+        // `[\w-]+` is word characters and `-`, not the letters `w` and `-`.
+        let enc = ok(r"[\w-]+");
+        for c in ['a', 'Z', '0', '_', '-'] {
+            assert!(enc.contains(c), "{enc} lacks {c:?}");
+        }
+        assert_eq!(ok(r"[\d]+"), ok(r"[0-9]+"));
+    }
+
+    #[test]
+    fn other_letter_escapes_inside_a_bracket_are_refused() {
+        refused(r"[\s]+");
+        refused(r"[\W-]+");
     }
 
     #[test]

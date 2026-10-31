@@ -1049,6 +1049,7 @@ fn table_from_create_table(
         foreign_keys: vec![],
         virtual_module: None,
         known_keyless,
+        primary_key_columns: Vec::new(),
     };
     let invalid_generated = crate::schema::generated::validate_table_with_dialect(&table, dialect);
     for (column, reason) in &invalid_generated {
@@ -1115,6 +1116,7 @@ fn virtual_table_from_call(call: &ruby_prism::CallNode<'_>) -> Option<(Symbol, T
             foreign_keys: vec![],
             virtual_module: Some(crate::schema::VirtualModule { module, args: module_args }),
             known_keyless: false,
+            primary_key_columns: Vec::new(),
         },
     ))
 }
@@ -1157,6 +1159,7 @@ fn view_from_create_view(
             foreign_keys: vec![],
             virtual_module: None,
             known_keyless: false,
+            primary_key_columns: Vec::new(),
         },
     ))
 }

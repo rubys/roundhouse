@@ -270,6 +270,7 @@ mod tests {
             crate::build_target::BuildTarget::Ruby.param_binds_enabled(None),
             super::super::ErrorsReaders::CreatedOnFirstRead,
             super::super::RuntimeRelation::Present,
+            &crate::lower::view_to_library::PartialStems::of(&app.views),
         )
         .0
     }

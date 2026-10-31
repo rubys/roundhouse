@@ -96,9 +96,15 @@ end
     assert!(child.contains("super(7, **kw)"), "{child}");
     let ordinary = std::fs::read_to_string(run.emitted.join("app/models/probe.rb")).unwrap();
     assert!(
-        !ordinary.contains("helper.target(11, 4, **kw)"),
+        ordinary.contains("helper.target(11, 4, **kw)"),
         "{ordinary}"
     );
+    let (neutral, errors) = emit_and_run::real_blog()
+        .write("app/lib/probe.rb", source)
+        .emit_target_neutral(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:?}");
+    let ordinary = std::fs::read_to_string(neutral.join("app/models/probe.rb")).unwrap();
+    assert!(!ordinary.contains("helper.target(11, 4, **kw)"), "{ordinary}");
 }
 
 #[test]
@@ -265,18 +271,21 @@ fn compiled_empty_and_optional_keyword_packets_survive_two_hops() {
 }
 
 #[test]
-fn competing_ordinary_and_full_virtual_keyword_contracts_refuse_projection() {
+fn competing_ordinary_and_full_virtual_keyword_contracts_keep_native_packets() {
     let source = "class Sink; def self.leaf(factor:,extra:); factor-extra; end; end; class Parent; def run; kw={factor:11,extra:4}; target(**kw); end; def target(factor:); factor; end; end; class Child < Parent; def target(...); Sink.leaf(...); end; end";
-    native_result(source, "puts Child.new.run", "7\n");
+    let script = "puts Child.new.run; begin; Parent.new.run; raise 'invalid parent packet accepted'; rescue ArgumentError; end";
+    native_result(source, script, "7\n");
     let run = emit_and_run::real_blog()
         .write("app/lib/probe.rb", source)
-        .run_ruby("puts Child.new.run");
+        .run_ruby(script);
+    run.assert_passes();
+    assert_eq!(run.stdout, "7\n");
+    let (_, errors) = emit_and_run::real_blog()
+        .write("app/lib/probe.rb", source)
+        .emit_target_neutral(roundhouse::project::BuildTarget::Ruby);
     assert!(
-        run.errors.iter().any(|e| e.contains("keyword producer")),
-        "{:?}; actual={}; stderr={}",
-        run.errors,
-        run.stdout,
-        run.stderr
+        errors.iter().any(|e| e.contains("keyword producer")),
+        "{errors:?}"
     );
 }
 

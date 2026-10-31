@@ -557,22 +557,27 @@ module ActiveSupport
   # the transpiled runtimes cannot host, and a REGEX the targets do not
   # all lower, so the scan is spelled out the way `to_sentence` below
   # is. Match each character against Rails' POSIX whitespace class,
-  # including Unicode whitespace.
+  # including Unicode whitespace. The walk is over `chars`, not
+  # `text[i]`: on a multibyte String CRuby finds the i-th character from
+  # the start, so indexing the String made the scan quadratic. The
+  # result grows in place for the same reason.
   #
   # campfire's `content_filters_test` writes `<<~HTML.squish` to put a
   # multi-line fixture body on one line before handing it to a filter.
   def self.squish(text)
     out = +""
     pending_space = false
+    chars = text.chars
+    n = chars.length
     i = 0
-    while i < text.length
-      c = text[i]
+    while i < n
+      c = chars[i]
       if c.match?(/[[:space:]]/)
         pending_space = !out.empty?
       else
-        out = out + " " if pending_space
+        out << " " if pending_space
         pending_space = false
-        out = out + c
+        out << c
       end
       i = i + 1
     end
@@ -631,8 +636,10 @@ module ActiveSupport
   end
 
   # The whitespace Rails' default `truncate_words` separator (`/\s+/`)
-  # splits on.
-  WORD_SPACE = " \t\n\v\f\r"
+  # splits on, as a byte: space, or \t \n \v \f \r.
+  def self.word_space_byte?(b)
+    b == 32 || (b >= 9 && b <= 13)
+  end
 
   # AS `String#truncate_words(words_count, omission: "...")`
   # (core_ext/string/filters.rb) for the default separator, with the
@@ -641,18 +648,21 @@ module ActiveSupport
   # the first word, and the cut happens only when whitespace follows the
   # n-th word. Built without a Regexp, like `squish` above. A `separator:`
   # call is not grounded here. Same home and same rule as `truncate`.
+  # The scan reads bytes: every separator is ASCII and no byte of a
+  # multibyte UTF-8 character is below 0x80, so the cuts are the same,
+  # and `text[i]` would walk the String from the start on each read.
   def self.truncate_words(text, words_count, omission)
     mark = omission || "..."
-    n = text.length
+    n = text.bytesize
     i = 0
     words = 0
     while i < n
       j = i + 1
-      j += 1 while j < n && !WORD_SPACE.include?(text[j])
+      j += 1 while j < n && !word_space_byte?(text.getbyte(j))
       k = j
-      k += 1 while k < n && WORD_SPACE.include?(text[k])
+      k += 1 while k < n && word_space_byte?(text.getbyte(k))
       words += 1
-      return text[0, j] + mark if words == words_count && k > j
+      return text.byteslice(0, j) + mark if words == words_count && k > j
       i = k
     end
     text.dup
@@ -1078,6 +1088,19 @@ module ActiveSupport
 
   def self.years_ago(t, n = 1)
     months_since(t, -12 * n)
+  end
+
+  def self.change_time_usec(time, usec)
+    raise ArgumentError, "argument out of range" if usec >= 1_000_000
+    raise ArgumentError, "argument out of range" if time.sec * 1_000_000 + usec < 0
+    changed = Time.at(time.to_i, usec, :usec)
+    return changed.getutc if time.utc?
+    return changed.getlocal(time.utc_offset) if time.zone.to_s.empty?
+    local = Time.at(time.to_i).getlocal
+    if local.zone != time.zone || local.utc_offset != time.utc_offset || local.dst? != time.dst?
+      raise NotImplementedError, "Time#change with a custom or changed system timezone is not supported"
+    end
+    changed.getlocal
   end
 
   def self.beginning_of_minute(t)

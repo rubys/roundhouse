@@ -146,7 +146,6 @@ fn check(root: &Path) -> String {
 }
 
 #[test]
-#[ignore = "fork spec: conditional declarations"]
 fn a_branch_that_changes_visibility_stays_refused_by_name() {
     let root = std::env::temp_dir().join(format!("roundhouse-conditional-definitions-{}", std::process::id()));
     app(

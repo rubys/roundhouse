@@ -260,7 +260,7 @@ fn index_access_method_keyword_requires_a_token_boundary() {
 }
 
 #[test]
-fn composite_primary_and_foreign_keys_are_ledgered_not_narrowed() {
+fn composite_primary_keys_are_kept_whole_and_foreign_keys_ledgered_not_narrowed() {
     let sql = r#"
 CREATE TABLE public.assignments (
     project_id bigint NOT NULL,
@@ -288,7 +288,8 @@ ALTER TABLE ONLY public.assignments
     assert!(assignments.foreign_keys.is_empty(), "composite fk never narrowed to one column pair");
 
     let messages: Vec<String> = gaps.iter().map(|g| format!("{g}")).collect();
-    assert!(messages.iter().any(|m| m.contains("primary key dropped") && m.contains("composite")), "{messages:?}");
+    assert_eq!(assignments.primary_key_columns, [Symbol::from("project_id"), Symbol::from("user_id")]);
+    assert!(!messages.iter().any(|m| m.contains("primary key dropped")), "a composite key is kept, not ledgered: {messages:?}");
     assert!(messages.iter().any(|m| m.contains("foreign key dropped") && m.contains("composite")), "{messages:?}");
 }
 
@@ -385,8 +386,8 @@ CREATE VIEW public.view_two AS SELECT memberships.org_id FROM public.memberships
             .collect()
     };
 
-    let pk_keys = keys_for("primary key dropped");
-    assert_eq!(pk_keys.len(), 1, "both composite PKs should bucket together: {pk_keys:?}");
+    // Composite primary keys are kept (`Table.primary_key_columns`), not ledgered.
+    assert!(keys_for("primary key dropped").is_empty());
 
     let fk_keys = keys_for("foreign key dropped");
     assert_eq!(fk_keys.len(), 1, "both composite FKs should bucket together: {fk_keys:?}");
@@ -432,12 +433,14 @@ ALTER TABLE ONLY shard.readings_p0
         !schema.tables.contains_key(&Symbol::from("readings_p0")),
         "the attached shard is retracted, not modeled as its own table"
     );
-    // Exactly one composite-pk gap (the parent's), not two — the
-    // shard's own later `ADD CONSTRAINT ... PRIMARY KEY` targets a
-    // table this Schema no longer has, and is silently skipped rather
-    // than ledgering a gap for a table nobody will ever see.
-    let pk_gaps = gaps.iter().filter(|g| format!("{g}").contains("primary key dropped")).count();
-    assert_eq!(pk_gaps, 1, "{gaps:?}");
+    // The parent keeps its composite key; the shard's own later `ADD
+    // CONSTRAINT ... PRIMARY KEY` targets a table this Schema no longer
+    // has, and is silently skipped.
+    assert_eq!(
+        schema.tables[&Symbol::from("readings")].primary_key_columns,
+        [Symbol::from("id"), Symbol::from("shard_key")]
+    );
+    assert!(!gaps.iter().any(|g| format!("{g}").contains("primary key dropped")), "{gaps:?}");
 }
 
 /// pg_dump writes an index on a partitioned table as `CREATE INDEX …

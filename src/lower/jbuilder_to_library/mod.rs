@@ -57,7 +57,10 @@
 //!  15. `json.partial! @record`         → (4) with the path Rails takes
 //!                                       from the record's model
 //!                                       (`partial:` and `as:` after
-//!                                       the record do not change it)
+//!                                       the record do not change it,
+//!                                       nor does a literal local the
+//!                                       partial never reads, such as
+//!                                       `cache: true`)
 //!
 //! (6)-(9) arrived together with campfire's bot API, which is six
 //! jbuilder templates written in exactly that dialect.
@@ -93,6 +96,7 @@ use record_value::{RecordShapes, RecordValue};
 
 use super::view_to_library::{
     build_view_signature, infer_view_arg, insert_framework_stubs, split_view_name, view_module_id,
+    PartialStems,
 };
 
 /// Bulk entry: lower every json-format view to a `LibraryClass`. Mirrors
@@ -104,6 +108,7 @@ pub fn lower_jbuilder_to_library_classes(
     extras: Vec<(ClassId, crate::analyze::ClassInfo)>,
 ) -> Vec<LibraryClass> {
     let partials = std::rc::Rc::new(partial_params(app));
+    let direct_helpers = crate::lower::routes::direct_helper_names(app);
     let mut lcs: Vec<LibraryClass> = views
         .iter()
         .filter(|v| v.jbuilder && !v.analysis_only)
@@ -183,7 +188,7 @@ pub fn lower_jbuilder_to_library_classes(
             // the follow-up type when the projection is a no-op — the
             // cloning entry re-walked every jbuilder body twice.
             if crate::lower::controller_to_library::rewrites::
-                project_route_helper_ids_in_place(&mut method.body)
+                project_route_helper_ids_in_place(&mut method.body, &direct_helpers)
             {
                 crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
             }
@@ -274,7 +279,7 @@ fn build_library_class(
     // whose name one of its locals takes reads its own parameter
     // (`PartialParams`), so the two stay apart.
     let partial_key = is_partial.then(|| {
-        let (mod_path, method) = partial_target(&format!("{dir}/{stem}"), dir);
+        let (mod_path, method) = partial_target(&format!("{dir}/{stem}"), dir, &partials.stems);
         partial_key(&mod_path, &method)
     });
     let mut rewritten = rewrite_ivars_to_locals(&view.body);
@@ -434,7 +439,11 @@ fn jbuilder_method_parts(
     partials: &PartialParams,
 ) -> (ClassId, MethodDef, String, Vec<String>, Vec<String>) {
     let module_id = view_module_id(dir);
-    let method_name = Symbol::from(format!("{stem}_json"));
+    let method_stem = match is_partial {
+        true => partial_target(&format!("{dir}/{stem}"), dir, &partials.stems).1,
+        false => stem.to_string(),
+    };
+    let method_name = Symbol::from(format!("{method_stem}_json"));
 
     let known_models: Vec<String> = app
         .models
@@ -477,7 +486,7 @@ fn jbuilder_method_parts(
     // the partial's own file name, and a partial reads its renderer's
     // ivars.
     let local_params: Option<&Vec<Symbol>> = if is_partial {
-        let (mod_path, method) = partial_target(&format!("{dir}/{stem}"), dir);
+        let (mod_path, method) = partial_target(&format!("{dir}/{stem}"), dir, &partials.stems);
         partials.params.get(&partial_key(&mod_path, &method))
     } else {
         None
@@ -524,7 +533,8 @@ fn jbuilder_method_parts(
         // the convention's type (the model of the partial's
         // directory); any other takes the model its own name gives.
         let key = {
-            let (mod_path, method) = partial_target(&format!("{dir}/{stem}"), dir);
+            let (mod_path, method) =
+                partial_target(&format!("{dir}/{stem}"), dir, &partials.stems);
             partial_key(&mod_path, &method)
         };
         let ivar_of = |p: &Symbol| {
@@ -690,8 +700,8 @@ struct Ctx {
 
 /// Classification of a single top-level statement in a jbuilder
 /// template. The walker normalizes recognized DSL Sends into this
-/// closed enum; unknown shapes are tagged `Unknown` and emit a TODO
-/// marker so the file still parses.
+/// closed enum; unknown shapes are tagged `Unknown`: refused when they
+/// are calls on `json`, an empty append otherwise.
 enum JbStmt<'a> {
     /// `json.extract! obj, :a, :b` — N pairs, one per attribute.
     Extract { obj: &'a Expr, attrs: Vec<Symbol> },
@@ -714,8 +724,11 @@ enum JbStmt<'a> {
     },
     /// `json.partial! @record` — the same call, with the path Rails
     /// takes from the record (`to_partial_path`). Resolved at emit time,
-    /// where the app's models are known.
-    PartialRecord { arg: &'a Expr, as_name: Option<Symbol> },
+    /// where the app's models are known. `locals` are the names of the
+    /// literal locals the call passes besides the record, which render
+    /// the same output only while the partial never reads them
+    /// (`record_partial_resolve`).
+    PartialRecord { arg: &'a Expr, as_name: Option<Symbol>, locals: Vec<Symbol> },
     /// `json.<key> obj, partial: P, as: V` — one pair whose value is a
     /// partial render of a SINGLE object. The `array!`/`partial!`
     /// siblings above render a collection and own the whole template;
@@ -790,7 +803,8 @@ enum JbStmt<'a> {
     /// attribute name and raises (`TypeError: {fields: :b} is not a
     /// symbol nor a string`). Reported, never dropped.
     ArrayHashArgument,
-    /// Unrecognized DSL or non-Send statement. Surfaces as an empty io
+    /// Unrecognized DSL or non-Send statement. A call on `json` is
+    /// refused where it stands; anything else surfaces as an empty io
     /// append so the lowered body stays well-formed.
     Unknown,
 }
@@ -984,8 +998,8 @@ fn emit_object_filled(raw_stmts: &[&Expr], ctx: &Ctx) -> (Vec<Expr>, bool) {
                 Some(emit_array_block(collection, item_var, body, ctx))
             }
             JbStmt::ArrayExtract { collection, attrs } => Some(emit_array_extract(collection, attrs, ctx)),
-            JbStmt::PartialRecord { arg, as_name } => {
-                record_partial_path(arg, as_name.as_ref(), &ctx.resource_dir, &ctx.record_sites)
+            JbStmt::PartialRecord { arg, as_name, locals } => {
+                record_partial_resolve(arg, as_name.as_ref(), locals, ctx)
                     .ok()
                     .map(|branches| {
                         let (mut stmts, call) = record_partial_call(arg, &branches, ctx);
@@ -1020,22 +1034,23 @@ fn emit_object_filled(raw_stmts: &[&Expr], ctx: &Ctx) -> (Vec<Expr>, bool) {
     mark_sound_merges(&classified, raw_stmts, ctx);
     let end = emit_pairs(&classified, raw_stmts, ctx, &mut out, Sep::First);
     out.push(io_append_lit(&ctx.accumulator, "}"));
-    // A statement the walker could not lower is written as nothing, so
-    // an empty object there says nothing about what Jbuilder sets:
-    // such an object is left as it was, not taken for BLANK.
+    // A statement the walker could not lower is refused or written as
+    // nothing, so an empty object there says nothing about what
+    // Jbuilder sets: such an object is left as it was, not taken for
+    // BLANK.
     (out, end == Sep::After || has_unlowered(raw_stmts, ctx))
 }
 
 /// Whether an object's statements, or a branch of them, include one
-/// the walker writes as an empty append (`JbStmt::Unknown`).
+/// the walker refuses or writes as an empty append (`JbStmt::Unknown`).
 fn has_unlowered(stmts: &[&Expr], ctx: &Ctx) -> bool {
     stmts.iter().any(|s| match classify(s) {
         JbStmt::Unknown
         | JbStmt::ArrayPartial { .. }
         | JbStmt::ArrayBlock { .. }
         | JbStmt::ArrayExtract { .. } => true,
-        JbStmt::PartialRecord { arg, as_name } => {
-            record_partial_path(arg, as_name.as_ref(), &ctx.resource_dir, &ctx.record_sites).is_err()
+        JbStmt::PartialRecord { arg, as_name, locals } => {
+            record_partial_resolve(arg, as_name.as_ref(), &locals, ctx).is_err()
         }
         JbStmt::Cond { then_branch, else_branch, .. } => {
             has_unlowered(&branch_stmts(then_branch), ctx) || has_unlowered(&branch_stmts(else_branch), ctx)
@@ -1282,8 +1297,46 @@ fn emit_pairs(
                     &ctx.accumulator,
                     &format!("\"{}\":", key.as_str()),
                 ));
+                let arg_ty = ctx.span_types.get(&arg.span);
                 let arg = rewrite_h_escape(&rewrite_route_helpers(arg, ctx));
-                out.extend(emit_partial_call(partial_path, vec![(as_name.clone(), arg)], ctx));
+                // Jbuilder's `_set_inline_partial` answers `[]` for a
+                // nil value without rendering the partial, whatever
+                // the value's static type.
+                if matches!(&*arg.node, ExprNode::Lit { value: Literal::Nil }) {
+                    out.push(io_append_lit(&ctx.accumulator, "[]"));
+                } else {
+                    // The value is bound once to a `__val<n>` local unless it
+                    // is a plain variable, so the nil check does not
+                    // evaluate it twice.
+                    let value = match &*arg.node {
+                        ExprNode::Var { .. } | ExprNode::Ivar { .. } => arg,
+                        _ => {
+                            let n = ctx.temps.get();
+                            ctx.temps.set(n + 1);
+                            let val = Symbol::from(format!("__val{n}"));
+                            out.push(Expr::new(
+                                Span::synthetic(),
+                                ExprNode::Assign { target: LValue::Var { id: VarId(0), name: val.clone() }, value: arg },
+                            ));
+                            var_ref(val)
+                        }
+                    };
+                    let render = if arg_ty.is_some_and(is_collection_ty) {
+                        // A collection: Jbuilder renders the partial once
+                        // per element, into an array.
+                        emit_array_partial(&value, partial_path, as_name, ctx)
+                    } else {
+                        emit_partial_call(partial_path, vec![(as_name.clone(), value.clone())], ctx)
+                    };
+                    out.push(Expr::new(
+                        Span::synthetic(),
+                        ExprNode::If {
+                            cond: send(Some(value), "nil?", Vec::new(), None, false),
+                            then_branch: io_append_lit(&ctx.accumulator, "[]"),
+                            else_branch: seq(render),
+                        },
+                    ));
+                }
                 sep = Sep::After;
             }
             JbStmt::Nested { key, body } => {
@@ -1340,8 +1393,8 @@ fn emit_pairs(
                     .collect();
                 sep = emit_merged_partial(partial_call(partial_path, locals, ctx), ctx, out, sep);
             }
-            JbStmt::PartialRecord { arg, as_name } => {
-                match record_partial_path(arg, as_name.as_ref(), &ctx.resource_dir, &ctx.record_sites) {
+            JbStmt::PartialRecord { arg, as_name, locals } => {
+                match record_partial_resolve(arg, as_name.as_ref(), locals, ctx) {
                     Ok(branches) => {
                         let (stmts, call) = record_partial_call(arg, &branches, ctx);
                         out.extend(stmts);
@@ -1464,6 +1517,24 @@ fn emit_pairs(
                     src.span,
                     "jbuilder merge!",
                     "only a Hash literal whose keys the object sets nowhere else, or a value typed Hash, is lowered",
+                ));
+            }
+            // A `json.<key>(…)` the classifier does not recognise. Writing
+            // it as nothing dropped the key and never evaluated its
+            // arguments, with no report: Jbuilder renders it or raises.
+            // It is refused where it stands instead, as `ExtractDynamic`
+            // is. A statement on any other receiver keeps the empty
+            // append.
+            JbStmt::Unknown if is_json_send(src) => {
+                crate::ingest::survey::record(&crate::ingest::IngestError::Unsupported {
+                    file: String::new(),
+                    message: "jbuilder: a `json.<key>(…)` or `json.set!` call whose arguments or block the lowering does not recognise"
+                        .to_string(),
+                });
+                out.push(unsupported_stmt(
+                    src.span,
+                    "jbuilder call with unrecognised arguments",
+                    "the key, its arguments or its block do not match a lowered shape (options that are not literals or that are only known at run time, a non-literal `set!` key, a block that names its own builder)",
                 ));
             }
             JbStmt::Unknown => {
@@ -1634,7 +1705,9 @@ fn object_keys(stmt: &JbStmt<'_>, ctx: &Ctx) -> Option<Vec<String>> {
             Some(pairs) => Some(pairs.into_iter().map(|(k, _)| k).collect()),
             None => attributes_merge(value, ctx).map(|(_, attrs)| attrs.iter().map(|a| a.as_str().to_string()).collect()),
         },
-        JbStmt::Local => Some(Vec::new()),
+        // Refused: the statement lowers to a raise, so a run that
+        // reaches it renders nothing and sets no key in this object.
+        JbStmt::Local | JbStmt::ExtractDynamic => Some(Vec::new()),
         JbStmt::Cond { then_branch, else_branch, .. } => {
             let mut keys = branch(then_branch)?;
             keys.extend(branch(else_branch)?);
@@ -1939,23 +2012,54 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
             // `json.partial! @record` — a positional that is a record,
             // not a path. Jbuilder renders the record's own partial
             // (`record.to_partial_path`) with the record as its local.
-            // `partial:` and `as:` after it do not change that:
+            // `partial:` and `as:` after it, as literals, do not change
+            // that:
             // jbuilder's `partial!` sets `options[:partial]` to the
             // positional, over the option, and `as:` only names the
             // local (`record_partial_path` checks it is the name the
             // lowered partial takes the record under). `cached:` is a
             // rendering option Jbuilder strips from the locals with the
             // other two; for one record it only turns on fragment
-            // caching, so it renders the same partial. Any other
-            // option is a local for the partial, which the call has no
-            // way to pass, so that form stays Unknown.
+            // caching (Action View's collection renderer is the only
+            // one that reads it), so it renders the same partial. Ruby
+            // evaluates any of the three before the render, so one that
+            // is not a literal stays Unknown, as in the keyed form.
+            //
+            // Every other key is a local for the partial (`cache: true`
+            // is one: Jbuilder has no such option), unless Action View
+            // reads it as a render option too (`layout:`, `formats:`,
+            // `locals:`, …), which changes what is rendered and stays
+            // Unknown. A local with a literal value is kept by name: the
+            // call renders the same output while the partial never
+            // reads it, which `record_partial_resolve` checks. A value
+            // that is not a literal is evaluated by Ruby before the
+            // render, so that form stays Unknown.
             if block.is_none() && record_partial::is_record_position(path_arg) {
+                let mut locals = Vec::new();
                 let options_ok = match args.len() {
                     1 => true,
                     2 => extract_hash(&args[1]).is_some_and(|opts| {
-                        opts.iter().all(|(k, _)| {
-                            matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
-                                if matches!(value.as_str(), "partial" | "as" | "cached"))
+                        opts.iter().all(|(k, v)| match &*k.node {
+                            ExprNode::Lit { value: Literal::Sym { value } } => match value.as_str() {
+                                "partial" | "as" | "cached" => is_literal_value(v),
+                                key if ACTION_VIEW_RENDER_OPTIONS.contains(&key) => false,
+                                _ => {
+                                    let literal = matches!(
+                                        &*v.node,
+                                        ExprNode::Lit {
+                                            value: Literal::Nil
+                                                | Literal::Bool { .. }
+                                                | Literal::Int { .. }
+                                                | Literal::Float { .. }
+                                                | Literal::Str { .. }
+                                                | Literal::Sym { .. }
+                                        }
+                                    );
+                                    locals.push(value.clone());
+                                    literal
+                                }
+                            },
+                            _ => false,
                         })
                     }),
                     _ => false,
@@ -1978,7 +2082,7 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
                         },
                     },
                 };
-                return JbStmt::PartialRecord { arg: path_arg, as_name };
+                return JbStmt::PartialRecord { arg: path_arg, as_name, locals };
             }
             if block.is_some() {
                 return JbStmt::Unknown;
@@ -2024,6 +2128,38 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
             };
             JbStmt::Partial { partial_path, locals }
         }
+        // `json.set!(K, *rest, &blk)` with a literal key is
+        // `json.K(*rest, &blk)`: jbuilder 2.15.1 sends any method the
+        // builder does not define to `set!`, key first, so the two
+        // spellings take the same path with the same arguments. Only
+        // the generic key shapes below apply: `set!(:array!, x)` writes
+        // a key named `array!`, it is not `json.array!`.
+        //
+        // With no value, a block that names a parameter is given the
+        // builder itself (`_merge_block` yields `self`), and its calls
+        // go through that parameter rather than `json`, which the
+        // lowering cannot follow: Unknown, and so refused. A key that
+        // is not a literal is only known at run time: Unknown too.
+        "set!" => {
+            let Some((key, rest)) = args.split_first() else {
+                return JbStmt::Unknown;
+            };
+            let Some(key) = set_bang_key(key) else {
+                return JbStmt::Unknown;
+            };
+            if rest.is_empty() && block_names_a_parameter(block) {
+                return JbStmt::Unknown;
+            }
+            classify_key(&key, rest, block)
+        }
+        key => classify_key(key, args, block),
+    }
+}
+
+/// The generic `json.<key>(…)` shapes, where the method name (or the
+/// literal key of a `set!`) is the JSON key.
+fn classify_key<'a>(key: &str, args: &'a [Expr], block: &'a Option<Expr>) -> JbStmt<'a> {
+    match key {
         // `json.<key> do … end` — the value is a nested object. No
         // positional args; the block body is another object template.
         key if args.is_empty() && block.is_some() => {
@@ -2056,14 +2192,8 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
         // them, so the arm only takes them when they are literals: a
         // call there (`cache: raise("bad")`, `cache: key_for(x)`) has
         // effects the lowered array would lose.
-        //
-        // An explicit `json.set!(:key, col) { … }` is not this shape:
-        // its method name is not the key and its first argument is not
-        // the collection, so only its one-argument form reaches this
-        // arm, as before.
         key if !args.is_empty()
             && block.is_some()
-            && (key != "set!" || args.len() == 1)
             && args[1..].iter().all(is_literal_value)
             && !args
                 .get(1)
@@ -2089,13 +2219,29 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
         // `json.<key> obj, partial: P, as: V` — one pair rendered
         // through a partial. Shares its options with `array!` and takes
         // the same two out; what differs is that the positional is ONE
-        // record, not a collection, so it emits an object where
-        // `array!` emits an array.
+        // record, so it emits an object where `array!` emits an array.
+        // A positional that is a collection renders one partial per
+        // element (jbuilder 2.15.1 `_set_inline_partial`); the walker
+        // picks that by the positional's type.
+        //
+        // The call passes the partial only its record. Any other key is
+        // a local Jbuilder hands the partial, which the call has no way
+        // to pass, and `cached:` is evaluated before Jbuilder renders:
+        // the shape is taken only with `partial:`, `as:` and `cached:`,
+        // all literals, and is refused otherwise.
         key if args.len() == 2 => {
             let arg = &args[0];
             let Some(opts) = extract_hash(&args[1]) else {
                 return JbStmt::Unknown;
             };
+            let options_ok = opts.iter().all(|(k, v)| {
+                matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
+                    if matches!(value.as_str(), "partial" | "as" | "cached"))
+                    && is_literal_value(v)
+            });
+            if !options_ok {
+                return JbStmt::Unknown;
+            }
             let (Some(partial_path), Some(as_name)) = (
                 hash_get_string(opts, "partial"),
                 hash_get_symbol(opts, "as"),
@@ -2106,6 +2252,26 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
         }
         _ => JbStmt::Unknown,
     }
+}
+
+/// The key of `json.set!(key, …)` as Jbuilder writes it, when it is a
+/// Symbol or String literal whose text needs no escaping in JSON (the
+/// walker writes a key as it stands). `None` for anything else, which
+/// the caller refuses.
+fn set_bang_key(e: &Expr) -> Option<String> {
+    let key = match &*e.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+        _ => string_literal(e)?,
+    };
+    let plain = !key.is_empty()
+        && key.chars().all(|c| !c.is_control() && !matches!(c, '"' | '\\' | '<' | '>' | '&' | '\u{2028}' | '\u{2029}'));
+    plain.then_some(key)
+}
+
+/// Whether a block names any parameter (`{ |g| … }`, `{ |*a| … }`).
+fn block_names_a_parameter(block: &Option<Expr>) -> bool {
+    matches!(block.as_ref().map(|b| &*b.node), Some(ExprNode::Lambda { params, rest_param, extra_params, block_param, .. })
+        if !params.is_empty() || rest_param.is_some() || !extra_params.is_empty() || block_param.is_some())
 }
 
 /// The element variable and body of a one-parameter block,
@@ -2333,6 +2499,22 @@ fn is_json_receiver(recv: &Expr) -> bool {
             ..
         } if method.as_str() == "json" && args.is_empty()
     )
+}
+
+/// Whether a value of type `ty` is always a collection: an Array, a
+/// Relation or an association collection, never nil.
+fn is_collection_ty(ty: &crate::ty::Ty) -> bool {
+    use crate::ty::Ty;
+    match ty {
+        Ty::Array { .. } | Ty::Relation { .. } => true,
+        Ty::Class { id, .. } => id.0.as_str().ends_with("Relation") || id.0.as_str().ends_with("CollectionProxy"),
+        _ => false,
+    }
+}
+
+/// Whether `stmt` is a call on the template's builder, `json.<m>(…)`.
+fn is_json_send(stmt: &Expr) -> bool {
+    matches!(&*stmt.node, ExprNode::Send { recv: Some(recv), .. } if is_json_receiver(recv))
 }
 
 fn extract_hash<'a>(e: &'a Expr) -> Option<&'a [(Expr, Expr)]> {
@@ -2687,6 +2869,49 @@ fn record_partial_path(
     Ok(RecordBranches { branches, switched: record.switched })
 }
 
+/// The keys of a `render` options Hash that Action View reads itself
+/// (the renderers' options, and the lookup details `extract_details`
+/// takes): passed to `json.partial!` they are locals too, but they
+/// also change which template renders and how, so a call with one is
+/// not lowered as a plain record partial.
+const ACTION_VIEW_RENDER_OPTIONS: &[&str] = &[
+    "action", "assigns", "body", "collection", "content_type", "file", "formats", "handlers", "html",
+    "inline", "json", "layout", "locale", "locals", "object", "plain", "prefixes", "renderable",
+    "spacer_template", "status", "template", "type", "variant", "variants",
+];
+
+/// Names that let a template read a local it does not name: a
+/// partial mentioning one may read any local a call passes.
+const READS_ANY_LOCAL: &[&str] = &["local_assigns", "binding", "eval", "local_variables"];
+
+/// `record_partial_path`, and the check that each partial it renders
+/// never reads the literal `locals` the call passes besides the record.
+/// Rails binds them, the lowered call does not; a partial that never
+/// names them renders the same either way. One that names one (or
+/// reads its locals through `local_assigns`) depends on it, and the
+/// lowered partial has no parameter for it.
+fn record_partial_resolve(
+    arg: &Expr,
+    as_name: Option<&Symbol>,
+    locals: &[Symbol],
+    ctx: &Ctx,
+) -> Result<RecordBranches, Unresolved> {
+    let record = record_partial_path(arg, as_name, &ctx.resource_dir, &ctx.record_sites)?;
+    for (path, _, _) in &record.branches {
+        let (mod_path, method) = partial_target(path, &ctx.resource_dir, &ctx.partials.stems);
+        let names = ctx.partials.names.get(&partial_key(&mod_path, &method));
+        for local in locals {
+            let read = names.is_none_or(|names| {
+                names.contains(local) || READS_ANY_LOCAL.iter().any(|n| names.contains(&Symbol::from(*n)))
+            });
+            if read {
+                return Err(Unresolved::ReadsLocal { partial: path.clone(), local: local.clone() });
+            }
+        }
+    }
+    Ok(record)
+}
+
 /// The `(path, local, model)` of each model a record may be, and
 /// whether its class is switched on.
 struct RecordBranches {
@@ -2760,7 +2985,7 @@ fn emit_partial_call(partial_path: &str, locals: Vec<(Symbol, Expr)>, ctx: &Ctx)
 /// it a parameter there too. A partial this app has no jbuilder
 /// template for takes the values in call order.
 fn partial_call(partial_path: &str, locals: Vec<(Symbol, Expr)>, ctx: &Ctx) -> Expr {
-    let (mod_path, method) = partial_target(partial_path, &ctx.resource_dir);
+    let (mod_path, method) = partial_target(partial_path, &ctx.resource_dir, &ctx.partials.stems);
     let key = partial_key(&mod_path, &method);
     let args: Vec<Expr> = match ctx.partials.params.get(&key) {
         Some(params) => {
@@ -2821,10 +3046,16 @@ pub(crate) struct PartialParams {
     /// Each partial's ivar parameters: the ivar, then its parameter.
     ivars: crate::det::HashMap<(String, String), Vec<(Symbol, Symbol)>>,
     closures: crate::det::HashMap<Symbol, Vec<Symbol>>,
+    /// The stem each partial's key and `<stem>_json` method go by.
+    stems: PartialStems,
     /// The partials whose every render is a non-empty value: an object
     /// with a pair on every path, or an array. A render of any other
     /// partial may come out `{}`, which Jbuilder treats as BLANK.
     filled: crate::det::HashSet<(String, String)>,
+    /// Every name each partial mentions as a local or a receiverless
+    /// call (`collect_mentioned_names`): a local a call passes that is
+    /// not among them is never read.
+    names: crate::det::HashMap<(String, String), crate::det::HashSet<Symbol>>,
 }
 
 impl PartialParams {
@@ -2841,8 +3072,9 @@ impl PartialParams {
 fn partial_params(app: &App) -> PartialParams {
     let known_models: Vec<String> =
         app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
+    let stems = PartialStems::of(&app.views);
     let views: Vec<&View> = app.views.iter().filter(|v| v.jbuilder && !v.analysis_only).collect();
-    let edges = render_edges(&views, &app.models);
+    let edges = render_edges(&views, &app.models, &stems);
     let closures = ivar_closures(&views, &edges);
     let mut bound: crate::det::HashMap<(String, String), Vec<Symbol>> =
         crate::det::HashMap::default();
@@ -2857,11 +3089,11 @@ fn partial_params(app: &App) -> PartialParams {
             }
         }
     }
-    let mut out = PartialParams { closures, ..Default::default() };
+    let mut out = PartialParams { closures, stems, ..Default::default() };
     for v in &views {
         let (dir, base) = split_view_name(v.name.as_str());
         let Some(stem) = base.strip_prefix('_') else { continue };
-        let (mod_path, method) = partial_target(&format!("{dir}/{stem}"), dir);
+        let (mod_path, method) = partial_target(&format!("{dir}/{stem}"), dir, &out.stems);
         let key = partial_key(&mod_path, &method);
         let mut names = bound.get(&key).cloned().unwrap_or_default();
         let mut optional = Vec::new();
@@ -2905,6 +3137,9 @@ fn partial_params(app: &App) -> PartialParams {
         if template_always_filled(&flatten_cache_blocks(stmts_of(&v.body))) {
             out.filled.insert(key.clone());
         }
+        let mut mentioned = crate::det::HashSet::default();
+        collect_mentioned_names(&v.body, &mut mentioned);
+        out.names.insert(key.clone(), mentioned);
         out.params.insert(key.clone(), names);
         out.ivars.insert(key, ivars);
     }
@@ -2947,7 +3182,7 @@ fn sets_a_pair(stmts: &[&Expr]) -> bool {
 /// Whether a render of `partial_path` from this template is always a
 /// non-empty value (`PartialParams::filled`).
 fn partial_always_filled(partial_path: &str, ctx: &Ctx) -> bool {
-    let (mod_path, method) = partial_target(partial_path, &ctx.resource_dir);
+    let (mod_path, method) = partial_target(partial_path, &ctx.resource_dir, &ctx.partials.stems);
     ctx.partials.filled.contains(&partial_key(&mod_path, &method))
 }
 
@@ -2956,13 +3191,17 @@ fn partial_always_filled(partial_path: &str, ctx: &Ctx) -> bool {
 /// local names the render binds.
 type RenderSites = Vec<((String, String), Option<Symbol>, Vec<Symbol>)>;
 
-fn render_edges(views: &[&View], models: &[crate::dialect::Model]) -> Vec<(Symbol, RenderSites)> {
+fn render_edges(
+    views: &[&View],
+    models: &[crate::dialect::Model],
+    stems: &PartialStems,
+) -> Vec<(Symbol, RenderSites)> {
     let mut partial_views: crate::det::HashMap<(String, String), Symbol> =
         crate::det::HashMap::default();
     for v in views {
         let (dir, base) = split_view_name(v.name.as_str());
         if let Some(stem) = base.strip_prefix('_') {
-            let (mod_path, method) = partial_target(&format!("{dir}/{stem}"), dir);
+            let (mod_path, method) = partial_target(&format!("{dir}/{stem}"), dir, stems);
             partial_views.insert(partial_key(&mod_path, &method), v.name.clone());
         }
     }
@@ -2972,7 +3211,7 @@ fn render_edges(views: &[&View], models: &[crate::dialect::Model]) -> Vec<(Symbo
             let (dir, _) = split_view_name(v.name.as_str());
             let mut sites = Vec::new();
             let records = record_partial::record_sites(&v.body, models);
-            collect_partial_sites(&v.body, dir, &records, &mut sites);
+            collect_partial_sites(&v.body, dir, &records, stems, &mut sites);
             let sites = sites
                 .into_iter()
                 .map(|(key, names)| {
@@ -3082,8 +3321,9 @@ fn ivar_closures(
 /// partials it renders, so a partial is typed with its renderers'
 /// ivars as an ERB partial is.
 pub(crate) fn jbuilder_render_edges(app: &App) -> Vec<(Symbol, Vec<Symbol>)> {
+    let stems = PartialStems::of(&app.views);
     let views: Vec<&View> = app.views.iter().filter(|v| v.jbuilder && !v.analysis_only).collect();
-    render_edges(&views, &app.models)
+    render_edges(&views, &app.models, &stems)
         .into_iter()
         .map(|(name, sites)| (name, sites.into_iter().filter_map(|(_, t, _)| t).collect()))
         .collect()
@@ -3095,8 +3335,9 @@ pub(crate) fn jbuilder_ivar_closures(
     views: &[View],
     models: &[crate::dialect::Model],
 ) -> crate::det::HashMap<Symbol, Vec<Symbol>> {
+    let stems = PartialStems::of(views);
     let views: Vec<&View> = views.iter().filter(|v| v.jbuilder && !v.analysis_only).collect();
-    let edges = render_edges(&views, models);
+    let edges = render_edges(&views, models, &stems);
     ivar_closures(&views, &edges)
 }
 
@@ -3122,6 +3363,54 @@ fn collect_local_names(e: &Expr, out: &mut crate::det::HashSet<Symbol>) {
     e.node.for_each_child(&mut |c| collect_local_names(c, out));
 }
 
+/// Every name `e` reads as a local or calls without a receiver, with
+/// or without arguments: a local of that name would be read, or would
+/// shadow the method, at any of them. A `READS_ANY_LOCAL` name called
+/// on `self` (`self.binding`) counts too: it reads the same locals.
+/// So does one reached by dispatch, with no receiver or on `self`:
+/// `send(:binding)`, `public_send`/`__send__` alike, `method(:binding)`
+/// (a Send, or a `MethodRef` as a block argument `&method(:binding)`),
+/// and a `send` or `method` of a name that is not a literal, which may
+/// be any of them.
+fn collect_mentioned_names(e: &Expr, out: &mut crate::det::HashSet<Symbol>) {
+    match &*e.node {
+        ExprNode::Var { name, .. } | ExprNode::Send { recv: None, method: name, .. } => {
+            out.insert(name.clone());
+        }
+        ExprNode::Send { recv: Some(recv), method, .. }
+            if matches!(&*recv.node, ExprNode::SelfRef) && READS_ANY_LOCAL.contains(&method.as_str()) =>
+        {
+            out.insert(method.clone());
+        }
+        ExprNode::MethodRef { recv, name }
+            if recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
+                && READS_ANY_LOCAL.contains(&name.as_str()) =>
+        {
+            out.insert(name.clone());
+        }
+        _ => {}
+    }
+    if let ExprNode::Send { recv, method, args, .. } = &*e.node {
+        let on_self = recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef));
+        let dispatch = matches!(method.as_str(), "send" | "public_send" | "__send__");
+        if on_self && (dispatch || method.as_str() == "method") {
+            let name = match args.first().map(|a| &*a.node) {
+                Some(ExprNode::Lit { value: Literal::Sym { value } }) => Some(value.as_str()),
+                Some(ExprNode::Lit { value: Literal::Str { value } }) => Some(value.as_str()),
+                Some(ExprNode::Lit { .. }) => None,
+                _ => {
+                    out.extend(READS_ANY_LOCAL.iter().map(|n| Symbol::from(*n)));
+                    None
+                }
+            };
+            if let Some(name) = name.filter(|n| READS_ANY_LOCAL.contains(n)) {
+                out.insert(Symbol::from(name));
+            }
+        }
+    }
+    e.node.for_each_child(&mut |c| collect_mentioned_names(c, out));
+}
+
 /// Every partial render in a jbuilder template, with the local names
 /// it binds. Calls with a block are skipped (no partial call has one)
 /// and walked into, so the collection blocks' own partial calls count.
@@ -3129,6 +3418,7 @@ fn collect_partial_sites(
     e: &Expr,
     dir: &str,
     records: &record_partial::RecordSites,
+    stems: &PartialStems,
     out: &mut Vec<((String, String), Vec<Symbol>)>,
 ) {
     if let ExprNode::Send { recv: Some(recv), block: None, .. } = &*e.node {
@@ -3139,9 +3429,11 @@ fn collect_partial_sites(
                 }
                 JbStmt::ArrayPartial { partial_path, item_var, .. } => Some((partial_path, vec![item_var])),
                 JbStmt::PairPartial { partial_path, as_name, .. } => Some((partial_path, vec![as_name])),
-                JbStmt::PartialRecord { arg, as_name } => {
+                // Only the record is bound: the literal locals are passed
+                // only to partials that never read them.
+                JbStmt::PartialRecord { arg, as_name, .. } => {
                     for (path, local, _) in record_partial_path(arg, as_name.as_ref(), dir, records).map(|r| r.branches).unwrap_or_default() {
-                        let (mod_path, method) = partial_target(&path, dir);
+                        let (mod_path, method) = partial_target(&path, dir, stems);
                         out.push((partial_key(&mod_path, &method), vec![local]));
                     }
                     None
@@ -3149,12 +3441,12 @@ fn collect_partial_sites(
                 _ => None,
             };
             if let Some((path, names)) = site {
-                let (mod_path, method) = partial_target(&path, dir);
+                let (mod_path, method) = partial_target(&path, dir, stems);
                 out.push((partial_key(&mod_path, &method), names));
             }
         }
     }
-    e.node.for_each_child(&mut |c| collect_partial_sites(c, dir, records, out));
+    e.node.for_each_child(&mut |c| collect_partial_sites(c, dir, records, stems, out));
 }
 
 /// The `local_assigns[:x]` keys a template reads, in first-seen order.
@@ -3177,12 +3469,12 @@ fn partial_key(mod_path: &[Symbol], method: &str) -> (String, String) {
 /// Resolve a Jbuilder partial path to (module-path, base-method-name).
 /// `"articles/article"` → (["Views","Articles"], "article")
 /// `"article"` (no slash) → (["Views","<current-dir-camel>"], "article")
-fn partial_target(path: &str, resource_dir: &str) -> (Vec<Symbol>, String) {
+/// The base is the stem `stems` gives the partial.
+fn partial_target(path: &str, resource_dir: &str, stems: &PartialStems) -> (Vec<Symbol>, String) {
     let (dir, base) = match path.rsplit_once('/') {
         Some((d, b)) => (d.to_string(), b.to_string()),
         None => (resource_dir.to_string(), path.to_string()),
     };
-    let base = base.trim_start_matches('_').to_string();
     // `camelize_path`, not `camelize`: a NESTED partial dir carries a
     // slash (`autocompletable/users`) and the module it names is
     // `Views::Autocompletable::Users`. The plain camelizer left the
@@ -3196,6 +3488,7 @@ fn partial_target(path: &str, resource_dir: &str) -> (Vec<Symbol>, String) {
     let module_path: Vec<Symbol> = std::iter::once(Symbol::from("Views"))
         .chain(module_camel.split("::").map(Symbol::from))
         .collect();
+    let base = stems.stem(&module_camel, &base);
     (module_path, base)
 }
 
@@ -3393,7 +3686,11 @@ fn rewrite_route_helpers(e: &Expr, ctx: &Ctx) -> Expr {
         },
         other => other.clone(),
     };
-    Expr::new(e.span, new_node)
+    let mut out = Expr::new(e.span, new_node);
+    // The same send, rebuilt: keep a grounded `iso8601`'s flag, as
+    // `rewrite_ivars_to_locals` does.
+    out.decisions |= e.decisions & crate::expr::GROUNDED_TIME_FORMAT;
+    out
 }
 
 /// Route-helper positional args want `record.id` instead of bare
@@ -3842,7 +4139,13 @@ fn rewrite_ivars_to_locals(expr: &Expr) -> Expr {
         }
         other => other.clone(),
     };
-    Expr::new(expr.span, new_node)
+    let mut out = Expr::new(expr.span, new_node);
+    // A rebuilt send keeps the lowering's decisions about it: a grounded
+    // `iso8601` (`expr::GROUNDED_TIME_FORMAT`) whose receiver was an
+    // ivar is now a parameter the emitter cannot type as a time, and
+    // the flag is all that tells it to print `iso8601` again.
+    out.decisions |= expr.decisions & crate::expr::GROUNDED_TIME_FORMAT;
+    out
 }
 
 fn rewrite_lvalue(lv: &LValue) -> LValue {

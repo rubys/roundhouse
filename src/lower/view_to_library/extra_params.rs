@@ -43,6 +43,12 @@ pub(super) fn rewritten_extras(
 /// its body spells or binds, and none it is handed (its `record`, the
 /// locals `keys` its callers pass, its `local_assigns` keys).
 ///
+/// A view reading `local_assigns[:notice]` moves its flash the same way,
+/// though no ivar takes the name: that read is the render's `notice:`
+/// local or nil, and a bare `notice` is that local or else the flash, so
+/// the one param could not hold both (a call site binds the moved flash
+/// from the `notice:` local too, `local_key_of`).
+///
 /// Only the flash reads move, a bare `notice` call: a local a block or
 /// an assignment binds reads as a `Var` and keeps its name. A view handed
 /// a `notice` local reads that, not the flash, so it keeps its names, as
@@ -97,9 +103,18 @@ pub(super) fn flash_locals<'a>(
         }
         e.node.for_each_child_mut(&mut |c| rename(c, from, to));
     }
+    fn local_assigns_keys(e: &Expr, out: &mut HashSet<String>) {
+        if let Some(k) = local_assigns_key(e) {
+            out.insert(k);
+        }
+        e.node.for_each_child(&mut |c| local_assigns_keys(c, out));
+    }
     let mut flash = ["notice".to_string(), "alert".to_string()];
     let shadowed = |n: &String| ivar_locals.values().any(|l| l == n);
-    if view.strict_locals.is_some() || !flash.iter().any(shadowed) {
+    let mut read_as_local: HashSet<String> = HashSet::default();
+    local_assigns_keys(&view.body, &mut read_as_local);
+    let split = |n: &String| n != record && !shadowed(n) && read_as_local.contains(n);
+    if view.strict_locals.is_some() || !flash.iter().any(|n| shadowed(n) || split(n)) {
         return (Cow::Borrowed(&view.body), flash);
     }
     let mut handed: HashSet<String> = std::iter::once(record)
@@ -111,7 +126,7 @@ pub(super) fn flash_locals<'a>(
     taken.extend(handed.iter().cloned());
     let mut body = Cow::Borrowed(&view.body);
     for n in &mut flash {
-        if !shadowed(n) || handed.contains(n.as_str()) {
+        if !split(n) && (!shadowed(n) || handed.contains(n.as_str())) {
             continue;
         }
         let mut local = format!("{n}_");
@@ -330,6 +345,40 @@ pub(crate) fn is_flash_slot_name(name: &str, base: &str) -> bool {
         || (name.starts_with(base)
             && name[base.len()..].chars().all(|c| c == '_')
             && !name[base.len()..].is_empty())
+}
+
+/// A view's flash params among its `extras`: the `notice` one, then the
+/// `alert` one. `collect_extra_params` seeds the pair at the front, so
+/// only a leading extra spelling the slot (or its `flash_locals` rename)
+/// is the flash; a `local_assigns[:notice_]` the body reads further on
+/// is an ordinary local, whatever its name.
+pub(crate) fn flash_params(extras: &[String]) -> [Option<&str>; 2] {
+    let mut out = [None, None];
+    let mut at = 0;
+    for (slot, base) in ["notice", "alert"].into_iter().enumerate() {
+        if let Some(name) = extras.get(at).filter(|n| is_flash_slot_name(n, base)) {
+            out[slot] = Some(name.as_str());
+            at += 1;
+        }
+    }
+    out
+}
+
+/// The flash slot (`notice` or `alert`) a partial's extra `name` is, if
+/// it is one of its flash params (`flash_params`).
+pub(crate) fn flash_slot_of(extras: &[String], name: &str) -> Option<&'static str> {
+    ["notice", "alert"]
+        .into_iter()
+        .zip(flash_params(extras))
+        .find_map(|(slot, param)| (param == Some(name)).then_some(slot))
+}
+
+/// The `locals:` key a render binds the partial's extra `name` from: its
+/// own, or the slot's for a flash param (`notice` for `notice_`). A bare
+/// `notice` reads the render's `notice:` local before the flash, however
+/// `flash_locals` spelled the param it reads.
+pub(crate) fn local_key_of<'a>(extras: &[String], name: &'a str) -> &'a str {
+    flash_slot_of(extras, name).unwrap_or(name)
 }
 
 /// The caller's flash param for slot `base` among `in_scope` names.

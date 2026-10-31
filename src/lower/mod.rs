@@ -194,6 +194,7 @@ pub mod params_permit;
 pub mod normalizes;
 pub mod relation_select_block;
 pub mod send_dispatch;
+pub mod record_slice;
 pub mod relation_counted_terminal;
 pub(crate) mod secure_password;
 pub mod attached;
@@ -220,6 +221,7 @@ pub mod typing;
 pub mod validations;
 pub mod view;
 pub mod view_buffer_passing;
+pub mod view_instrumentation;
 pub mod tag_block_passing;
 pub mod lazy_model_state;
 pub(crate) mod eager_load;
@@ -703,6 +705,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // outside the module names `@@x`. Consumes ingest's mattr expansion,
     // which no pass rewrites; no constraints.
     ("module_mattr_storage", &[]),
+    // `record.slice(:a, :b)` on a typed model → a Hash of its typed
+    // readers. Reads the analyzer's receiver types; nothing keys on it.
+    ("record_slice", &[]),
     ("send_static_dispatch", &[]),
     // Grounds the plural duration-unit calls that send_static_dispatch
     // synthesizes into case arms, so it must observe that pass's output.
@@ -792,6 +797,14 @@ fn post_analyze_pass_order_is_sound() -> bool {
 pub fn apply_post_analyze_lowerings(
     app: &mut crate::app::App,
     registry: &crate::det::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
+) -> Vec<crate::diagnostic::Diagnostic> {
+    apply_post_analyze_lowerings_for(app, registry, crate::build_target::BuildTarget::Ruby)
+}
+
+pub(crate) fn apply_post_analyze_lowerings_for(
+    app: &mut crate::app::App,
+    registry: &crate::det::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
+    target: crate::build_target::BuildTarget,
 ) -> Vec<crate::diagnostic::Diagnostic> {
     // Templates ingested for the analyzer only (`View::analysis_only`)
     // leave here: the type checker and the IDE have seen them; no
@@ -1077,6 +1090,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("transaction_after_commit");
     module_mattr_storage::apply_module_mattr_storage(app);
     ran!("module_mattr_storage");
+    diags.extend(record_slice::apply_record_slice_lowering(app, registry));
+    ran!("record_slice");
     diags.extend(crate::timings::phase("post-analyze: send_dispatch", || {
         send_dispatch::apply_send_static_dispatch(app, registry)
     }));
@@ -1085,7 +1100,7 @@ pub fn apply_post_analyze_lowerings(
     // entry's runs_after). An all-duration-unit name set dispatches
     // through case arms synthesized as plural unit calls that count on
     // this grounding (`send_dispatch::duration_plural`).
-    duration::apply_duration_lowering(app);
+    duration::apply_duration_lowering_for(app, target);
     ran!("duration");
     relation_counted_terminal::apply_relation_counted_terminals(app);
     ran!("relation_counted_terminal");
@@ -1691,7 +1706,7 @@ pub use controller_to_library::{
 pub use model_to_library::{
     class_info_from_library_class, lower_model_to_library_class, lower_models_to_library_classes,
     lower_models_to_library_classes_with_params, lower_models_with_registry,
-    lower_models_with_registry_and_params,
+    lower_models_with_registry_and_params, lower_models_with_registry_params_and_views,
 };
 pub use fixture_to_library::{lower_fixtures_to_library_classes, rewrite_fixture_calls};
 pub use importmap_to_library::lower_importmap_to_library_functions;

@@ -299,9 +299,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // of the controller-derived metadata.
     let params_specs =
         crate::lower::controller_to_library::params::collect_specs(&app.controllers);
-    let (mut model_lcs, model_registry) = crate::lower::lower_models_with_registry_and_params(
+    let (mut model_lcs, model_registry) = crate::lower::lower_models_with_registry_params_and_views(
         &app.models,
         &app.schema,
+        &app.views,
         view_extras,
         &params_specs,
     );
@@ -359,6 +360,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             &app.models,
             test_extras,
             &crate::lower::routes::helper_id_segments(app),
+            &crate::lower::routes::direct_helper_names(app),
         )
     };
     let mut test_lcs: Vec<crate::dialect::LibraryClass> = test_lowered

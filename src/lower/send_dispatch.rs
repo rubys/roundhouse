@@ -636,7 +636,7 @@ fn duration_plural(name: &str) -> Option<&'static str> {
 /// chain, exactly the walk analyze's dispatch performs. `None` when the
 /// receiver isn't a registered class or the method's return is still an
 /// open inference variable.
-fn method_return_via_registry(
+pub(crate) fn method_return_via_registry(
     registry: &HashMap<ClassId, ClassInfo>,
     class: &ClassId,
     name: &str,

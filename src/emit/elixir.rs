@@ -306,9 +306,10 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
             expr::register_field_names(&class_name, &field_names);
         }
         let (model_lcs, model_registry) =
-            crate::lower::model_to_library::lower_models_with_registry_and_params(
+            crate::lower::model_to_library::lower_models_with_registry_params_and_views(
                 &app.models,
                 &app.schema,
+                &app.views,
                 vec![],
                 &specs,
             );

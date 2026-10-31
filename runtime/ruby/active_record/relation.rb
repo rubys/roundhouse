@@ -110,6 +110,11 @@ module ActiveRecord
       @hash_columns = []
       @from = nil
       @ctes = []
+      # `readonly`: every record this relation loads is read-only.
+      @readonly = false
+      # `lock`'s clause (`FOR UPDATE`), after the LIMIT/OFFSET; "" for
+      # none, and on SQLite, which takes none (connection.rb's `lock`).
+      @lock_clause = ""
       @shared_lists = false
       @friendly = false
       apply_default_scope! if scoped
@@ -436,6 +441,68 @@ module ActiveRecord
       self
     end
 
+    # `rel.and(other)` — Rails' Relation#and: the intersection, this
+    # relation's WHEREs and HAVINGs and the other's together (a condition
+    # both hold is kept once, as Rails' `where_clause |=` keeps it).
+    # Either side matching nothing leaves nothing. The rest of the two
+    # queries must agree, or it raises ArgumentError, as Rails does.
+    def and(other)
+      spawn.and!(other)
+    end
+
+    def and!(other)
+      incompatible = structurally_incompatible_with(other)
+      unless incompatible.empty?
+        raise ArgumentError, "Relation passed to #and must be structurally compatible. Incompatible values: [#{incompatible.map { |name| ":#{name}" }.join(", ")}]"
+      end
+      own_lists
+      unload_records
+      other.where_clauses.each do |w|
+        unless @wheres.include?(w)
+          push_where(w)
+          @opaque_wheres = true
+        end
+      end
+      other.having_clauses.each { |h| @havings << h unless @havings.include?(h) }
+      mark_null! if other.null_relation?
+      @none = true if other.explicit_none?
+      self
+    end
+
+    # Rails' `structurally_incompatible_values_for`: the query parts
+    # other than the conditions that differ between the two relations.
+    # A list part the other relation never set (`joins`, `order`, …)
+    # does not count, as Rails relaxes it.
+    def structurally_incompatible_with(other)
+      theirs = other.structural_values
+      out = []
+      structural_values.each_with_index do |mine, i|
+        their = theirs[i]
+        next if mine[1] == their[1]
+        next if mine[2] == "list" && their[1] == ""
+        out << mine[0]
+      end
+      out
+    end
+
+    # Each structural part as [name, its text, "list" for a list part].
+    def structural_values
+      [
+        ["joins", @joins.join("\n"), "list"],
+        ["order", @orders.join("\n"), "list"],
+        ["group", @groups.join("\n"), "list"],
+        ["includes", @includes.map { |name| name.to_s }.join("\n"), "list"],
+        ["with", @ctes.join("\n"), "list"],
+        ["select", @select_sql.to_s, "list"],
+        ["distinct", @distinct.to_s, ""],
+        ["limit", @limit.to_s, ""],
+        ["offset", @offset.to_s, ""],
+        ["from", @from.to_s, ""],
+        ["lock", @lock_clause, ""],
+        ["readonly", @readonly.to_s, ""]
+      ]
+    end
+
     # Answers whether it actually PUSHED a clause — a nil or empty
     # condition pushes none. `find_by` is the caller that needs the
     # answer: it borrows a predicate and gives it back, so it has to
@@ -502,6 +569,32 @@ module ActiveRecord
     # those conditions seeded. A `none` stays.
     def unscope_where
       spawn.unscope_where!
+    end
+
+    # Rails' `unscope(:order)`, `unscope(:limit, :offset)`: each named
+    # part of the query goes (`:where` as `unscope_where`). The lowering
+    # rewrites a literal list of these to this call
+    # (`lower::unscope_check`); any other part is refused there.
+    def unscope_parts(parts)
+      rel = spawn
+      parts.each { |part| rel.unscope_part!(part) }
+      rel
+    end
+
+    def unscope_part!(part)
+      if part == :where
+        unscope_where!
+      elsif part == :order
+        own_lists
+        clear_ordering
+      elsif part == :limit
+        limit!(nil)
+      elsif part == :offset
+        offset!(nil)
+      else
+        raise ArgumentError, "Called unscope() with invalid unscoping argument ':#{part}'"
+      end
+      self
     end
 
     def unscope_where!
@@ -1192,6 +1285,10 @@ module ActiveRecord
       @wheres
     end
 
+    def having_clauses
+      @havings
+    end
+
     # `rel.arel` — the relation reified as its SELECT text, for the
     # `.arel.exists` correlated-subquery idiom
     # (`where.not(HiddenStory.….arel.exists)`). Captures the SQL at the
@@ -1544,7 +1641,26 @@ module ActiveRecord
       if @includes.length > 0 && !@skip_preloading && records.length > 0
         @model.preload_associations(records, @includes.dup)
       end
+      records.each { |record| record.readonly! } if @readonly
       records
+    end
+
+    # Rails' `readonly`: the records it loads raise ReadOnlyRecord on
+    # save or destroy; `readonly(false)` lifts it.
+    def readonly(value = true)
+      rel = unloaded_spawn
+      rel.readonly_value!(value)
+    end
+
+    def readonly_value!(value)
+      @readonly = value == true
+      self
+    end
+
+    def lock_clause!(clause)
+      unload_records
+      @lock_clause = clause
+      self
     end
 
     # Implicit array conversion — Rails delegates `to_ary` to the
@@ -2847,10 +2963,13 @@ module ActiveRecord
       if !@limit.nil?
         sql = "#{sql} LIMIT #{@limit}"
       elsif !@offset.nil?
-        # SQLite needs LIMIT even for offset-only pagination.
-        sql = "#{sql} LIMIT -1"
+        # SQLite needs LIMIT even for offset-only pagination, and
+        # PostgreSQL refuses SQLite's `LIMIT -1`: the largest bigint is
+        # no limit to both.
+        sql = "#{sql} LIMIT 9223372036854775807"
       end
       sql = "#{sql} OFFSET #{@offset}" unless @offset.nil?
+      sql = "#{sql} #{@lock_clause}" unless @lock_clause == ""
       sql
     end
 
@@ -3053,7 +3172,7 @@ module ActiveRecord
         # scalar elements escape as-is. An empty list is Rails' none
         # predicate (`1=0`): never `IN ()`. Pure — NullRelation is set by
         # `mark_null!` from `none` / lasting positive `where` only.
-        ids = val.map { |x| x.is_a?(Base) ? x._primary_key_value : x }
+        ids = val.map { |x| x.is_a?(Base) ? x._primary_key_value : column_bound_value(col, x) }
         if ids.empty?
           "1=0"
         elsif ids.any? { |x| x.nil? || x.is_a?(Range) || x.is_a?(Bounds) }
@@ -3075,8 +3194,25 @@ module ActiveRecord
         # be a record OR a collection, and only the runtime knows.
         "#{qcol} = #{bind_literal(val._primary_key_value)}"
       else
-        "#{qcol} = #{bind_literal(val)}"
+        "#{qcol} = #{bind_literal(column_bound_value(col, val))}"
       end
+    end
+
+    # A hash condition's value as Rails casts it through the column's
+    # type: a boolean against an integer column (`is_not_deleted
+    # smallint`, `where(is_not_deleted: true)`) is 1 or 0, which
+    # PostgreSQL's integer compares with and its TRUE does not. Every
+    # other value, and a column of another table, binds as given. The
+    # boolean test comes first: `schema_column_types` builds its hash on
+    # each call, and every `where(id: ids)` element passes through here.
+    def column_bound_value(col, val)
+      return 1 if val == true && integer_column?(col)
+      return 0 if val == false && integer_column?(col)
+      val
+    end
+
+    def integer_column?(col)
+      !col.include?(".") && @model.schema_column_types[col.to_sym] == :integer
     end
 
     # Rails' Range condition: `where(score: 5..9)` is `>=` and `<=`, an
@@ -3149,7 +3285,7 @@ module ActiveRecord
       index = 0
       while index < parts.length - 1
         if index < args.length
-          result = result + ActiveRecord.adapter.escape_value(args[index])
+          result = result + bound_text(args[index])
         else
           result = result + "?"
         end
@@ -3182,7 +3318,7 @@ module ActiveRecord
           key = name.to_sym
           if binds.key?(key)
             value = binds[key]
-            out = out + (value.is_a?(Array) ? escape_list(value) : ActiveRecord.adapter.escape_value(value))
+            out = out + (value.is_a?(Array) ? escape_list(value) : bound_text(value))
             i = j
             next
           end
@@ -3191,6 +3327,14 @@ module ActiveRecord
         i += 1
       end
       out
+    end
+
+    # One bind's SQL text, as Rails' `replace_bind_variable` writes it: a
+    # Relation is its own SELECT (`where("tier IN (?)", Tier.where(…)
+    # .select(:name))`), any other value its escaped literal.
+    def bound_text(value)
+      return value.to_sql if value.is_a?(Relation)
+      ActiveRecord.adapter.escape_value(value)
     end
 
     def named_bind_start?(ch)

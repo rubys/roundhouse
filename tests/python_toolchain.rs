@@ -19,6 +19,9 @@ mod emit_and_run;
 #[path = "support/i18n_locales_app.rs"]
 #[allow(dead_code)]
 mod i18n_locales_app;
+#[path = "support/record_slice_app.rs"]
+#[allow(dead_code)]
+mod record_slice_app;
 
 use roundhouse::emit::python;
 use roundhouse::ingest::ingest_app;
@@ -153,4 +156,22 @@ print("locales passed")
     let output = Command::new("python3").arg("probe.py").current_dir(&emitted).output().expect("run python3");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success() && stdout.contains("locales passed"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
+#[ignore]
+fn real_blog_record_slice_runs() {
+    // The answers `emit_and_run::record_slice` checks on CRuby.
+    let (emitted, errors) = record_slice_app::probe_app().emit(roundhouse::project::BuildTarget::Python);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("probe.py"), r#"from app.v2.models import Article
+
+got = Article.sliced()
+if got != ["2", "Sliced", "7", "1", "Other", "3", "Bound", "5", "4", "A comment body."]:
+    raise AssertionError(f"sliced: {got!r}")
+print("slice passed")
+"#).expect("write probe");
+    let output = Command::new("python3").arg("probe.py").current_dir(&emitted).output().expect("run python3");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("slice passed"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
 }

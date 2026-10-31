@@ -244,6 +244,12 @@ impl Overlay {
         (Emitted(dir), errors)
     }
 
+    pub fn emit_target_neutral(self, target: BuildTarget) -> (Emitted, Vec<String>) {
+        let (dir, _app, errors) = self.emit_app_tree_with_lowering(target, false);
+        let errors = errors.into_iter().map(|d| format!("{:?}: {}", d.span, d.message)).collect();
+        (Emitted(dir), errors)
+    }
+
     /// Emit and retain structured errors plus the source catalogue that
     /// resolves each diagnostic's `FileId`. Tests that make provenance
     /// claims should inspect that mapping rather than grep `Debug` spans.
@@ -325,11 +331,19 @@ impl Overlay {
     }
 
     fn emit_app_tree(self, target: BuildTarget) -> (PathBuf, roundhouse::App, Vec<Diagnostic>) {
+        self.emit_app_tree_with_lowering(target, true)
+    }
+
+    fn emit_app_tree_with_lowering(self, target: BuildTarget, target_aware: bool) -> (PathBuf, roundhouse::App, Vec<Diagnostic>) {
         let (scratch, source) = self.materialize();
         // As the CLI does: an error ingest reports gates the emit too.
         let (app, ingest_diags) = roundhouse::ingest::prism::scope(|| ingest_app(&source));
         let mut app = app.expect("ingest the overlaid fixture");
-        let lower_diags = roundhouse::session::analyze_and_lower_for(&mut app, target);
+        let lower_diags = if target_aware {
+            roundhouse::session::analyze_and_lower_for(&mut app, target)
+        } else {
+            roundhouse::session::analyze_and_lower(&mut app)
+        };
         let mut errors: Vec<_> = ingest_diags
             .into_iter()
             .chain(diagnose(&app))

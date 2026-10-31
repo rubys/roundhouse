@@ -5,7 +5,7 @@
 # The same `module Db` contract as runtime/spinel/db.rb (SQLite over
 # libsqlite3 FFI) and its gem-backed siblings, typed in
 # runtime/ruby/db.rbs. Under Spinel it runs on the spinel-pg driver
-# (https://github.com/rubys/spinel-pg): a pure spinel-Ruby PostgreSQL
+# (https://github.com/roundhouse-rb/spinel-pg): a pure spinel-Ruby PostgreSQL
 # client over Spinel's own sp_net sockets, so the program links no
 # libpq. A raw compile finds it with `spinel -I <spinel-pg checkout>`;
 # a spin package lists `pg` in `[dependencies]`. Under CRuby it runs on

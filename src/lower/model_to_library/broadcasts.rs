@@ -18,12 +18,17 @@
 use crate::dialect::{Association, MethodDef, Model, ModelBodyItem};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
+use crate::lower::view_to_library::PartialStems;
 use crate::span::Span;
 
 use super::markers::fold_into_or_push;
 use super::{lit_sym, nil_lit, self_ref, var_ref};
 
-pub(super) fn push_broadcasts_methods(methods: &mut Vec<MethodDef>, model: &Model) {
+pub(super) fn push_broadcasts_methods(
+    methods: &mut Vec<MethodDef>,
+    model: &Model,
+    stems: &PartialStems,
+) {
     for item in &model.body {
         let ModelBodyItem::Unknown { expr, .. } = item else { continue };
         let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
@@ -69,7 +74,7 @@ pub(super) fn push_broadcasts_methods(methods: &mut Vec<MethodDef>, model: &Mode
             .map(|t| rewrite_lambda_param(&t, self_param.as_ref()))
             .unwrap_or_else(|| stream_expr.clone());
         let canonical_target = canonical_record_target(&model.name);
-        let html_partial = views_render_self(&model.name);
+        let html_partial = views_render_self(&model.name, stems);
 
         let mut create_call = broadcasts_call(
             create_action,
@@ -258,11 +263,12 @@ fn dom_identity_call(recv: Option<Expr>, name: &str) -> Expr {
 }
 
 /// `Views::<Plural>.<singular>(self)` — the partial-render call used
-/// for the `html:` payload on create/update broadcasts.
-fn views_render_self(class_name: &ClassId) -> Expr {
+/// for the `html:` payload on create/update broadcasts. The method is
+/// the one `stems` gives `<plural>/_<singular>`.
+fn views_render_self(class_name: &ClassId, stems: &PartialStems) -> Expr {
     let plural = crate::naming::pluralize_snake(class_name.0.as_str());
     let plural_camel = camelize(&plural);
-    let singular = crate::naming::snake_case(class_name.0.as_str());
+    let singular = stems.method(&plural, &crate::naming::snake_case(class_name.0.as_str()));
     Expr::new(
         Span::synthetic(),
         ExprNode::Send {
@@ -272,7 +278,7 @@ fn views_render_self(class_name: &ClassId) -> Expr {
                     path: vec![Symbol::from("Views"), Symbol::from(plural_camel)],
                 },
             )),
-            method: Symbol::from(singular),
+            method: singular,
             args: vec![self_ref()],
             block: None,
             parenthesized: true,
@@ -359,8 +365,12 @@ fn rewrite_lambda_param(e: &Expr, param: Option<&Symbol>) -> Expr {
 ///
 /// Other shapes (non-belongs_to receiver, unknown method) pass
 /// through unchanged so the emitter still produces parseable Ruby.
-pub(crate) fn rewrite_rails_broadcast_calls(expr: Expr, model: &Model) -> Expr {
-    walk(expr, model)
+pub(crate) fn rewrite_rails_broadcast_calls(
+    expr: Expr,
+    model: &Model,
+    stems: &PartialStems,
+) -> Expr {
+    walk(expr, model, stems)
 }
 
 /// `Turbo::StreamsChannel.broadcast_update_to(stream, target: …,
@@ -445,38 +455,38 @@ fn try_rewrite_channel_call(expr: &Expr) -> Option<Expr> {
     Some(call)
 }
 
-fn walk(e: Expr, model: &Model) -> Expr {
+fn walk(e: Expr, model: &Model, stems: &PartialStems) -> Expr {
     // `<call> rescue nil` where `<call>` is a recognized broadcast →
     // unwrap the rescue (the spinel shape's nil-check supersedes).
     if let ExprNode::RescueModifier { expr: inner, fallback } = &*e.node {
         if matches!(&*fallback.node, ExprNode::Lit { value: Literal::Nil }) {
-            if let Some(rewritten) = try_rewrite_call(inner, model) {
+            if let Some(rewritten) = try_rewrite_call(inner, model, stems) {
                 return rewritten;
             }
         }
     }
-    if let Some(rewritten) = try_rewrite_call(&e, model) {
+    if let Some(rewritten) = try_rewrite_call(&e, model, stems) {
         return rewritten;
     }
     let new_node = match &*e.node {
         ExprNode::Seq { exprs } => ExprNode::Seq {
-            exprs: exprs.iter().map(|x| walk(x.clone(), model)).collect(),
+            exprs: exprs.iter().map(|x| walk(x.clone(), model, stems)).collect(),
         },
         ExprNode::If { cond, then_branch, else_branch } => ExprNode::If {
-            cond: walk(cond.clone(), model),
-            then_branch: walk(then_branch.clone(), model),
-            else_branch: walk(else_branch.clone(), model),
+            cond: walk(cond.clone(), model, stems),
+            then_branch: walk(then_branch.clone(), model, stems),
+            else_branch: walk(else_branch.clone(), model, stems),
         },
         ExprNode::RescueModifier { expr, fallback } => ExprNode::RescueModifier {
-            expr: walk(expr.clone(), model),
-            fallback: walk(fallback.clone(), model),
+            expr: walk(expr.clone(), model, stems),
+            fallback: walk(fallback.clone(), model, stems),
         },
         _ => return e,
     };
     Expr::new(e.span, new_node)
 }
 
-fn try_rewrite_call(expr: &Expr, model: &Model) -> Option<Expr> {
+fn try_rewrite_call(expr: &Expr, model: &Model, stems: &PartialStems) -> Option<Expr> {
     let ExprNode::Send { recv, method, args, block: None, .. } = &*expr.node else {
         return None;
     };
@@ -486,7 +496,7 @@ fn try_rewrite_call(expr: &Expr, model: &Model) -> Option<Expr> {
     // (campfire writes its broadcasts that way, in a concern). The
     // association form below is the one a `after_*_commit` block uses.
     let Some(recv) = recv else {
-        return rewrite_self_broadcast(action, args, model, expr.span);
+        return rewrite_self_broadcast(action, args, model, stems, expr.span);
     };
     let ExprNode::Send {
         recv: None,
@@ -511,6 +521,7 @@ fn try_rewrite_call(expr: &Expr, model: &Model) -> Option<Expr> {
     let singular = crate::naming::snake_case(class_name);
     let plural = crate::naming::pluralize_snake(class_name);
     let plural_camel = camelize(&plural);
+    let partial_method = stems.method(&plural, &singular);
 
     let parent_sym = Symbol::from("parent");
     let assign = Expr::new(
@@ -578,7 +589,7 @@ fn try_rewrite_call(expr: &Expr, model: &Model) -> Option<Expr> {
                     path: vec![Symbol::from("Views"), Symbol::from(plural_camel)],
                 },
             )),
-            method: Symbol::from(singular.clone()),
+            method: partial_method,
             args: vec![var_ref(parent_sym.clone())],
             block: None,
             parenthesized: true,
@@ -637,6 +648,7 @@ fn rewrite_self_broadcast(
     action: BroadcastAct,
     args: &[Expr],
     model: &Model,
+    stems: &PartialStems,
     span: Span,
 ) -> Option<Expr> {
     let (positional, mut opts, given_html) = split_options(args, span)?;
@@ -680,14 +692,14 @@ fn rewrite_self_broadcast(
         (BroadcastAct::Remove, Some(_)) => {
             return decline(span, "broadcast_remove_to option `html:`")
         }
-        (_, None) => Some(views_render_self(&model.name)),
+        (_, None) => Some(views_render_self(&model.name, stems)),
         (_, Some(GivenHtml::Always(html))) => Some(html),
         (_, Some(GivenHtml::When(cond, html))) => Some(Expr::new(
             span,
             ExprNode::If {
                 cond,
                 then_branch: html,
-                else_branch: views_render_self(&model.name),
+                else_branch: views_render_self(&model.name, stems),
             },
         )),
     };

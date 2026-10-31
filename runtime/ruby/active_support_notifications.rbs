@@ -1,10 +1,36 @@
 module ActiveSupport
   module Notifications
-    SUBSCRIBERS: Array[Array[untyped]]
+    SUBSCRIBERS: Array[::ActiveSupport::Notifications::Subscriber]
 
-    def self.subscribe: (String | Regexp pattern, ?untyped? callback, ?monotonic: bool) ?{ () -> untyped } -> Array[untyped]
-    def self.unsubscribe: (Array[untyped] subscriber) -> nil
+    class Subscriber
+      @pattern: String | ::Regexp
+      # Rails takes any object that answers `call`, a block or a subscriber instance.
+      @listener: untyped
+      @monotonic: bool
+
+      def pattern: () -> (String | ::Regexp)
+      def listener: () -> untyped
+      def monotonic: () -> bool
+      def initialize: (String | ::Regexp pattern, untyped listener, bool monotonic) -> void
+      def matches?: (String name) -> bool
+      def notify: (String name, Float start, Float finish, Float wall, Hash[Symbol, untyped] payload) -> nil
+    end
+    self.@sql_listening: bool
+    self.@render_listening: bool
+    self.@process_listening: bool
+
+    def self.subscribe: (String | ::Regexp pattern, ?untyped? callback, ?monotonic: bool) ?{ () -> untyped } -> ::ActiveSupport::Notifications::Subscriber
+    def self.monotonic_subscribe: (String | ::Regexp pattern, ?untyped? callback) ?{ () -> untyped } -> ::ActiveSupport::Notifications::Subscriber
+    def self.unsubscribe: (::ActiveSupport::Notifications::Subscriber subscriber) -> nil
+    def self.refresh_listening: () -> nil
+    def self.subscribers: () -> Array[::ActiveSupport::Notifications::Subscriber]
+    def self.listening?: (String name) -> bool
+    def self.sql_listening?: () -> bool
+    def self.render_listening?: () -> bool
+    def self.process_listening?: () -> bool
+    def self.monotonic_now: () -> Float
     def self.instrument: (String name, ?untyped? payload) ?{ () -> untyped } -> untyped
+    def self.publish: (String name, Float start, Float finish, Hash[Symbol, untyped] payload) -> nil
     def self.sql: (String statement) -> nil
     def self.subscribed: (untyped callback, String name, ?monotonic: bool) { () -> untyped } -> untyped
 

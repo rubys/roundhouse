@@ -264,7 +264,7 @@ raise "captured record" unless controller.instance_variable_get(:@written_record
 missing = MessagesController.new
 missing.instance_variable_set(:@params, { "id" => "99999" })
 missing.create
-raise "missing owner guard" unless missing.instance_variable_get(:@status) == 404 && Message.count == 5
+raise "missing owner guard" unless missing.status == 404 && Message.count == 5
 puts "local association builds: rows, inputs, owner, evaluation, assignment"
 "#).assert_passes();
 }

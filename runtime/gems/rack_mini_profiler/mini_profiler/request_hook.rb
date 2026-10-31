@@ -7,13 +7,16 @@ module Rack
       PROFILE = 2
       DONE = 3
 
-      attr_accessor :mode, :settings, :start, :page, :inject_js, :app_called, :flamegraph_missing
+      attr_accessor :mode, :settings, :start, :page, :inject_js, :app_called, :flamegraph_missing,
+        :current_timer, :processing_parent
 
       def initialize(settings, start)
         @mode = PASS
         @settings = settings
         @start = start
         @page = nil
+        @current_timer = nil
+        @processing_parent = nil
         @inject_js = false
         @app_called = true
         @flamegraph_missing = false
@@ -79,7 +82,9 @@ module Rack
         end
 
         ctx.mode = Context::PROFILE
-        ctx.page = create_page(req)
+        page = create_page(req)
+        ctx.page = page
+        ctx.current_timer = page.root
         ctx.inject_js = config.auto_inject && req.req_headers.fetch("x-requested-with", "") != "XMLHttpRequest"
         if matches_action?(req, "normal-backtrace")
           settings.backtrace_level = ClientSettings::BACKTRACE_DEFAULT
@@ -152,7 +157,7 @@ module Rack
 
         page = ctx.page
         return nil if page.nil?
-        page.root.record_time((Process.clock_gettime(Process::CLOCK_MONOTONIC) - ctx.start) * 1000)
+        page.root.record_time((Process.clock_gettime(Process::CLOCK_MONOTONIC) - ctx.start) * 1000, page.children_ms(page.root))
         STORE.save(page.id, page.to_json)
         STORE.set_unviewed(page.user, page.id)
         inject_profiler(res, ctx, page) if res.status >= 200 && res.status < 300

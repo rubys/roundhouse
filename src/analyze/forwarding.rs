@@ -565,6 +565,7 @@ fn virtual_destinations<'a>(
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KeywordPolicy {
     Native,
+    NativeLibrary,
     Legacy,
     Refuse,
     RefuseOrdinarySuper,
@@ -625,18 +626,24 @@ fn keyword_calls_with_index(
         e: &Expr,
         plans: &mut HashMap<Span, KeywordPolicy>,
         fallback: bool,
+        helper_fallback: bool,
     ) {
         let args = match &*e.node {
             ExprNode::Send { args, .. } => Some(args.as_slice()),
             ExprNode::Super { args: Some(args) } => Some(args.as_slice()),
             _ => None,
         };
-        if args.is_some_and(|a| {
+        let has_splat = args.is_some_and(|a| {
             a.iter()
                 .any(|a| matches!(&*a.node, ExprNode::KeywordSplat { .. }))
-        }) && !(fallback && plans.contains_key(&e.span))
+        });
+        let native = possible_native_keyword_destination(contracts, context, e)
+            && verified_native_library_call(app, contracts, context, e, helper_fallback);
+        if (has_splat || native) && !(fallback && plans.contains_key(&e.span))
         {
-            let policy = if !possible_full_destination(contracts, context, e) {
+            let policy = if native {
+                KeywordPolicy::NativeLibrary
+            } else if !possible_full_destination(contracts, context, e) {
                 // Unrelated selectors cannot reach a full contract. Avoid
                 // scanning receiver provenance and hierarchies for each of
                 // their keyword calls in a large application.
@@ -687,7 +694,7 @@ fn keyword_calls_with_index(
                 .or_insert(policy);
         }
         e.node
-            .for_each_child(&mut |c| visit(app, contracts, context, c, plans, fallback));
+            .for_each_child(&mut |c| visit(app, contracts, context, c, plans, fallback, helper_fallback));
     }
     let mut plans = HashMap::default();
     for (owner, method) in methods(app).chain(actions.iter().map(|(c, m)| (c, m))) {
@@ -698,6 +705,7 @@ fn keyword_calls_with_index(
             &method.body,
             &mut plans,
             false,
+            true,
         );
         for default in method.params.iter().filter_map(|p| p.default.as_ref()) {
             visit(
@@ -707,11 +715,15 @@ fn keyword_calls_with_index(
                 default,
                 &mut plans,
                 false,
+                true,
             );
         }
     }
+    for view in &app.views {
+        visit(app, contracts, None, &view.body, &mut plans, true, true);
+    }
     crate::lower::for_each_forwarding_body_ref(app, &mut |e| {
-        visit(app, contracts, None, e, &mut plans, true)
+        visit(app, contracts, None, e, &mut plans, true, false)
     });
     plans
 }
@@ -738,6 +750,51 @@ fn possible_full_destination(
             && contracts
                 .full_selectors
                 .contains(&Symbol::from("initialize")))
+}
+
+fn possible_native_keyword_destination(
+    contracts: &SourceContractIndex<'_>,
+    context: Option<(&ClassId, &MethodDef)>,
+    call: &Expr,
+) -> bool {
+    let method = match &*call.node {
+        ExprNode::Send { method, .. } => method,
+        ExprNode::Super { .. } => match context {
+            Some((_, enclosing)) => &enclosing.name,
+            None => return false,
+        },
+        _ => return false,
+    };
+    contracts.native_keyword_selectors.contains(method)
+        || (method.as_str() == "new"
+            && contracts.native_keyword_selectors.contains(&Symbol::from("initialize")))
+}
+
+fn verified_native_library_call(
+    app: &App,
+    contracts: &SourceContractIndex<'_>,
+    context: Option<(&ClassId, &MethodDef)>,
+    call: &Expr,
+    helper_fallback: bool,
+) -> bool {
+    if let Some(resolved) = destination(app, contracts, context, call, None) {
+        return contracts.native_keyword_methods.contains(&resolved.method.name_span)
+            && keyword_contract_error(context, call, Some(resolved), contracts).is_none();
+    }
+    if !helper_fallback {
+        return false;
+    }
+    let ExprNode::Send { recv: None, method, .. } = &*call.node else { return false };
+    let Some(owner) = app.helper_method_index.get(method) else { return false };
+    let Some((method, model)) = contracts.effective_call(owner, method, MethodReceiver::Instance) else {
+        return false;
+    };
+    contracts.native_keyword_methods.contains(&method.name_span)
+        && keyword_contract_error(None, call, Some(ResolvedDestination {
+            method,
+            model,
+            lookup_owner: owner.clone(),
+        }), contracts).is_none()
 }
 
 fn has_forwarding(args: &[Expr]) -> bool {
@@ -901,6 +958,8 @@ struct SourceContractIndex<'a> {
     class: HashMap<(ClassId, Symbol), (&'a MethodDef, bool)>,
     virtual_owners: Vec<&'a ClassId>,
     full_selectors: HashSet<Symbol>,
+    native_keyword_methods: HashSet<Span>,
+    native_keyword_selectors: HashSet<Symbol>,
     unretained: HashSet<Span>,
     /// The model whose emitted synthesis shadows a source method contract.
     /// Keep the model alongside the span so an unrelated sibling receiver
@@ -942,11 +1001,24 @@ impl<'a> SourceContractIndex<'a> {
             class: HashMap::default(),
             virtual_owners: Vec::new(),
             full_selectors: HashSet::default(),
+            native_keyword_methods: HashSet::default(),
+            native_keyword_selectors: HashSet::default(),
             unretained: HashSet::default(),
             unretained_models: HashSet::default(),
         };
         let mut class_owners = HashSet::default();
         for class in classes(app) {
+            if app.native_library_keywords {
+                for method in &class.methods {
+                    if !method.name_span.is_synthetic()
+                        && method.params.iter().any(|param| param.keyword)
+                        && !method.params.iter().any(|param| param.forwarding)
+                    {
+                        index.native_keyword_methods.insert(method.name_span);
+                        index.native_keyword_selectors.insert(method.name.clone());
+                    }
+                }
+            }
             class_owners.insert(class.name.clone());
             if class.is_module {
                 index.modules.insert(class.name.clone());
@@ -1025,6 +1097,7 @@ impl<'a> SourceContractIndex<'a> {
         // emission. Looking up every unrelated selector for every model
         // makes large-app transpilation quadratic in the source inventory.
         let mut names = index.full_selectors.clone();
+        names.extend(index.native_keyword_selectors.iter().cloned());
         // Add selectors whose source packets can reach model-built methods;
         // `super` inherits the enclosing method's selector rather than
         // carrying one on its own node.

@@ -509,7 +509,7 @@ pub fn format_full(format: &str, attribute: &str, message: &str) -> String {
 }
 
 /// A `t` / `I18n.t` call reduced to what its lookup needs.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Translate {
     /// The key as written; a leading `.` is a view's lazy lookup.
     pub key: String,
@@ -555,7 +555,7 @@ impl Translate {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Fallback {
     Key(String),
     Text(String),

@@ -323,6 +323,7 @@ module ActiveStorage
   end
 
   class PurgeJob
+    def perform: (ActiveStorage::Blob blob) -> nil
     def self.perform_later: (ActiveStorage::Blob blob) -> nil
   end
 

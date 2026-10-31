@@ -197,10 +197,24 @@ module ActiveRecord
 
   # Row set from `Connection#execute` / `#exec_query`. Mirrors the
   # slice of `ActiveRecord::Result` the corpus uses: `to_a`, `first`,
-  # `each`, `rows`.
+  # `each`, `rows`, `columns`, and the `affected_rows` a bulk write
+  # (`insert_all`, `upsert_all`) answers.
   class Result
-    def initialize(rows)
+    # `affected_rows` below zero: the rows' own count, as for a read.
+    def initialize(rows, affected_rows = -1)
       @rows = rows
+      @affected_rows = affected_rows
+    end
+
+    # Rails 8's count of the rows the statement wrote. A write that
+    # returned no rows passes its count; one that returned them (or a
+    # read) answers how many there are.
+    def affected_rows
+      @affected_rows < 0 ? @rows.length : @affected_rows
+    end
+
+    def columns
+      @rows.empty? ? [] : @rows[0].keys
     end
 
     # Rails' shape: each row an Array of its values, in column order
@@ -223,6 +237,11 @@ module ActiveRecord
         yield row
       end
       @rows
+    end
+
+    def map
+      mapped = @rows.map { |row| yield row }
+      mapped
     end
   end
 
@@ -390,8 +409,20 @@ module ActiveRecord
 
   # Not in relation.rb: the strict targets' `Db` never raises RecordNotUnique.
   class Relation
-    def lock(_locking = true)
-      unloaded_spawn
+    # Rails' `lock`: `FOR UPDATE`, or the clause given, ends the SELECT;
+    # `lock(false)` takes it off. SQLite has no row locks, and Rails'
+    # SQLite adapter writes none, so neither does this there.
+    def lock(locking = true)
+      rel = unloaded_spawn
+      clause = ""
+      if Db.adapter_name == "postgresql"
+        if locking == true
+          clause = "FOR UPDATE"
+        elsif locking.is_a?(String)
+          clause = locking
+        end
+      end
+      rel.lock_clause!(clause)
     end
 
     def create_or_find_by(conditions)
@@ -416,6 +447,22 @@ module ActiveRecord
   end
 
   class Base
+    # Rails' read-only records: one a `readonly` relation loaded, or one
+    # `readonly!` marked, raises ReadOnlyRecord on save, destroy,
+    # `update_column(s)` or `touch`.
+    def readonly?
+      @readonly == true
+    end
+
+    def readonly!
+      @readonly = true
+      self
+    end
+
+    def _raise_readonly_record_error
+      raise ReadOnlyRecord.new("#{self.class.name} is marked as readonly")
+    end
+
     def assign_attributes(attributes)
       unless attributes.is_a?(Hash)
         raise ArgumentError, "assign_attributes requires an attribute Hash"
@@ -429,7 +476,7 @@ module ActiveRecord
     end
 
     def _unknown_mass_attribute(name)
-      raise ActiveModel::UnknownAttributeError.new(self, name)
+      raise ActiveModel::UnknownAttributeError.new(self, name, "unknown attribute '#{name}' for #{self.class.name}.")
     end
 
     # Ruby-family only, beside the other reopens here: strict targets have
@@ -440,6 +487,32 @@ module ActiveRecord
 
     def write_attribute(name, value)
       self[name] = value
+    end
+
+    # Rails' `slice(*methods)`: the named attributes, String-keyed (Rails
+    # wraps the Hash in a HashWithIndifferentAccess), from Symbol or
+    # String names, flattened as Rails flattens them. Rails reads each
+    # name through `public_send`; this runtime reads it through the `[]`
+    # column indexer, as `read_attribute` does, so a name that is not a
+    # column raises instead of answering a nil Rails would never give.
+    # The indexer hands back a temporal column's stored text, so that
+    # one is parsed into the Time its reader answers.
+    def slice(*names)
+      columns = self.class.schema_columns
+      time_columns = self.class.schema_time_columns
+      h = {}
+      names.flatten.each do |n|
+        name = n.to_sym
+        unless columns.include?(name)
+          raise NotImplementedError, "slice reads columns only; #{name} is not a column of #{self.class.name}"
+        end
+        h[name.to_s] = if time_columns.include?(name)
+          ActiveSupport.present_db(ActiveSupport.parse_db_time(self[name]))
+        else
+          self[name]
+        end
+      end
+      h
     end
 
     def saved_changes?
@@ -1001,8 +1074,8 @@ module ActiveRecord
     # `Model.upsert(attrs, …)` — INSERT that folds into an UPDATE when it
     # collides, in one statement. Rails routes the single-row form
     # through `upsert_all`; so does this.
-    def self.upsert(attrs, unique_by: nil, on_duplicate: nil, returning: nil, record_timestamps: nil)
-      upsert_all([attrs], unique_by: unique_by, on_duplicate: on_duplicate, returning: returning, record_timestamps: record_timestamps)
+    def self.upsert(attrs, unique_by: nil, on_duplicate: nil, update_only: nil, returning: nil, record_timestamps: nil)
+      upsert_all([attrs], unique_by: unique_by, on_duplicate: on_duplicate, update_only: update_only, returning: returning, record_timestamps: record_timestamps)
     end
 
     # The predicate of the unique index on `columns` (sorted, joined with
@@ -1014,20 +1087,75 @@ module ActiveRecord
       ""
     end
 
-    # `Model.upsert_all(rows, …)` → SQLite's
-    # `INSERT … ON CONFLICT (target) DO UPDATE SET …`.
+    # The columns, joined with ", ", of the unique index named `name`,
+    # else "". The lowering overrides it for a model whose table has a
+    # unique index. A `unique_by:` naming an index means its columns, as
+    # Rails' `InsertAll#find_unique_index_for` reads it: the conflict
+    # target is the index's columns, never its name.
+    def self._unique_index_columns(name)
+      ""
+    end
+
+    # `unique_by:` as the columns an ON CONFLICT clause names.
+    def self._conflict_target(unique_by)
+      names = unique_by.is_a?(Array) ? unique_by.map { |c| c.to_s } : [unique_by.to_s]
+      return names unless names.length == 1
+      indexed = _unique_index_columns(names[0])
+      indexed == "" ? names : indexed.split(", ")
+    end
+
+    # Rails reads every row's keys as Strings, so a row built from a
+    # record's `attributes` with a Symbol key merged over it names each
+    # column once, the later value winning.
+    def self._string_keyed_rows(rows)
+      keyed = []
+      rows.each do |row|
+        one = {}
+        row.each { |name, value| one[name.to_s] = value }
+        keyed.push(one)
+      end
+      keyed
+    end
+
+    # The database's clock, as Rails' `high_precision_current_timestamp`
+    # stamps a bulk write with it: SQLite's to the millisecond,
+    # PostgreSQL's in UTC (the zone this runtime reads a timestamp in).
+    def self._database_now_sql
+      return "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')" if Db.adapter_name == "postgresql"
+      "STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW')"
+    end
+
+    # `left` and `right` are equal, NULL equal to NULL: SQLite's `IS`,
+    # which PostgreSQL reads only before NULL/TRUE/FALSE.
+    def self._same_value_sql(left, right)
+      return "#{left} IS NOT DISTINCT FROM #{right}" if Db.adapter_name == "postgresql"
+      "#{left} IS #{right}"
+    end
+
+    # The created/updated columns Rails 8.1's `record_timestamps` stamps
+    # on a bulk write: the table's, less any the rows give.
+    def self._bulk_stamps(given, record_timestamps)
+      stamping = record_timestamps.nil? ? self.record_timestamps : record_timestamps
+      table_cols = schema_columns
+      [:created_at, :created_on, :updated_at, :updated_on].select { |c| stamping && table_cols.include?(c) && !given.include?(c.to_s) }
+    end
+
+    # `Model.upsert_all(rows, …)` → `INSERT … ON CONFLICT (target) DO
+    # UPDATE SET …`, in SQLite's and PostgreSQL's shared syntax.
     #
-    # The conflict target is `unique_by` when given, else the model's
-    # `primary_key` — which is why that had to become a real per-model
-    # value rather than an assumed `id`. Lobsters' Keystore is the case
-    # in point: conflicting on `id` would insert a fresh autoincrement
-    # row every call and then trip the UNIQUE index on `key`.
+    # The conflict target is `unique_by` when given (columns, or the name
+    # of a unique index), else the model's `primary_key` — which is why
+    # that had to become a real per-model value rather than an assumed
+    # `id`. Lobsters' Keystore is the case in point: conflicting on `id`
+    # would insert a fresh autoincrement row every call and then trip
+    # the UNIQUE index on `key`.
     #
     # `on_duplicate:` replaces the generated SET clause with a raw
     # fragment (`Arel.sql("value = value + 1")`). `Arel.sql` answers an
     # `Arel::Nodes::SqlLiteral` whose `to_s` is that text, which the
-    # interpolation below reads. Otherwise every
-    # non-conflict column is assigned from `excluded`, matching Rails.
+    # interpolation below reads. Otherwise every non-conflict column is
+    # assigned from `excluded`, matching Rails, or only those
+    # `update_only:` names (a column or a list).
     #
     # Timestamps as Rails 8.1's `record_timestamps` stamps them: an
     # insert fills every created/updated column a row leaves out, and an
@@ -1035,37 +1163,37 @@ module ActiveRecord
     # raw `on_duplicate:` is left as written.
     #
     # NOT Rails-complete, deliberately: no RETURNING (asking for it
-    # raises rather than quietly handing back nothing). Returns the
-    # affected-row count, the same currency `update_counters` deals in.
-    def self.upsert_all(rows, unique_by: nil, on_duplicate: nil, returning: nil, record_timestamps: nil)
-      return 0 if rows.length == 0
+    # raises rather than quietly handing back nothing). Answers Rails'
+    # `ActiveRecord::Result`, empty, its `affected_rows` the count.
+    def self.upsert_all(rows, unique_by: nil, on_duplicate: nil, update_only: nil, returning: nil, record_timestamps: nil)
+      return Result.new([], 0) if rows.length == 0
       if returning
         raise NotImplementedError, "#{name}.upsert_all: RETURNING is not supported"
       end
 
-      cols = rows[0].keys
-      target = unique_by.nil? ? primary_key : unique_by
-      target_names = target.is_a?(Array) ? target.map { |c| c.to_s } : [target.to_s]
+      keyed = _string_keyed_rows(rows)
+      cols = keyed[0].keys
+      target_names = _conflict_target(unique_by.nil? ? primary_key : unique_by)
 
-      # Not `ActiveSupport.db_now`: Rails' insert_all stamps with SQLite's own clock, to the millisecond.
-      now = "STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW')"
-      table_cols = schema_columns
-      given = cols.map { |c| c.to_s }
-      stamping = record_timestamps.nil? ? self.record_timestamps : record_timestamps
-      stamps = [:created_at, :created_on, :updated_at, :updated_on].select { |c| stamping && table_cols.include?(c) && !given.include?(c.to_s) }
-      tuples = rows.map do |row|
+      now = _database_now_sql
+      stamps = _bulk_stamps(cols, record_timestamps)
+      tuples = keyed.map do |row|
         values = cols.map { |c| ActiveRecord.adapter.escape_value(row[c]) }
         "(" + (values + stamps.map { |_c| now }).join(", ") + ")"
       end
 
       assigns = on_duplicate
       if assigns.nil?
-        updatable = cols.reject { |c| target_names.include?(c.to_s) }
+        updatable = cols.reject { |c| target_names.include?(c) }
+        unless update_only.nil?
+          only = update_only.is_a?(Array) ? update_only.map { |c| c.to_s } : [update_only.to_s]
+          updatable = updatable.select { |c| only.include?(c) }
+        end
         # Every column IS the conflict target: there is nothing left to
         # assign, and `DO UPDATE SET` with an empty list is a syntax
         # error. Rails degrades to a no-op insert here too.
         unless updatable.length == 0
-          unchanged = updatable.map { |c| "#{c} IS excluded.#{c}" }.join(" AND ")
+          unchanged = updatable.map { |c| _same_value_sql("#{table_name}.#{c}", "excluded.#{c}") }.join(" AND ")
           touches = [:updated_at, :updated_on].select { |c| stamps.include?(c) }.map do |c|
             "#{c} = (CASE WHEN (#{unchanged}) THEN #{table_name}.#{c} ELSE #{now} END)"
           end
@@ -1077,10 +1205,123 @@ module ActiveRecord
       predicate = _conflict_predicate(target_names.sort.join(", "))
       conflict_where = predicate == "" ? "" : " WHERE #{predicate}"
 
-      sql = "INSERT INTO #{table_name} (#{(cols + stamps).join(", ")}) VALUES #{tuples.join(", ")}" \
+      sql = "INSERT INTO #{table_name} (#{(cols + stamps.map { |c| c.to_s }).join(", ")}) VALUES #{tuples.join(", ")}" \
             " ON CONFLICT (#{target_names.join(", ")})#{conflict_where} #{action}"
       ActiveRecord.adapter.execute_ddl(sql)
-      ActiveRecord.adapter.changes
+      Result.new([], ActiveRecord.adapter.changes)
+    end
+
+    # `Model.insert_all(rows, unique_by:, returning:, record_timestamps:)`
+    # and its kin (insert_all.rb): one INSERT for every row, with neither
+    # validations nor callbacks. `insert_all` and `insert` skip a row
+    # that conflicts (`ON CONFLICT DO NOTHING`, on `unique_by:` when
+    # given); `insert_all!` and `insert!` raise RecordNotUnique. The
+    # lowering inlines the plain `insert_all(rows)` and
+    # `insert_all!(rows, returning: [...])` (`lower::scope_chain`); the
+    # other forms reach these.
+    #
+    # Answers Rails' `ActiveRecord::Result` of the RETURNING columns, one
+    # row for each row written: the primary key unless `returning:` names
+    # others (a list of columns, or a String of SQL), none for `false`.
+    # Every row must carry the same keys; timestamps the rows leave out
+    # are stamped as `upsert_all` stamps them.
+    def self.insert_all(rows, unique_by: nil, returning: nil, record_timestamps: nil)
+      _insert_rows(rows, true, unique_by, returning, record_timestamps)
+    end
+
+    def self.insert_all!(rows, returning: nil, record_timestamps: nil)
+      _insert_rows(rows, false, nil, returning, record_timestamps)
+    end
+
+    def self.insert(attrs, unique_by: nil, returning: nil, record_timestamps: nil)
+      _insert_rows([attrs], true, unique_by, returning, record_timestamps)
+    end
+
+    def self.insert!(attrs, returning: nil, record_timestamps: nil)
+      _insert_rows([attrs], false, nil, returning, record_timestamps)
+    end
+
+    def self._insert_rows(rows, skip_duplicates, unique_by, returning, record_timestamps)
+      return Result.new([], 0) if rows.length == 0
+      keyed = _string_keyed_rows(rows)
+      cols = keyed[0].keys
+      keyed.each do |row|
+        unless row.keys.sort == cols.sort
+          raise ArgumentError, "All objects being inserted must have the same keys"
+        end
+      end
+
+      now = _database_now_sql
+      stamps = _bulk_stamps(cols, record_timestamps)
+      tuples = keyed.map do |row|
+        values = cols.map { |c| ActiveRecord.adapter.escape_value(row[c]) }
+        "(" + (values + stamps.map { |_c| now }).join(", ") + ")"
+      end
+
+      conflict = ""
+      if skip_duplicates
+        if unique_by.nil?
+          conflict = " ON CONFLICT DO NOTHING"
+        else
+          target_names = _conflict_target(unique_by)
+          predicate = _conflict_predicate(target_names.sort.join(", "))
+          conflict_where = predicate == "" ? "" : " WHERE #{predicate}"
+          conflict = " ON CONFLICT (#{target_names.join(", ")})#{conflict_where} DO NOTHING"
+        end
+      end
+
+      # `returning: false` asks for nothing; SQL (`Arel.sql("id, …")`) is
+      # written as given.
+      returned = ""
+      if returning.nil?
+        returned = primary_key.to_s
+      elsif returning.is_a?(Array)
+        returned = returning.map { |c| c.to_s }.join(", ")
+      elsif returning != false
+        returned = returning.to_s
+      end
+
+      sql = "INSERT INTO #{table_name} (#{(cols + stamps.map { |c| c.to_s }).join(", ")}) VALUES #{tuples.join(", ")}#{conflict}"
+      return Result.new(_returned_rows("#{sql} RETURNING #{returned}")) unless returned == ""
+      ActiveRecord.adapter.execute_ddl(sql)
+      Result.new([], ActiveRecord.adapter.changes)
+    end
+
+    # The rows an `INSERT … RETURNING` wrote, read off the handle
+    # `Db.exec_returning` answers. A write, so neither the request's
+    # query cache nor its read snapshot answers it, as they would a
+    # `select_rows`.
+    def self._returned_rows(sql)
+      stmt = Db.exec_returning(sql)
+      rows = []
+      begin
+        ncols = Db.column_count(stmt)
+        names = []
+        i = 0
+        while i < ncols
+          names.push(Db.column_name(stmt, i))
+          i += 1
+        end
+        while Db.step?(stmt)
+          row = {}
+          i = 0
+          while i < ncols
+            row[names[i]] = Db.column_value(stmt, i)
+            i += 1
+          end
+          rows.push(row)
+        end
+      ensure
+        Db.finalize(stmt)
+      end
+      rows
+    end
+
+    # Rails' `composite_primary_key?`: whether the model keys its records
+    # on several columns. Every model here keys on one (a composite table
+    # is keyed on the column its model declares), so the answer is false.
+    def self.composite_primary_key?
+      false
     end
 
     def self.record_timestamps=(value)
@@ -1106,6 +1347,7 @@ module ActiveRecord
     # value via the `[]=` indexer, then persists via the same adapter
     # path `save` uses.
     def update_column(name, value)
+      _raise_readonly_record_error if readonly?
       self[name] = value
       _adapter_update
       true
@@ -1114,6 +1356,7 @@ module ActiveRecord
     # `record.update_columns(a: 1, b: 2)` — several attributes at once,
     # the same way: no validations, no callbacks, no timestamps.
     def update_columns(attributes)
+      _raise_readonly_record_error if readonly?
       attributes.each { |name, value| self[name] = value }
       _adapter_update
       true
@@ -1660,6 +1903,7 @@ module ActiveRecord
     # Rails' before callbacks can; an after_* hook's `throw :abort` is not
     # caught, as in Rails, where it escapes as UncaughtThrowError.
     def save_after_validation
+      _raise_readonly_record_error if readonly?
       if _halted_by_abort { before_save }
         @_save_halted = true
         return false
@@ -1722,6 +1966,7 @@ module ActiveRecord
     # cascade or an `after_destroy` write that raises undoes the delete.
     # base.rb's body, restated as `save` is.
     def destroy
+      _raise_readonly_record_error if readonly?
       return self unless persisted?
       halted = false
       self.class.transaction do
@@ -1756,6 +2001,7 @@ module ActiveRecord
     # guards its index rewrite because boosts touch the message). The
     # bodies are base.rb's, restated for the transaction.
     def touch
+      _raise_readonly_record_error if readonly?
       self.class.transaction do
         fill_timestamps(false)
         _adapter_touch
@@ -1767,6 +2013,7 @@ module ActiveRecord
     end
 
     def touch_written
+      _raise_readonly_record_error if readonly?
       self.class.transaction do
         fill_timestamps(false)
         _adapter_update

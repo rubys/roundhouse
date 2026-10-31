@@ -20,7 +20,7 @@ use super::form_with::{
     rewrite_errors_each_body,
 };
 use super::helpers::{emit_inline_helper_block, emit_view_helper_call};
-use super::partial::{emit_render_partial, emit_yield};
+use super::partial::{emit_flagged_collection_render, emit_render_partial, emit_yield};
 use super::turbo_drive::emit_turbo_drive_directive;
 use super::predicates::rewrite_predicates;
 use super::{
@@ -38,7 +38,14 @@ pub(super) fn walk_body(body: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         _ => vec![body],
     };
     let mut out = Vec::new();
+    // A statement assigning a local over a flash param shadows it for the
+    // rest of the body (`ViewCtx::after_assigning`).
+    let mut shadowed: Option<ViewCtx> = None;
     for stmt in &stmts {
+        if let Some(next) = shadowed.as_ref().unwrap_or(ctx).after_assigning(stmt) {
+            shadowed = Some(next);
+        }
+        let ctx = shadowed.as_ref().unwrap_or(ctx);
         let mut lowered = walk_stmt(stmt, ctx);
         // Synthesis choke point: everything walk_stmt invented for this
         // source statement (helper sends, io appends, TODO markers, …)
@@ -492,15 +499,32 @@ fn splice_form_wrapper(
     // what was passed and fall back to each remaining parameter's own
     // default; a parameter with no default and no argument is a call
     // this pass cannot reconstruct.
-    if args.len() > w.params.len() {
+    let (positionals, keywords) = if w.keyword_rest {
+        match args.last() {
+            Some(last) => match &*last.node {
+                ExprNode::Hash { kwargs: true, .. } => (&args[..args.len() - 1], Some(last)),
+                ExprNode::KeywordSplat { value } if matches!(&*value.node, ExprNode::Hash { .. }) => {
+                    (&args[..args.len() - 1], Some(value))
+                }
+                ExprNode::KeywordSplat { .. } => return None,
+                _ => (args, None),
+            },
+            None => (args, None),
+        }
+    } else {
+        (args, None)
+    };
+    let positional_count = w.params.len() - usize::from(w.keyword_rest);
+    if positionals.len() > positional_count {
         return None;
     }
-    if !args.iter().all(is_pure_read) {
+    if !positionals.iter().all(is_pure_read) || keywords.is_some_and(|arg| !is_pure_read(arg)) {
         return None;
     }
     let mut binding: crate::det::HashMap<&Symbol, &Expr> = crate::det::HashMap::default();
     for (i, (name, default)) in w.params.iter().enumerate() {
-        match args.get(i) {
+        let argument = if w.keyword_rest && i == positional_count { keywords } else { positionals.get(i) };
+        match argument {
             Some(a) => {
                 binding.insert(name, a);
             }
@@ -515,15 +539,16 @@ fn splice_form_wrapper(
     let ExprNode::Send { method, args: wargs, parenthesized, .. } = &*w.call.node else {
         return None;
     };
+    let args = wargs
+        .iter()
+        .map(|a| fold_static_merge(&substitute_vars(a, &binding)))
+        .collect::<Option<Vec<_>>>()?;
     Some(Expr::new(
         w.call.span,
         ExprNode::Send {
             recv: None,
             method: method.clone(),
-            args: wargs
-                .iter()
-                .map(|a| fold_static_merge(&substitute_vars(a, &binding)))
-                .collect(),
+            args,
             block: Some(block.clone()),
             parenthesized: *parenthesized,
         },
@@ -543,27 +568,27 @@ fn splice_form_wrapper(
 ///
 /// Later keys win, which is Ruby's `merge` and also the point of the
 /// wrapper: the caller's options override the helper's defaults.
-fn fold_static_merge(e: &Expr) -> Expr {
+fn fold_static_merge(e: &Expr) -> Option<Expr> {
     let ExprNode::Send { recv: Some(base), method, args, block: None, .. } = &*e.node else {
-        return e.clone();
+        return Some(e.clone());
     };
-    if method.as_str() != "merge" || args.len() != 1 {
-        return e.clone();
+    if method.as_str() != "merge" {
+        return Some(e.clone());
+    }
+    if args.len() != 1 {
+        return None;
     }
     let (ExprNode::Hash { entries: base_entries, kwargs }, ExprNode::Hash { entries: over, .. }) =
         (&*base.node, &*args[0].node)
     else {
-        return e.clone();
+        return None;
     };
     let key_of = |k: &Expr| match &*k.node {
-        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
-        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+        ExprNode::Lit { value: value @ (Literal::Sym { .. } | Literal::Str { .. }) } => Some(value.clone()),
         _ => None,
     };
-    // A key this cannot compare cannot be overridden safely — leave the
-    // chain alone rather than merge past it.
     if base_entries.iter().chain(over.iter()).any(|(k, _)| key_of(k).is_none()) {
-        return e.clone();
+        return None;
     }
     let mut merged: Vec<(Expr, Expr)> = Vec::new();
     for (k, v) in base_entries {
@@ -577,7 +602,7 @@ fn fold_static_merge(e: &Expr) -> Expr {
             merged.push((k.clone(), v.clone()));
         }
     }
-    Expr::new(e.span, ExprNode::Hash { entries: merged, kwargs: *kwargs })
+    Some(Expr::new(e.span, ExprNode::Hash { entries: merged, kwargs: *kwargs }))
 }
 
 /// A read with no side effect and no cost worth worrying about, so
@@ -838,6 +863,51 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                     }
                 }
             }
+        }
+    }
+
+    // `<%= render(@posts) || "No posts" %>` — Rails answers nil for a
+    // collection with no records (`CollectionRenderer`'s
+    // `EmptyCollection`), so the fallback shows exactly when the
+    // collection is empty. A collection render lowers to an `each` that
+    // appends as it goes and has no value, so nothing below could read
+    // the `||`, and the bare `render` reached the emit. Render the
+    // collection with a flag set per record, then append the fallback
+    // when none rendered: the collection is evaluated once, as Rails
+    // does, where asking it `empty?` afterwards ran a relation's query
+    // again. The flag is distinct per site and always a Boolean.
+    if let ExprNode::BoolOp { op: BoolOpKind::Or, left, right, .. } = &*inner.node
+        && let ExprNode::Send { recv, method, args: sa, block, .. } = &*left.node
+    {
+        let is_local = |n: &str| ctx.is_local(n);
+        let is_options_ivar = |n: &str| ctx.is_options_ivar(n);
+        let flag = Symbol::from(format!("__rendered_{}", inner.span.start));
+        if let Some(rp) = classify_render_partial(
+            recv.as_ref(),
+            method.as_str(),
+            sa,
+            block.as_ref(),
+            &is_local,
+            &is_options_ivar,
+        ) && let Some(render) = emit_flagged_collection_render(&rp, &flag, &ctx.for_render(sa))
+        {
+            let unset = Expr::new(
+                inner.span,
+                ExprNode::Assign {
+                    target: LValue::Var { id: VarId(0), name: flag.clone() },
+                    value: Expr::new(inner.span, ExprNode::Lit { value: Literal::Bool { value: false } }),
+                },
+            );
+            let fallback = send(Some(right.clone()), "to_s", Vec::new(), None, false);
+            let guarded = Expr::new(
+                inner.span,
+                ExprNode::If {
+                    cond: send(None, "!", vec![var_ref(flag.clone())], None, false),
+                    then_branch: seq(emit_io_append(&fallback, ctx)),
+                    else_branch: nil_lit(),
+                },
+            );
+            return vec![unset, render, guarded];
         }
     }
 
@@ -1785,12 +1855,14 @@ mod tests {
             view_formats: Default::default(),
             multipart_partials: Default::default(),
             dyn_pools: Default::default(),
+            partial_stems: Default::default(),
             partial_extras: Default::default(),
             strict_locals: Default::default(),
             view_name: "messages/_message".to_string(),
             ivar_models: Default::default(),
             str_ivars: Default::default(),
             ivar_locals: Default::default(),
+            own_flash: Default::default(),
         }
     }
 
@@ -2289,6 +2361,7 @@ mod tests {
         // room page died on.
         let wrapper = super::super::FormWrapperHelper {
             params: vec![(Symbol::from("room"), None)],
+            keyword_rest: false,
             call: Expr::new(
                 Span::default(),
                 ExprNode::Send {
@@ -2352,6 +2425,7 @@ mod tests {
         // a site keeps its shape and stays a loud failure.
         let wrapper = super::super::FormWrapperHelper {
             params: vec![(Symbol::from("room"), None)],
+            keyword_rest: false,
             call: Expr::new(
                 Span::default(),
                 ExprNode::Send {

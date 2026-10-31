@@ -68,6 +68,7 @@ fn lowered_test_body() -> String {
         &app.models,
         Vec::new(),
         &roundhouse::lower::routes::helper_id_segments(&app),
+        &roundhouse::lower::routes::direct_helper_names(&app),
     );
     lcs.iter()
         .flat_map(|lc| lc.methods.iter())

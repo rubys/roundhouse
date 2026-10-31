@@ -453,6 +453,7 @@ pub(super) fn ingest_model_with_enum_constants(
         parent,
         parent_span,
         sti_subclass_names: Vec::new(),
+        select_aliases: Vec::new(),
         i18n: Default::default(),
         table: TableRef(Symbol::from(table_name)),
         primary_key,
@@ -1216,6 +1217,63 @@ fn enum_mapping_error(file: &str, column: &str) -> IngestError {
     }
 }
 
+/// Re-ingesting models would duplicate diagnostics, so read their retained
+/// source when consumed method overrides may invalidate a folded set.
+fn folded_enum_validation_lists(
+    model: &Model,
+    source: &crate::span::SourceFile,
+    constants: &EnumConstants,
+) -> crate::det::HashMap<Span, Vec<Literal>> {
+    let validations: Vec<_> = model.body.iter().filter_map(|item| match item {
+        ModelBodyItem::Validation { span, .. } if !span.is_synthetic() => Some((span.start as usize, span.end as usize)),
+        _ => None,
+    }).collect();
+    let mut uses = crate::det::HashMap::default();
+    if validations.is_empty() { return uses; }
+    let result = super::prism::parse_silent(source.text.as_bytes());
+    let root = result.node();
+    let Some((_, class)) = super::util::find_all_classes_with_scope(&root).into_iter()
+        .find(|(_, class)| class.location().start_offset() == model.span.start as usize)
+        else { return uses };
+    let Some(body) = class.body() else { return uses };
+    let stmts = flatten_statements(body);
+    let owners = constants.nesting.get(&(source.path.clone(), model.span.start as usize)).cloned().unwrap_or_default();
+    let mut table = ClassConsts::collect(&stmts, &source.path);
+    table.import(&stmts, constants, &owners);
+    struct Reads<'a> {
+        table: &'a ClassConsts,
+        validations: &'a [(usize, usize)],
+        file: crate::span::FileId,
+        inside: bool,
+        uses: &'a mut crate::det::HashMap<Span, Vec<Literal>>,
+    }
+    impl Reads<'_> {
+        fn record(&mut self, node: &Node<'_>) {
+            if self.inside && let Some(values) = self.table.derived_enum_list(node) {
+                self.uses.insert(Span { file: self.file, start: node.location().start_offset() as u32, end: node.location().end_offset() as u32 }, values);
+            }
+        }
+    }
+    impl<'pr> ruby_prism::Visit<'pr> for Reads<'_> {
+        fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+            let before = self.inside;
+            self.inside |= self.validations.iter().any(|(start, end)| node.location().start_offset() <= *start && node.location().end_offset() >= *end);
+            self.record(&node.as_node());
+            ruby_prism::visit_call_node(self, node);
+            self.inside = before;
+        }
+        fn visit_constant_read_node(&mut self, node: &ruby_prism::ConstantReadNode<'pr>) {
+            self.record(&node.as_node());
+        }
+        fn visit_constant_path_node(&mut self, node: &ruby_prism::ConstantPathNode<'pr>) {
+            self.record(&node.as_node());
+        }
+    }
+    let mut reads = Reads { table: &table, validations: &validations, file: model.span.file, inside: false, uses: &mut uses };
+    for stmt in &stmts { ruby_prism::Visit::visit(&mut reads, stmt); }
+    uses
+}
+
 fn validate_sorbet_enum_mappings(
     model: &Model,
     source: &crate::span::SourceFile,
@@ -1540,6 +1598,7 @@ const READ_ONLY_CONST_METHODS: &[&str] = &[
 /// The names a class body writes, or may mutate, anywhere other than
 /// one plain top-level `NAME = …` (see [`ClassConsts::collect`]).
 struct ConstTaint {
+    proven_reads: crate::det::HashSet<(usize, usize)>,
     top_level: crate::det::HashSet<usize>,
     top_writes: crate::det::HashMap<String, usize>,
     tainted: crate::det::HashSet<String>,
@@ -1547,6 +1606,7 @@ struct ConstTaint {
     /// right-hand side reads): the two may be one object, so a mutation
     /// through either taints both.
     aliases: Vec<(String, String)>,
+    snapshot_aliases: Vec<(String, String)>,
     /// The constants a [`REFLECTION_METHODS`] call's receiver chain is
     /// rooted at (`Rule.const_set`): owners whose constants it may replace.
     reflected: crate::det::HashSet<String>,
@@ -1682,7 +1742,12 @@ fn constant_reads(node: &Node<'_>) -> Vec<String> {
 
 impl ConstTaint {
     fn scan(stmts: &[Node<'_>]) -> crate::det::HashSet<String> {
+        Self::scan_with_proven_reads(stmts, Default::default())
+    }
+
+    fn scan_with_proven_reads(stmts: &[Node<'_>], proven_reads: crate::det::HashSet<(usize, usize)>) -> crate::det::HashSet<String> {
         let mut scan = ConstTaint {
+            proven_reads,
             top_level: stmts
                 .iter()
                 .filter(|s| s.as_constant_write_node().is_some())
@@ -1691,6 +1756,7 @@ impl ConstTaint {
             top_writes: Default::default(),
             tainted: Default::default(),
             aliases: Vec::new(),
+            snapshot_aliases: Vec::new(),
             reflected: Default::default(),
             named_writes: Default::default(),
             boot_namespaces: None,
@@ -1713,20 +1779,24 @@ impl ConstTaint {
     fn scan_tree(
         root: &Node<'_>,
         direct_writes: crate::det::HashSet<usize>,
-    ) -> (crate::det::HashSet<String>, crate::det::HashSet<String>) {
+    ) -> (crate::det::HashSet<String>, crate::det::HashSet<String>, crate::det::HashSet<String>, Vec<(String, String)>) {
         let mut scan = ConstTaint {
+            proven_reads: Default::default(),
             top_level: direct_writes,
             top_writes: Default::default(),
             tainted: Default::default(),
             aliases: Vec::new(),
+            snapshot_aliases: Vec::new(),
             reflected: Default::default(),
             named_writes: Default::default(),
             boot_namespaces: None,
         };
         ruby_prism::Visit::visit(&mut scan, root);
-        let ConstTaint { mut tainted, aliases, reflected, .. } = scan;
+        let ConstTaint { mut tainted, aliases, snapshot_aliases, reflected, named_writes, .. } = scan;
+        let mut snapshot_taint = tainted.clone();
+        snapshot_taint.extend(named_writes);
         Self::alias_closure(&mut tainted, &aliases);
-        (tainted, reflected)
+        (tainted, reflected, snapshot_taint, snapshot_aliases)
     }
 
     /// The names a source that runs at boot may leave with another value:
@@ -1741,10 +1811,12 @@ impl ConstTaint {
         namespaces: crate::det::HashSet<String>,
     ) -> (crate::det::HashSet<String>, Vec<(String, String)>) {
         let mut scan = ConstTaint {
+            proven_reads: Default::default(),
             top_level: direct_writes,
             top_writes: Default::default(),
             tainted: Default::default(),
             aliases: Vec::new(),
+            snapshot_aliases: Vec::new(),
             reflected: Default::default(),
             named_writes: Default::default(),
             boot_namespaces: Some(namespaces),
@@ -1824,6 +1896,21 @@ impl<'pr> ruby_prism::Visit<'pr> for ConstTaint {
             for read in constant_reads(&node.value()) {
                 self.aliases.push((name.clone(), read));
             }
+            // The keys array does not alias the enum's namespace, so namespace
+            // mutation must not taint a snapshot through that alias.
+            fn fresh_keys(node: &Node<'_>) -> bool {
+                if let Some(inner) = single_parenthesized(node) { return fresh_keys(&inner); }
+                let Some(call) = node.as_call_node() else { return false };
+                if call.arguments().is_some() || call.block().is_some() { return false; }
+                match constant_id_str(&call.name()).as_ref() {
+                    "keys" => true,
+                    "freeze" | "dup" => call.receiver().is_some_and(|receiver| fresh_keys(&receiver)),
+                    _ => false,
+                }
+            }
+            if !fresh_keys(&node.value()) {
+                self.snapshot_aliases.extend(constant_reads(&node.value()).into_iter().map(|read| (name.clone(), read)));
+            }
             *self.top_writes.entry(name).or_default() += 1;
         } else {
             self.tainted.insert(name);
@@ -1873,6 +1960,11 @@ impl<'pr> ruby_prism::Visit<'pr> for ConstTaint {
     // `MODES.first << "x"`, whose receivers may be the constant itself
     // or one of its elements.
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        // Proven enum reads cannot mutate the source namespace; treating them
+        // as arbitrary calls would taint an independent keys snapshot.
+        if self.proven_reads.contains(&(node.location().start_offset(), node.location().end_offset())) {
+            return;
+        }
         // `Catalog.const_set(:KINDS, …)`, or a receiverless one in the
         // owner's body: either replaces that name.
         if let Some(name) = named_constant_write(node).or_else(|| dispatched_named_constant_write(node)) {
@@ -2046,6 +2138,8 @@ pub(super) struct ClassConsts {
     /// String it stores (`{ password: "password" }`): a lowered check
     /// reads the stored value, and only there do the two agree.
     enum_labels: crate::det::HashMap<String, Vec<String>>,
+    enum_key_lists: crate::det::HashMap<(usize, usize), Vec<Literal>>,
+    enum_key_constants: crate::det::HashSet<String>,
 }
 
 /// The operators [`ClassConsts::int_expr`] folds.
@@ -2132,6 +2226,9 @@ impl ClassConsts {
     /// literal (`1.week.seconds`, folded to its Integer seconds), `.freeze`d
     /// or not, or another folded list constant.
     pub(super) fn list(&self, node: &Node<'_>) -> Option<Vec<Literal>> {
+        if let Some(list) = self.enum_key_lists.get(&(node.location().start_offset(), node.location().end_offset())) {
+            return Some(list.clone());
+        }
         if let Some(inner) = single_parenthesized(node) {
             return self.list(&inner);
         }
@@ -2388,6 +2485,57 @@ impl ClassConsts {
                 self.regexes.insert(key.clone(), value.clone());
             }
         }
+        self.import_enum_key_lists(stmts, constants, owners);
+    }
+
+    fn import_enum_key_lists(&mut self, stmts: &[Node<'_>], constants: &enum_constants::EnumConstants, owners: &[String]) {
+        struct Lists<'a> {
+            constants: &'a enum_constants::EnumConstants,
+            owners: &'a [String],
+            lists: &'a mut crate::det::HashMap<(usize, usize), Vec<Literal>>,
+        }
+        impl<'pr> ruby_prism::Visit<'pr> for Lists<'_> {
+            fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+                if let Some(list) = self.constants.enum_key_list(&node.as_node(), self.owners) {
+                    self.lists.insert((node.location().start_offset(), node.location().end_offset()), list);
+                }
+                ruby_prism::visit_call_node(self, node);
+            }
+        }
+        let mut lists = Lists { constants, owners, lists: &mut self.enum_key_lists };
+        for stmt in stmts {
+            ruby_prism::Visit::visit(&mut lists, stmt);
+        }
+        let tainted = ConstTaint::scan_with_proven_reads(stmts, self.enum_key_lists.keys().copied().collect());
+        for stmt in stmts {
+            let Some(write) = stmt.as_constant_write_node() else { continue };
+            let name = constant_id_str(&write.name()).to_string();
+            if !tainted.contains(&name)
+                && let Some(list) = self.derived_enum_list(&write.value())
+                && constants.snapshot_constant_is_stable(&name, owners)
+            {
+                self.lists.insert(name.clone(), list);
+                self.enum_key_constants.insert(name);
+            }
+        }
+    }
+
+    fn derived_enum_list(&self, node: &Node<'_>) -> Option<Vec<Literal>> {
+        if let Some(inner) = single_parenthesized(node) {
+            return self.derived_enum_list(&inner);
+        }
+        if let Some(call) = node.as_call_node()
+            && matches!(constant_id_str(&call.name()).as_ref(), "freeze" | "dup")
+            && call.arguments().is_none() && call.block().is_none()
+        {
+            return self.derived_enum_list(&call.receiver()?);
+        }
+        if let Some(key) = const_key(node)
+            && self.enum_key_constants.contains(&key)
+        {
+            return self.lists.get(&key).cloned();
+        }
+        self.enum_key_lists.get(&(node.location().start_offset(), node.location().end_offset())).cloned()
     }
 
     /// `/pattern#{CONST}pattern/flags` — folds when the embedded part
@@ -3637,6 +3785,20 @@ fn parse_scope(
                     default,
                 ));
             }
+        }
+        // A required parameter after the optional ones (`->(col = "price",
+        // op = ">=", amount)`, Prism's `posts`) binds the LAST argument.
+        // The class method this scope becomes has no slot for it (the
+        // relation parameter follows the optionals), and dropping it left
+        // the body reading an unbound name while the caller's last
+        // argument landed in an optional. Refuse rather than mis-bind.
+        if pn.posts().iter().next().is_some() {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: format!(
+                    "scope :{name}: a required parameter after optional ones is not supported"
+                ),
+            });
         }
         for kw in pn.keywords().iter() {
             if let Some(okw) = kw.as_optional_keyword_parameter_node() {

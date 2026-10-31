@@ -305,80 +305,71 @@ pub(crate) fn split_key(args: &[Expr]) -> Option<(Expr, Vec<Expr>, Vec<Expr>)> {
 }
 
 thread_local! {
-    static PLANNED: std::cell::RefCell<Option<crate::det::HashMap<PlanKey, Result<Vec<(Variant, Plan)>, String>>>> =
+    static PLANNED: std::cell::RefCell<Option<SharedPlanCache>> =
         const { std::cell::RefCell::new(None) };
 }
 
-/// A call by where it sits, its source spans and its literal arguments.
-type PlanKey = (u8, String, String, Vec<(u32, u32, u32)>, String);
+// Answers shared only within one immutable-catalog phase and its workers.
+#[derive(Clone, Default)]
+pub(crate) struct SharedPlanCache(std::sync::Arc<std::sync::Mutex<
+    crate::det::HashMap<PlanKey, Result<Vec<(Variant, Plan)>, String>>
+>>);
 
-/// Run `f` with each call's plans kept: the analyzer asks for them every
-/// typing round and the lowering once more, and each asking plans the call
-/// in every locale. The key is the call's source spans, which `f`'s one app
-/// does not reuse (nor its one catalog, which the lowering reads from a
-/// copy). Nested, it keeps the plans the outer one has.
-pub fn with_plan_cache<T>(f: impl FnOnce() -> T) -> T {
-    if PLANNED.with(|c| c.borrow().is_some()) {
-        return f();
-    }
-    PLANNED.with(|c| *c.borrow_mut() = Some(Default::default()));
-    let out = f();
-    PLANNED.with(|c| *c.borrow_mut() = None);
-    out
+pub(crate) fn plan_cache_snapshot() -> Option<SharedPlanCache> {
+    PLANNED.with(|c| c.borrow().clone())
 }
 
-fn plan_key(recv: Option<&Expr>, method: &str, args: &[Expr], block: Option<&Expr>, site: Site<'_>) -> Option<PlanKey> {
-    let spans: Vec<(u32, u32, u32)> = recv.iter().copied().chain(args).chain(block).map(|e| (e.span.file.0, e.span.start, e.span.end)).collect();
-    if args.is_empty() || spans.iter().any(|s| *s == (0, 0, 0)) {
-        return None;
+pub(crate) fn install_plan_cache(cache: Option<SharedPlanCache>) -> impl Drop {
+    struct Restore(Option<SharedPlanCache>);
+    impl Drop for Restore {
+        fn drop(&mut self) { PLANNED.with(|c| *c.borrow_mut() = self.0.take()); }
     }
-    let (kind, name) = match site {
-        Site::Other => (0, ""),
-        Site::View(v) => (1, v.unwrap_or("")),
-        Site::Controller(c) => (2, c),
-    };
-    fn literal(e: &Expr) -> String {
-        match &*e.node {
-            ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
-            ExprNode::Lit { value: Literal::Sym { value } } => format!(":{}", value.as_str()),
-            ExprNode::StringInterp { parts } => parts
-                .iter()
-                .map(|p| match p {
-                    InterpPart::Text { value } => value.clone(),
-                    InterpPart::Expr { expr } => format!("#{{{}}}", literal(expr)),
-                })
-                .collect(),
-            _ => "_".into(),
-        }
+    Restore(PLANNED.with(|c| c.replace(cache)))
+}
+
+/// Planning reads the parsed lookup, the literal locale (if any), the
+/// presence/tail of a dynamic key, and view context. Runtime expressions
+/// are evaluated by folding, not planning. Spans are not identities:
+/// class macros copy them while substituting different option values.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct PlanKey {
+    lookup: Translate,
+    locale: Option<String>,
+    dynamic_tail: Option<String>,
+    in_view: bool,
+}
+
+/// Keep plans for one phase over one immutable catalog. Nested analyses
+/// start a fresh cache: an outer session may analyze another app/catalog.
+pub fn with_plan_cache<T>(f: impl FnOnce() -> T) -> T {
+    let _cache = install_plan_cache(Some(Default::default()));
+    f()
+}
+
+fn plan_key(call: &Call, in_view: bool) -> PlanKey {
+    PlanKey {
+        lookup: call.lookup.clone(),
+        locale: match &call.locale {
+            Some(Locale::Literal(locale)) => Some(locale.clone()),
+            _ => None,
+        },
+        dynamic_tail: call.dynamic.as_ref().map(|(_, tail)| tail.clone()),
+        in_view,
     }
-    // Not the spans alone: a ternary key's branch calls carry the spans of the call they came from, and a pass between analysis and lowering may rewrite an option.
-    let shape: String = args
-        .iter()
-        .map(|a| match &*a.node {
-            ExprNode::If { .. } => "?".to_string(),
-            ExprNode::Hash { entries, .. } => entries.iter().map(|(k, v)| format!("{}={}", literal(k), literal(v))).collect::<Vec<_>>().join(","),
-            _ => literal(a),
-        })
-        .collect::<Vec<_>>()
-        .join("\u{1f}");
-    Some((kind + if recv.is_some() { 4 } else { 0 }, name.to_string(), method.to_string(), spans, shape))
 }
 
 /// `plans` for the call written as `recv.method(args)`, kept for the length of `with_plan_cache`.
-fn plans_at(catalog: &Catalog, call: &Call, key: Option<PlanKey>, in_view: bool) -> Result<Vec<(Variant, Plan)>, String> {
-    if let Some(key) = &key
-        && let Some(hit) = PLANNED.with(|c| c.borrow().as_ref().and_then(|m| m.get(key).cloned()))
-    {
+fn plans_at(catalog: &Catalog, call: &Call, in_view: bool) -> Result<Vec<(Variant, Plan)>, String> {
+    let key = plan_key(call, in_view);
+    if let Some(hit) = PLANNED.with(|c| c.borrow().as_ref().and_then(|m| m.0.lock().unwrap().get(&key).cloned())) {
         return hit;
     }
     let out = plans(catalog, call, in_view);
-    if let Some(key) = key {
-        PLANNED.with(|c| {
-            if let Some(m) = c.borrow_mut().as_mut() {
-                m.insert(key, out.clone());
-            }
-        });
-    }
+    PLANNED.with(|c| {
+        if let Some(m) = c.borrow().as_ref() {
+            m.0.lock().unwrap().insert(key, out.clone());
+        }
+    });
     out
 }
 
@@ -410,7 +401,7 @@ fn resolves_uncached(
             .iter()
             .try_for_each(|a| resolves(catalog, recv, method, a, block, site).expect("still a translate call")),
         (Ok(call), None) if counted_by_rule(&call, catalog) => Err(COUNT_BY_RULE.to_string()),
-        (Ok(call), None) => plans_at(catalog, &call, plan_key(recv, method, args, block, site), site.in_view()).map(|_| ()),
+        (Ok(call), None) => plans_at(catalog, &call, site.in_view()).map(|_| ()),
         (Err(reason), None) => Err(reason),
     };
     Some(match answer {
@@ -644,6 +635,8 @@ thread_local! {
 /// templates. A controller's instance methods (its actions and the
 /// private methods they call) take the controller's `t`.
 pub fn apply_i18n_translate_lowering(app: &mut App) {
+    // This catalog is a new phase, independent of analysis and outer sessions.
+    let _cache = install_plan_cache(Some(Default::default()));
     TABLE.with(|t| *t.borrow_mut() = Default::default());
     RUNTIME_SITES.with(|r| *r.borrow_mut() = Default::default());
     let catalog = app.i18n.or_rails_default().clone();
@@ -808,8 +801,7 @@ fn rewrite_one(expr: &mut Expr, catalog: &Catalog, site: Site<'_>) {
     if counted_by_rule(&call, catalog) {
         return runtime(COUNT_BY_RULE, expr);
     }
-    let key = plan_key(recv.as_ref(), method.as_str(), args, block.as_ref(), site);
-    let plans = match plans_at(catalog, &call, key, in_view) {
+    let plans = match plans_at(catalog, &call, in_view) {
         Ok(plans) => plans,
         Err(reason) => return runtime(&reason, expr),
     };
@@ -1654,5 +1646,29 @@ mod tree_answer_tests {
             }
         }
         assert!(positive > 0 && negative > 0);
+    }
+}
+
+#[cfg(test)]
+mod phase_cache_tests {
+    use super::*;
+
+    #[test]
+    fn nested_phases_do_not_reuse_another_catalogs_answer() {
+        let catalog = |text: &str| {
+            let mut c = Catalog::default();
+            c.locale = "en".into();
+            c.entries.insert("label".into(), text.into());
+            c
+        };
+        let (first, second) = (catalog("first"), catalog("second"));
+        let call = Call { lookup: Translate { key: "label".into(), ..Default::default() },
+            count: None, values: vec![], order: vec![], dynamic: None, locale: None };
+        with_plan_cache(|| {
+            let expected = plans(&first, &call, false).unwrap();
+            assert_eq!(plans_at(&first, &call, false).unwrap(), expected);
+            with_plan_cache(|| assert_eq!(plans_at(&second, &call, false).unwrap(), plans(&second, &call, false).unwrap()));
+            assert_eq!(plans_at(&first, &call, false).unwrap(), expected);
+        });
     }
 }

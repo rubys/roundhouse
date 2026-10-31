@@ -159,6 +159,10 @@ json.widgets @widgets, partial: @partial, as: :widget do |widget|
 end
 "#;
 
+/// What the Ruby emit writes for a `json` call the lowering refuses
+/// (#1539).
+const REFUSAL: &str = "jbuilder call with unrecognised arguments not supported";
+
 fn emitted() -> Vec<(String, String)> {
     let files: HashMap<PathBuf, Vec<u8>> = [
         ("db/schema.rb", SCHEMA),
@@ -316,7 +320,7 @@ fn render(name: &str, body: &str) -> String {
     }
     std::fs::write(dir.join("app/views.rb"), "").unwrap();
     let mut requires = String::new();
-    for name in ["_widget_json.rb", "items_json.rb", "inline_json.rb", "names_json.rb", "sorted_json.rb", "options_json.rb"] {
+    for name in ["_widget_json.rb", "items_json.rb", "inline_json.rb", "names_json.rb", "sorted_json.rb", "options_json.rb", "set_bang_json.rb"] {
         let file = dir.join("app/views/widgets").join(name);
         requires.push_str(&format!("require {:?}\n", file.display().to_string()));
     }
@@ -417,13 +421,30 @@ puts Views::Widgets.options_json(widgets)
 }
 
 /// `json.set!(:widgets, col) { … }` is not a key named `set!` mapped
-/// over the Symbol `:widgets`.
+/// over the Symbol `:widgets`: it is `json.widgets(col) { … }` (#1539).
 #[test]
 fn an_explicit_set_bang_with_a_block_is_not_a_key_with_a_collection() {
     let files = emitted();
     let src = view(&files, "widgets/set_bang_json.rb");
     assert!(!src.contains("\\\"set!\\\":"), "`set!` is not the key:\n{src}");
     assert!(!src.contains("__col0 = :widgets"), "the key is not the collection:\n{src}");
+    assert!(
+        src.contains("\\\"widgets\\\":") && src.contains("__col0 = widgets") && src.contains("__col0.map"),
+        "an array over the collection under the key:\n{src}"
+    );
+}
+
+/// Rails 8.1.4 + jbuilder 2.15.1 render the explicit `set!` as the key
+/// with an array, one object per element.
+#[test]
+fn an_explicit_set_bang_with_a_block_renders_what_jbuilder_renders() {
+    let out = render(
+        "set_bang",
+        r#"widgets = [Widget.new(1, "b", 5), Widget.new(2, "a", nil)]
+puts Views::Widgets.set_bang_json(widgets)
+"#,
+    );
+    assert_eq!(out, r#"{"count":2,"widgets":[{"label":"b"},{"label":"a"}]}"#);
 }
 
 /// `partial:` + `as:` with a non-literal `partial:` value is still the
@@ -436,6 +457,7 @@ fn an_inline_partial_with_a_variable_path_is_not_an_array_of_blocks() {
         !src.contains("__col0.map") && !src.contains("\\\"label\\\":"),
         "the block is not run per element:\n{src}"
     );
+    assert!(src.contains(REFUSAL), "the partial path is not known, so it is refused:\n{src}");
 }
 
 /// Literal options (`cache: true`, `OPTIONS`) still become the array;
@@ -449,6 +471,7 @@ fn a_collection_with_a_call_in_its_options_is_not_an_array_of_blocks() {
         !src.contains("__col0.map") && !src.contains("\\\"label\\\":"),
         "the block is not run per element:\n{src}"
     );
+    assert!(src.contains(REFUSAL), "the statement is refused, not dropped:\n{src}");
     let literal = view(&files, "widgets/options_json.rb");
     assert!(literal.contains("__col0.map"), "a literal option still lowers:\n{literal}");
 }
@@ -462,4 +485,5 @@ fn an_inline_partial_hash_before_another_argument_is_not_an_array_of_blocks() {
         !src.contains("__col0.map") && !src.contains("\\\"label\\\":"),
         "the block is not run per element:\n{src}"
     );
+    assert!(src.contains(REFUSAL), "the extra argument is not lowered, so it is refused:\n{src}");
 }

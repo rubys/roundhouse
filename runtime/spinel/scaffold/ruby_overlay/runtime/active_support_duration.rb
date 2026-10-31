@@ -27,6 +27,10 @@ module ActiveSupport
       @seconds = seconds
     end
 
+    def self.time_operand(value)
+      value.is_a?(Duration) ? value.seconds : value
+    end
+
     def self.seconds(n) = new(n)
     def self.second(n) = new(n)
     def self.minutes(n) = new(n * SECONDS_PER_MINUTE)

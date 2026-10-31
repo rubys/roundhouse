@@ -288,13 +288,18 @@ pub(crate) fn rewrite_node(
     // The record is all a class-side call can bind — except the FLASH
     // PAIR, which every view method carries as a defaulted tail
     // (`def self.mention(user, notice = nil, alert = nil)`) and which a
-    // caller outside a request has no business supplying anyway.
+    // caller outside a request has no business supplying anyway, nor
+    // the `local_assigns[:notice]` read a moved flash leaves beside it
+    // (`local_key_of`), nil for a render that passes no `notice:`.
     // Anything else in the contract is a value the partial's body
     // genuinely reads and a class-side call has nowhere to get, so
     // declining is the honest answer — Rails raises there too, one step
     // later.
     if !contract.closure.is_empty()
-        || contract.extras.iter().any(|e| e != "notice" && e != "alert")
+        || contract
+            .extras
+            .iter()
+            .any(|e| !matches!(crate::lower::view_to_library::local_key_of(&contract.extras, e), "notice" | "alert"))
     {
         return;
     }
@@ -311,7 +316,7 @@ pub(crate) fn rewrite_node(
                             .collect(),
                     },
                 )),
-                method: Symbol::from(stem),
+                method: contract.method.clone(),
                 args,
                 block: None,
                 parenthesized: true,

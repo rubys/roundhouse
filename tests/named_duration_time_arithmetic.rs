@@ -27,8 +27,8 @@ end
 }
 
 const ASSERTIONS: &str = r#"now = Time.at(100000)
-raise "day" unless UploadClock.cutoff(now).to_i == 13600
-raise "shift" unless UploadClock.shifted(now).to_i == 100002
+raise "day" unless UploadClock.cutoff(now: now).to_i == 13600
+raise "shift" unless UploadClock.shifted(now: now).to_i == 100002
 puts "PASS"
 "#;
 

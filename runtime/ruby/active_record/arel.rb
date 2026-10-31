@@ -127,14 +127,16 @@ module Arel
       end
     end
 
-    # A SQL literal. nil, numbers, and booleans stay bare. Strings go
-    # through `Db.escape_string`, the same literal `Connection#quote`
-    # used to build itself, so a NUL or a binary value stays one literal.
+    # A SQL literal. nil, numbers, and booleans stay bare: a boolean is
+    # the database's literal (SQLite's 1, PostgreSQL's TRUE), as `Db`
+    # writes it. Strings go through `Db.escape_string`, the same literal
+    # `Connection#quote` used to build itself, so a NUL or a binary value
+    # stays one literal.
     def self.quote_scalar(value)
       return "NULL" if value.nil?
       return value.to_s if value.is_a?(Integer) || value.is_a?(Float)
-      return "1" if value == true
-      return "0" if value == false
+      return Db.escape_bool_opt(true) if value == true
+      return Db.escape_bool_opt(false) if value == false
       Db.escape_string(value.to_s)
     end
 

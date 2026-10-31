@@ -73,6 +73,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::app::App;
+use crate::build_target::BuildTarget;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
@@ -80,11 +81,16 @@ use crate::ty::Ty;
 /// Ground duration-unit sends across every app body the post-analyze
 /// hook owns (models, library classes, controllers, seeds — not views).
 pub fn apply_duration_lowering(app: &mut App) {
+    apply_duration_lowering_for(app, BuildTarget::Ruby);
+}
+
+pub(crate) fn apply_duration_lowering_for(app: &mut App, target: BuildTarget) {
+    let time_operands = matches!(target, BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel);
     let temporal_predicates = !app_defines_temporal_predicates(app);
     let duration_constants = named_duration_constants(app);
     super::for_each_owned_hook_body(app, &mut |owner, body| {
         type_duration_constants(body, owner, &duration_constants);
-        apply_duration_rewrites(body, temporal_predicates)
+        apply_duration_rewrites(body, temporal_predicates, time_operands)
     });
     // TEST BODIES TOO. `1.day.ago` is not a method on any target's
     // Integer — this pass IS what grounds it — so a test writing one
@@ -99,7 +105,7 @@ pub fn apply_duration_lowering(app: &mut App) {
     // strict-target test lanes do not ship.
     super::for_each_test_body(app, &mut |body| {
         type_duration_constants(body, None, &duration_constants);
-        apply_duration_rewrites(body, temporal_predicates)
+        apply_duration_rewrites(body, temporal_predicates, time_operands)
     });
 }
 
@@ -158,13 +164,13 @@ fn type_duration_constants(expr: &mut Expr, owner: Option<&ClassId>, constants: 
 /// operand, and the arithmetic rewrite hides one behind `.to_i` — after
 /// it runs, `<t> - <dur>` is no longer distinguishable from the numeric
 /// `Time - Time` shape.
-pub(crate) fn apply_duration_rewrites(body: &mut Expr, temporal_predicates: bool) {
+pub(crate) fn apply_duration_rewrites(body: &mut Expr, temporal_predicates: bool, time_operands: bool) {
     rewrite_durations(body);
     if temporal_predicates {
         rewrite_temporal_predicates(body);
     }
     rewrite_duration_comparisons(body);
-    rewrite_time_duration_arith(body);
+    rewrite_time_duration_arith(body, time_operands);
     rewrite_expires_in(body);
 }
 
@@ -330,8 +336,8 @@ fn rewrite_temporal_predicates(expr: &mut Expr) {
 /// A Duration RECEIVER is left alone: `1.day - 1.hour` is Duration
 /// arithmetic, and the value class ships no operators, so grounding
 /// only one operand would quietly change what the expression means.
-fn rewrite_time_duration_arith(expr: &mut Expr) {
-    expr.node.for_each_child_mut(&mut rewrite_time_duration_arith);
+fn rewrite_time_duration_arith(expr: &mut Expr, time_operands: bool) {
+    expr.node.for_each_child_mut(&mut |child| rewrite_time_duration_arith(child, time_operands));
     let is_arith = matches!(
         &*expr.node,
         ExprNode::Send { recv: Some(recv), method, args, block: None, .. }
@@ -344,6 +350,47 @@ fn rewrite_time_duration_arith(expr: &mut Expr) {
                 && !is_typed_duration(recv)
     );
     if !is_arith {
+        let ExprNode::Send {
+            recv: Some(recv),
+            method,
+            args,
+            block: None,
+            ..
+        } = &mut *expr.node
+        else {
+            return;
+        };
+        if !time_operands
+            || !matches!(recv.ty, Some(Ty::Time))
+            || !matches!(method.as_str(), "+" | "-")
+            || args.len() != 1
+            || matches!(args[0].ty, Some(Ty::Int | Ty::Float | Ty::Time))
+        {
+            return;
+        }
+        let operand = take(&mut args[0]);
+        let span = operand.span;
+        let mut duration = Expr::new(
+            span,
+            ExprNode::Const {
+                path: vec![Symbol::from("ActiveSupport"), Symbol::from("Duration")],
+            },
+        );
+        duration.ty = Some(Ty::Class {
+            id: ClassId(Symbol::from("ActiveSupport::Duration")),
+            args: vec![].into(),
+        });
+        args[0] = Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(duration),
+                method: Symbol::from("time_operand"),
+                args: vec![operand],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        args[0].ty = Some(Ty::Untyped);
         return;
     }
     let ExprNode::Send { args, .. } = &mut *expr.node else { unreachable!() };

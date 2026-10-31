@@ -3195,6 +3195,7 @@ fn ingest_explicit_route(
     // where Rails serves `/searches/clear` (named `clear_searches`).
     let mut on_scope: Option<ResourceScope> = None;
     let mut constraints: IndexMap<Symbol, String> = IndexMap::new();
+    let mut action_symbol = false;
 
     for arg in args_node.arguments().iter() {
         if let Some(s) = rstring(&arg) {
@@ -3213,6 +3214,7 @@ fn ingest_explicit_route(
             // symbol appearing after a target can't be mistaken for one.
             if let Some(s) = symbol_value(&arg) {
                 path = Some(s);
+                action_symbol = true;
             }
         } else if let Some(kh) = arg.as_keyword_hash_node() {
             // Two shapes share KeywordHashNode here:
@@ -3382,6 +3384,7 @@ fn ingest_explicit_route(
             // `on: :member` / `on: :collection` still decide the path.
             // Nested is the default a bare verb inside `resources` gets.
             scope: on_scope.unwrap_or(ResourceScope::Nested),
+            action_symbol,
         }));
     }
     if to_is_unsupported {
@@ -3431,7 +3434,10 @@ fn ingest_explicit_route(
             if stem.is_empty() || stem.contains('/') || stem.contains(':') {
                 return Ok(None);
             }
-            path = Some(format!("/{stem}"));
+            // As written, leading slash or not: Rails takes `get "show"`
+            // on a member for the resource's own `show`, and `get
+            // "/show"` for a new action beside it (`show_note`).
+            path = Some(if p.starts_with('/') { format!("/{stem}") } else { stem.clone() });
             (parent.to_string(), action_kwarg.unwrap_or(stem))
         }
     };
@@ -3447,6 +3453,7 @@ fn ingest_explicit_route(
         // and a `member do`/`collection do` wrapper (handled in
         // `ingest_route_body`) overwrites it on the returned entry.
         scope: on_scope.unwrap_or(ResourceScope::Nested),
+        action_symbol,
     }))
 }
 
@@ -3514,6 +3521,7 @@ fn ingest_root_route(
             as_name: Some(as_name.unwrap_or_else(|| Symbol::from("root"))),
             constraints: IndexMap::new(),
             scope: ResourceScope::default(),
+            action_symbol: false,
         }));
     }
     match target {

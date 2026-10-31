@@ -134,15 +134,15 @@ pub(super) fn push_dom_prefix_method(methods: &mut Vec<MethodDef>, model: &Model
 /// `User#to_param` answers the username). Skipped for abstract models
 /// like the other instance-shaped synthesizers.
 ///
-/// `@id.to_s`, not `id&.to_s`: the ivar is the lowered id slot every
-/// model carries, and on a persisted record — the only kind a URL
+/// `@id.to_s` (the declared key's slot, under `self.primary_key = …`),
+/// not `id&.to_s`: the ivar is the lowered id slot every model carries, and on a persisted record — the only kind a URL
 /// helper ever renders — the two are byte-identical. (For an unsaved
 /// record Rails answers nil where this answers ""; no corpus call
 /// site reaches that.) Belongs to every target: the definition that
 /// existed before lived in the CRuby overlay's core_ext, which the
 /// strict targets never apply — so campfire's avatar helper
 /// (`Zlib.crc32(user.to_param)`) 500'd every avatar on the binary.
-pub(super) fn push_to_param_method(methods: &mut Vec<MethodDef>, model: &Model) {
+pub(super) fn push_to_param_method(methods: &mut Vec<MethodDef>, model: &Model, table: Option<&crate::schema::Table>) {
     if is_primary_abstract_class(model) {
         return;
     }
@@ -164,9 +164,11 @@ pub(super) fn push_to_param_method(methods: &mut Vec<MethodDef>, model: &Model) 
             Expr::new(
                 Span::synthetic(),
                 ExprNode::Send {
+                    // The key column's slot: `@cityhash` under `self.primary_key = "cityhash"`,
+                    // or under a composite table whose key a reopen or ancestor declared.
                     recv: Some(Expr::new(
                         Span::synthetic(),
-                        ExprNode::Ivar { name: Symbol::from("id") },
+                        ExprNode::Ivar { name: model.primary_key.clone().or_else(|| composite_key(table)).unwrap_or_else(|| Symbol::from("id")) },
                     )),
                     method: Symbol::from("to_s"),
                     args: Vec::new(),
@@ -360,7 +362,7 @@ fn const_symbol_array(model: &Model, path: &[Symbol]) -> Vec<Symbol> {
 /// `ModelBodyItem::Unknown`), so the fold reads the assignment where it
 /// sits. Unexpanded, the class emitted NO accessors at all and every
 /// read of `title` was a NoMethodError.
-fn accessor_names(model: &Model, args: &[Expr]) -> Vec<Symbol> {
+pub(super) fn accessor_names(model: &Model, args: &[Expr]) -> Vec<Symbol> {
     let mut names: Vec<Symbol> = Vec::new();
     for arg in args {
         match &*arg.node {
@@ -1652,7 +1654,11 @@ pub(super) const BLOCK_CALLBACK_HOOKS: &[&str] = &[
 /// Unknown items — into `def <hook>` overrides of the runtime Base's
 /// no-op hooks. One body walk so declaration order is preserved
 /// across both forms when they target the same hook.
-pub(super) fn push_callback_methods(methods: &mut Vec<MethodDef>, model: &Model) {
+pub(super) fn push_callback_methods(
+    methods: &mut Vec<MethodDef>,
+    model: &Model,
+    stems: &crate::lower::view_to_library::PartialStems,
+) {
     // AHEAD of the declared callbacks: Rails registers the
     // `belongs_to … default:` callback when the association is
     // declared, and campfire declares its associations above its
@@ -1666,7 +1672,7 @@ pub(super) fn push_callback_methods(methods: &mut Vec<MethodDef>, model: &Model)
                 push_symbol_callback(methods, model, callback, item.span());
             }
             ModelBodyItem::Unknown { expr, .. } => {
-                push_block_callback(methods, model, expr);
+                push_block_callback(methods, model, expr, stems);
             }
             _ => {}
         }
@@ -2084,7 +2090,12 @@ fn rename_callback_locals(expr: &mut Expr, renames: &crate::det::HashMap<Symbol,
     }
 }
 
-fn push_block_callback(methods: &mut Vec<MethodDef>, model: &Model, expr: &Expr) {
+fn push_block_callback(
+    methods: &mut Vec<MethodDef>,
+    model: &Model,
+    expr: &Expr,
+    stems: &crate::lower::view_to_library::PartialStems,
+) {
     {
         let Some((callback, hook_name, on)) = block_callback_shape(expr) else {
             return;
@@ -2169,6 +2180,7 @@ fn push_block_callback(methods: &mut Vec<MethodDef>, model: &Model, expr: &Expr)
         let mut lambda_body = super::broadcasts::rewrite_rails_broadcast_calls(
             lambda_body.clone(),
             model,
+            stems,
         );
         // `self.<col> ||= v` on a string column → blank-guarded assign.
         // Rails' new-record attributes are nil, so `||=` means "set
@@ -2226,4 +2238,11 @@ fn push_block_callback(methods: &mut Vec<MethodDef>, model: &Model, expr: &Expr)
             });
         }
     }
+}
+
+/// The column `ingest::app::key_composite_tables` keyed a composite table
+/// on: it was declared by the model, a reopen of it, or a model ancestor.
+fn composite_key(table: Option<&crate::schema::Table>) -> Option<Symbol> {
+    let table = table.filter(|t| !t.primary_key_columns.is_empty())?;
+    table.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone())
 }

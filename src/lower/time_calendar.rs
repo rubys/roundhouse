@@ -116,6 +116,14 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     if !is_time_value(r) {
         return;
     }
+    if method.as_str() == "change"
+        && matches!(r.ty, Some(Ty::Time))
+        && let Some(usec) = change_usec_arg(args)
+    {
+        *expr.node = active_support_call("change_time_usec", vec![r.clone(), usec]);
+        expr.ty = Some(Ty::Time);
+        return;
+    }
     if method.as_str() == "to_date" && args.is_empty() {
         *expr.node = active_support_call("date_current", vec![r.clone()]);
         expr.ty = Some(Ty::Date);
@@ -457,6 +465,19 @@ fn is_time_zone_class(expr: &Expr) -> bool {
     matches!(&*expr.node, ExprNode::Const { path }
         if matches!(path.iter().map(|s| s.as_str()).collect::<Vec<_>>().as_slice(),
             ["ActiveSupport", "TimeZone"] | ["", "ActiveSupport", "TimeZone"]))
+}
+
+fn change_usec_arg(args: &[Expr]) -> Option<Expr> {
+    let [options] = args else { return None };
+    let ExprNode::Hash { entries, .. } = &*options.node else { return None };
+    let [(key, value)] = entries.as_slice() else { return None };
+    if matches!(&*key.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "usec")
+        && matches!(value.ty, Some(Ty::Int))
+    {
+        Some(value.clone())
+    } else {
+        None
+    }
 }
 
 fn active_support_call(method: &str, args: Vec<Expr>) -> ExprNode {

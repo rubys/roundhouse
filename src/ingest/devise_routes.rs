@@ -512,6 +512,7 @@ pub(super) fn ingest_devise_for(
                 as_name: Some(Symbol::from(as_name.as_str())),
                 constraints: IndexMap::new(),
                 scope: ResourceScope::Nested,
+                action_symbol: false,
             }
         })
         .collect();

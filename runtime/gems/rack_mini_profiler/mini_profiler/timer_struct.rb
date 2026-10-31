@@ -37,36 +37,104 @@ module Rack
 
       HEX = "0123456789abcdef"
 
-      class Request
-        attr_reader :id, :name, :start_milliseconds, :duration_milliseconds, :is_trivial
+      # JSON writes Ruby's Integer and Float differently, and the gem's counters start as Integer 0 and turn Float on the first addition.
+      def self.number(value, float)
+        float ? value.to_s : value.to_i.to_s
+      end
 
-        def initialize(name, page_started)
+      def self.now_ms
+        (Process.clock_gettime(Process::CLOCK_MONOTONIC) * 1000).to_i
+      end
+
+      class Request
+        attr_reader :id, :name, :depth, :is_trivial
+        attr_accessor :parent, :start, :start_milliseconds, :start_float, :duration_milliseconds,
+          :duration_without_children_milliseconds, :sql_timings_duration_milliseconds, :sql_float
+
+        def initialize(name, page_started, parent)
           @id = MiniProfiler.generate_id
           @name = name
+          @parent = parent
+          @depth = parent.nil? ? 0 : parent.depth + 1
           @duration_milliseconds = 0.0
-          @start_milliseconds = (Process.clock_gettime(Process::CLOCK_MONOTONIC) * 1000).to_i - page_started
+          @duration_set = false
+          @duration_without_children_milliseconds = 0.0
+          @start_milliseconds = (TimerStruct.now_ms - page_started).to_f
+          @start_float = false
+          @sql_timings_duration_milliseconds = 0.0
+          @sql_float = false
           @is_trivial = false
+          @start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         end
 
-        def record_time(milliseconds)
+        def root?
+          @parent.nil?
+        end
+
+        def record_time(milliseconds, children_ms)
           @duration_milliseconds = milliseconds
+          @duration_set = true
           @is_trivial = true if milliseconds < 2
+          @duration_without_children_milliseconds = milliseconds - children_ms
           nil
         end
 
-        def to_json
+        def adjust_depth(depth)
+          @depth = depth
+          nil
+        end
+
+        def add_sql_ms(ms)
+          @sql_timings_duration_milliseconds += ms
+          @sql_float = true
+          nil
+        end
+
+        def to_json(page)
+          children = page.children_of(self)
+          sqls = page.sqls_of(self)
           "{\"id\":" + TimerStruct.json_string(@id) +
             ",\"name\":" + TimerStruct.json_string(@name) +
-            ",\"duration_milliseconds\":" + @duration_milliseconds.to_s +
-            ",\"duration_without_children_milliseconds\":" + @duration_milliseconds.to_s +
-            ",\"start_milliseconds\":" + @start_milliseconds.to_s +
-            ",\"parent_timing_id\":null,\"children\":[],\"has_children\":false,\"key_values\":null" +
-            ",\"has_sql_timings\":false,\"has_duplicate_sql_timings\":false" +
-            ",\"trivial_duration_threshold_milliseconds\":2,\"sql_timings\":[]" +
-            ",\"sql_timings_duration_milliseconds\":0,\"is_trivial\":" + @is_trivial.to_s +
-            ",\"is_root\":true,\"depth\":0,\"executed_readers\":0,\"executed_scalars\":0" +
+            ",\"duration_milliseconds\":" + TimerStruct.number(@duration_milliseconds, @duration_set) +
+            ",\"duration_without_children_milliseconds\":" + TimerStruct.number(@duration_without_children_milliseconds, @duration_set) +
+            ",\"start_milliseconds\":" + TimerStruct.number(@start_milliseconds, @start_float) +
+            ",\"parent_timing_id\":" + (@parent.nil? ? "null" : TimerStruct.json_string(@parent.id)) +
+            ",\"children\":[" + children.map { |c| c.to_json(page) }.join(",") + "]" +
+            ",\"has_children\":" + (!children.empty?).to_s + ",\"key_values\":null" +
+            ",\"has_sql_timings\":" + (!sqls.empty?).to_s + ",\"has_duplicate_sql_timings\":false" +
+            ",\"trivial_duration_threshold_milliseconds\":2,\"sql_timings\":[" + sqls.map { |q| q.to_json }.join(",") + "]" +
+            ",\"sql_timings_duration_milliseconds\":" + TimerStruct.number(@sql_timings_duration_milliseconds, @sql_float) +
+            ",\"is_trivial\":" + @is_trivial.to_s +
+            ",\"is_root\":" + @parent.nil?.to_s + ",\"depth\":" + @depth.to_s + ",\"executed_readers\":0,\"executed_scalars\":0" +
             ",\"executed_non_queries\":0,\"custom_timing_stats\":{},\"custom_timings\":{}}"
         end
+      end
+
+      class Sql
+        attr_accessor :parent
+        attr_reader :start_milliseconds, :duration_milliseconds
+
+        def initialize(query, duration_ms, page_started, parent, cached)
+          @query = query
+          @duration_milliseconds = duration_ms
+          @start_milliseconds = (TimerStruct.now_ms - page_started) - duration_ms
+          @parent = parent
+          @cached = cached
+        end
+
+        # Not a stack_trace_snippet: the gem filters `Kernel.caller` to the app's frames, and a Spinel binary keeps no Ruby call stack.
+        def to_json
+          "{\"execute_type\":3,\"formatted_command_string\":" + TimerStruct.json_string(TimerStruct.html_escape(@query)) +
+            ",\"stack_trace_snippet\":null,\"start_milliseconds\":" + @start_milliseconds.to_s +
+            ",\"duration_milliseconds\":" + @duration_milliseconds.to_s +
+            ",\"first_fetch_duration_milliseconds\":" + @duration_milliseconds.to_s +
+            ",\"parameters\":null,\"row_count\":0,\"class_name\":null,\"parent_timing_id\":" + TimerStruct.json_string(@parent.id) +
+            ",\"cached\":" + (@cached ? "true" : "null") + ",\"is_duplicate\":false}"
+        end
+      end
+
+      def self.html_escape(s)
+        s.gsub("&", "&amp;").gsub("<", "&lt;").gsub(">", "&gt;").gsub("\"", "&quot;").gsub("'", "&#39;")
       end
 
       class Page
@@ -79,16 +147,75 @@ module Rack
           @id = id
           @name = name
           @started_at = (Time.now.to_f * 1000).to_i
-          @started = (Process.clock_gettime(Process::CLOCK_MONOTONIC) * 1000).to_i
+          @started = TimerStruct.now_ms
           @machine_name = machine_name
           @request_method = request_method
           @request_path = request_path
           @user = user
-          @root = Request.new(root_name, @started)
+          @root = Request.new(root_name, @started, nil)
+          # Not a children Array on each timer: spinel cannot seed an Array of a class inside that class's own constructor.
+          @timers = [@root]
+          @sqls = [Sql.new("", 0.0, @started, @root, false)]
+          @sqls.pop
+          @sql_count = 0
+          @cached_sql_count = 0
+          @sql_ms = 0.0
+          @sql_float = false
         end
 
         def duration_ms
           @root.duration_milliseconds
+        end
+
+        def add_child(parent, name)
+          timer = Request.new(name, @started, parent)
+          @timers << timer
+          timer
+        end
+
+        def add_sql(parent, query, elapsed_ms, cached)
+          @sqls << Sql.new(query, elapsed_ms, @started, parent, cached)
+          parent.add_sql_ms(elapsed_ms)
+          @sql_ms += elapsed_ms
+          @sql_float = true
+          @sql_count += 1
+          @cached_sql_count += 1 if cached
+          nil
+        end
+
+        def children_of(timer)
+          @timers.select { |t| !t.parent.nil? && t.parent.equal?(timer) }
+        end
+
+        def sqls_of(timer)
+          @sqls.select { |q| q.parent.equal?(timer) }
+        end
+
+        def children_ms(timer)
+          sum = 0.0
+          children_of(timer).each { |c| sum += c.duration_milliseconds }
+          sum
+        end
+
+        def move_child(child, destination)
+          child.parent = destination
+          relevel(child, destination.depth + 1)
+          nil
+        end
+
+        def relevel(timer, depth)
+          timer.adjust_depth(depth)
+          children_of(timer).each { |c| relevel(c, depth + 1) }
+          nil
+        end
+
+        def move_sql(sql, destination)
+          source = sql.parent
+          source.sql_timings_duration_milliseconds -= sql.duration_milliseconds
+          source.sql_float = true
+          destination.add_sql_ms(sql.duration_milliseconds)
+          sql.parent = destination
+          nil
         end
 
         def to_json
@@ -101,14 +228,15 @@ module Rack
             "," + UNVIEWED +
             ",\"duration_milliseconds\":" + @root.duration_milliseconds.to_s +
             ",\"has_trivial_timings\":true,\"has_all_trivial_timings\":false" +
-            ",\"trivial_duration_threshold_milliseconds\":2,\"head\":null,\"sql_count\":0" +
-            ",\"cached_sql_count\":0,\"duration_milliseconds_in_sql\":0,\"has_sql_timings\":true" +
+            ",\"trivial_duration_threshold_milliseconds\":2,\"head\":null,\"sql_count\":" + @sql_count.to_s +
+            ",\"cached_sql_count\":" + @cached_sql_count.to_s +
+            ",\"duration_milliseconds_in_sql\":" + TimerStruct.number(@sql_ms, @sql_float) + ",\"has_sql_timings\":true" +
             ",\"has_duplicate_sql_timings\":false,\"executed_readers\":0,\"executed_scalars\":0" +
             ",\"executed_non_queries\":0,\"custom_timing_names\":[],\"custom_timing_stats\":{}" +
             ",\"custom_fields\":{},\"has_flamegraph\":false" +
             ",\"request_method\":" + TimerStruct.json_string(@request_method) +
             ",\"request_path\":" + TimerStruct.json_string(@request_path) +
-            ",\"root\":" + @root.to_json +
+            ",\"root\":" + @root.to_json(self) +
             ",\"started_formatted\":\"/Date(" + @started_at.to_s + ")/\"}"
         end
 

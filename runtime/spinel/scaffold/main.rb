@@ -643,7 +643,13 @@ module Main
       controller.params.key?("format") || !matched.req_format.nil?)
 
     begin
-      controller.process_action(matched.action)
+      # Not the class name built per request: only a start_processing / process_action listener reads it.
+      processing = ActiveSupport::Notifications.process_listening? ? ActiveSupport::Notifications.start_processing(controller.class.name, matched.action.to_s) : 0.0
+      begin
+        controller.process_action(matched.action)
+      ensure
+        ActiveSupport::Notifications.process_action(controller.class.name, matched.action.to_s, processing) unless processing == 0.0
+      end
     rescue ActiveRecord::RecordNotFound, ActionController::RoutingError, AbstractController::ActionNotFound
       # The routed format (extension, route default) is the `format`
       # param; an html one may still name `?format=`.

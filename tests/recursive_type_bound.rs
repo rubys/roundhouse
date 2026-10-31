@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
-use roundhouse::analyze::{diagnose, Analyzer, FixpointRounds, LoopEnd, Severity};
+use roundhouse::analyze::{diagnose, Analyzer, FixpointRounds, LoopEnd, Restamp, Severity};
 use roundhouse::ident::{ClassId, Symbol};
 use roundhouse::ingest::ingest_app_from_tree;
 use roundhouse::ty::Ty;
@@ -289,7 +289,8 @@ fn assert_settles(settled: &Settled) {
     assert!(
         production_settles
             && matches!(rounds.views_and_tests, LoopEnd::Settled(_))
-            && rounds.absorb != LoopEnd::RanToCap,
+            && rounds.absorb != LoopEnd::RanToCap
+            && matches!(rounds.restamp.end, LoopEnd::Settled(_)),
         "the fixpoint stopped on a round cap: {rounds:?}"
     );
 }
@@ -335,6 +336,45 @@ fn a_self_recursive_walk_settles_bounded() {
     );
     assert_bounded(&settled);
     assert_settles(&settled);
+}
+
+/// #1494's shape: `score_label` is fed from a view, so its param is only
+/// re-joined after the views are typed, from `shown_score`'s
+/// `Integer | String` return.
+const SCORE_HELPER: &str = r#"
+module ScoreHelper
+  def shown_score(size)
+    if size > 3
+      size
+    else
+      "~"
+    end
+  end
+
+  def score_label(score)
+    if score.is_a? Integer
+      "n#{score}"
+    else
+      "~"
+    end
+  end
+end
+"#;
+
+/// The restamp takes one production pass of its budget: the first re-join
+/// moves the param, and the second moves nothing.
+#[test]
+fn a_view_fed_helper_param_settles_the_restamp_in_one_pass() {
+    let settled = analyze(
+        &[
+            ("app/controllers/trees_controller.rb", "class TreesController < ApplicationController\n  def index\n    @size = 5\n  end\nend\n"),
+            ("app/helpers/score_helper.rb", SCORE_HELPER),
+            ("app/views/trees/index.html.erb", "<% score = shown_score(@size) %>\n<%= score_label(score) %>\n"),
+        ],
+        &[],
+    );
+    assert!(settled.errors.is_empty(), "errors: {:#?}", settled.errors);
+    assert_eq!(settled.rounds.restamp, Restamp { end: LoopEnd::Settled(1), rounds: 2, passes: 1 });
 }
 
 /// The call sites live in the class, so analysis sees the same feedback

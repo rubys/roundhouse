@@ -206,3 +206,158 @@ end
         "class << self; define_method(:inherited) can replace Child.new"
     );
 }
+
+#[test]
+fn included_callback_that_only_calls_a_macro_on_the_receiver_keeps_keywords() {
+    for body in [
+        "base.before_action(:load_tag) if base.methods.include?(:before_action)",
+    ] {
+        let source = format!(
+            r#"
+module Tagging
+  def self.included(base)
+    {body}
+  end
+end
+
+class WidgetClient
+  include Tagging
+
+  def initialize(args)
+    @name = args[:name]
+  end
+
+  def self.build
+    new(name: "x")
+  end
+end
+"#
+        );
+        assert!(!constructor_keywords_are_refused(&source), "{body}");
+    }
+}
+
+#[test]
+fn included_eval_block_that_replaces_new_still_refuses() {
+    for body in [
+        "base.instance_eval do\n      define_singleton_method(:new) { |**o| o }\n    end",
+        "base.class_eval do\n      extend Unknown::Factory\n    end",
+        "base.class_eval(\"def self.new(**o) = o\")",
+        // The block's parameter is the receiver too (`klass` is `base`).
+        "base.instance_eval do |klass|\n      klass.define_singleton_method(:new) { |**o| o }\n    end",
+        "base.class_eval { |klass| klass.extend(Unknown::Factory) }",
+        "base.instance_eval { it.define_singleton_method(:new) { |**o| o } }",
+        "base.instance_eval { _1.define_singleton_method(:new) { |**o| o } }",
+        // Any literal eval block on the receiver refuses, as on `main`: even a
+        // bare macro call, a numbered parameter of a nested block, or `self`
+        // through a local (CodeRabbit on #1525).
+        "base.instance_eval do\n      before_action(:load_tag) if base.methods.include?(:before_action)\n    end",
+        "base.instance_eval { [1].map { _1 } }",
+        "base.instance_eval do\n      target = self\n      target.define_singleton_method(:new) { |**o| o }\n    end",
+    ] {
+        let source = format!(
+            r#"
+module Hooks
+  def self.included(base)
+    {body}
+  end
+end
+
+class Child
+  include Hooks
+
+  def initialize(label:)
+    @label = label
+  end
+
+  def self.build
+    new(label: "x")
+  end
+end
+"#
+        );
+        assert!(constructor_keywords_are_refused(&source), "{body}");
+    }
+}
+
+/// A lookup change sent reflectively on the hook's receiver: `send`,
+/// `public_send` and `__send__` each run the named method (CodeRabbit on
+/// #1525), so keywords stay refused.
+#[test]
+fn included_callback_sending_a_lookup_change_still_refuses() {
+    for body in [
+        "base.send(:define_singleton_method, :new) { |**o| o }",
+        "base.public_send(:define_singleton_method, :new) { |**o| o }",
+        "base.__send__(:define_singleton_method, :new) { |**o| o }",
+    ] {
+        let source = format!(
+            r#"
+module Hooks
+  def self.included(base)
+    {body}
+  end
+end
+
+class Child
+  include Hooks
+
+  def initialize(label:)
+    @label = label
+  end
+
+  def self.build
+    new(label: "x")
+  end
+end
+"#
+        );
+        assert!(constructor_keywords_are_refused(&source), "{body}");
+    }
+}
+
+/// A hook that calls, on its receiver, a method an extended module defines,
+/// and that method replaces `new` (CodeRabbit on #1525): the call can't be
+/// read as a harmless macro, so keywords stay refused.
+#[test]
+fn included_callback_calling_an_extended_constructor_installer_still_refuses() {
+    for (hook, class_extends) in [
+        ("base.extend(Factory)\n    base.install_factory", ""),
+        ("base.install_factory", "  extend Factory\n"),
+        ("base.extend(Factory)\n    base.send(:install_factory)", ""),
+        ("base.extend(Factory)\n    base.public_send(\"install_factory\")", ""),
+        ("base.extend(Factory)\n    base.__send__(:install_factory)", ""),
+        ("base.extend(Factory)\n    base.send(installer)", ""),
+        ("base.extend(Factory)\n    base.instance_eval { install_factory }", ""),
+    ] {
+        let source = format!(
+            r#"
+module Factory
+  def install_factory
+    define_singleton_method(:new) {{ |**options| options }}
+  end
+end
+
+module Hooked
+  def self.installer = :install_factory
+
+  def self.included(base)
+    {hook}
+  end
+end
+
+class WidgetClient
+{class_extends}  include Hooked
+
+  def initialize(args)
+    @name = args[:name]
+  end
+
+  def self.build
+    new(name: "x")
+  end
+end
+"#
+        );
+        assert!(constructor_keywords_are_refused(&source), "{hook} / {class_extends:?}");
+    }
+}

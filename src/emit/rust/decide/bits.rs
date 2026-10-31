@@ -3,7 +3,7 @@
 //! Layout: bits 0–31 are **cross-target** concerns — predicates whose
 //! semantics other targets (TS/Crystal/Go/Kotlin/Swift) would also
 //! consume if and when those targets grow a decide pass. Bits 32–63
-//! are **rust-local** — semantics tied to Rust's type system
+//! are **target-local**. Rust uses them for its type system
 //! (ownership, move/copy, Option wrapping for `Option<T>`-typed
 //! positions).
 //!
@@ -82,7 +82,8 @@ pub const CLONE_AT: u64 = 1 << 34;
 // Ivar(Class)), making the lowerer-inserted `Cast { target_ty:
 // Option<U> }` the sole signal for Some-wrap. The walker that
 // stamped this bit (`decide/coerce_family.rs`) was deleted in the
-// same commit; the position stays unallocated for future use.
+// same commit. The position is now `crate::expr::NATIVE_KEYWORD_ARGUMENTS`,
+// a Ruby-family-local lowering decision, so Rust must not allocate it.
 
 // ────────────────────────────────────────────────────────────────────
 // Enum-valued fields (bit groups)

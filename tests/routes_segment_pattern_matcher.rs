@@ -103,10 +103,12 @@ fn backreference_constraint_refuses_the_whole_route() {
     );
 }
 
-/// lobsters' domain routes: a lookahead keeps `example.com` whole while
-/// a trailing `.json`/`.rss` stays the format.
+/// A lookahead without `$`: the param must be followed by `.json` or
+/// `.rss`, a split the router cannot make. With `$` the shape is served
+/// (lazy: `route_format_lookahead`; greedy, lobsters' origins:
+/// `route_dot_span`).
 const LOOKAHEAD_DOMAIN: &str = r#"
-  constraints :id => /([^\/]+?)(?=\.json|\.rss|$|\/)/ do
+  constraints :id => /(.+)(?=\.json|\.rss)/ do
     get "/domains/:id" => "widgets#show", :as => "domain"
   end
 "#;
@@ -178,6 +180,51 @@ raise "refused route must not be served: #{got}" unless got.start_with?("404")
         run.errors
     );
     assert!(run.success, "stdout:\n{}\nstderr:\n{}", run.stdout, run.stderr);
+}
+
+/// lobsters' ORIGINS_IDENTIFIER: the greedy `.+` crosses `/`, so the
+/// param is a span the router matches as a `*glob`, and ending the path it
+/// keeps every extension (`format_suffix` no extension meets).
+#[test]
+fn a_dot_requirement_is_a_span_of_segments() {
+    let r = routes(
+        r#"
+  constraints identifier: /(.+)(?=\.json|\.rss|$|\/)/ do
+    get "/origins/:identifier(.:format)" => "widgets#show"
+    get "/mod/origins/:identifier/edit" => "widgets#edit"
+  end
+"#,
+    );
+    let show = find(&r, HttpMethod::Get, "/origins/:identifier").expect("served");
+    assert_eq!(
+        show.seg_patterns,
+        vec![
+            ("*identifier".to_string(), String::new()),
+            ("format_suffix".to_string(), roundhouse::lower::segment_pattern::NEVER.to_string()),
+        ]
+    );
+    assert_eq!(
+        roundhouse::lower::segment_pattern::dispatch_path(&show.path, &show.seg_patterns),
+        "/origins/*identifier"
+    );
+    let edit = find(&r, HttpMethod::Get, "/mod/origins/:identifier/edit").expect("served");
+    assert_eq!(edit.seg_patterns, vec![("*identifier".to_string(), String::new())]);
+}
+
+/// The forms of a span the router has no split for stay refused: inside
+/// a segment, beside another span, and followed by `/` its lookahead
+/// leaves out.
+#[test]
+fn a_span_the_router_cannot_split_refuses_the_route() {
+    for source in [
+        r#"  get "/@:id", to: "widgets#show", constraints: { id: /.+/ }"#,
+        r#"  get "/x/:id/*rest", to: "widgets#show", constraints: { id: /.+/ }"#,
+        r#"  get "/x/:id/edit", to: "widgets#show", constraints: { id: /(.+)(?=\.json|$)/ }"#,
+        r#"  get "/x/:id", to: "widgets#show", constraints: { id: /(.+?)(?=$|\/)/ }"#,
+    ] {
+        let r = routes(source);
+        assert!(r.is_empty(), "{source}\n{r:?}");
+    }
 }
 
 #[test]

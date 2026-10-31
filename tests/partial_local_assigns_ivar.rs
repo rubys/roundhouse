@@ -236,7 +236,7 @@ fn a_reserved_word_controller_local_passes_the_same_arguments() {
     // As for `error` below, the same-named local wins over the ivar: the
     // key is `class`, the param it binds is `class_` (#571).
     let source = file(&files, "app/controllers/posts_controller.rb");
-    assert!(source.contains("Views::Posts.card(nil, \"x\")"), "{source}");
+    assert!(source.contains("Views::Posts.card(nil, \"x\", @flash[:notice], @flash[:alert])"), "{source}");
 }
 
 const ROUTES_PREVIEW: &str =
@@ -262,7 +262,7 @@ fn a_controller_render_passes_a_reserved_word_ivar_by_its_own_name() {
         let source = file(&files, "app/controllers/posts_controller.rb");
         assert_parses(source, "app/controllers/posts_controller.rb");
         assert!(
-            source.contains("Views::Posts.card(nil, @class)"),
+            source.contains("Views::Posts.card(nil, @class, @flash[:notice], @flash[:alert])"),
             "{target:?}\n{source}"
         );
     }

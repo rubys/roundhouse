@@ -5,6 +5,8 @@
 //! Like ordinary classes, a factory does not lose those facts for
 //! unrelated or unresolved reflection. Literal mutations of the factory, its
 //! ancestry, or the Class constructor still make that identity uncertain.
+//! A module mixed into Class, Module, Object or BasicObject is such a
+//! mutation only when it may change construction.
 //! Nonempty blocks of class-body statements are ingested as ordinary
 //! library classes (`ingest::class_new_factory`); other nonempty blocks stay
 //! excluded here. Ordinary class headers define the superclass parity bar.
@@ -24,6 +26,27 @@ use super::ClassInfo;
 use super::body::ConstResolver;
 
 use crate::ingest::prism_api::PrismLocation;
+
+/// `Class.new` is looked up through these classes, so a mutation of one
+/// can change it.
+const CONSTRUCTOR_ANCESTORS: &[&str] = &["Class", "Module", "Object", "BasicObject"];
+
+/// What a module must define, on either side, to change what `Class.new`
+/// builds when it is mixed into a constructor ancestor: a step of
+/// construction, or a hook that runs when the module is mixed in.
+const CONSTRUCTION_METHODS: &[&str] = &[
+    "new",
+    "allocate",
+    "initialize",
+    "inherited",
+    "included",
+    "append_features",
+    "prepended",
+    "prepend_features",
+    "extended",
+    "extend_object",
+];
+
 pub(super) fn register(
     app: &App,
     resolver: &ConstResolver,
@@ -70,7 +93,6 @@ pub(super) fn register(
     // invocation, refinements of Class#new, and interpolated undef names are
     // shared core-method-model limits, not additional detection guarantees.
     let mutations = source_mutations(app, resolver);
-    const CONSTRUCTOR_ANCESTORS: &[&str] = &["Class", "Module", "Object", "BasicObject"];
     if CONSTRUCTOR_ANCESTORS
         .iter()
         .any(|owner| mutations.targets(owner) || mutations.constructors.contains(*owner))
@@ -283,9 +305,11 @@ fn has_unsupported_ancestry(
         // Class.new calls inherited before assigning the constant: the child
         // is still anonymous. An ordinary header supplies its name to the hook,
         // so application-defined hooks cannot share the class-header assumption.
+        // A module's include hook ran on its includer and can give it one.
         if id == *factory
             || id.0.as_str() == "Class"
             || mutations.targets(id.0.as_str())
+            || mutations.include_hooks.contains(id.0.as_str())
             || inherited_hooks.contains(&id)
             || resolver.source_singleton_method(id.0.as_str(), "inherited")
             || classes
@@ -314,6 +338,10 @@ struct Mutations {
     constants: HashSet<String>,
     constant_namespaces: HashSet<String>,
     constructors: HashSet<String>,
+    /// Modules whose singleton side defines `included` or `append_features`.
+    /// The hook gets the includer as an argument, so a class body's own
+    /// `include` of one is not the plain ancestry main models.
+    include_hooks: HashSet<String>,
     /// `const_set(:Class, …)` under a namespace, at this source offset.
     /// A factory later in that namespace is not a call to `::Class.new`.
     constructor_shadows: Vec<(String, crate::span::FileId, u32)>,
@@ -346,6 +374,16 @@ fn source_mutations(app: &App, resolver: &ConstResolver) -> Mutations {
         owners: Vec<String>,
         singleton_receivers: Vec<(usize, Vec<String>)>,
         declarations: HashSet<String>,
+        /// Every class or module body, by the owner name it pushes.
+        bodies: HashSet<String>,
+        /// Owners whose bodies define, alias, undefine or `attr` one of
+        /// `CONSTRUCTION_METHODS`, on either side.
+        construction: HashSet<String>,
+        /// A body's own `include`: the owner, and the module if resolved.
+        includes: Vec<(String, Option<String>)>,
+        /// Mixins into a constructor ancestor: those receivers, and each
+        /// module if resolved. They are decided after the whole scan.
+        ancestor_mixins: Vec<(Vec<String>, Vec<Option<String>>)>,
     }
     impl<'pr> Visit<'pr> for Scan<'_> {
         fn visit_constant_write_node(&mut self, node: &ruby_prism::ConstantWriteNode<'pr>) {
@@ -386,7 +424,8 @@ fn source_mutations(app: &App, resolver: &ConstResolver) -> Mutations {
             self.singleton_receivers.pop();
         }
         fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
-            if node.name_loc().as_slice() == b"new" {
+            let name = String::from_utf8_lossy(node.name_loc().as_slice());
+            if CONSTRUCTION_METHODS.contains(&name.as_ref()) {
                 let targets = if node.receiver().is_some() {
                     self.receiver_targets(node.receiver())
                 } else {
@@ -396,7 +435,19 @@ fn source_mutations(app: &App, resolver: &ConstResolver) -> Mutations {
                         .map(|(_, targets)| targets.clone())
                         .unwrap_or_else(|| self.receiver_targets(None))
                 };
-                self.mutations.constructors.extend(targets);
+                if name == "new" {
+                    self.mutations.constructors.extend(targets.iter().cloned());
+                }
+                if matches!(name.as_ref(), "included" | "append_features")
+                    && (node.receiver().is_some()
+                        || self
+                            .singleton_receivers
+                            .last()
+                            .is_some_and(|(depth, _)| *depth == self.owners.len()))
+                {
+                    self.mutations.include_hooks.extend(targets.iter().cloned());
+                }
+                self.construction.extend(targets);
             }
             if let Some(receiver) = node.receiver()
                 && receiver.as_self_node().is_none()
@@ -406,10 +457,14 @@ fn source_mutations(app: &App, resolver: &ConstResolver) -> Mutations {
             ruby_prism::visit_def_node(self, node);
         }
         fn visit_alias_method_node(&mut self, node: &ruby_prism::AliasMethodNode<'pr>) {
-            if literal_name(&node.new_name()).as_deref() == Some("new") {
+            let name = literal_name(&node.new_name());
+            if name.as_deref() == Some("new") {
                 self.mutations
                     .constructors
                     .extend(self.receiver_targets(None));
+            }
+            if construction_name(name.as_deref()) {
+                self.construction.extend(self.receiver_targets(None));
             }
             ruby_prism::visit_alias_method_node(self, node);
         }
@@ -422,6 +477,13 @@ fn source_mutations(app: &App, resolver: &ConstResolver) -> Mutations {
                 self.mutations
                     .constructors
                     .extend(self.receiver_targets(None));
+            }
+            if node
+                .names()
+                .iter()
+                .any(|name| construction_name(literal_name(&name).as_deref()))
+            {
+                self.construction.extend(self.receiver_targets(None));
             }
             ruby_prism::visit_undef_node(self, node);
         }
@@ -497,6 +559,10 @@ fn source_mutations(app: &App, resolver: &ConstResolver) -> Mutations {
                 node.as_string_node()
                     .map(|node| String::from_utf8_lossy(node.unescaped()).into_owned())
             })
+    }
+    /// A computed name may be any of them.
+    fn construction_name(name: Option<&str>) -> bool {
+        name.is_none_or(|name| CONSTRUCTION_METHODS.contains(&name))
     }
     fn unparenthesized(mut node: ruby_prism::Node<'_>) -> Option<ruby_prism::Node<'_>> {
         while let Some(parentheses) = node.as_parentheses_node() {
@@ -581,9 +647,8 @@ fn source_mutations(app: &App, resolver: &ConstResolver) -> Mutations {
                 | "class_exec"
                 | "module_exec"
                 | "instance_exec"
-                | "eval"
-                | "extend"
-                | "prepend" => self.namespace_mutation(receiver),
+                | "eval" => self.namespace_mutation(receiver),
+                "include" | "extend" | "prepend" => self.mixin(receiver, method, args, reflective),
                 "attr"
                     if args.iter().any(|arg| {
                         arg.as_true_node().is_none()
@@ -597,19 +662,8 @@ fn source_mutations(app: &App, resolver: &ConstResolver) -> Mutations {
                         .constructors
                         .extend(self.receiver_targets(receiver));
                 }
-                "include" | "attr_reader" | "attr_writer" | "attr_accessor"
-                    if receiver.is_some()
-                        || reflective
-                        || self
-                            .singleton_receivers
-                            .last()
-                            .is_some_and(|(depth, _)| *depth == self.owners.len())
-                        || self.receiver_targets(None).iter().any(|owner| {
-                            matches!(
-                                owner.as_str(),
-                                "Class" | "Module" | "Object" | "BasicObject"
-                            )
-                        }) =>
+                "attr_reader" | "attr_writer" | "attr_accessor"
+                    if receiver.is_some() || reflective || self.owner_mutation() =>
                 {
                     self.namespace_mutation(receiver);
                 }
@@ -625,8 +679,95 @@ fn source_mutations(app: &App, resolver: &ConstResolver) -> Mutations {
                 {
                     self.namespace_mutation(receiver);
                 }
+                // An attribute of a module body can still define a method a
+                // mixin of that module brings along.
+                "attr" | "attr_reader" | "attr_writer" | "attr_accessor"
+                    if args.iter().any(|arg| {
+                        arg.as_true_node().is_none()
+                            && arg.as_false_node().is_none()
+                            && construction_name(literal_name(arg).as_deref())
+                    }) =>
+                {
+                    self.construction.extend(self.receiver_targets(receiver));
+                }
                 _ => {}
             }
+        }
+        /// A call without a receiver still mutates its owner in a singleton
+        /// body, or in a constructor ancestor's own body.
+        fn owner_mutation(&self) -> bool {
+            self.singleton_receivers
+                .last()
+                .is_some_and(|(depth, _)| *depth == self.owners.len())
+                || self
+                    .receiver_targets(None)
+                    .iter()
+                    .any(|owner| CONSTRUCTOR_ANCESTORS.contains(&owner.as_str()))
+        }
+        /// `include`, `prepend` and `extend`. A module body's own `include`
+        /// is no mutation, but the owner brings that module along. A mixin
+        /// into a constructor ancestor waits for the whole scan: it counts
+        /// only if a module may change construction (`may_construct`).
+        fn mixin(
+            &mut self,
+            receiver: Option<ruby_prism::Node<'_>>,
+            method: &str,
+            args: &[ruby_prism::Node<'_>],
+            reflective: bool,
+        ) {
+            let modules: Vec<_> = args.iter().map(|arg| self.module_name(arg)).collect();
+            if method == "include" && receiver.is_none() && !reflective && !self.owner_mutation() {
+                for owner in self.receiver_targets(None) {
+                    self.includes
+                        .extend(modules.iter().map(|module| (owner.clone(), module.clone())));
+                }
+                return;
+            }
+            let (ancestors, others): (Vec<_>, Vec<_>) = self
+                .receiver_targets(receiver)
+                .into_iter()
+                .partition(|target| CONSTRUCTOR_ANCESTORS.contains(&target.as_str()));
+            self.mutations.namespaces.extend(others);
+            if !ancestors.is_empty() {
+                self.ancestor_mixins.push((ancestors, modules));
+            }
+        }
+        /// The module a mixin argument names, when the resolver resolves it
+        /// to a module that only these sources define. A reopening does not
+        /// show the methods Ruby core or the framework runtime gives it.
+        fn module_name(&self, node: &ruby_prism::Node<'_>) -> Option<String> {
+            if node.as_constant_read_node().is_none() && node.as_constant_path_node().is_none() {
+                return None;
+            }
+            let location = node.location();
+            let text = String::from_utf8_lossy(location.as_slice());
+            let path = text.split("::").map(Symbol::from).collect::<Vec<_>>();
+            let span = Span {
+                file: self.file,
+                start: location.start_offset() as u32,
+                end: location.end_offset() as u32,
+            };
+            let name = self.resolver.namespace(span, &path)?.0.as_str();
+            (!self.resolver.is_runtime_class(span, &path, name)).then(|| name.to_owned())
+        }
+        /// Whether mixing in this module may change what `Class.new` builds:
+        /// no source body shows its methods, a body defines one of
+        /// `CONSTRUCTION_METHODS`, something else mutates it, or a module it
+        /// includes may. Each module's methods count, wherever it is opened.
+        fn may_construct(&self, module: &str, seen: &mut HashSet<String>) -> bool {
+            if !seen.insert(module.to_owned()) {
+                return false;
+            }
+            !self.bodies.contains(module)
+                || self.construction.contains(module)
+                || self.mutations.constructors.contains(module)
+                || self.mutations.targets(module)
+                || self.includes.iter().any(|(owner, included)| {
+                    owner == module
+                        && included
+                            .as_deref()
+                            .is_none_or(|included| self.may_construct(included, seen))
+                })
         }
         fn parallel_aliases(
             &mut self,
@@ -724,15 +865,16 @@ fn source_mutations(app: &App, resolver: &ConstResolver) -> Mutations {
             // while mutations inside the body use the actual receiver.
             self.declarations.insert(written.clone());
             let location = node.location();
-            if let Some(id) = self.resolver.namespace_body(Span {
+            let owner = match self.resolver.namespace_body(Span {
                 file: self.file,
                 start: location.start_offset() as u32,
                 end: location.end_offset() as u32,
             }) {
-                self.owners.push(id.0.as_str().to_owned());
-                return;
-            }
-            self.owners.push(written);
+                Some(id) => id.0.as_str().to_owned(),
+                None => written,
+            };
+            self.bodies.insert(owner.clone());
+            self.owners.push(owner);
         }
         fn receiver_targets(&self, receiver: Option<ruby_prism::Node<'_>>) -> Vec<String> {
             let Some(receiver) = receiver else {
@@ -875,6 +1017,10 @@ fn source_mutations(app: &App, resolver: &ConstResolver) -> Mutations {
         owners: Vec::new(),
         singleton_receivers: Vec::new(),
         declarations: HashSet::default(),
+        bodies: HashSet::default(),
+        construction: HashSet::default(),
+        includes: Vec::new(),
+        ancestor_mixins: Vec::new(),
     };
     for (index, source) in app
         .sources
@@ -935,6 +1081,8 @@ fn source_mutations(app: &App, resolver: &ConstResolver) -> Mutations {
         (&mut scan.mutations.constants, false),
         (&mut scan.mutations.constant_namespaces, true),
         (&mut scan.mutations.constructors, true),
+        (&mut scan.mutations.include_hooks, true),
+        (&mut scan.construction, true),
     ] {
         for name in std::mem::take(targets) {
             expand(
@@ -945,6 +1093,33 @@ fn source_mutations(app: &App, resolver: &ConstResolver) -> Mutations {
                 follow_value,
             );
         }
+    }
+    // A mixin into a constructor ancestor mutates it only if some module
+    // may change construction; an unresolved one may. A Module body that
+    // defines a hook runs that hook for every module mixed in.
+    let hooks = scan.construction.contains("Module");
+    let mixed: Vec<String> = scan
+        .ancestor_mixins
+        .iter()
+        .filter(|(_, modules)| {
+            hooks
+                || modules.is_empty()
+                || modules.iter().any(|module| {
+                    module
+                        .as_deref()
+                        .is_none_or(|module| scan.may_construct(module, &mut HashSet::default()))
+                })
+        })
+        .flat_map(|(targets, _)| targets.iter().cloned())
+        .collect();
+    for name in mixed {
+        expand(
+            &name,
+            &scan.aliases,
+            &mut HashSet::default(),
+            &mut scan.mutations.namespaces,
+            true,
+        );
     }
     let shadows = std::mem::take(&mut scan.mutations.constructor_shadows);
     for (owner, file, offset) in shadows {

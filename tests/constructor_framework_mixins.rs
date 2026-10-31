@@ -44,7 +44,14 @@ fn emit(helper_body: &str, init: &str, extra: &str) -> (String, Vec<String>) {
 fn assert_bound(helper_body: &str, init: &str, extra: &str) {
     let (caller, errors) = emit(helper_body, init, extra);
     assert!(!errors.iter().any(|e| e.contains(REFUSAL)), "{errors:#?}");
-    assert!(caller.contains("Req.new(:get, \"u\", true)"), "{caller}");
+    assert!(caller.contains("Req.new(:get, \"u\", allow_local: true)"), "{caller}");
+    let run = emit_and_run::real_blog()
+        .write("app/lib/kit/helper.rb", &helper(helper_body))
+        .write("app/lib/kit/req.rb", &req(init, extra))
+        .write("app/lib/kit/caller.rb", CALLER)
+        .run_ruby("Dir[File.join(__dir__, 'app/models/kit/*.rb')].sort.each { |file| require file }\np Kit::Caller.new.go\n");
+    run.assert_passes();
+    assert_eq!(run.stdout, "[:get, \"u\", true]\n");
 }
 
 fn assert_refused(helper_body: &str, init: &str, extra: &str) {

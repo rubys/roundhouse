@@ -82,6 +82,7 @@ module ActiveSupport
   def self.squish: (String text) -> String
   def self.squish!: (String text) -> String
   def self.truncate: (String text, Integer truncate_to, String? omission, String? separator) -> String
+  def self.word_space_byte?: (Integer b) -> bool
   def self.truncate_words: (String text, Integer words_count, String? omission) -> String
   # `untyped`, and this one was learned the hard way: it said
   # `Array[untyped]` for a day, on the reasoning that the only receiver
@@ -107,6 +108,7 @@ module ActiveSupport
   def self.months_ago: (Time t, ?Integer n) -> Time
   def self.years_since: (Time t, ?Integer n) -> Time
   def self.years_ago: (Time t, ?Integer n) -> Time
+  def self.change_time_usec: (Time time, Integer usec) -> Time
   def self.beginning_of_minute: (Time t) -> Time
   def self.end_of_minute: (Time t) -> Time
   def self.beginning_of_hour: (Time t) -> Time
@@ -133,7 +135,6 @@ module ActiveSupport
   def self.on_weekday?: (Time t) -> bool
   def self.on_wday?: (Time t, Integer wday) -> bool
   ZONE_NAMES: Hash[String, String]
-  WORD_SPACE: String
   class TimeZoneData
     def name: () -> String
     def initialize: (String name, Array[Integer] transitions, Array[Integer] offsets, Integer initial_offset, Array[Integer] rule, Array[bool] dsts) -> void

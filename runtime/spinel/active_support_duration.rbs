@@ -9,6 +9,7 @@ module ActiveSupport
     @seconds: Integer
 
     def initialize: (Integer seconds) -> void
+    def self.time_operand: (untyped value) -> untyped
     def self.seconds: (Integer n) -> Duration
     def self.second: (Integer n) -> Duration
     def self.minutes: (Integer n) -> Duration

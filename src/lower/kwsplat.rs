@@ -295,6 +295,9 @@ fn apply_to_test_modules(app: &mut App, diags: &mut Vec<Diagnostic>) {
 fn rewrite_self_sends(expr: &mut Expr, helpers: &HashMap<Symbol, Vec<Param>>, diags: &mut Vec<Diagnostic>) {
     expr.node
         .for_each_child_mut(&mut |child| rewrite_self_sends(child, helpers, diags));
+    if expr.decisions & crate::expr::NATIVE_KEYWORD_ARGUMENTS != 0 {
+        return;
+    }
     let splat = {
         let ExprNode::Send { recv, method, args, .. } = &*expr.node else {
             return;
@@ -376,6 +379,10 @@ fn rewrite(expr: &mut Expr, sigs: &Signatures, diags: &mut Vec<Diagnostic>) {
     expr.node
         .for_each_child_mut(&mut |child| rewrite(child, sigs, diags));
 
+    if expr.decisions & crate::expr::NATIVE_KEYWORD_ARGUMENTS != 0 {
+        return;
+    }
+
     if let Some(splat) = erased_splat(expr, sigs) {
         let ExprNode::Send { args, .. } = &mut *expr.node else {
             unreachable!("erased_splat matched a Send")
@@ -394,6 +401,9 @@ fn is_self_send(recv: Option<&Expr>) -> bool {
 }
 
 fn restore_kwrest_on_typed_send(expr: &mut Expr, sigs: &Signatures) {
+    if expr.decisions & crate::expr::NATIVE_KEYWORD_ARGUMENTS != 0 {
+        return;
+    }
     let ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node else {
         return;
     };

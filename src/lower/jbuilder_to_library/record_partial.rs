@@ -42,6 +42,8 @@ pub(super) enum Unresolved {
     Polymorphic,
     /// `as:` names a local other than the model's singular name.
     As { model: String, as_name: Symbol },
+    /// The partial reads a local the call passes besides the record.
+    ReadsLocal { partial: String, local: Symbol },
     /// One record of a closed set of models (a union's members, a
     /// polymorphic reader's targets): rendered by a run-time switch
     /// on its class, so a site never reports it; the resolution of a
@@ -66,6 +68,9 @@ impl Unresolved {
             }
             Unresolved::As { model, as_name } => format!(
                 "`as: :{as_name}` binds the `{model}` record under a name its partial is not lowered to take"
+            ),
+            Unresolved::ReadsLocal { partial, local } => format!(
+                "the partial `{partial}` reads the local `{local}` the call passes, and its lowered method takes no parameter for it"
             ),
             Unresolved::Set(models) => format!("the record is one of {}", models.join(", ")),
         }

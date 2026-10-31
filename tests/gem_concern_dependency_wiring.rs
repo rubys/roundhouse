@@ -57,13 +57,11 @@ fn app(railtie_body: &str) -> emit_and_run::Overlay {
 }
 
 #[test]
-#[ignore = "fork spec: class-body loops and hooks"]
 fn a_railtie_initializer_s_concern_include_reaches_the_includers_of_the_outer_concern() {
     app(INITIALIZER).run_test("test/models/note_test.rb").assert_passes();
 }
 
 #[test]
-#[ignore = "fork spec: class-body loops and hooks"]
 fn an_on_load_block_s_concern_include_reaches_the_includers_of_the_outer_concern() {
     app(ON_LOAD).run_test("test/models/note_test.rb").assert_passes();
 }

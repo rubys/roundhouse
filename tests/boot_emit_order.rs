@@ -144,7 +144,6 @@ const GQLC: &[(&str, &str)] = &[
 ];
 
 #[test]
-#[ignore = "fork spec: load order"]
 fn an_alias_of_an_inherited_method_is_carried() {
     gem_same_as_native(
         "gqlc",
@@ -164,7 +163,7 @@ const CORE_ALIAS: &[(&str, &str)] = &[
 ];
 
 #[test]
-#[ignore = "fork spec: load order"]
+#[ignore = "fork spec: core method signatures"]
 fn an_alias_of_a_core_superclass_method_is_carried() {
     gem_same_as_native(
         "amlike",
@@ -188,7 +187,6 @@ const QUERY_TYPENAME: &str = "module Gqlc\n  module QueryTypename\n    if ENV[\"
 const SINGLETON_CONDITIONAL: &str = "module Gqlc\n  module Singleton\n    def self.x = 1\n\n    class << self\n      if ENV[\"GQLC_LEGACY\"].nil?\n        class Inner\n          def visit = :visitor\n        end\n      end\n    end\n  end\nend\n";
 
 #[test]
-#[ignore = "fork spec: load order"]
 fn a_class_declared_in_a_class_body_conditional_is_carried() {
     let files = [("lib/gqlc/query_typename.rb", QUERY_TYPENAME)];
     let script = "require \"gqlc/query_typename\"\np Gqlc::QueryTypename.insert, defined?(Gqlc::QueryTypename::InsertVisitor)\n";
@@ -216,7 +214,7 @@ fn check_gem_tree(tag: &str, files: &[(&str, &str)]) -> String {
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
         ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
         ("roundhouse.yml", ""),
-        ("Gemfile.lock", "GEM\n  remote: https://rubygems.org/\n  specs:\n\nDEPENDENCIES\n  gqlc!\n"),
+        ("Gemfile.lock", "PATH\n  remote: vendor/gems/gqlc-1.0.0\n  specs:\n    gqlc (1.0.0)\n\nDEPENDENCIES\n  gqlc!\n"),
     ]
     .into_iter()
     .chain(gem.iter().map(|(path, text)| (path.as_str(), *text)))
@@ -239,7 +237,6 @@ const UNDEFINED_ALIAS: &[(&str, &str)] = &[
 /// captured: native Ruby raises loading the file, and the file is still
 /// refused at the alias, as before.
 #[test]
-#[ignore = "fork spec: load order"]
 fn an_alias_no_ancestor_defines_still_refuses_its_file() {
     let script = "begin\n  require \"gqlc/node\"\nrescue NameError => e\n  p e.name\nend\n";
     assert_eq!(native(UNDEFINED_ALIAS, script), ":gem_label\n");

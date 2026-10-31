@@ -75,6 +75,8 @@ require_relative "runtime/params"
 require_relative "runtime/action_text"
 require_relative "runtime/importmap"
 require_relative "runtime/rails"
+# Not part of runtime/rails: the instrumented Notifications paths keep per-thread state the strict targets' typing gate does not follow.
+require_relative "runtime/active_support_instrumentation"
 # `ActiveSupport::Cache::MemoryStore` (a `Rails::Cache`) and
 # `ActiveSupport::Cache.expand_cache_key`.
 require_relative "runtime/active_support_cache"

@@ -2,7 +2,7 @@ module ActiveModel
   class UnknownAttributeError < NoMethodError
     def record: () -> ActiveRecord::Base
     def attribute: () -> String
-    def initialize: (ActiveRecord::Base record, String attribute) -> void
+    def initialize: (ActiveRecord::Base record, String attribute, ?String message) -> void
   end
 end
 

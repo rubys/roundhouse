@@ -60,6 +60,13 @@ records each gap and substitutes or skips instead of aborting, so one
 unsupported construct doesn't hide every gap behind it. See
 `src/ingest/survey.rs` (`unwrap_or_record`).
 
+A support file (`lib/`, a gem's source) whose class ingest fails is
+left out and the walk goes on, so one gap does not abort the app. It is
+reported, not dropped in silence: `App::ingest_drops` holds it, and
+analysis reports `error[ingest_unsupported]` at the construct that
+failed it (`ingest::error_site` notes the innermost statement as the
+error passes up through the walk).
+
 ### Surface preservation
 
 Expression-level round-trip (ingest → emit-ruby → ingest ≡ identity,
@@ -106,7 +113,11 @@ methods, and report each such statement as an error
 applies to such a method only when every branch defines it and the
 conditional ends in `else`. A model body's conditional definitions, a
 visibility marker inside a branch, and any other statement in one stay
-refused.
+refused, each named at the statement that keeps it refused, as is a
+`class` / `module` declared in one inside `class << self`. A class
+declared in a branch and also, unconditionally, in another file is an
+error at the declaration: the merged class would load only with the
+branch.
 
 ### Body statements only Ruby answers
 
@@ -119,6 +130,11 @@ following statements back where the source has them, among the class's methods (
   `define_method`s per element;
 - a call to one of Ruby's own `Module` methods (`freeze`,
   `self.define_method`);
+- an `alias_method` of a method an app superclass defines, or one
+  [an alias of an inherited method](#an-alias-of-an-inherited-method)
+  resolves (the walk already copies an alias of one the body defines;
+  an alias of a method only a dropped macro defines would raise
+  NameError as the class loads, so it stays dropped);
 - a write through a class-side writer the class or an app ancestor
   defines (`self.require_name = true`, `self.strict ||= :on`);
 - such a write in a class that, itself or through an app ancestor,
@@ -161,6 +177,16 @@ written in source order. A hook with a declaration this cannot read (a
 computed name or flag, a block, an unknown option) keeps its text and
 still fails at the include. So does a model's include of such a module.
 
+A model's own `class_attribute`, and one a Concern's `included do`
+declares, are the same defs on the model; an app class below it reads
+the model's value until it writes its own. A Concern's `included` block
+runs in the model for each of the Concern's own Concern includes first,
+as `append_features` runs them, wherever the Concern lives (app, `lib/`
+or a gem's source). A model body's call of its own class method
+(`custom_strategy :title, with: proc { … }`, written there or spliced
+from a Concern's block) runs as the class loads, after the Concern's
+class methods it may call.
+
 ### An include written in another body
 
 `Other.include(M)`, where `Other` and `M` are the app's own and Ruby
@@ -173,6 +199,26 @@ for it. The same call inside a railtie's `initializer`,
 `config.to_prepare` or `ActiveSupport.on_load` block makes `M` a
 dependency of `Other`, which is what a Concern does with it, and the
 block stays where it is.
+
+### An alias of an inherited method
+
+`alias to from` (and `alias_method :to, :from`) in a `lib/` or gem
+source class, naming a method the class body has not defined above it,
+is an alias of an ancestor's method: graphql-client's
+`OperationDefinition < Definition` writes `alias operation_name
+definition_name`. The support walk captures it as the `alias_method`
+call it is, and once every file is walked looks the original up as
+Ruby does, through its app superclasses and their includes
+(`ingest::inherited_alias`). The class's own includes must be app
+modules written above the alias that do not define the original; with
+a `prepend`, the alias stays refused. The Ruby and JRuby trees write the call
+back, in the class's own `class << self` for a class-side alias, so
+`instance_method(:to).original_name` is the original's. Analysis,
+Spinel and the other targets see a copy of the original under the
+alias's name, unless the original calls `super`. A file with an alias
+no app ancestor defines is refused at the alias, including one of a
+core superclass's method (`class Errors < Hash; alias count size`),
+which needs the core classes' signatures.
 
 ## ERB → Ruby → IR
 

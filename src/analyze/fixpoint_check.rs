@@ -554,12 +554,16 @@ impl Analyzer {
             return;
         }
         let rounds: FixpointRounds = self.fixpoint_rounds;
+        let mut restamp = loop_end(rounds.restamp.end);
+        restamp["rounds"] = serde_json::json!(rounds.restamp.rounds);
+        restamp["passes"] = serde_json::json!(rounds.restamp.passes);
         let mut line = serde_json::json!({
             "schema": 1,
             "loops": {
                 "production": loop_end(rounds.production),
                 "views_and_tests": loop_end(rounds.views_and_tests),
                 "absorb": loop_end(rounds.absorb),
+                "restamp": restamp,
             },
         });
         if *VERIFY {
