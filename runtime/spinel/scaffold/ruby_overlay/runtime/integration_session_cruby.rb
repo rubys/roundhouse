@@ -85,7 +85,7 @@ module ActionDispatch
           Thread.current[:broadcast_log] = saved_broadcasts
         end
         keep_cookies(Array(headers["set-cookie"]))
-        @response = ActionDispatch::TestResponse.new(status, body.join, headers)
+        @response = ActionDispatch::TestResponse.new(status, verb == "HEAD" ? "" : body.join, headers)
         status
       end
 

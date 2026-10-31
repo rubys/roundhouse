@@ -104,7 +104,13 @@ module ActionDispatch
         end
         keep_cookies(res.set_cookies)
         # Not res.body: a public/ file is left to the server to send, so read it as the response the client would get.
-        body = res.file_path.empty? || verb == "HEAD" ? res.body : File.read(res.file_path)
+        body = if verb == "HEAD"
+          ""
+        elsif res.file_path.empty?
+          res.body
+        else
+          File.read(res.file_path)
+        end
         @response = ActionDispatch::TestResponse.new(res.status, body, res.headers)
         res.status
       end

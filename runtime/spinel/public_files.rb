@@ -4,50 +4,52 @@
 # with `.html`, then its `index.html`, so `/about` is `public/about.html`
 # and `/docs/` is `public/docs/index.html`.
 #
-# Listed once, at the first request, rather than stat'ed per request:
-# the stat was ~5% of a `/up` request on the bench box, paid by every
-# route. A page the app writes later through the page cache
-# (runtime/action_controller_page_caching.rb) is added here as it is
-# written and removed as it is expired, which is the one way a running
-# app puts a file under public/.
+# The file set is listed once, at the first request, rather than stat'ed
+# per request: the stat was ~5% of a `/up` request on the bench box, paid
+# by every route. A page the app writes later through the page cache
+# (runtime/action_controller_page_caching.rb) is added as it is written
+# and removed as it is expired. A path the set names is confirmed on disk
+# before it is served, so a file another worker expired, or one expired
+# while this one was being written, falls through to the routes instead of
+# answering 404; a page another worker cached is rendered here again.
 module ActionController
   module PublicFiles
-    def self.table
-      if @table.nil?
-        @table = {}
+    def self.files
+      if @files.nil?
+        @files = {}
         Dir.glob("public/**/*", File::FNM_DOTMATCH).each do |path|
           ActionController::PublicFiles.add(path["public/".length, path.length]) if File.file?(path)
         end
       end
-      @table
+      @files
     end
 
     # The URL path of the file a GET/HEAD for `path` is answered with, or "" for none.
     def self.lookup(path)
       return "" if path.include?("..")
-      ActionController::PublicFiles.table.fetch(path, "")
+      stem = path.chomp("/")
+      found = ActionController::PublicFiles.present(path)
+      found = ActionController::PublicFiles.present(stem + ".html") if found.empty? && !stem.empty?
+      found = ActionController::PublicFiles.present(stem + "/index.html") if found.empty?
+      found
+    end
+
+    # `file` when the set names it and it is still on disk, else "".
+    def self.present(file)
+      files = ActionController::PublicFiles.files
+      return "" unless files.key?(file)
+      return file if File.file?("public" + file)
+      files.delete(file)
+      ""
     end
 
     def self.add(rel)
-      file = "/" + rel
-      table = ActionController::PublicFiles.table
-      table[file] = file
-      if file.end_with?("/index.html")
-        dir = file[0, file.length - "index.html".length]
-        table[dir] = file unless table.key?(dir)
-        stem = dir.chomp("/")
-        table[stem] = file unless stem.empty? || table.key?(stem)
-      elsif file.end_with?(".html")
-        stem = file[0, file.length - ".html".length]
-        table[stem] = file unless table.key?(stem)
-      end
+      ActionController::PublicFiles.files["/" + rel] = true
       nil
     end
 
     def self.remove(rel)
-      file = "/" + rel
-      table = ActionController::PublicFiles.table
-      table.delete_if { |_, v| v == file }
+      ActionController::PublicFiles.files.delete("/" + rel)
       nil
     end
 

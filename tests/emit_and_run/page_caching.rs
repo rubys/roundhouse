@@ -153,3 +153,35 @@ end
         .run_test(TEST_PATH)
         .assert_passes();
 }
+
+#[test]
+fn the_static_lookup_follows_file_handler_order_and_the_disk() {
+    app()
+        .write(
+            TEST_PATH,
+            r#"require "test_helper"
+
+class SitesControllerTest < ActionDispatch::IntegrationTest
+  test "path, then .html, then index.html, each confirmed on disk" do
+    FileUtils.mkdir_p("public/docs")
+    File.write("public/docs/index.html", "index")
+    ActionController::PublicFiles.add("docs/index.html")
+    assert_equal "/docs/index.html", ActionController::PublicFiles.lookup("/docs")
+    assert_equal "/docs/index.html", ActionController::PublicFiles.lookup("/docs/")
+    File.write("public/docs.html", "page")
+    ActionController::PublicFiles.add("docs.html")
+    assert_equal "/docs.html", ActionController::PublicFiles.lookup("/docs")
+    File.delete("public/docs.html")
+    assert_equal "/docs/index.html", ActionController::PublicFiles.lookup("/docs")
+    File.delete("public/docs/index.html")
+    assert_equal "", ActionController::PublicFiles.lookup("/docs")
+  ensure
+    FileUtils.rm_rf("public/docs")
+    FileUtils.rm_f("public/docs.html")
+  end
+end
+"#,
+        )
+        .run_test(TEST_PATH)
+        .assert_passes();
+}
