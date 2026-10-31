@@ -2325,6 +2325,22 @@ pub(super) fn rewrite_params(expr: &Expr) -> Expr {
             let ExprNode::Hash { entries, .. } = &*arg.node else { return None };
             params_expect_array(entries, e.span)
         }
+        // Not left to the emitter's typed key coercion: a guard or filter body spliced in after analysis reaches it with `@params` typed as the controller's ivar, not the String-keyed store.
+        ExprNode::Send { recv: Some(recv), method, args, block: None, parenthesized }
+            if method.as_str() == "[]" && args.len() == 1 && is_bare_params(recv) && sym_arg(&args[0]).is_some() =>
+        {
+            let key = sym_arg(&args[0])?;
+            Some(Expr::new(
+                e.span,
+                ExprNode::Send {
+                    recv: Some(Expr::new(recv.span, ExprNode::Ivar { name: Symbol::from("params") })),
+                    method: method.clone(),
+                    args: vec![Expr::new(args[0].span, ExprNode::Lit { value: Literal::Str { value: key } })],
+                    block: None,
+                    parenthesized: *parenthesized,
+                },
+            ))
+        }
         // Bare `params` (no recv, no args, no block) → `@params`.
         ExprNode::Send { recv: None, method, args, block: None, .. }
             if method.as_str() == "params" && args.is_empty() =>
