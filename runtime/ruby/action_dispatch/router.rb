@@ -357,7 +357,9 @@ module ActionDispatch
       i = 0
       while i < pattern_parts.length
         pp = pattern_parts[i]
-        ap = path_parts[glob >= 0 && i > glob ? i + extra : i]
+        # Not indexed by the conditional itself: Crystal emits it as an `if` expression, which an index cannot hold.
+        at = glob >= 0 && i > glob ? i + extra : i
+        ap = path_parts[at]
         if pp.start_with?("*")
           # Rails' glob is `.+?` and a `.+` requirement's span is `.+`: an empty one (`/files//edit`) is no match.
           return nil if glob_rest(path_parts, i, i + extra + 1).empty?
@@ -661,7 +663,8 @@ module ActionDispatch
       i = 0
       while i < pattern_parts.length
         pp = pattern_parts[i]
-        ap = path_parts[glob >= 0 && i > glob ? i + extra : i].to_s
+        at = glob >= 0 && i > glob ? i + extra : i
+        ap = path_parts[at].to_s
         unless pp.include?(":") || pp.start_with?("*")
           return false if pp != ap
         end
