@@ -11898,7 +11898,8 @@ fn warn_sidekiq(detail: String) {
 /// `ActiveJob::Base.retry_jitter` app-wide (`App::active_job_retry_jitter`),
 /// read by line scan in Rails' precedence: `config.load_defaults` 6.1+
 /// sets 0.15 (Rails' `new_framework_defaults_6_1`), and an explicit
-/// `config.active_job.retry_jitter = <number>` in config/application.rb,
+/// `config.active_job.retry_jitter = <number>` (or
+/// `ActiveJob::Base.retry_jitter = <number>`) in config/application.rb,
 /// config/environments/production.rb or an initializer wins over that.
 fn read_active_job_retry_jitter<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> f64 {
     let code_lines = |bytes: &[u8]| -> Vec<String> {
@@ -11929,7 +11930,9 @@ fn read_active_job_retry_jitter<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> f64 {
         }
     }
     for line in files.iter().flatten() {
-        let Some(i) = line.find("active_job.retry_jitter") else { continue };
+        let Some(i) = line.find("active_job.retry_jitter").or_else(|| line.find("ActiveJob::Base.retry_jitter")) else {
+            continue;
+        };
         let Some((_, v)) = line[i..].split_once('=') else { continue };
         let v: String = v.trim().chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
         if let Ok(v) = v.parse::<f64>() {

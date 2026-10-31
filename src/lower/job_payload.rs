@@ -736,9 +736,10 @@ fn exception_class(app: &App, owner: &LibraryClass, e: &Expr) -> Option<String> 
     if RUNTIME_EXCEPTIONS.contains(&name.as_str()) {
         return Some(name);
     }
+    // Ruby's lexical lookup: the job's own namespace first (a class
+    // declared inside the job), then each enclosing one, then the top.
     let mut scope: Vec<&str> = owner.name.0.as_str().split("::").collect();
     loop {
-        scope.pop();
         let candidate =
             if scope.is_empty() { name.clone() } else { format!("{}::{}", scope.join("::"), name) };
         if app.library_classes.iter().any(|c| c.name.0.as_str() == candidate) {
@@ -747,6 +748,7 @@ fn exception_class(app: &App, owner: &LibraryClass, e: &Expr) -> Option<String> 
         if scope.is_empty() {
             return None;
         }
+        scope.pop();
     }
 }
 

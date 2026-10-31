@@ -1862,8 +1862,9 @@ come from the job's `perform_later` call sites, and
   job's `retry_jitter`, which `load_defaults` 6.1 sets to 0.15) to its
   `queue:` and `priority:`, until its `attempts:` are used up and the
   error goes on to Sidekiq's rules. A handler with a block, a computed
-  option or an exception class the tree doesn't define is dropped with
-  a warning, as is `after_discard`. The heartbeat Sidekiq's Web UI
+  option or an exception class the tree doesn't define is an error
+  (`job-handler-unsupported`) at its call; `after_discard` is dropped
+  with a warning. The heartbeat Sidekiq's Web UI
   reads (and the process count the scheduler scales by) is still
   missing. Under
   config/cable.yml's `adapter: redis`, every process's broadcasts go
