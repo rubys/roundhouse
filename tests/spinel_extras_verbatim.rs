@@ -96,7 +96,7 @@ fn a_vips_compositor_is_emitted_as_written_against_the_pinned_package() {
     assert!(!story_image.contains("GemFacade.fail!"), "{story_image}");
     let manifest = file(&files, "spin.toml");
     assert!(
-        manifest.contains("ruby-vips = { git = \"https://github.com/rubys/spinel-ruby-vips\", ref = \"v0.3.0\" }"),
+        manifest.contains("ruby-vips = { git = \"https://github.com/roundhouse-rb/spinel-ruby-vips\", ref = \"v0.3.0\" }"),
         "{manifest}"
     );
 }

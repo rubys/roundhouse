@@ -62,7 +62,7 @@ pub fn build_unique_keys(models: &[Model], schema: &crate::schema::Schema) -> Un
         let not_null = |name: &Symbol| {
             table.columns.iter().any(|c| &c.name == name && !c.nullable)
         };
-        let keys: Vec<UniqueKey> = table
+        let mut keys: Vec<UniqueKey> = table
             .indexes
             .iter()
             .filter(|i| i.unique && !i.columns.is_empty())
@@ -74,6 +74,17 @@ pub fn build_unique_keys(models: &[Model], schema: &crate::schema::Schema) -> Un
                     .map(str::to_string),
             })
             .collect();
+        // The primary key conflicts too: a row that supplies its key
+        // (`insert_all([{ id: 910, … }])`) writes it, and Rails skips one
+        // already taken. A row without one reads `nil`, which matches none.
+        let primary: Vec<Symbol> = if table.primary_key_columns.is_empty() {
+            table.columns.iter().filter(|c| c.primary_key).map(|c| c.name.clone()).collect()
+        } else {
+            table.primary_key_columns.clone()
+        };
+        if !primary.is_empty() && !keys.iter().any(|k| k.columns == primary && k.predicate.is_none()) {
+            keys.push(UniqueKey { columns: primary, predicate: None });
+        }
         if !keys.is_empty() {
             out.insert(m.name.clone(), keys);
         }

@@ -139,6 +139,7 @@ fn overlay_gate(fixture: &Path, scratch: &str) {
         &app.models,
         fixture_extras,
         &roundhouse::lower::routes::helper_id_segments(&app),
+        &roundhouse::lower::routes::direct_helper_names(&app),
     );
     assert_all_green(
         "fixtures",

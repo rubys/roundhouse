@@ -29,6 +29,7 @@ PORT = 16540
 URL = "redis://127.0.0.1:#{PORT}/0"
 DIR = File.expand_path(__dir__)
 require "tmpdir"
+require_relative "oracle_support"
 WORK = Dir.mktmpdir("sidekiq-worker-oracle")
 
 ENV["ORACLE_LOG"] = File.join(WORK, "client.log")
@@ -89,80 +90,6 @@ def kept(trips)
     next if commands.empty? || commands.map { |c| c[0].downcase } == %w[multi exec]
     { "kind" => trip["kind"], "commands" => commands }
   end
-end
-
-def ms?(v) = v.is_a?(Integer) && v.to_s.length == 13
-
-# A timestamp the run itself wrote, as opposed to one the oracle seeded
-# (those are in 2001, and are kept so the record shows they survive).
-def fresh_ms?(v) = ms?(v) && (v - (Time.now.to_f * 1000).to_i).abs < 86_400_000
-
-# The envelope's keys in the order they appear in the JSON text, at the
-# top level only: a small scan that tracks nesting and strings.
-def top_level_keys(raw)
-  keys = []
-  depth = 0
-  i = 0
-  while i < raw.length
-    c = raw[i]
-    if c == '"'
-      j = i + 1
-      j += (raw[j] == "\\" ? 2 : 1) while raw[j] != '"'
-      keys << JSON.parse(raw[i..j]) if depth == 1 && raw[j + 1] == ":"
-      i = j
-    elsif c == "{" || c == "["
-      depth += 1
-    elsif c == "}" || c == "]"
-      depth -= 1
-    end
-    i += 1
-  end
-  keys
-end
-
-def mask_envelope(raw)
-  env = JSON.parse(raw)
-  raise "jid shape: #{env["jid"]}" unless env["jid"].match?(/\A[0-9a-f]{24}\z/)
-  env["jid"] = "<jid>"
-  %w[created_at enqueued_at failed_at retried_at].each do |k|
-    next unless env.key?(k)
-    raise "#{k} is not integer ms: #{env[k].inspect}" unless ms?(env[k])
-    env[k] = "<ms>" if fresh_ms?(env[k])
-  end
-  env["args"] = env["args"].map do |aj|
-    aj = aj.dup
-    raise "job_id shape" unless aj["job_id"].match?(/\A\h{8}-\h{4}-4\h{3}-[89ab]\h{3}-\h{12}\z/)
-    aj["job_id"] = "<uuid>"
-    raise "enqueued_at shape" unless aj["enqueued_at"].match?(/\A\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{9}Z\z/)
-    aj["enqueued_at"] = "<iso8601(9)>"
-    aj
-  end
-  env
-end
-
-# A job's text with its per-run values pinned to fixed ones, keys and
-# formatting as Sidekiq wrote them, so a test can feed the same text to
-# the runtime and compare what it writes with what Sidekiq wrote.
-# Malformed JSON is returned as it is.
-PINNED = {
-  "jid" => "0123456789abcdef01234567",
-  "created_at" => 1_792_632_730_123,
-  "enqueued_at" => 1_792_632_730_124,
-  "job_id" => "00000000-0000-4000-8000-000000000000",
-  "aj_enqueued_at" => "2026-10-23T00:00:00.000000000Z"
-}.freeze
-
-def pin(raw)
-  env = JSON.parse(raw)
-  env["jid"] = PINNED["jid"]
-  env["created_at"] = PINNED["created_at"] if env.key?("created_at")
-  env["enqueued_at"] = PINNED["enqueued_at"] if env.key?("enqueued_at")
-  env["args"] = env["args"].map do |aj|
-    aj.merge("job_id" => PINNED["job_id"], "enqueued_at" => PINNED["aj_enqueued_at"])
-  end
-  JSON.generate(env)
-rescue JSON::ParserError
-  raw
 end
 
 # One command, with its per-run values masked. `now` is the dead write's

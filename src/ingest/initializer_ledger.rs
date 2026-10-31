@@ -1428,12 +1428,16 @@ pub(super) fn record<V: Vfs + ?Sized>(
     admitted: &HashSet<String>,
     lock: Option<&crate::gems::Lockfile>,
     app_namespaces: &HashSet<String>,
+    carried_rate_limit_stores: &[Span],
 ) {
     let findings = ledger(vfs, dir, path_gems, admitted);
     for f in findings.into_iter().flat_map(|l| l.findings) {
         let holder = holder_of(&f.targets, lock, app_namespaces);
         let location = format!("{}:{}:{}", f.path, f.line, f.column);
         let file = sources::file_id(&absolute(dir, &f.path));
+        if carried_rate_limit_stores.iter().any(|value| value.file == file && value.start >= f.start && value.end <= f.end) {
+            continue;
+        }
         let span = if file.0 == 0 { Span::synthetic() } else { Span { file, start: f.start, end: f.end } };
         let kind = DiagnosticKind::UnconsumedInitializer {
             owner: Symbol::from(f.owner.as_str()),

@@ -516,7 +516,12 @@ PostgreSQL's `pg_dump` format. It skips the `\restrict` and
 `\unrestrict` lines that pg_dump 18 (and the August 2025 minor
 releases) brackets a dump with and that Rails before 7.2.3/8.0.3 keeps;
 any other psql meta-command is ledgered as a statement it does not
-model. When there is neither (never migrated locally, or gitignored),
+model. A composite primary key (`PRIMARY KEY (shop_id, id)`) is kept
+whole in `Table.primary_key_columns`, with no column flagged as the key.
+A model on such a table keys on the column it declares
+(`self.primary_key = :id`, in its own file or a reopen), which ingest
+then flags; a model that declares none is refused, since Rails would key
+it on every column and this compiler does not yet. When there is neither (never migrated locally, or gitignored),
 the walk falls back to folding `db/migrate/*.rb` in filename order —
 `src/ingest/schema.rs::ingest_migration`, called from
 `src/ingest/app.rs`. Migration shapes it can't fold deterministically

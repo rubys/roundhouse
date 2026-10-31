@@ -276,7 +276,35 @@ fn effective_return_ty(m: &MethodDef) -> Option<Ty> {
         Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
         Some(_) => None,
         None if m.name.as_str() == "initialize" || is_writer_name(m.name.as_str()) => None,
-        None => m.body.ty.clone().filter(|t| !t.mentions_unknown() && !matches!(t, Ty::Bottom | Ty::Nil)),
+        None => m.body.ty.clone().filter(|t| settled_for_rust(t) && !matches!(t, Ty::Bottom | Ty::Nil)),
+    }
+}
+
+/// A body type rust can declare: nothing unknown in it, except a Hash
+/// value that rust renders as `serde_json::Value` whatever it holds
+/// (`record.slice`'s `Hash[String, untyped]`). An unfinished inference
+/// variable is never settled.
+fn settled_for_rust(ty: &Ty) -> bool {
+    match ty {
+        Ty::Hash { key, value } => {
+            !key.mentions_unknown()
+                && (settled_for_rust(value)
+                    || (super::ty::rust_value_shaped(value) && !mentions_var(value)))
+        }
+        Ty::Union { variants } => variants.iter().all(settled_for_rust),
+        other => !other.mentions_unknown(),
+    }
+}
+
+fn mentions_var(ty: &Ty) -> bool {
+    match ty {
+        Ty::Var { .. } => true,
+        Ty::Hash { key, value } => mentions_var(key) || mentions_var(value),
+        Ty::Array { elem } => mentions_var(elem),
+        Ty::Union { variants } => variants.iter().any(mentions_var),
+        Ty::Class { args, .. } => args.iter().any(mentions_var),
+        Ty::Tuple { elems } => elems.iter().any(mentions_var),
+        _ => false,
     }
 }
 

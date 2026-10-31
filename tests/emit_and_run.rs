@@ -7,6 +7,14 @@
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/time_change_usec.rs"]
+mod time_change_usec_contract;
+#[path = "emit_and_run/time_change_usec.rs"]
+mod time_change_usec;
+#[path = "emit_and_run/rate_limits.rs"]
+mod rate_limits;
+#[path = "emit_and_run/rack_mounts.rs"]
+mod rack_mounts;
 #[path = "support/i18n_locales_app.rs"]
 #[allow(dead_code)]
 mod i18n_locales_app;
@@ -40,6 +48,8 @@ mod active_model_attributes_form;
 mod association_query_arguments;
 #[path = "emit_and_run/tableless_params.rs"]
 mod tableless_params;
+#[path = "emit_and_run/splatted_accessor_params.rs"]
+mod splatted_accessor_params;
 #[path = "emit_and_run/active_model_superclass.rs"]
 mod active_model_superclass;
 #[path = "emit_and_run/arel_nodes.rs"]
@@ -160,6 +170,8 @@ mod job_rest_params;
 mod regexp_constants;
 #[path = "emit_and_run/upsert.rs"]
 mod upsert;
+#[path = "emit_and_run/relation_parts.rs"]
+mod relation_parts;
 #[path = "support/relation_fork.rs"]
 mod relation_fork_contract;
 #[path = "emit_and_run/relation_fork.rs"]
@@ -415,6 +427,8 @@ mod uniqueness_association_attribute;
 mod default_scope_static;
 #[path = "emit_and_run/default_scope_dynamic.rs"]
 mod default_scope_dynamic;
+#[path = "emit_and_run/acts_as_tenant.rs"]
+mod acts_as_tenant;
 #[path = "emit_and_run/validates_integer_constants.rs"]
 mod validates_integer_constants;
 #[path = "emit_and_run/validation_callback_on.rs"]
@@ -20427,6 +20441,8 @@ mod module_factory;
 mod spinel_unknown_gem;
 #[path = "emit_and_run/json_column_name.rs"]
 mod json_column_name;
+#[path = "emit_and_run/block_locals.rs"]
+mod block_locals;
 
 /// `ActiveSupport::JSON.encode(value, escape: false)` — Rails' document
 /// without the HTML-entity escaping, which campfire's fragment keys can
@@ -20550,6 +20566,9 @@ mod namespaced_controller_symbol;
 #[path = "emit_and_run/route_format_lookahead.rs"]
 mod route_format_lookahead;
 
+#[path = "emit_and_run/route_dot_span.rs"]
+mod route_dot_span;
+
 #[path = "emit_and_run/params_write_assign.rs"]
 mod params_write_assign;
 
@@ -20558,3 +20577,10 @@ mod find_each_mailer;
 
 #[path = "emit_and_run/model_class_attribute.rs"]
 mod model_class_attribute;
+#[path = "support/record_slice_app.rs"]
+mod record_slice_app;
+#[path = "emit_and_run/record_slice.rs"]
+mod record_slice;
+
+#[path = "emit_and_run/csrf_meta_tag_alias.rs"]
+mod csrf_meta_tag_alias;

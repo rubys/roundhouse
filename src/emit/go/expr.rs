@@ -431,6 +431,19 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                     // assumption the heuristic makes and the shape every
                     // Ruby hash key emits as.
                     let k_ty = if key.is_open() { "string".to_string() } else { k_raw };
+                    // A nullable column read is a Go pointer; the map
+                    // holds the value (`map[string]string`) or boxes it
+                    // (`map[string]interface{}`), so unbox it here.
+                    let parts: Vec<String> = entries
+                        .iter()
+                        .zip(parts)
+                        .map(|((k, v), part)| {
+                            match unbox_nullable_column(v, &emit_expr(ctx, v), &v_ty) {
+                                Some(unboxed) => format!("{}: {unboxed}", emit_expr(ctx, k)),
+                                None => part,
+                            }
+                        })
+                        .collect();
                     return format!("map[{k_ty}]{v_ty}{{{}}}", parts.join(", "));
                 }
             }
@@ -4305,14 +4318,15 @@ pub(super) fn set_nullable_columns(cols: Vec<(String, String)>) {
 }
 
 thread_local! {
-    /// Every model's nullable columns, app-wide: `(Model, column)`.
+    /// Every model's nullable columns, app-wide: `(Model, column, Go
+    /// pointer type)`.
     /// The per-class table above only knows the class being emitted,
     /// but a VIEW reads another record's column (`article.title`), so
     /// the cross-class lookup needs the whole set. Keyed by the
     /// receiver's resolved model, never by column name alone — the
     /// same column name can be nullable on one table and NOT NULL on
     /// another.
-    static ALL_NULLABLE_COLUMNS: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
+    static ALL_NULLABLE_COLUMNS: RefCell<Vec<(String, String, String)>> = const { RefCell::new(Vec::new()) };
 }
 
 thread_local! {
@@ -4343,18 +4357,14 @@ fn raised_error_class(ctx: &EmitCtx, path: &[crate::ident::Symbol]) -> Option<St
     is_error_class(&nested).then_some(nested)
 }
 
-pub(super) fn set_all_nullable_columns(pairs: Vec<(String, String)>) {
-    ALL_NULLABLE_COLUMNS.with(|c| *c.borrow_mut() = pairs);
+pub(super) fn set_all_nullable_columns(columns: Vec<(String, String, String)>) {
+    ALL_NULLABLE_COLUMNS.with(|c| *c.borrow_mut() = columns);
 }
 
 /// Is `column` nullable on the model this expression's receiver
 /// resolves to?
 fn recv_column_is_nullable(recv: &Expr, column: &str) -> bool {
-    let Some(Ty::Class { id, .. }) = recv.ty.as_ref() else { return false };
-    let model = id.0.as_str().rsplit("::").next().unwrap_or(id.0.as_str());
-    ALL_NULLABLE_COLUMNS.with(|c| {
-        c.borrow().iter().any(|(m, col)| m == model && col == column)
-    })
+    recv_column_go_ty(recv, column).is_some()
 }
 
 fn nullable_column_go_ty(field_ruby: &str) -> Option<String> {
@@ -4447,14 +4457,42 @@ fn box_nullable_column_arg(method: &str, arg: &Expr, arg_s: &str) -> Option<Stri
     Some(format!("{f}({arg_s})"))
 }
 
+/// A nullable column read (`@title`, `article.title`) stored into a map
+/// whose Go value type is `slot_go`: `DerefString(..)` into a `string`
+/// slot (nil reads as "", the zero value), `AnyString(..)` into an
+/// `interface{}` slot (nil stays nil). `None` when `v` is no such read
+/// or the slot already holds the pointer.
+fn unbox_nullable_column(v: &Expr, v_s: &str, slot_go: &str) -> Option<String> {
+    let ptr = match &*v.node {
+        ExprNode::Ivar { name } => nullable_column_go_ty(name.as_str()),
+        ExprNode::Send { recv: Some(inner), method: m, args, .. } if args.is_empty() => {
+            recv_column_go_ty(inner, m.as_str())
+        }
+        _ => None,
+    }?;
+    let (scalar, deref, any) = match ptr.as_str() {
+        "*string" => ("string", "DerefString", "AnyString"),
+        "*int64" => ("int64", "DerefInt64", "AnyInt64"),
+        "*float64" => ("float64", "DerefFloat64", "AnyFloat64"),
+        "*bool" => ("bool", "DerefBool", "AnyBool"),
+        _ => return None,
+    };
+    let helper = if slot_go == scalar {
+        deref
+    } else if slot_go == "interface{}" {
+        any
+    } else {
+        return None;
+    };
+    Some(format!("{helper}({v_s})"))
+}
+
 /// The Go pointer type of `column` on the model this receiver resolves
 /// to, when the schema declares it nullable.
 fn recv_column_go_ty(recv: &Expr, column: &str) -> Option<String> {
-    if !recv_column_is_nullable(recv, column) {
-        return None;
-    }
-    // Every nullable scalar column renders as one of these; string is
-    // the overwhelmingly common case and the only one the fixtures
-    // exercise through an untyped seam.
-    Some("*string".to_string())
+    let Some(Ty::Class { id, .. }) = recv.ty.as_ref() else { return None };
+    let model = id.0.as_str().rsplit("::").next().unwrap_or(id.0.as_str());
+    ALL_NULLABLE_COLUMNS.with(|c| {
+        c.borrow().iter().find(|(m, col, _)| m == model && col == column).map(|(_, _, ty)| ty.clone())
+    })
 }

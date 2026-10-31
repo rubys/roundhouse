@@ -126,6 +126,26 @@ fn compile_seg_patterns(
     let mut out = Vec::with_capacity(other_constraints.len());
     let mut suffixes: Vec<String> = Vec::new();
     for (name, rx) in other_constraints {
+        if let Some(span) = crate::lower::segment_pattern::dot_span(rx) {
+            let segments: Vec<&str> = path.split('/').collect();
+            let at = segments.iter().position(|s| s.strip_prefix(':') == Some(name.as_str()));
+            let last = at.is_some_and(|i| i + 1 == segments.len());
+            let spans = segments.iter().filter(|s| s.starts_with('*')).count()
+                + out.iter().filter(|(k, _): &&(String, String)| k.starts_with('*')).count();
+            // The router spans one run of whole segments: a `.+` param inside a segment (`/@:name`), or beside another span, has no split it can find.
+            if at.is_none() || spans > 0 || (!last && !span.slash_follows) {
+                return (Vec::new(), Some((name.clone(), rx.clone())));
+            }
+            out.push((crate::lower::segment_pattern::span_key(name), String::new()));
+            if last {
+                if span.exts.is_empty() {
+                    out.push(("format_suffix".to_string(), crate::lower::segment_pattern::NEVER.to_string()));
+                } else {
+                    suffixes.extend(span.exts);
+                }
+            }
+            continue;
+        }
         match crate::lower::segment_pattern::compile(rx) {
             Some(pattern) => out.push((name.clone(), pattern)),
             None => match crate::lower::segment_pattern::split_format_lookahead(rx)
@@ -261,6 +281,18 @@ pub fn helper_id_segments(app: &App) -> crate::det::HashMap<String, Vec<bool>> {
         out.entry(format!("{}_path", r.as_name)).or_insert(shape);
     }
     out
+}
+
+/// The app's `direct` helpers, as the `RouteHelpers` methods a call names
+/// (`fresh_account_logo_path`, `fresh_account_logo_url`). Their bodies
+/// are the blocks the app wrote, so a caller's arguments reach them as
+/// written.
+pub fn direct_helper_names(app: &App) -> crate::det::HashSet<String> {
+    app.routes
+        .direct_helpers
+        .iter()
+        .flat_map(|h| [format!("{}_path", h.name.as_str()), format!("{}_url", h.name.as_str())])
+        .collect()
 }
 
 /// The routes the router dispatches: every flattened route except those
@@ -479,6 +511,9 @@ fn singular_resource_actions() -> &'static [(&'static str, HttpMethod, &'static 
 
 fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
     match spec {
+        // Rack mounts use the ordered prefix dispatcher, not controller rows
+        // or `(.:format)` URL helpers.
+        RouteSpec::RackMount { .. } => {}
         RouteSpec::Explicit {
             method,
             path,

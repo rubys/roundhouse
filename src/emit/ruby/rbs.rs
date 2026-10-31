@@ -429,6 +429,10 @@ fn ty_to_rbs_in(ty: &Ty, enclosing: &[&str]) -> String {
         Ty::Class { id, args } if id.0.as_str() == "Class" && args.len() == 1 => {
             format!("singleton({})", rbs(&args[0]))
         }
+        // The source ENV protocol has no runtime class; Spinel passes its Hash snapshot.
+        Ty::Class { id, args } if id.0.as_str() == "_RoundhouseEnvironment" && args.is_empty() => {
+            "Hash[String, String]".into()
+        }
         Ty::Class { id, args } => {
             let raw = id.0.as_str();
             let first = raw.split("::").next().unwrap_or(raw);

@@ -181,6 +181,13 @@ pub const IMPLICIT_MODEL_FINDER_RECEIVER: u64 = 1 << 38;
 /// Unknown-hook dynamic dispatch has no established emitted implementation.
 pub const FINDER_IMPLEMENTATION_UNKNOWN: u64 = 1 << 39;
 
+/// On a route-helper call `lower::route_format_suffix` renamed for its
+/// literal `format:` (`widget_url(w, format: :json)` to
+/// `widget_json_url(w)`): the only calls `routes_to_library` builds a
+/// format variant for. A `<route>_<word>_url` written in the source is
+/// not a Rails helper, whatever it splits into.
+pub const FORMAT_VARIANT_CALL: u64 = 1 << 37;
+
 /// Whether `expr` is a [`SELF_BINDING`] cast.
 pub fn is_self_binding(expr: &Expr) -> bool {
     expr.decisions & SELF_BINDING != 0

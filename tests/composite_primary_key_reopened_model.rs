@@ -37,7 +37,6 @@ fn emitted_event(declaring: &str, reopening: &str) -> String {
 }
 
 #[test]
-#[ignore = "fork spec: postgresql"]
 fn a_single_key_declaration_survives_a_reopen_without_one() {
     let event = emitted_event(
         "class Event < ApplicationRecord\n  self.primary_key = :id\nend\n",
@@ -48,7 +47,6 @@ fn a_single_key_declaration_survives_a_reopen_without_one() {
 }
 
 #[test]
-#[ignore = "fork spec: postgresql"]
 fn a_reopen_may_carry_the_single_key_declaration() {
     let event = emitted_event(
         "class Event < ApplicationRecord\nend\n",
@@ -66,4 +64,16 @@ fn an_undeclared_key_stays_the_tables_composite_across_a_reopen() {
         "class Event < ApplicationRecord\n  def mentioned? = true\nend\n",
     );
     assert!(event.contains("def self.composite_primary_key?"), "{event}");
+}
+
+/// `to_param` answers the declared key, even when only a reopen declares it.
+#[test]
+fn to_param_reads_the_key_a_reopen_declares() {
+    let event = emitted_event(
+        "class Event < ApplicationRecord\nend\n",
+        "class Event < ApplicationRecord\n  self.primary_key = :shop_id\nend\n",
+    );
+    let to_param = event.split("def to_param").nth(1).expect("a to_param");
+    let body = to_param.split("\n  end").next().unwrap_or_default();
+    assert!(body.contains("@shop_id.to_s"), "{body}");
 }

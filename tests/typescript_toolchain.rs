@@ -23,6 +23,8 @@ mod app_class_base;
 mod parenless_calls;
 #[path = "support/model_class_methods.rs"]
 mod model_class_methods;
+#[path = "support/ts_controller_ivars.rs"]
+mod ts_controller_ivars;
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
@@ -37,6 +39,9 @@ mod class_constants;
 #[path = "support/i18n_locales_app.rs"]
 #[allow(dead_code)]
 mod i18n_locales_app;
+#[path = "support/record_slice_app.rs"]
+#[allow(dead_code)]
+mod record_slice_app;
 
 use roundhouse::emit::typescript;
 use roundhouse::ingest::ingest_app;
@@ -458,6 +463,25 @@ fn real_blog_app_class_base_runs_under_tsx() {
 
 #[test]
 #[ignore]
+fn controller_ivars_named_like_base_state_compile_and_render() {
+    // An app controller's `@status`, `@location` and `@headers` (its
+    // own, ApplicationController's and a concern's) compile next to the
+    // runtime base's fields of those names, render on the page, and leave
+    // the response as it was: 200, no Location (#1614).
+    let (emitted, errors) = ts_controller_ivars::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { ProbesController } from \"./app/controllers/probes_controller.js\";\nconst c = new ProbesController();\nc.params = {};\nc.request_method = \"GET\";\nawait c.process_action(\"show\");\nconsole.log(JSON.stringify([c.status, c.location, c.body]));\n",
+    );
+    let want = format!("[200,null,{}]", serde_json::to_string(ts_controller_ivars::BODY).unwrap());
+    assert_eq!(out, want);
+    std::fs::remove_file(emitted.join("check.ts")).unwrap();
+    assert_tsc_passes("an app controller with ivars named like the base's state", &emitted);
+}
+
+#[test]
+#[ignore]
 fn real_blog_parenless_calls_run_under_tsx() {
     // A zero-argument `def` called without parens answers its value on a
     // plain class, from a subclass's class method and from a model's
@@ -627,4 +651,23 @@ console.log("locales passed");
     assert_eq!(out, "locales passed");
     std::fs::remove_file(emitted.join("check.ts")).unwrap();
     assert_tsc_passes("real-blog with two locales", &emitted);
+}
+
+#[test]
+#[ignore]
+fn real_blog_record_slice_runs_under_tsx() {
+    // The answers `emit_and_run::record_slice` checks on CRuby.
+    let (emitted, errors) = record_slice_app::probe_app().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        r#"import { Article } from "./app/models/article.js";
+const got = Article.sliced();
+if (JSON.stringify(got) !== JSON.stringify(["2", "Sliced", "7", "1", "Other", "3", "Bound", "5", "4", "A comment body."])) throw new Error("sliced: " + JSON.stringify(got));
+console.log("slice passed");
+"#,
+    );
+    assert_eq!(out, "slice passed");
+    std::fs::remove_file(emitted.join("check.ts")).unwrap();
+    assert_tsc_passes("real-blog with record slices", &emitted);
 }

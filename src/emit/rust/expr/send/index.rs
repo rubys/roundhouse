@@ -169,6 +169,10 @@ pub(super) fn try_recv_typed_method(
                     emit_expr(r),
                 ));
             }
+            // Missing key or nil value, Ruby's nil either way.
+            if map_holds_option(recv_ty) {
+                return Some(format!("{}.get({}).cloned().flatten()", emit_expr(r), emit_expr(&args[0])));
+            }
             if matches!(&*r.node, ExprNode::Const { .. }) {
                 return Some(format!(
                     "{}.lock().unwrap()[({}) as usize]",
@@ -780,10 +784,15 @@ fn rust_emits_session_or_flash_get(recv: &Expr) -> bool {
 /// total nil to fall back on.
 fn map_holds_json_value(recv_ty: Option<&crate::ty::Ty>) -> bool {
     use crate::ty::Ty;
+    // As `rust_ty` renders the value: `T | nil` is an `Option<T>`, not a Value.
     matches!(
         recv_ty,
-        Some(Ty::Hash { value, .. })
-            if matches!(value.as_ref(), Ty::Untyped)
-                || matches!(value.as_ref(), Ty::Union { .. })
+        Some(Ty::Hash { value, .. }) if super::super::super::ty::rust_value_shaped(value)
     )
+}
+
+/// A map of `Option<T>` values (`{ "title" => title }` over a nullable
+/// column): its `T | nil` is the Option itself.
+fn map_holds_option(recv_ty: Option<&crate::ty::Ty>) -> bool {
+    matches!(recv_ty, Some(crate::ty::Ty::Hash { value, .. }) if super::super::util::is_option_ty(value))
 }

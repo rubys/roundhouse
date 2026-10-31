@@ -76,6 +76,7 @@ pub mod channel_callbacks;
 mod active_model_attributes;
 pub mod current_attributes;
 pub mod delegate;
+mod acts_as_tenant;
 mod acts_as_votable;
 mod discard;
 mod model_callbacks;

@@ -26,6 +26,9 @@ mod emit_and_run;
 #[path = "support/i18n_locales_app.rs"]
 #[allow(dead_code)]
 mod i18n_locales_app;
+#[path = "support/record_slice_app.rs"]
+#[allow(dead_code)]
+mod record_slice_app;
 
 use roundhouse::emit::rust;
 use roundhouse::ingest::ingest_app;
@@ -437,6 +440,34 @@ fn i18n_locales_probe() {
     .expect("write probe");
     let output = Command::new("cargo")
         .args(["test", "--test", "i18n_probe"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run cargo test");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore]
+fn real_blog_record_slice_runs() {
+    // The answers `emit_and_run::record_slice` checks on CRuby.
+    let (emitted, errors) = record_slice_app::probe_app().emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::create_dir_all(emitted.join("tests")).expect("tests dir");
+    std::fs::write(
+        emitted.join("tests/record_slice.rs"),
+        format!(
+            "use app::models::Article;\n\n#[test]\nfn sliced() {{\n    assert_eq!(Article::sliced(), {:?});\n}}\n",
+            record_slice_app::EXPECTED
+        ),
+    )
+    .expect("write probe");
+    let output = Command::new("cargo")
+        .args(["test", "--test", "record_slice"])
         .current_dir(&*emitted)
         .output()
         .expect("run cargo test");

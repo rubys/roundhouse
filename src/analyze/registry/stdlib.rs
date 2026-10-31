@@ -262,14 +262,16 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // and a narrowing for the rarer `fetch(key, 3000)` / block forms —
     // the same trade the neighbours above make.
     let str_or_nil = || Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
-    register_stdlib_class(classes, "ENV", &[
+    let environment_methods = &[
         ("fetch", Ty::Str), ("[]", str_or_nil()), ("[]=", Ty::Str),
         ("key?", Ty::Bool), ("has_key?", Ty::Bool), ("include?", Ty::Bool),
         ("member?", Ty::Bool), ("key", str_or_nil()), ("delete", str_or_nil()),
         ("keys", str_arr()), ("values", str_arr()),
         ("to_h", Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) }),
         ("replace", Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) }),
-    ], &[]);
+    ];
+    register_stdlib_class(classes, "ENV", environment_methods, &[]);
+    register_stdlib_class(classes, "_RoundhouseEnvironment", &[], environment_methods);
     // `Pathname` — `Rails.root.join(...)` territory. The path-returning
     // methods answer a Pathname so a chain stays typed to its `to_s`.
     let pathname = || Ty::Class { id: ClassId(Symbol::from("Pathname")), args: vec![].into() };

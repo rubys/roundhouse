@@ -106,6 +106,9 @@ pub(in crate::ingest) struct EnumConstants {
     /// `NAME = …`, mutates, or lets a variable hold ([`super::ConstTaint`]
     /// over the whole file). By name, whatever owner the write names.
     foreign_taint: crate::det::HashSet<String>,
+    snapshot_taint: crate::det::HashSet<String>,
+    snapshot_aliases: Vec<(String, String)>,
+    snapshot_reflected: crate::det::HashSet<String>,
     /// `ALIAS = KINDS` edges the boot sources write, across all of them:
     /// closed over `foreign_taint` once they are all recorded, in
     /// `finish`, so an alias one initializer writes and a later one
@@ -194,13 +197,19 @@ impl EnumConstants {
 
     /// Only already-consumed original Ruby can add mutation facts here.
     /// Declaration admission remains the prepass's input roots. Revalidate
-    /// enum declarations only: no model replacement or unrelated diagnostics.
+    /// enum declarations and derived validation lists: no model replacement
+    /// or unrelated diagnostics.
     pub(in crate::ingest) fn validate_consumed_sources(
         &mut self,
         app: &crate::App,
         sources: &[crate::span::SourceFile],
         input_files: &crate::det::HashSet<std::path::PathBuf>,
     ) -> super::super::IngestResult<()> {
+        let validation_lists: Vec<_> = app.models.iter().filter_map(|model| {
+            let source = model.span.file.0.checked_sub(1).and_then(|index| sources.get(index as usize))?;
+            let lists = super::folded_enum_validation_lists(model, source, self);
+            (!lists.is_empty()).then_some((model, source, lists))
+        }).collect();
         for source in sources {
             let path = std::path::Path::new(&source.path);
             if path.extension().is_some_and(|extension| extension == "rb")
@@ -210,6 +219,15 @@ impl EnumConstants {
             }
         }
         self.finish();
+        for (model, source, before) in validation_lists {
+            let after = super::folded_enum_validation_lists(model, source, self);
+            if before.iter().any(|(span, values)| after.get(span) != Some(values)) {
+                super::super::survey::unwrap_or_record::<()>(Err(super::super::IngestError::Unsupported {
+                    file: source.path.clone(),
+                    message: "enum-derived inclusion list changed after loading source; validation cannot be statically lowered".into(),
+                }))?;
+            }
+        }
         for model in app.models.iter().filter(|model| !model.enums.is_empty()) {
             if let Some(source) = model.span.file.0.checked_sub(1)
                 .and_then(|index| sources.get(index as usize))
@@ -326,6 +344,21 @@ impl EnumConstants {
         }
         let table = self.owner_consts.get(owner)?.as_ref()?;
         Some((owner.to_string(), member.to_string(), table))
+    }
+
+    pub(in crate::ingest) fn snapshot_constant_is_stable(&self, key: &str, owners: &[String]) -> bool {
+        let Some(name) = self.resolve_name(key, owners) else { return false };
+        let Some((owner, member)) = name.rsplit_once("::") else { return false };
+        let mut tainted = self.snapshot_taint.clone();
+        super::ConstTaint::close_aliases(&mut tainted, &self.snapshot_aliases);
+        self.namespace_chain_valid(&name)
+            && self.write_counts.get(&name) == Some(&1)
+            && self.owner_consts.get(owner).is_some_and(Option::is_some)
+            && !tainted.contains(member)
+            && !self.reflected.contains("Object")
+            && !owner.split("::").any(|segment| self.reflected.contains(segment))
+            && !self.snapshot_reflected.contains("Object")
+            && !owner.split("::").any(|segment| self.snapshot_reflected.contains(segment))
     }
 
     /// Whether any recorded source defines a constant, class or module

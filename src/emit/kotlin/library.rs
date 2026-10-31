@@ -377,12 +377,14 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
         out.push('\n');
     }
 
-    // The class's property names (accessor-backed + body ivars), so a
-    // `self.x` zero-arg send in a body emits as a property read; everything
-    // else gets `()`. Active for the rest of this function's method emit.
+    // The class's property names (accessor-backed + body ivars + the
+    // temporal computed getters), so a `self.x` zero-arg send in a body
+    // emits as a property read; everything else gets `()`. Active for the
+    // rest of this function's method emit.
     let instance_props: HashSet<String> = prop_types
         .keys()
         .chain(body_ivars.keys())
+        .chain(temporal_names.iter())
         .chain(inherited_props.iter())
         .cloned()
         .collect();

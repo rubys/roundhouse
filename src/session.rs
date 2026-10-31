@@ -45,13 +45,11 @@ pub fn analyze_and_lower(app: &mut App) -> Vec<Diagnostic> {
 }
 
 fn analyze_and_lower_with_target(app: &mut App, target: crate::build_target::BuildTarget) -> Vec<Diagnostic> {
-    crate::lower::i18n_translate::with_plan_cache(|| {
-        let mut analyzer = crate::analyze::Analyzer::new(app);
-        analyzer.analyze(app);
-        app.helper_diagnostics = Some(crate::analyze::diagnose_helper_modules(app));
-        crate::timings::phase("post-analyze lowerings", || {
-            crate::lower::apply_post_analyze_lowerings_for(app, analyzer.class_registry(), target)
-        })
+    let mut analyzer = crate::analyze::Analyzer::new(app);
+    analyzer.analyze(app);
+    app.helper_diagnostics = Some(crate::analyze::diagnose_helper_modules(app));
+    crate::timings::phase("post-analyze lowerings", || {
+        crate::lower::apply_post_analyze_lowerings_for(app, analyzer.class_registry(), target)
     })
 }
 

@@ -900,9 +900,15 @@ literal column list lowers; anything else declines.
 `INSERT`, `ON CONFLICT … DO NOTHING` for the skipping forms (on the
 `unique_by:` columns, or the columns of the unique index it names),
 `RETURNING` the primary key unless `returning:` says otherwise, and
-Rails' `ActiveRecord::Result` as its value. The per-row inlining keeps
-one gap there: an integer key a row supplies is still the database's to
-assign, as in `_insert_row`.
+Rails' `ActiveRecord::Result` as its value.
+
+**A supplied integer key is written, on the Ruby family.** The per-row
+inlining writes through `_adapter_insert`, which leaves an integer key
+to the database and reads it back. Under the Ruby family's runtime
+(`RuntimeRelation::Present`) that method writes the key too when the
+record holds one (`@id.to_i != 0`): `create(id: 900)`, an `insert_all`
+row's `id:`, or the key column of a table that has no database default
+for it. A strict target still leaves every integer key to the database.
 
 **What it costs.** N statements instead of one, plus, for `insert_all`,
 one SELECT per row for the conflict check.
@@ -1326,7 +1332,7 @@ raising façade on spinel (`runtime/ruby/rqrcode_facade.rb`, the
 write-path rule every gem façade follows) and the real gem on CRuby and
 JRuby. It is now real on spinel too: when an app names `RQRCode`,
 `spin_shape` swaps the façade file for `require "rqrcode"` and declares
-the spinel-rqrcode spin package (github.com/rubys/spinel-rqrcode;
+the spinel-rqrcode spin package (github.com/roundhouse-rb/spinel-rqrcode;
 matz/spin-index#8 is the registration, so the manifest uses the git form
 until it merges), the same seam bcrypt and ruby-vips use.
 
@@ -1827,7 +1833,7 @@ come from the job's `perform_later` call sites, and
   job carries `"retry":true`, so Sidekiq retries it with its own
   defaults; Active Job's `retry_on`, TLS (`rediss://`) and per-job
   adapters are still missing.
-- **The worker role has no retries.** The same build runs the pushed
+- **The worker role has no heartbeat.** The same build runs the pushed
   jobs as `./app sidekiq` (spinel) or `ruby sidekiq.rb` (ruby, jruby),
   a Sidekiq 8.1 server process with BasicFetch
   (`runtime/spinel/sidekiq/sidekiq_worker.rb`); a Ruby Sidekiq process
@@ -1836,10 +1842,19 @@ come from the job's `perform_later` call sites, and
   `:timeout:` (its `production:` section merged over the top level),
   which win over `RAILS_MAX_THREADS` and the defaults (5, `default`,
   25). TSTP quiets it, and TERM or INT waits up to the timeout and
-  pushes unfinished jobs back. A job that raises goes straight to the
-  dead set with Sidekiq's error fields, so the retry set, the scheduler
-  that moves `schedule` and `retry` to their queues, `retry_on`, and the
-  heartbeat Sidekiq's Web UI reads are still missing. Under
+  pushes unfinished jobs back. A job that raises takes Sidekiq's retry
+  rules: `retry: false` drops it; otherwise it goes to the retry set
+  with Sidekiq's error fields and backoff (`count**4 + 15` seconds plus
+  jitter) until its `retry` limit (`:max_retries:`, 25 by default) or
+  `retry_for` runs out, then to the dead set (trimmed by
+  `:dead_max_jobs:` and `:dead_timeout_in_seconds:`), unless it says
+  `dead: false`. A scheduler thread moves due jobs from `retry`, then
+  `schedule`, back onto their queues with Sidekiq's Lua pop (`EVALSHA`,
+  so spinel needs spinel-redis with scripting) every
+  `:poll_interval_average:` or 5 s per Sidekiq process, randomized as
+  Sidekiq randomizes it. `retry_on` and the heartbeat Sidekiq's Web UI
+  reads (and the process count the scheduler scales by) are still
+  missing. Under
   config/cable.yml's `adapter: redis`, every process's broadcasts go
   out as `PUBLISH <channel_prefix>:<stream>`, as Action Cable's Redis
   adapter sends them, and each server process delivers what it
@@ -3171,6 +3186,50 @@ flattening: same name, same arity, same namespace.
 does — the one caller is an app test helper, and those run on the ruby
 family. A target that needs it wants the module split, not this file
 copied.
+
+### `ActiveRecord::Base#slice`: lowered where typed, runtime otherwise
+
+Rails' `record.slice(:id, :name)` answers the named attributes in a
+HashWithIndifferentAccess. Roundhouse answers a String-keyed Hash two
+ways.
+
+**Typed sites, every target.** `src/lower/record_slice.rs` rewrites a
+`slice` whose receiver types as a model (or is the implicit `self` of
+an instance method of a model or of one of its concerns; a class
+method's or scope's bare `slice` is not a record's and keeps the call;
+the strict targets do not mix a
+model concern's methods into the model yet, so a concern's lowered
+`slice` builds on the ruby family only) and whose names are literals into a Hash literal of reader
+calls: `a.slice(:id, :title)` becomes `{"id" => a.id, "title" =>
+a.title}`, typed `Hash[String, <union of the readers>]`. A name given
+twice is one entry, as Rails' indifferent Hash keeps one key, and a
+bare `slice` reads through an explicit `self`, so a local of the same
+name does not answer for the attribute. The receiver
+is evaluated once: a receiver with effects read more than once is bound
+in a `Let` under a name unique to the site. A receiver with effects
+sliced with NO names (`Article.find(id).slice`) keeps the call, with an
+`effectful-no-names` lower-residue warning, and does not build on a
+strict target. That is an accepted gap: the call always answers `{}`,
+and binding a receiver nothing reads does not compile in Go. A name the model has no reader for leaves the call
+as written with a `record-slice` lower-residue warning, as does a name
+known only at run time (`slice(name)`, a `dynamic-names` warning); the
+ruby family answers both from the runtime, a strict target does not
+build them. A model that defines its own `slice` keeps it.
+
+**Untyped sites, ruby family only.** A receiver the analyzer cannot
+type keeps the call, which `runtime/ruby/active_record/connection.rb`
+answers beside `read_attribute`, reading each name, Symbol or String
+and flattened as Rails flattens them, through the `[]` column indexer.
+That indexer answers a temporal column's stored text, so `slice` parses
+it into the Time the reader (and the typed path) answers. Rails reads through `public_send`, so a model method
+that is not a column (`slice(:id, :avatar_url)`) is a
+`NotImplementedError` there, not a nil. It is not in `base.rb` for the
+reason `read_attribute` is not: the strict targets have no untyped
+`self[name]` to build the Hash from. A strict target given an untyped
+receiver emits the call as written and fails to build.
+
+Pinned by `tests/emit_and_run/record_slice.rs` (CRuby and Spinel) and
+the `real_blog_record_slice_runs` probe in each strict toolchain suite.
 
 ### `assert_select`'s block does not scope its nested assertions
 

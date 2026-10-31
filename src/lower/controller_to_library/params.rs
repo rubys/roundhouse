@@ -419,6 +419,13 @@ fn request_field_ty(spec: &ParamsSpec, field: &Symbol) -> Ty {
     if let Some(nested) = spec.nested_fields.get(field) {
         if nested.mode == "scalars" {
             Ty::Array { elem: Ty::Str.into() }
+        } else if nested.mode == "list" {
+            let record = Ty::Hash { key: Ty::Str.into(), value: param_value_ty().into() };
+            Ty::Union { variants: vec![
+                Ty::Array { elem: record.clone().into() },
+                Ty::Hash { key: Ty::Str.into(), value: record.into() },
+                Ty::Nil,
+            ].into() }
         } else {
             param_value_ty()
         }
@@ -491,9 +498,14 @@ fn field_reads(spec: &ParamsSpec, field: &Symbol, sub: Expr, span: Span) -> (Exp
         );
         let args = vec![sub, str_lit(field.as_str()), allowed, str_lit(nested.mode)];
         let params = vec![Symbol::from("Params")];
+        let value = if nested.mode == "list" {
+            call(params.clone(), "record_list", args[..3].to_vec(), field_ty(spec, field))
+        } else {
+            call(params.clone(), "nested", args.clone(), param_value_ty())
+        };
         return (
             call(params.clone(), "nested_provided", args.clone(), Ty::Bool),
-            call(params, "nested", args, param_value_ty()),
+            value,
         );
     }
     if spec.file_fields.contains(field) {

@@ -1339,6 +1339,23 @@ fn with_nonnull<F: FnOnce() -> String>(props: &[String], f: F) -> String {
 
 fn emit_cast(value: &Expr, target_ty: &crate::ty::Ty) -> String {
     use crate::ty::Ty;
+    // A Hash literal cast to a Hash type is built at that type:
+    // `Dictionary` is invariant, so the literal's own `<string, object?>`
+    // does not cast to `<string, string?>`.
+    if let (ExprNode::Hash { entries, .. }, Ty::Hash { key, value: value_ty }) = (&*value.node, target_ty) {
+        if !entries.is_empty() {
+            let pairs: Vec<String> = entries
+                .iter()
+                .map(|(k, v)| format!("[{}] = {}", emit_expr(k), emit_expr(v)))
+                .collect();
+            return format!(
+                "new Dictionary<{}, {}> {{ {} }}",
+                csharp_ty(key),
+                csharp_ty(value_ty),
+                pairs.join(", ")
+            );
+        }
+    }
     let v = emit_expr(value);
     match target_ty {
         Ty::Int => format!("Convert.ToInt64({v})"),

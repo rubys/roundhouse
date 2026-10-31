@@ -12,11 +12,11 @@
 module ActionController
   class Base
     def send_data(data, type: "application/octet-stream", disposition: "attachment", filename: nil)
-      @body = data
-      @content_type = type
-      @performed = true
+      @_body = data
+      @_content_type = type
+      @_performed = true
       disp = disposition.to_s == "inline" ? "inline" : "attachment"
-      @headers["Content-Disposition"] = filename.nil? ? disp : ActionController::Base.content_disposition(disp, filename)
+      @_headers["Content-Disposition"] = filename.nil? ? disp : ActionController::Base.content_disposition(disp, filename)
       apply_vary_header
       nil
     end

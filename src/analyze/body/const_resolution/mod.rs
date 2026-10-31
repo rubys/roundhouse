@@ -202,6 +202,7 @@ fn core_rbs() -> &'static str {
             out.push_str(name);
             out.push_str(": String\n");
         }
+        out.push_str("interface _RoundhouseEnvironment\nend\nENV: _RoundhouseEnvironment\n");
         out.push_str(STDLIB_NAMESPACES_RBS);
         out
     })
@@ -235,8 +236,11 @@ module REXML\n\
   class ParseException < StandardError\n  end\n\
 end\n";
 
-/// The type of a value constant `core_rbs()` declares, as Ruby defines it.
+/// The value contract contributed by a constant declared in `core_rbs()`.
 fn core_value_type(name: &str) -> Option<Ty> {
+    if name.trim_start_matches("Object::") == "ENV" {
+        return Some(Ty::Class { id: ClassId(Symbol::from("_RoundhouseEnvironment")), args: vec![].into() });
+    }
     if CORE_TOP_CONSTS.contains(&name.trim_start_matches("Object::")) {
         return Some(io_ty());
     }

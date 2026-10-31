@@ -32,6 +32,12 @@ use roundhouse::ingest::ingest_app;
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "spinel_toolchain/rack_mounts.rs"]
+mod rack_mounts;
+#[path = "support/time_change_usec.rs"]
+mod time_change_usec_contract;
+#[path = "spinel_toolchain/time_change_usec.rs"]
+mod time_change_usec;
 #[path = "support/string_truncate.rs"]
 mod string_truncate;
 #[path = "spinel_toolchain/string_truncate.rs"]

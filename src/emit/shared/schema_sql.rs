@@ -612,7 +612,7 @@ mod tests {
     }
 
     fn table(name: &str, columns: Vec<Column>, indexes: Vec<Index>) -> Table {
-        Table { name: Symbol::from(name), columns, indexes, foreign_keys: Vec::new(), virtual_module: None, known_keyless: false }
+        Table { name: Symbol::from(name), columns, indexes, foreign_keys: Vec::new(), virtual_module: None, known_keyless: false, primary_key_columns: Vec::new() }
     }
 
     fn schema_of(tables: Vec<Table>) -> Schema {

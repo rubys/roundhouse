@@ -116,6 +116,7 @@ fn a_spliced_helper_gets_the_fixture_and_route_rewrites() {
         &app.models,
         Vec::new(),
         &roundhouse::lower::routes::helper_id_segments(&app),
+        &roundhouse::lower::routes::direct_helper_names(&app),
     );
     let body = lcs
         .iter()
@@ -151,6 +152,7 @@ fn a_variable_fixture_label_routes_through_by_label() {
         &app.models,
         Vec::new(),
         &roundhouse::lower::routes::helper_id_segments(&app),
+        &roundhouse::lower::routes::direct_helper_names(&app),
     );
     let body = lcs
         .iter()
@@ -218,6 +220,7 @@ fn a_spliced_helper_with_no_signature_returns_what_its_body_returns() {
         &app.models,
         Vec::new(),
         &roundhouse::lower::routes::helper_id_segments(&app),
+        &roundhouse::lower::routes::direct_helper_names(&app),
     );
     let methods: Vec<_> = lcs.iter().flat_map(|lc| lc.methods.iter()).collect();
     let sig = methods

@@ -101,12 +101,14 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
             return format!("vec![{}]", items.join(", "));
         }
     }
-    // A number into a nilable parameter of several types: rust renders it Option<Value>, which takes the number boxed
+    // A number into a nilable parameter of several types: rust renders it Option<Value>, which takes the number boxed.
+    // Only when it does: a flat `Integer | String | nil` renders a bare Value, and `Some(..)` there cannot unify.
     if let Ty::Union { variants } = param_ty {
         let non_nil: Vec<&Ty> = variants.iter().filter(|v| !matches!(v, Ty::Nil)).collect();
         let several = non_nil.len() > 1 || matches!(non_nil.as_slice(), [Ty::Union { .. }]);
         if variants.iter().any(|v| matches!(v, Ty::Nil))
             && several
+            && !super::super::super::ty::rust_value_shaped(param_ty)
             && matches!(arg.ty.as_ref(), Some(Ty::Int | Ty::Float))
         {
             return format!("Some(serde_json::Value::from({}))", emit_expr(arg));
@@ -321,19 +323,23 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
     let value_target = |ty: &Ty| -> bool {
         super::super::super::ty::rust_value_shaped(ty)
     };
+    // A Hash literal already widened to a Hash (the lowered
+    // `record.slice`) nests as an Object when the slot is a Value.
+    if let ExprNode::Cast { value, target_ty: Ty::Hash { .. } } = &*arg.node {
+        if let (ExprNode::Hash { entries, .. }, true) = (&*value.node, value_target(param_ty)) {
+            return hash_literal_into_value(entries);
+        }
+    }
     if let ExprNode::Cast { value, target_ty } = &*arg.node {
         if value_target(target_ty) {
             // Family 3b — Hash literal → Value::Object.
             if let ExprNode::Hash { entries, .. } = &*value.node {
-                if entries.is_empty() {
-                    return "serde_json::Value::Object(serde_json::Map::new())".to_string();
-                }
-                let inner_raw = emit_expr(value);
-                return format!(
-                    "serde_json::Value::Object({inner_raw}.into_iter().map(|(k, v)| (k.to_string(), serde_json::Value::from(v))).collect())"
-                );
+                return hash_literal_into_value(entries);
             }
             // Family 3 — primitive → Value.
+            if let Some(time) = time_into_value(value) {
+                return time;
+            }
             let inner_ty_peeled = value.ty.as_ref().map(peel_nil);
             if matches!(
                 inner_ty_peeled,
@@ -354,12 +360,10 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
     // explicit `param_ty` the lowerer didn't see).
     if !matches!(&*arg.node, ExprNode::Cast { .. }) && value_target(param_ty) {
         if let ExprNode::Hash { entries, .. } = &*arg.node {
-            if entries.is_empty() {
-                return "serde_json::Value::Object(serde_json::Map::new())".to_string();
-            }
-            return format!(
-                "serde_json::Value::Object({raw}.into_iter().map(|(k, v)| (k.to_string(), serde_json::Value::from(v))).collect())"
-            );
+            return hash_literal_into_value(entries);
+        }
+        if let Some(time) = time_into_value(arg) {
+            return time;
         }
         if matches!(
             arg_ty_peeled,
@@ -579,6 +583,43 @@ pub(crate) fn cast_via_value_for_union(value: &Expr, target_ty: &crate::ty::Ty) 
         )),
         _ => None,
     }
+}
+
+/// Family 3b: a Hash literal into a `serde_json::Value` slot, as a
+/// `Value::Object` built entry by entry. Not the literal as a `HashMap`
+/// first: its values need not share a type (`slice(:id, :created_at)`
+/// is an Integer beside a Time), and a `HashMap::from` of them cannot
+/// unify before any per-value conversion runs.
+fn hash_literal_into_value(entries: &[(Expr, Expr)]) -> String {
+    if entries.is_empty() {
+        return "serde_json::Value::Object(serde_json::Map::new())".to_string();
+    }
+    let pairs: Vec<String> = entries
+        .iter()
+        .map(|(k, v)| {
+            let v_s = time_into_value(v).unwrap_or_else(|| format!("serde_json::Value::from({})", emit_expr(v)));
+            format!("(({}).to_string(), {v_s})", emit_expr(k))
+        })
+        .collect();
+    format!("serde_json::Value::Object(serde_json::Map::from_iter([{}]))", pairs.join(", "))
+}
+
+/// A `Time` into a `serde_json::Value` slot. A Value cannot hold a
+/// `DateTime<Utc>`; it holds the stored text form, as `attributes` and
+/// `get_index` do, which is what `parse_db_time` reads back. A nil time
+/// is JSON null.
+pub(crate) fn time_into_value(arg: &Expr) -> Option<String> {
+    use crate::ty::Ty;
+    let ty = arg.ty.as_ref()?;
+    if !matches!(peel_nil(ty), Ty::Time) {
+        return None;
+    }
+    let raw = emit_expr(arg);
+    Some(if is_option_ty(ty) {
+        format!("serde_json::Value::from(({raw}).map(crate::rh_datetime::format_db_time))")
+    } else {
+        format!("serde_json::Value::from(crate::rh_datetime::format_db_time({raw}))")
+    })
 }
 
 /// `Union{[T, Nil]}` → `T`. A nullable column's field/param carries

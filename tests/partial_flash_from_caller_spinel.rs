@@ -4,6 +4,7 @@
 //! view, a layout, a collection, another partial, and an action's
 //! `render partial:` — and neither a `local_assigns[:notice_]`, an outer
 //! partial's `notice:` local nor a `|notice|` block param passes for it.
+//! A `local_assigns[:notice]` beside it reads only the render's local.
 //! The Spinel run needs a Spinel compiler, so it is
 //! `#[ignore]`d like its sibling suites; CI's `spinel-framework` job runs
 //! it with `--ignored` (`scripts/ci-plan.py`'s `SPINEL_TESTS`).
@@ -47,13 +48,18 @@ fn app() -> emit_and_run::Overlay {
             "<%= render \"note\" %>\n<%= render partial: \"row\", collection: @rows, as: :row %>\n<%= render \"outer\" %>\n\
              <%= render \"opt\" %>\n<%= render partial: \"local_outer\", locals: { notice: \"Local\" } %>\n\
              <%= render \"strict_outer\", label: \"S:\" %>\n\
-             <% [\"Local\"].each do |notice| %><%= render \"inner\" %><% end %>\n",
+             <% [\"Local\"].each do |notice| %><%= render \"inner\" %><% end %>\n\
+             <%= render \"local\" %>\n<%= render \"local\", notice: \"Local\" %>\n",
         )
         .write("app/views/pages/_note.html.erb", "<p id=\"note\"><%= notice %></p>\n")
         .write("app/views/pages/_row.html.erb", "<p class=\"row\"><%= row %>:<%= alert %></p>\n")
         .write("app/views/pages/_outer.html.erb", "<div id=\"outer\"><%= render \"inner\" %></div>\n")
         .write("app/views/pages/_inner.html.erb", "<p id=\"inner\"><%= notice %></p>\n")
         .write("app/views/pages/_opt.html.erb", "<p id=\"opt\"><%= notice %>|<%= local_assigns[:notice_] %></p>\n")
+        .write(
+            "app/views/pages/_local.html.erb",
+            "<p class=\"local\"><%= notice %>|<%= local_assigns[:notice] || \"none\" %></p>\n",
+        )
         .write(
             "app/views/pages/_local_outer.html.erb",
             "<div id=\"local-outer\"><%= notice %><%= render \"inner\" %></div>\n",
@@ -81,6 +87,8 @@ body = page.body
   "<p id=\"opt\">Saved|</p>",
   "<div id=\"local-outer\">Local<p id=\"inner\">",
   "<div id=\"strict-outer\">S:Declared<p id=\"inner\">",
+  "<p class=\"local\">Saved|none</p>",
+  "<p class=\"local\">Local|Local</p>",
 ].each do |want|
   raise "show: no #{want} in #{body}" unless body.include?(want)
 end

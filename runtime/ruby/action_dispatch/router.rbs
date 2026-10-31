@@ -15,8 +15,8 @@ module ActionDispatch
       # The pattern split on "/" once at construction, so a `Router.match`
       # table walk never re-splits it per request.
       def pattern_parts: () -> Array[String]
-      # Precomputed for `Router.admits`: the segment count, whether the
-      # last segment is a `*glob`, and the first segment when it is a
+      # Precomputed for `Router.admits`: the segment count, whether a
+      # segment is a `*glob`, and the first segment when it is a
       # plain literal ("" when it is dynamic).
       def part_count: () -> Integer
       def globbed: () -> bool
@@ -100,8 +100,9 @@ module ActionDispatch
     # The same segment loop over already-split parts — what `Router.match`
     # calls with the route's precomputed `pattern_parts`, so a table walk
     # allocates no segment arrays per candidate.
-    def self.literals_match: (Array[String] pattern_parts, Array[String] path_parts) -> bool
-    def self.glob_rest: (Array[String] path_parts, Integer from) -> String
+    def self.literals_match: (Array[String] pattern_parts, Array[String] path_parts, Integer glob, Integer extra) -> bool
+    def self.glob_rest: (Array[String] path_parts, Integer from, Integer stop) -> String
+    def self.glob_index: (Array[String] pattern_parts) -> Integer
     def self.param_prefix_length: (String segment) -> Integer
     def self.match_parts: (
       Array[String] pattern_parts,

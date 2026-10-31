@@ -14,6 +14,7 @@ module Tep
     @halted: bool
     @file_path: String
     @set_cookies: Array[String]
+    @header_fields: Array[[String, String]]
     @streamer: untyped
     @streaming: bool
     @upgrading_ws: bool
@@ -32,11 +33,14 @@ module Tep
     def file_path=: (String p) -> String
     def set_cookies: () -> Array[String]
     def set_cookies=: (Array[String] c) -> Array[String]
+    def header_fields: () -> Array[[String, String]]
+    def header_fields=: (Array[[String, String]] fields) -> Array[[String, String]]
 
     def initialize: () -> void
     def start_stream: (untyped streamer) -> untyped
     def start_websocket: (String accept_key, untyped driver) -> untyped
     def set_cookie: (String name, String value, Hash[String, String] opts) -> untyped
+    def append_header: (String name, String value) -> untyped
     def send_file: (String path) -> untyped
     def set_body_if_empty: (String s) -> untyped
     def set_status: (Integer n) -> Integer

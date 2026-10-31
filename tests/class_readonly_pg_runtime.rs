@@ -59,7 +59,6 @@ const FILES: [(&str, &str); 7] = [
 ];
 
 #[test]
-#[ignore = "fork spec: postgresql"]
 fn a_class_level_readonly_matches_native_rails_on_postgresql() {
     let app = FILES.iter().fold(emit_and_run::empty_app(), |app, (path, text)| app.write(path, text));
     let (emitted, errors) = app.emit(roundhouse::project::BuildTarget::Ruby);

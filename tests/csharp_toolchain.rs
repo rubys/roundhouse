@@ -19,6 +19,9 @@ mod emit_and_run;
 #[path = "support/i18n_locales_app.rs"]
 #[allow(dead_code)]
 mod i18n_locales_app;
+#[path = "support/record_slice_app.rs"]
+#[allow(dead_code)]
+mod record_slice_app;
 
 use roundhouse::emit::csharp;
 use roundhouse::ingest::ingest_app;
@@ -223,6 +226,41 @@ public class I18nProbeTest
 "#).expect("write probe test");
     let output = Command::new("dotnet")
         .args(["test", "tests", "--nologo", "--filter", "I18nProbeTest"])
+        .current_dir(&emitted)
+        .output()
+        .expect("run dotnet test");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore]
+fn real_blog_record_slice_runs() {
+    // The answers `emit_and_run::record_slice` checks on CRuby.
+    let (emitted, errors) = record_slice_app::probe_app().emit(roundhouse::project::BuildTarget::CSharp);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("tests/RecordSliceProbeTest.cs"), r#"using System.Collections.Generic;
+using Xunit;
+
+namespace Roundhouse;
+
+public class RecordSliceProbeTest
+{
+    [Fact]
+    public void SliceAnswersAsRails()
+    {
+        var got = System.Text.Json.JsonSerializer.Serialize(Article.Sliced());
+        var want = System.Text.Json.JsonSerializer.Serialize(new List<object?> { "2", "Sliced", "7", "1", "Other", "3", "Bound", "5", "4", "A comment body." });
+        Assert.True(got == want, "sliced: " + got);
+    }
+}
+"#).expect("write probe test");
+    let output = Command::new("dotnet")
+        .args(["test", "tests", "--nologo", "--filter", "RecordSliceProbeTest"])
         .current_dir(&emitted)
         .output()
         .expect("run dotnet test");

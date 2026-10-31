@@ -134,6 +134,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr, helpers: &crate::det::HashSet<String
                 if !helpers.contains(&renamed) {
                     *method = Symbol::from(renamed);
                     expr.ty = Some(crate::ty::Ty::Str);
+                    expr.decisions |= crate::expr::FORMAT_VARIANT_CALL;
                     return;
                 }
             }

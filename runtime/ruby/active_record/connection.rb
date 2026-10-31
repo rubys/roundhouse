@@ -238,6 +238,11 @@ module ActiveRecord
       end
       @rows
     end
+
+    def map
+      mapped = @rows.map { |row| yield row }
+      mapped
+    end
   end
 
   # `connection.raw_connection` — see `Connection#raw_connection`.
@@ -404,8 +409,20 @@ module ActiveRecord
 
   # Not in relation.rb: the strict targets' `Db` never raises RecordNotUnique.
   class Relation
-    def lock(_locking = true)
-      unloaded_spawn
+    # Rails' `lock`: `FOR UPDATE`, or the clause given, ends the SELECT;
+    # `lock(false)` takes it off. SQLite has no row locks, and Rails'
+    # SQLite adapter writes none, so neither does this there.
+    def lock(locking = true)
+      rel = unloaded_spawn
+      clause = ""
+      if Db.adapter_name == "postgresql"
+        if locking == true
+          clause = "FOR UPDATE"
+        elsif locking.is_a?(String)
+          clause = locking
+        end
+      end
+      rel.lock_clause!(clause)
     end
 
     def create_or_find_by(conditions)
@@ -430,6 +447,22 @@ module ActiveRecord
   end
 
   class Base
+    # Rails' read-only records: one a `readonly` relation loaded, or one
+    # `readonly!` marked, raises ReadOnlyRecord on save, destroy,
+    # `update_column(s)` or `touch`.
+    def readonly?
+      @readonly == true
+    end
+
+    def readonly!
+      @readonly = true
+      self
+    end
+
+    def _raise_readonly_record_error
+      raise ReadOnlyRecord.new("#{self.class.name} is marked as readonly")
+    end
+
     def assign_attributes(attributes)
       unless attributes.is_a?(Hash)
         raise ArgumentError, "assign_attributes requires an attribute Hash"
@@ -454,6 +487,32 @@ module ActiveRecord
 
     def write_attribute(name, value)
       self[name] = value
+    end
+
+    # Rails' `slice(*methods)`: the named attributes, String-keyed (Rails
+    # wraps the Hash in a HashWithIndifferentAccess), from Symbol or
+    # String names, flattened as Rails flattens them. Rails reads each
+    # name through `public_send`; this runtime reads it through the `[]`
+    # column indexer, as `read_attribute` does, so a name that is not a
+    # column raises instead of answering a nil Rails would never give.
+    # The indexer hands back a temporal column's stored text, so that
+    # one is parsed into the Time its reader answers.
+    def slice(*names)
+      columns = self.class.schema_columns
+      time_columns = self.class.schema_time_columns
+      h = {}
+      names.flatten.each do |n|
+        name = n.to_sym
+        unless columns.include?(name)
+          raise NotImplementedError, "slice reads columns only; #{name} is not a column of #{self.class.name}"
+        end
+        h[name.to_s] = if time_columns.include?(name)
+          ActiveSupport.present_db(ActiveSupport.parse_db_time(self[name]))
+        else
+          self[name]
+        end
+      end
+      h
     end
 
     def saved_changes?
@@ -1258,6 +1317,13 @@ module ActiveRecord
       rows
     end
 
+    # Rails' `composite_primary_key?`: whether the model keys its records
+    # on several columns. Every model here keys on one (a composite table
+    # is keyed on the column its model declares), so the answer is false.
+    def self.composite_primary_key?
+      false
+    end
+
     def self.record_timestamps=(value)
       TimestampSwitches.store(name, value)
     end
@@ -1281,6 +1347,7 @@ module ActiveRecord
     # value via the `[]=` indexer, then persists via the same adapter
     # path `save` uses.
     def update_column(name, value)
+      _raise_readonly_record_error if readonly?
       self[name] = value
       _adapter_update
       true
@@ -1289,6 +1356,7 @@ module ActiveRecord
     # `record.update_columns(a: 1, b: 2)` — several attributes at once,
     # the same way: no validations, no callbacks, no timestamps.
     def update_columns(attributes)
+      _raise_readonly_record_error if readonly?
       attributes.each { |name, value| self[name] = value }
       _adapter_update
       true
@@ -1835,6 +1903,7 @@ module ActiveRecord
     # Rails' before callbacks can; an after_* hook's `throw :abort` is not
     # caught, as in Rails, where it escapes as UncaughtThrowError.
     def save_after_validation
+      _raise_readonly_record_error if readonly?
       if _halted_by_abort { before_save }
         @_save_halted = true
         return false
@@ -1897,6 +1966,7 @@ module ActiveRecord
     # cascade or an `after_destroy` write that raises undoes the delete.
     # base.rb's body, restated as `save` is.
     def destroy
+      _raise_readonly_record_error if readonly?
       return self unless persisted?
       halted = false
       self.class.transaction do
@@ -1931,6 +2001,7 @@ module ActiveRecord
     # guards its index rewrite because boosts touch the message). The
     # bodies are base.rb's, restated for the transaction.
     def touch
+      _raise_readonly_record_error if readonly?
       self.class.transaction do
         fill_timestamps(false)
         _adapter_touch
@@ -1942,6 +2013,7 @@ module ActiveRecord
     end
 
     def touch_written
+      _raise_readonly_record_error if readonly?
       self.class.transaction do
         fill_timestamps(false)
         _adapter_update

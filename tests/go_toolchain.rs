@@ -21,6 +21,9 @@ mod emit_and_run;
 #[path = "support/i18n_locales_app.rs"]
 #[allow(dead_code)]
 mod i18n_locales_app;
+#[path = "support/record_slice_app.rs"]
+#[allow(dead_code)]
+mod record_slice_app;
 
 use roundhouse::emit::go;
 use roundhouse::ingest::ingest_app;
@@ -191,6 +194,39 @@ func TestI18nLocalesProbe(t *testing.T) {
     go_mod_tidy(&emitted);
     let output = Command::new("go")
         .args(["test", "-count=1", "-run", "TestI18nLocalesProbe", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore]
+fn real_blog_record_slice_runs() {
+    // The answers `emit_and_run::record_slice` checks on CRuby.
+    let (emitted, errors) = record_slice_app::probe_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("app/v2/record_slice_probe_test.go"), r#"package v2
+
+import (
+	"reflect"
+	"testing"
+)
+
+func TestRecordSliceProbe(t *testing.T) {
+	if got := Article_sliced(); !reflect.DeepEqual(got, []string{"2", "Sliced", "7", "1", "Other", "3", "Bound", "5", "4", "A comment body."}) {
+		t.Fatalf("sliced: %#v", got)
+	}
+}
+"#).expect("write probe");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-run", "TestRecordSliceProbe", "./app/v2/"])
         .current_dir(&*emitted)
         .output()
         .expect("run go test");

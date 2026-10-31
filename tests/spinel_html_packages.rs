@@ -62,8 +62,8 @@ fn file<'a>(files: &'a [(String, String)], path: &str) -> &'a str {
 fn an_app_naming_nokogiri_and_commonmarker_gets_both_packages() {
     let files = spinel_files("both", Some(MARKDOWNER));
     let manifest = file(&files, "spin.toml");
-    assert!(manifest.contains("nokogiri = { git = \"https://github.com/rubys/spinel-nokogiri\""), "{manifest}");
-    assert!(manifest.contains("commonmarker = { git = \"https://github.com/rubys/spinel-commonmarker\""), "{manifest}");
+    assert!(manifest.contains("nokogiri = { git = \"https://github.com/roundhouse-rb/spinel-nokogiri\""), "{manifest}");
+    assert!(manifest.contains("commonmarker = { git = \"https://github.com/roundhouse-rb/spinel-commonmarker\""), "{manifest}");
     assert!(file(&files, "runtime/nokogiri_facade.rb").contains("require \"nokogiri\""));
     assert!(!files.iter().any(|(p, _)| p == "runtime/nokogiri_facade.rbs"));
     assert!(file(&files, "runtime/gem_facades.rb").contains("require \"commonmarker\""));
