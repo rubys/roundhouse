@@ -40,6 +40,15 @@
 //! method: campfire's `lib/rails_ext/string.rb` adds `all_emoji?`, and
 //! the inquirer, a String subclass, answers it the same way.
 //!
+//! The by-name evidence is only as good as the call site's reach. A
+//! method name collected from one class (`ApiClient#kind` ends in
+//! `StringInquirer.new`) says nothing about a receiver-less `kind` in
+//! an unrelated class or mixin, where it resolves to that class's own
+//! `kind` (a GraphQL type's `TypeKind`, whose `interface?` is real).
+//! A receiver-less call therefore folds only when its owner class
+//! reaches a definer through its superclass / include chain, and an
+//! explicit receiver only when its typed (or written) class does.
+//!
 //! An app defining its own `inquiry` disables the pass wholesale, the
 //! same coarse opt-out `exclude_predicate` takes beside this file: the
 //! name would then mean something the app chose, and a receiver type
@@ -54,10 +63,14 @@ pub fn apply_inquiry_lowering(app: &mut App) {
     if app_defines_inquiry(app) {
         return;
     }
-    let facts = Facts { inquirers: inquirer_methods(app), app_string_methods: app_string_methods(app) };
-    super::for_each_hook_body(app, &mut |body| rewrite(body, &facts));
+    let facts = Facts {
+        inquirers: inquirer_methods(app),
+        app_string_methods: app_string_methods(app),
+        reach: Reach::collect(app),
+    };
+    super::for_each_owned_hook_body(app, &mut |owner, body| rewrite(body, &facts, owner));
     for view in &mut app.views {
-        rewrite(&mut view.body, &facts);
+        rewrite(&mut view.body, &facts, None);
     }
 }
 
@@ -72,6 +85,90 @@ fn inquirer_methods(app: &App) -> crate::det::HashSet<Symbol> {
 struct Facts {
     inquirers: crate::det::HashSet<Symbol>,
     app_string_methods: crate::det::HashSet<Symbol>,
+    reach: Reach,
+}
+
+/// Which classes define an inquirer-returning method, and each class's
+/// superclass / include edges, so a receiver-less call can be checked
+/// against what its owner can actually reach. Keyed by the last name
+/// segment: includes are written relative to their lexical scope, and
+/// the over-match only widens the fold to a same-named sibling.
+#[derive(Default)]
+struct Reach {
+    definers: crate::det::HashMap<Symbol, crate::det::HashSet<String>>,
+    edges: crate::det::HashMap<String, Vec<String>>,
+}
+
+fn last_segment(name: &str) -> String {
+    name.rsplit("::").next().unwrap_or(name).to_string()
+}
+
+impl Reach {
+    fn collect(app: &App) -> Reach {
+        let mut r = Reach::default();
+        let define = |r: &mut Reach, owner: &crate::ident::ClassId, method: &Symbol| {
+            r.definers.entry(method.clone()).or_default().insert(last_segment(owner.0.as_str()));
+        };
+        let edge = |r: &mut Reach, owner: &crate::ident::ClassId, to: &crate::ident::ClassId| {
+            r.edges.entry(last_segment(owner.0.as_str())).or_default().push(last_segment(to.0.as_str()));
+        };
+        for model in &app.models {
+            for m in model.methods() {
+                if crate::analyze::inquiry::tail_is_inquiry(&m.body) {
+                    define(&mut r, &model.name, &m.name);
+                }
+            }
+            if let Some(p) = &model.parent {
+                edge(&mut r, &model.name, p);
+            }
+        }
+        for lc in &app.library_classes {
+            for m in &lc.methods {
+                if crate::analyze::inquiry::tail_is_inquiry(&m.body) {
+                    define(&mut r, &lc.name, &m.name);
+                }
+            }
+            if let Some(p) = &lc.parent {
+                edge(&mut r, &lc.name, p);
+            }
+            for i in &lc.includes {
+                edge(&mut r, &lc.name, i);
+            }
+        }
+        for c in &app.controllers {
+            for item in &c.body {
+                if let crate::dialect::ControllerBodyItem::Action { action, .. } = item {
+                    if crate::analyze::inquiry::tail_is_inquiry(&action.body) {
+                        define(&mut r, &c.name, &action.name);
+                    }
+                }
+            }
+            if let Some(p) = &c.parent {
+                edge(&mut r, &c.name, p);
+            }
+        }
+        r
+    }
+
+    /// Does `owner`, through its superclass / include chain, reach a
+    /// class that defines the inquirer-returning `method`?
+    fn owner_reaches(&self, owner: &crate::ident::ClassId, method: &Symbol) -> bool {
+        let Some(definers) = self.definers.get(method) else { return false };
+        let mut stack = vec![last_segment(owner.0.as_str())];
+        let mut seen = crate::det::HashSet::default();
+        while let Some(cur) = stack.pop() {
+            if definers.contains(&cur) {
+                return true;
+            }
+            if !seen.insert(cur.clone()) {
+                continue;
+            }
+            if let Some(next) = self.edges.get(&cur) {
+                stack.extend(next.iter().cloned());
+            }
+        }
+        false
+    }
 }
 
 /// The methods the app defines by reopening `String`, its included
@@ -97,7 +194,7 @@ fn app_string_methods(app: &App) -> crate::det::HashSet<Symbol> {
     out
 }
 
-fn rewrite(expr: &mut Expr, facts: &Facts) {
+fn rewrite(expr: &mut Expr, facts: &Facts, owner: Option<&crate::ident::ClassId>) {
     let inquirers = &facts.inquirers;
     // `<recv>.inquiry.<name>?` — the DIRECT pair, matched BEFORE the
     // recursive walk folds the `.inquiry` away.
@@ -121,7 +218,7 @@ fn rewrite(expr: &mut Expr, facts: &Facts) {
                 if !label.is_empty() && !facts.app_string_methods.contains(method) {
                     if let Some(inner) = crate::analyze::inquiry::inquirer_value(recv) {
                         let mut inner = inner.clone();
-                        rewrite(&mut inner, facts);
+                        rewrite(&mut inner, facts, owner);
                         let span = expr.span;
                         *expr = eq_label(span, inner, label);
                         return;
@@ -131,7 +228,7 @@ fn rewrite(expr: &mut Expr, facts: &Facts) {
         }
     }
 
-    expr.node.for_each_child_mut(&mut |c| rewrite(c, facts));
+    expr.node.for_each_child_mut(&mut |c| rewrite(c, facts, owner));
 
     // `<recv>.inquiry` / `ActiveSupport::StringInquirer.new(<recv>)` — the inquirer is its string.
     if let Some(inner) = crate::analyze::inquiry::inquirer_value(expr) {
@@ -158,7 +255,8 @@ fn rewrite(expr: &mut Expr, facts: &Facts) {
     // collected above, since the fold erases the call itself.
     let recv_is_inquirer = matches!(
         &*recv.node,
-        ExprNode::Send { method, .. } if inquirers.contains(method)
+        ExprNode::Send { recv: call_recv, method, .. } if inquirers.contains(method)
+            && inquirer_call_reaches(facts, owner, call_recv.as_ref(), method)
     );
     if !matches!(recv.ty, Some(Ty::Str)) && !recv_is_inquirer {
         return;
@@ -166,6 +264,36 @@ fn rewrite(expr: &mut Expr, facts: &Facts) {
     let recv = recv.clone();
     let span = expr.span;
     *expr = eq_label(span, recv, label);
+}
+
+/// Can the call `<call_recv>.<method>` reach an inquirer-returning
+/// definer? A receiver-less call (or `self.`) dispatches on the owner's
+/// own `self`; an explicit receiver is judged by the class it is typed
+/// or written as. A receiver of unknown class stays unfolded: the name
+/// alone does not say which class's `<method>` it is, and an unfolded
+/// predicate on a real inquirer fails loudly where a wrong fold
+/// compares a non-String silently.
+fn inquirer_call_reaches(
+    facts: &Facts,
+    owner: Option<&crate::ident::ClassId>,
+    call_recv: Option<&Expr>,
+    method: &Symbol,
+) -> bool {
+    let class_of = |recv: &Expr| -> Option<crate::ident::ClassId> {
+        match (&*recv.node, &recv.ty) {
+            (ExprNode::SelfRef, _) => owner.cloned(),
+            (ExprNode::Const { path }, _) => Some(crate::ident::ClassId(Symbol::from(
+                path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::").as_str(),
+            ))),
+            (_, Some(Ty::Class { id, .. })) => Some(id.clone()),
+            _ => None,
+        }
+    };
+    match call_recv {
+        // Views and seeds belong to no class; keep the name-keyed fact.
+        None => owner.map_or(true, |o| facts.reach.owner_reaches(o, method)),
+        Some(recv) => class_of(recv).is_some_and(|c| facts.reach.owner_reaches(&c, method)),
+    }
 }
 
 /// `<recv> == "<label>"`, stamped Bool. The one shape both the direct
