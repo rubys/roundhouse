@@ -492,10 +492,13 @@ impl Analyzer {
             // all three so `@user.is_admin` (column read),
             // `@user.is_admin?` (predicate), and `@user.user_id = x`
             // (writer) all resolve.
+            let own_readers: HashSet<_> = model.methods()
+                .filter(|method| method.receiver == MethodReceiver::Instance)
+                .map(|method| method.name.clone()).collect();
             for (name, ty) in &model.attributes.fields {
                 let n = name.as_str();
                 // Not the stored value: an enum's reader answers its label, or nil for a value no label names.
-                let reader_ty = if source_methods.instance_method(&model.name, n) {
+                let reader_ty = if own_readers.contains(name) {
                     // The storage type is not the return of an overriding
                     // source getter. Wait for that body instead of feeding a
                     // schema unknown into its callers as a runtime value.
