@@ -87,7 +87,7 @@ use(Class.new do
     if file.empty?
       @app.call(env)
     else
-      PUBLIC_FILES.call(env.merge("PATH_INFO" => file))
+      PUBLIC_FILES.call(env.merge("PATH_INFO" => ActionDispatch::Router.escape_path(file)))
     end
   end
 end)

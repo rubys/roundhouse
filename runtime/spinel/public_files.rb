@@ -11,7 +11,8 @@
 # and removed as it is expired. A path the set names is confirmed on disk
 # before it is served, so a file another worker expired, or one expired
 # while this one was being written, falls through to the routes instead of
-# answering 404; a page another worker cached is rendered here again.
+# answering 404. When the page cache writes under public/, a miss also
+# looks at the disk, which is how a page another worker cached is found.
 module ActionController
   module PublicFiles
     def self.files
@@ -24,23 +25,52 @@ module ActionController
       @files
     end
 
-    # The URL path of the file a GET/HEAD for `path` is answered with, or "" for none.
+    # The file a GET/HEAD for `path` is answered with, as a decoded path
+    # under public/ (FileHandler unescapes the request path first, and the
+    # page cache writes the decoded name), or "" for none.
     def self.lookup(path)
-      return "" if path.include?("..")
-      stem = path.chomp("/")
-      found = ActionController::PublicFiles.present(path)
+      decoded = ActionDispatch::Router.decode_capture(path)
+      return "" if decoded.include?("..") || decoded.include?("\0")
+      stem = decoded.chomp("/")
+      found = ActionController::PublicFiles.present(decoded)
       found = ActionController::PublicFiles.present(stem + ".html") if found.empty? && !stem.empty?
       found = ActionController::PublicFiles.present(stem + "/index.html") if found.empty?
       found
     end
 
-    # `file` when the set names it and it is still on disk, else "".
+    # `file` when it is on disk and the set names it, or the page cache
+    # writes under public/ (another worker's page is then found on disk);
+    # else "".
     def self.present(file)
       files = ActionController::PublicFiles.files
-      return "" unless files.key?(file)
-      return file if File.file?("public" + file)
-      files.delete(file)
-      ""
+      if files.key?(file)
+        return file if File.file?("public" + file)
+        files.delete(file)
+        return ""
+      end
+      return "" unless ActionController::PublicFiles.watch_disk?
+      return "" unless File.file?("public" + file)
+      files[file] = true
+      file
+    end
+
+    # Whether a page can appear under public/ while the app runs: the page
+    # cache is on and writes there. Only then does a miss look at the disk,
+    # so an app that does not cache into public/ stats nothing per route.
+    def self.watch_disk?
+      if @watch_disk.nil?
+        public_dir = File.expand_path("public")
+        cache_dir = File.expand_path(ActionController::Base.page_cache_directory)
+        @watch_disk = ActionController::Base.perform_caching &&
+          (cache_dir == public_dir || cache_dir.start_with?(public_dir + "/"))
+      end
+      @watch_disk
+    end
+
+    # Forget what the first lookup decided, after the settings change (the tests).
+    def self.reset_watch!
+      @watch_disk = nil
+      nil
     end
 
     def self.add(rel)

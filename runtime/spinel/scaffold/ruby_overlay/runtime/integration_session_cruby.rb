@@ -92,7 +92,7 @@ module ActionDispatch
       def answer(verb, path_info, env)
         file = verb == "GET" || verb == "HEAD" ? ActionController::PublicFiles.lookup(path_info) : ""
         unless file.empty?
-          return Rack::Files.new("public").call(env.merge("PATH_INFO" => file)).then { |s, h, b| [s, h, b.to_a] }
+          return Rack::Files.new("public").call(env.merge("PATH_INFO" => ActionDispatch::Router.escape_path(file))).then { |s, h, b| [s, h, b.to_a] }
         end
         Db.with_connection { Main.run_rack(env) }
       end

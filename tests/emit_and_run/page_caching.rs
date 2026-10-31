@@ -185,3 +185,34 @@ end
         .run_test(TEST_PATH)
         .assert_passes();
 }
+
+#[test]
+fn the_static_lookup_decodes_the_path_and_finds_another_workers_page() {
+    app()
+        .write(
+            TEST_PATH,
+            r#"require "test_helper"
+
+class SitesControllerTest < ActionDispatch::IntegrationTest
+  test "an escaped request path finds the decoded file, and a page written elsewhere is found once the cache writes under public/" do
+    FileUtils.mkdir_p("public/sites")
+    File.write("public/sites/a b.html", "spaced")
+    ActionController::PublicFiles.add("sites/a b.html")
+    assert_equal "/sites/a b.html", ActionController::PublicFiles.lookup("/sites/a%20b")
+    File.write("public/sites/elsewhere.html", "other worker")
+    assert_equal "", ActionController::PublicFiles.lookup("/sites/elsewhere")
+    ActionController::Base.perform_caching = true
+    ActionController::Base.page_cache_directory = Rails.public_path.to_s
+    ActionController::PublicFiles.reset_watch!
+    assert_equal "/sites/elsewhere.html", ActionController::PublicFiles.lookup("/sites/elsewhere")
+  ensure
+    ActionController::Base.perform_caching = false
+    ActionController::PublicFiles.reset_watch!
+    FileUtils.rm_rf("public/sites")
+  end
+end
+"#,
+        )
+        .run_test(TEST_PATH)
+        .assert_passes();
+}
