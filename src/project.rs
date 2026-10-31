@@ -9231,6 +9231,11 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     if file_fixtures.exists() {
         walk_dir_into(&file_fixtures, "test/fixtures/files/", &mut files)?;
     }
+    // The app's data files, at their Rails.root-relative paths. First, so
+    // anything the emit produces at the same path wins.
+    let mut data = Vec::new();
+    walk_data_files_into(fixture, &mut data)?;
+    files.splice(0..0, data);
 
     let mut files = dedupe_last_wins(files);
     // De-blog the scaffold for whatever app was ingested: regenerate the
@@ -12395,6 +12400,56 @@ fn walk_dir_into_skipping(
                     Err(_) => continue,
                 };
                 out.push((nested, content));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The app's data files (`*.yml`, `*.yaml`, `*.json`, each optionally
+/// `.erb`), carried verbatim at their Rails.root-relative paths: app code
+/// reads them by a path it builds from `Rails.root` (a class body that
+/// loads `components/regions/config/overrides.yml`), and the
+/// emitted app serves from its root (runtime `Rails.root` is "."), so a
+/// file that is not there is an Errno::ENOENT the source never raises.
+/// Nothing transpiles them; whatever ERB they hold is the reading code's
+/// to render.
+///
+/// Skipped: dev/build dirs (`SKIP_DIRS`), hidden entries, `sorbet/`
+/// (type declarations the compiler reads), `config/database.yml` (compiled
+/// into the tree as `DatabaseYml`), and anything named for credentials or
+/// keys. Encrypted material (`*.ejson`, `credentials.yml.enc`,
+/// `master.key`) has no data extension and is never copied.
+fn walk_data_files_into(root: &Path, out: &mut Vec<(String, String)>) -> Result<(), String> {
+    fn data_file(name: &str) -> bool {
+        let name = name.strip_suffix(".erb").unwrap_or(name);
+        [".yml", ".yaml", ".json"].iter().any(|ext| name.ends_with(ext))
+    }
+    fn secret(name: &str) -> bool {
+        let lower = name.to_ascii_lowercase();
+        lower.contains("credential") || lower.contains("master.key") || lower.ends_with(".key")
+    }
+    let mut stack = vec![(root.to_path_buf(), String::new())];
+    while let Some((dir, prefix)) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || secret(&name) {
+                continue;
+            }
+            let Ok(ty) = entry.file_type() else { continue };
+            let rel = format!("{prefix}{name}");
+            if ty.is_dir() {
+                if !SKIP_DIRS.contains(&name.as_str()) && !(prefix.is_empty() && name == "sorbet") {
+                    stack.push((entry.path(), format!("{rel}/")));
+                }
+            } else if ty.is_file() && data_file(&name) && rel != "config/database.yml" {
+                // Not UTF-8: `collect_binary_assets` carries what it can.
+                if let Ok(content) = fs::read_to_string(entry.path()) {
+                    out.push((rel, content));
+                }
             }
         }
     }
