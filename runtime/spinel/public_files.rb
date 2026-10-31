@@ -15,8 +15,8 @@ module ActionController
     def self.table
       if @table.nil?
         @table = {}
-        Dir.glob("**/*", File::FNM_DOTMATCH, base: "public").each do |rel|
-          ActionController::PublicFiles.add(rel) if File.file?(File.join("public", rel))
+        Dir.glob("public/**/*", File::FNM_DOTMATCH).each do |path|
+          ActionController::PublicFiles.add(path["public/".length, path.length]) if File.file?(path)
         end
       end
       @table
