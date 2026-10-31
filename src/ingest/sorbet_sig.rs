@@ -1039,7 +1039,7 @@ fn scoped_rbs_aliases(
 
 /// The signature text of the `#:` / `#|` comment lines directly above
 /// the line holding byte `def_start`.
-fn rbs_comment_text(source: &[u8], def_start: usize) -> Option<String> {
+pub(super) fn rbs_comment_text(source: &[u8], def_start: usize) -> Option<String> {
     let text = std::str::from_utf8(source).ok()?;
     let before = text.get(..def_start)?;
     let line_start = before.rfind('\n').map_or(0, |i| i + 1);
