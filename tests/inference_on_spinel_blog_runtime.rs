@@ -520,6 +520,11 @@ fn untyped_subexpressions_baseline() {
     // the same collector measures 1109 total on main and 1114 here.
     // Only Base#assign_attributes adds sites (+5). Both totals include
     // the same 3 sanitize_sql_like sites, excluded here (1126 -> 1111).
+    // MEASURED 1095 on d0a3c8e4 with qualified integer query helpers:
+    // the identical test measures 1114 total on main and 1098 here,
+    // including the same 3 sanitize_sql_like sites. The new String
+    // caller seeds IntegerKeyCast's input; no existing method gains a
+    // site. Lower this ledger to the measured residual (1111 -> 1095).
     // MEASURED 1173 on 2026-10-30 against main dfd6a874 (1111): the bulk
     // writes' rows are attribute Hashes whose values are whatever the app
     // passes, and their parameters are vars on this RBS-less probe. Every
@@ -529,6 +534,9 @@ fn untyped_subexpressions_baseline() {
     // _bulk_stamps (2), _database_now_sql and _same_value_sql (1 each),
     // Arel::Nodes.quote_scalar's boolean escape (2) and
     // Relation#bound_text (1). The RBS-paired gate types them.
+    // Combined with main e368e2ae: 1173 + (1095 - 1111) = 1157.
+    // Retain the qualified integer parser's 16-site reduction alongside
+    // the bulk-write and Relation-bind sites above.
     // MEASURED 1192 on 2026-10-30 against main 3dfccb68 (1173): Relation's
     // `and`/`and!` read the other relation's conditions and none (+10),
     // `unscope_parts`/`unscope_part!` read the part names (+8), and `lock`
@@ -539,11 +547,13 @@ fn untyped_subexpressions_baseline() {
     // `structurally_incompatible_with` reads the other relation's parts
     // (+10), `and!` its HAVINGs and the check (+6), and `structural_values`
     // its own list (+1). relation.rbs types them for the RBS-paired gate.
+    // Combined with measured main f3eda5be2: 1209 + (1157 - 1173) = 1193.
     // MEASURED 1210 on 2026-10-31 (on 1209): the ruby-family Base#slice
     // parses a temporal column's stored text into the Time its reader
     // answers, reading the untyped `[]` value a second time (+1 in
     // active_record/connection.rb), as `_as_json_only` does.
-    const CEILING: usize = 1210;
+    // Combined with measured main fe705054f: 1210 + (1157 - 1173) = 1194.
+    const CEILING: usize = 1194;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

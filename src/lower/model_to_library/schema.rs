@@ -562,6 +562,21 @@ pub(super) fn push_schema_methods(
     // apply ISO8601-with-offset vs calendar-only without sniffing values.
     push_schema_symbol_list(methods, owner, "schema_columns", table, |_| true);
     push_schema_column_types(methods, owner, table);
+    if runtime_relation == super::RuntimeRelation::Present {
+        // A decorated attribute can serialize differently from
+        // its integer storage. Keep this evidence specific to plain
+        // scalar columns; the runtime reuses the existing finder range.
+        let declared = super::attribute_api_decls(&model.body);
+        let normalized = crate::lower::normalizes::normalizations(model);
+        push_schema_symbol_list(methods, owner, "schema_integer_query_columns", table, |c| {
+            matches!(c.col_type, crate::schema::ColumnType::Integer
+                | crate::schema::ColumnType::BigInt | crate::schema::ColumnType::Reference { .. })
+                && !c.array
+                && !model.enums.contains_key(&c.name)
+                && !declared.iter().any(|(name, _)| name == &c.name)
+                && !normalized.contains_key(&c.name)
+        });
+    }
     push_decode_plucked(methods, owner, table);
     push_schema_symbol_list(methods, owner, "schema_time_columns", table, |c| {
         matches!(c.col_type, crate::schema::ColumnType::DateTime | crate::schema::ColumnType::Time)

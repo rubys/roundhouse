@@ -90,4 +90,34 @@ class IntegerKeyCastTest < Minitest::Test
     assert_equal "12", StringProbe.find(12)
     assert_raises(ActiveRecord::RecordNotFound) { StringProbe.find(nil) }
   end
+
+  class QueryProbe < ActiveRecord::Base
+    def self.table_name = "queries"
+    def self.schema_column_types = { id: :integer, label: :string }
+    def self.schema_integer_query_columns = [:id]
+  end
+
+  def test_integer_query_evidence_is_per_column_and_table
+    relation = ActiveRecord::Relation.new(QueryProbe)
+    assert relation.integer_query_column?("id")
+    assert relation.integer_query_column?("queries.id")
+    refute relation.integer_query_column?("label")
+    refute relation.integer_query_column?("other.id")
+    refute relation.integer_query_column?("unknown")
+  end
+
+  def test_integer_query_strings_keep_null_distinct_from_overflow
+    relation = ActiveRecord::Relation.new(QueryProbe)
+    ["", " ", "junk", "+junk", "_1"].each do |text|
+      assert_equal "NULL", relation.integer_query_string(text), text.inspect
+    end
+    {"0junk" => "0", "1_0" => "10", "1__0" => "1", "\t-0007tail" => "-7",
+     "9223372036854775807" => "9223372036854775807",
+     "-9223372036854775808" => "-9223372036854775808"}.each do |text, expected|
+      assert_equal expected, relation.integer_query_string(text), text.inspect
+    end
+    ["9223372036854775808", "-9223372036854775809", "1" + "0" * 80].each do |text|
+      assert_equal "", relation.integer_query_string(text), text.inspect
+    end
+  end
 end
