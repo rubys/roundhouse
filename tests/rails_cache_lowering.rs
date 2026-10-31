@@ -89,3 +89,31 @@ fn no_expires_in_gets_a_never_expiring_ttl() {
     let body = lowered(r#"    content = Rails.cache.fetch("k") { render_to_string :action => "tree" }"#);
     assert!(body.contains("fetch_str"), "expected fetch_str:\n{body}");
 }
+
+#[test]
+fn an_app_defined_cache_store_keeps_fetch() {
+    // An app carries its own `ActiveSupport::Cache::CustomStore`:
+    // `Rails.cache` is that store, which has no `fetch_str`, so the
+    // String-block site must stay a plain `fetch`.
+    let tree = vec![
+        (
+            std::path::PathBuf::from("app/controllers/things_controller.rb"),
+            b"class ThingsController < ApplicationController\n  def index\n    v = Rails.cache.fetch(\"k\", expires_in: 60) { render_to_string :action => \"x\" }\n  end\nend\n".to_vec(),
+        ),
+        (
+            std::path::PathBuf::from("app/models/active_support/cache/proxy_cache_store.rb"),
+            b"module ActiveSupport\n  module Cache\n    class CustomStore\n      def fetch(name, options = nil, &block)\n        yield\n      end\n    end\n  end\nend\n".to_vec(),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    apply_rails_cache_lowering(&mut app);
+    let c = app
+        .controllers
+        .iter()
+        .find(|c| c.name.0.as_str() == "ThingsController")
+        .expect("controller ingested");
+    let body = format!("{:?}", c.body);
+    assert!(!body.contains("fetch_str"), "app-defined store must keep fetch:\n{body}");
+}

@@ -32,7 +32,21 @@ use crate::ident::Symbol;
 use crate::ty::Ty;
 
 pub fn apply_rails_cache_lowering(app: &mut App) {
+    if app_defines_cache_store(app) {
+        return;
+    }
     super::for_each_hook_body(app, &mut rewrite);
+}
+
+/// Does the app carry its own `ActiveSupport::Cache::*` store? Then
+/// `Rails.cache` is that app's store, not the shared runtime's, and
+/// `fetch_str` (a method of the runtime's store only) would be
+/// undefined on it: the pass stands down and `fetch` runs as written.
+/// An app's own proxy store and its test double are the case.
+pub(crate) fn app_defines_cache_store(app: &App) -> bool {
+    let is_store = |id: &crate::ident::ClassId| id.0.as_str().starts_with("ActiveSupport::Cache::");
+    app.library_classes.iter().any(|c| is_store(&c.name))
+        || app.models.iter().any(|m| is_store(&m.name))
 }
 
 fn rewrite(expr: &mut Expr) {
