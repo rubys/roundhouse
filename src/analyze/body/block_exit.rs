@@ -227,8 +227,11 @@ impl BodyTyper<'_> {
         }
         ty.is_some_and(|t| self.answers_receiver(t, method))
             || recv.is_some_and(|r| {
+                // load/create_additions and parse's object_class options can
+                // construct a user object with its own non-yielding #tap.
                 matches!(&*r.node, ExprNode::Send { recv, method, args, .. }
-                if self.json_value_source(recv.as_ref(), method, args))
+                if method.as_str() == "parse" && args.len() == 1
+                    && self.json_value_source(recv.as_ref(), method, args))
             })
     }
 

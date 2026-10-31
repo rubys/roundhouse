@@ -119,3 +119,48 @@ fn opaque_setters_and_uncalled_callbacks_match_cruby() {
         );
     }
 }
+
+#[test]
+fn customized_json_objects_keep_their_own_tap_like_cruby() {
+    for (parser, raw) in [
+        (
+            "JSON.load(raw, nil, create_additions: true)",
+            r#"{"json_class":"ParserValue"}"#,
+        ),
+        ("JSON.parse(raw, object_class: ParserValue)", "{}"),
+    ] {
+        let source = format!(
+            r#"class ParserValue < Hash
+  def self.json_create(value); new; end
+  def tap; 42; end
+end
+module Probe
+  def self.value(raw)
+    {parser}.tap {{ raise "not yielded" }} rescue :fallback
+  end
+end
+"#
+        );
+        let assertion =
+            format!("raise 'lost custom Integer' unless Probe.value({raw:?}) == 42\nputs 'ok'\n");
+        let original = Command::new("ruby")
+            .args(["-rjson", "-e", &format!("{source}\n{assertion}")])
+            .output()
+            .expect("CRuby customized-parser oracle");
+        assert!(
+            original.status.success(),
+            "{}",
+            String::from_utf8_lossy(&original.stderr)
+        );
+        let emitted = super::emit_and_run::empty_app()
+            .write("db/schema.rb", "ActiveRecord::Schema.define do\nend\n")
+            .write("lib/probe.rb", &source)
+            .run_ruby(&assertion);
+        emitted.assert_passes();
+        assert_eq!(
+            emitted.stdout,
+            String::from_utf8_lossy(&original.stdout),
+            "{parser}"
+        );
+    }
+}

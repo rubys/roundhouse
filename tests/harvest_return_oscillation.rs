@@ -295,3 +295,24 @@ end
 "#);
     assert!(rbs.contains("def self.value: () -> untyped"), "{rbs}");
 }
+
+#[test]
+fn customized_json_values_do_not_certify_a_core_yielding_protocol() {
+    for parser in [
+        "JSON.load(raw, nil, create_additions: true)",
+        "JSON.parse(raw, object_class: ParserValue)",
+    ] {
+        let source = format!(r#"class ParserValue < Hash
+  def self.json_create(value); new; end
+  def tap; 42; end
+end
+module Probe
+  def self.value(raw)
+    {parser}.tap {{ raise "not yielded" }} rescue :fallback
+  end
+end
+"#);
+        let (_, rbs) = declarations_for(&source);
+        assert!(rbs.contains("def self.value: (untyped raw) -> untyped"), "{parser}: {rbs}");
+    }
+}
