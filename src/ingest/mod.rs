@@ -51,6 +51,8 @@ pub(crate) mod database_yml;
 pub mod sidekiq_yml;
 pub mod cable_yml;
 mod public_file_server_config;
+mod action_controller_caching_config;
+mod caches_page;
 pub mod allow_browser;
 pub mod app;
 mod concern_accessors;

@@ -582,6 +582,27 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("busy_timeout=", Ty::Int),
         ("busy_handler_timeout=", Ty::Int),
     ]);
+    // `ActionDispatch::Integration::Session`, a request the app answers in
+    // process (runtime/spinel/integration_session.rb and its ruby-tree
+    // twin): only the GET/HEAD surface those implement.
+    let test_response = Ty::Class { id: ClassId(Symbol::from("ActionDispatch::TestResponse")), args: vec![].into() };
+    register_stdlib_class(classes, "ActionDispatch::TestResponse", &[], &[
+        ("status", Ty::Int),
+        ("body", Ty::Str),
+        ("headers", Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) }),
+    ]);
+    let session = Ty::Class { id: ClassId(Symbol::from("ActionDispatch::Integration::Session")), args: vec![].into() };
+    register_stdlib_class(classes, "ActionDispatch::Integration::Session", &[
+        ("new", session),
+    ], &[
+        ("host", Ty::Str),
+        ("host!", Ty::Str),
+        ("https!", Ty::Bool),
+        ("https?", Ty::Bool),
+        ("get", Ty::Int),
+        ("head", Ty::Int),
+        ("response", Ty::Union { variants: vec![test_response, Ty::Nil].into() }),
+    ]);
     // `ActiveSupport::Cache` — `expand_cache_key` and the bounded
     // `MemoryStore`, in runtime/spinel/active_support_cache.rb (the ruby
     // family and spinel). A cached value is whatever was written.

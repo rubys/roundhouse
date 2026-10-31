@@ -290,6 +290,8 @@ require_relative "config/routes"
 # `ActionView::ViewHelpers.fragment_read/_write`, so after every file that
 # defines them.
 require_relative "runtime/action_controller_fragment_caching"
+require_relative "runtime/action_controller_page_caching"
+require_relative "runtime/integration_session"
 # Rails 8.1.4's full ActionController::Head options hash is a Ruby-family
 # feature; strict non-Ruby targets keep the bounded shared implementation.
 require_relative "runtime/action_controller_head"
