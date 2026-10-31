@@ -10,7 +10,7 @@ use crate::span::Span;
 
 use crate::lower::view::RenderPartial;
 
-use super::extra_params::flash_params;
+use super::extra_params::{flash_params, local_key_of};
 use super::{
     accumulator_append_call, assign_accumulator_string_new, lit_sym, nil_lit, send, seq,
     var_ref, view_helpers_call, ViewCtx, ViewKind,
@@ -1167,20 +1167,23 @@ fn locals_extra_args(
     // Here the flash is a param of every template, so the caller passes
     // its own (`ViewCtx::own_flash`): the layout's `notice`, or its
     // `notice_` when an `@notice` ivar took the plain name
-    // (`flash_locals`). Without it every partial got nil. A partial
-    // caller whose `notice` may be a local (a render hands it `notice:`,
-    // or its strict locals declare it) passes nil: Rails does not hand
-    // a partial's locals on, and no other flash is in reach here. So
-    // does a render under a block param or after an assignment that
-    // rebinds `notice` (`ViewCtx::shadow_flash`).
+    // (`flash_locals`). Without it every partial got nil. A render's
+    // `notice:` local still wins, under whichever name the partial's
+    // flash param goes by (`local_key_of`). A partial caller whose
+    // `notice` may be a local (a render hands it `notice:`, or its
+    // strict locals declare it) passes nil: Rails does not hand a
+    // partial's locals on, and no other flash is in reach here. So does
+    // a render under a block param or after an assignment that rebinds
+    // `notice` (`ViewCtx::shadow_flash`).
     let flash = flash_params(extras);
     let bound: Vec<Option<Expr>> = extras
         .iter()
         .map(|name| {
+            let key = if strict { name.as_str() } else { local_key_of(extras, name) };
             entries
                 .iter()
                 .find_map(|(k, v)| match &*k.node {
-                    ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == name => {
+                    ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == key => {
                         Some(v.clone())
                     }
                     _ => None,
