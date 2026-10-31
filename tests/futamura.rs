@@ -1758,3 +1758,57 @@ end
         assert!(report.specialized.iter().any(|s| s.contains("fetch_member_service.rb:3:")), "{:?}", report.specialized);
     }
 }
+
+mod runtime_stats {
+    use std::fs;
+    use std::process::Command;
+
+    use roundhouse::emit::futamura::INITIALIZER;
+
+    // The emitted initializer carries an opt-in measurement block. It must
+    // stay inert unless FUTAMURA_STATS names a directory, and the file must
+    // stay valid Ruby with it.
+    #[test]
+    fn emitted_runtime_has_an_opt_in_stats_block_and_stays_valid_ruby() {
+        let dir = std::env::temp_dir().join(format!("roundhouse-futamura-stats-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let src = dir.join("src");
+        let out = dir.join("out");
+        fs::create_dir_all(src.join("app/models")).unwrap();
+        fs::create_dir_all(src.join("config")).unwrap();
+        fs::create_dir_all(src.join("db")).unwrap();
+        fs::write(src.join("Gemfile"), "source \"https://rubygems.org\"\ngem \"rails\"\n").unwrap();
+        fs::write(src.join("config/routes.rb"), "Rails.application.routes.draw do\nend\n").unwrap();
+        fs::write(
+            src.join("db/schema.rb"),
+            "ActiveRecord::Schema.define do\n  create_table \"pages\", force: :cascade do |t|\n    t.string \"slug\"\n  end\nend\n",
+        )
+        .unwrap();
+        fs::write(src.join("app/models/application_record.rb"), "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n").unwrap();
+        fs::write(
+            src.join("app/models/page.rb"),
+            "class Page < ApplicationRecord\n  def self.live_by(slug)\n    where(slug: slug).first\n  end\nend\n",
+        )
+        .unwrap();
+        let run = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+            .args(["--target", "futamura", "-o"])
+            .arg(&out)
+            .arg(&src)
+            .output()
+            .unwrap();
+        assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+        let init = fs::read_to_string(out.join(INITIALIZER)).unwrap();
+        // One guarded block, after the runtime module, that counts calls per
+        // site and why each fell back; FUTAMURA_STATS_AB times the chain too.
+        assert!(init.contains("if ENV[\"FUTAMURA_STATS\"].to_s != \"\""), "{init}");
+        assert!(init.contains("singleton_class.prepend(Stats::Instrument)"), "{init}");
+        assert!(init.contains("FUTAMURA_STATS_AB"), "{init}");
+        for reason in ["default_scopes", "root_not_model", "relation_needs_rails"] {
+            assert!(init.contains(reason), "{reason}: {init}");
+        }
+        // The whole file, block included, parses.
+        if let Ok(ruby) = Command::new("ruby").arg("-c").arg(out.join(INITIALIZER)).output() {
+            assert!(ruby.status.success(), "{}", String::from_utf8_lossy(&ruby.stderr));
+        }
+    }
+}

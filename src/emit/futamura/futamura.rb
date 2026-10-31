@@ -334,3 +334,153 @@ module Futamura
     end
   end
 end
+
+# Opt-in measurement, off unless FUTAMURA_STATS names a directory. Each process
+# writes futamura-stats-<pid>.json there at exit: per call site how many calls
+# were specialized and how many fell back (and why), the time spent building
+# statements, and the time each path took. FUTAMURA_STATS_AB=1 also runs the
+# original chain after (or before, alternating) every specialized call and
+# times it, so the two paths can be compared per site; like FUTAMURA_VERIFY it
+# runs the chain twice, so it is for measuring, not for gating.
+if ENV["FUTAMURA_STATS"].to_s != ""
+  module Futamura
+    module Stats
+      DIR = ENV["FUTAMURA_STATS"]
+      AB = ENV["FUTAMURA_STATS_AB"] == "1"
+      Site = Struct.new(:calls, :specialized, :fallback, :specialized_s, :fallback_s, :guard_s, :ab_calls, :ab_spec_s, :ab_orig_s, keyword_init: true)
+
+      @sites = {}
+      @compiles = []
+      @compile_reasons = {}
+      @association_keys = [0, 0.0]
+      @defined = []
+
+      class << self
+        attr_reader :sites, :compiles, :compile_reasons, :association_keys, :defined
+
+        def now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+
+        def site(key)
+          @sites[key] ||= Site.new(calls: 0, specialized: 0, fallback: Hash.new(0), specialized_s: 0.0, fallback_s: 0.0,
+                                   guard_s: 0.0, ab_calls: 0, ab_spec_s: 0.0, ab_orig_s: 0.0)
+        end
+
+        # Why the guards in Futamura.records sent a call to Rails' chain, in the order they are checked.
+        def reason(key, binds, root)
+          bad = binds.find { |value| ActiveRecord::StatementCache.unsupported_value?(value) }
+          return "bind_#{kind(bad)}" if bad
+
+          statement = Futamura.instance_variable_get(:@statements).fetch(key)
+          return "root_not_model" if root && !root.equal?(statement.model)
+
+          @compile_reasons[key] || "compiled_false"
+        end
+
+        def kind(value)
+          case value
+          when nil then "nil"
+          when Array then "array"
+          when Range then "range"
+          when ActiveRecord::Base then "record"
+          when Set then "set"
+          else value.class.name.to_s.downcase
+          end
+        end
+
+        def dump
+          return if @sites.empty? && @defined.empty?
+
+          rows = @sites.transform_values do |s|
+            h = s.to_h
+            h[:fallback] = s.fallback
+            h
+          end
+          File.write(File.join(DIR, "futamura-stats-#{Process.pid}.json"), JSON.generate(
+            pid: Process.pid, defined: @defined, sites: rows, compiles: @compiles,
+            association_key: { calls: @association_keys[0], seconds: @association_keys[1] }
+          ))
+        end
+      end
+
+      module Instrument
+        def define(key, *args, **opts, &build)
+          Stats.defined << key
+          super
+        end
+
+        def association_key(*)
+          t = Stats.now
+          super
+        ensure
+          Stats.association_keys[0] += 1
+          Stats.association_keys[1] += Stats.now - t
+        end
+
+        def records(key, binds, owner: nil, association: nil, root: nil, &fallback)
+          site = Stats.site(key)
+          site.calls += 1
+          fell = nil
+          fell_s = 0.0
+          timed_fallback = proc do
+            fell = Stats.reason(key, binds, root)
+            t = Stats.now
+            begin
+              fallback.call
+            ensure
+              fell_s = Stats.now - t
+            end
+          end
+          started = Stats.now
+          first = !Stats.instance_variable_get(:@seen_keys).include?(key)
+          Stats.instance_variable_get(:@seen_keys) << key
+          orig_first = Stats::AB && site.calls.odd?
+          if orig_first
+            t = Stats.now
+            fallback.call
+            orig_s = Stats.now - t
+            started = Stats.now
+          end
+          result = super(key, binds, owner: owner, association: association, root: root, &timed_fallback)
+          total = Stats.now - started
+          if fell
+            site.fallback[fell] += 1
+            site.fallback_s += fell_s
+            site.guard_s += total - fell_s
+          else
+            site.specialized += 1
+            site.specialized_s += total
+            if Stats::AB && !first
+              unless orig_first
+                t = Stats.now
+                fallback.call
+                orig_s = Stats.now - t
+              end
+              site.ab_calls += 1
+              site.ab_spec_s += total
+              site.ab_orig_s += orig_s
+            end
+          end
+          result
+        end
+
+        private
+
+        def compile(statement, connection)
+          t = Stats.now
+          result = super
+          Stats.compiles << { model: statement.model.name, seconds: Stats.now - t, built: result ? true : false }
+          unless result
+            key = Futamura.instance_variable_get(:@statements).key(statement)
+            Stats.compile_reasons[key] = statement.model.default_scopes.any? ? "default_scopes" : "relation_needs_rails"
+          end
+          result
+        end
+      end
+
+      @seen_keys = Set.new
+    end
+
+    singleton_class.prepend(Stats::Instrument)
+    at_exit { Stats.dump }
+  end
+end
