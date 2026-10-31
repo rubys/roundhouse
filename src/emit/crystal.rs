@@ -311,13 +311,17 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     controller_extras.extend(crate::lower::extras_from_lcs(&view_lcs));
     controller_extras.extend(route_helper_extras);
     let assocs = crate::lower::model_associations::compute_association_graph(app);
-    let controller_lcs = crate::lower::lower_controllers_with_arel_views_and_assocs(
+    let mut controller_lcs = crate::lower::lower_controllers_with_arel_views_and_assocs(
         &app.controllers,
         controller_extras,
         Some(&app.schema),
         &app.views,
         &assocs,
     );
+    // Crystal names a method as Ruby does (`performed?`, `status=`).
+    super::controller_ivars::rename_ivars_shadowing_controller_base(&mut controller_lcs, &runtime_classes_for_typing, |name| {
+        vec![name.clone()]
+    });
     let controller_synth: Vec<(String, String)> = controller_lcs
         .iter()
         .filter(|lc| lc.origin.is_some())

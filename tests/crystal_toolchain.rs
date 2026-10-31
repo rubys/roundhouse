@@ -24,6 +24,9 @@ mod i18n_locales_app;
 #[path = "support/record_slice_app.rs"]
 #[allow(dead_code)]
 mod record_slice_app;
+#[path = "support/ts_controller_ivars.rs"]
+#[allow(dead_code)]
+mod ts_controller_ivars;
 
 use roundhouse::emit::crystal;
 use roundhouse::ingest::ingest_app;
@@ -214,4 +217,44 @@ puts "slice passed"
         .expect("run crystal");
     let stdout = String::from_utf8_lossy(&run.stdout);
     assert!(run.status.success() && stdout.contains("slice passed"), "{stdout}\n{}", String::from_utf8_lossy(&run.stderr));
+}
+
+#[test]
+#[ignore]
+fn controller_ivars_named_like_base_state_compile() {
+    // An app controller's `@status`, `@location` and `@headers` (its own,
+    // ApplicationController's and a concern's) compile next to the runtime
+    // base's members of those names (#1625).
+    let (emitted, errors) = ts_controller_ivars::overlay().emit(roundhouse::project::BuildTarget::Crystal);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_crystal_passes("an app controller with ivars named like the base's state", &emitted);
+}
+
+#[test]
+#[ignore]
+fn controller_ivars_named_like_base_state_render() {
+    // The same three names, all set by the controller that renders, show
+    // on the page, and the response is as Rails leaves it: 200, no
+    // Location (#1625). Set in ApplicationController instead, `@location`
+    // reaches the view call unnarrowed, whatever its name.
+    let (emitted, errors) = ts_controller_ivars::overlay()
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .edit("app/controllers/probes_controller.rb", "@status = \"app status\"", "@status = \"app status\"\n    @location = \"app location\"")
+        .emit(roundhouse::project::BuildTarget::Crystal);
+    assert!(errors.is_empty(), "{errors:?}");
+    shards_install(&emitted);
+    std::fs::write(
+        emitted.join("probe.cr"),
+        "require \"./src/app\"\nc = ProbesController.new\nc.request_method = \"GET\"\nc.process_action(:show)\nputs [c.status, c.location, c.body].inspect\n",
+    )
+    .unwrap();
+    let run = Command::new("crystal")
+        .args(["run", "probe.cr"])
+        .current_dir(&emitted)
+        .env("CRYSTAL_CACHE_DIR", emitted.join(".crystal-cache"))
+        .output()
+        .expect("run crystal");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let want = format!("[200, nil, {}]", serde_json::to_string(ts_controller_ivars::BODY).unwrap());
+    assert!(run.status.success() && stdout.trim() == want, "{stdout}\n{}", String::from_utf8_lossy(&run.stderr));
 }
