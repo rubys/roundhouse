@@ -1961,7 +1961,10 @@ fn append_query_string(path: Expr, keys: &[QueryKey]) -> Expr {
                     parenthesized: false,
                 },
             );
-            let sorted = send_method(mapped, "sort", Vec::new());
+            // Typed, so each target maps `sort`/`join` as an Array's: Python's `list.sort()` answers None.
+            let pairs_ty = || Ty::Array { elem: std::sync::Arc::new(Ty::Str) };
+            let mapped = with_ty(mapped, pairs_ty());
+            let sorted = with_ty(send_method(mapped, "sort", Vec::new()), pairs_ty());
             let joined = send_method(sorted, "join", vec![lit_str("&".to_string())]);
             let mut parts: Vec<InterpPart> = Vec::new();
             match separator {

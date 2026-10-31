@@ -61,7 +61,9 @@ puts "nil option passed"
 
 fn example() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
-        .write("db/schema.rb", "ActiveRecord::Schema.define do\nend\n")
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"kind\"\n  end\nend\n")
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n")
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
         .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
         .write("app/controllers/widgets_controller.rb", CONTROLLER)
         .write("config/routes.rb", ROUTES)
@@ -94,4 +96,48 @@ fn a_hash_query_option_renders_as_rails_does_on_spinel_with_rbs() {
     let run = example().run_spinel_with_rbs(ASSERTIONS);
     run.assert_passes();
     assert!(run.stdout.contains("hash query passed"), "{}", run.stdout);
+}
+
+/// The Python emit of the same helpers, run under `python3`.
+#[test]
+#[ignore = "requires python3"]
+fn a_hash_query_option_renders_as_rails_does_on_python() {
+    let (emitted, errors) = example().emit(BuildTarget::Python);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(
+        emitted.join("probe.py"),
+        r#"from app.v2.view_helpers import ViewHelpers
+import app.v2.route_helpers as route_helpers
+route_helpers.ViewHelpers = ViewHelpers
+from app.v2.route_helpers import RouteHelpers
+
+got = [
+    RouteHelpers.admin_domain_allows_path({"domain": "example.com"}),
+    RouteHelpers.admin_domain_allows_path({"note": "x", "domain": "example.com"}),
+    RouteHelpers.admin_domain_allows_path({"domain": None}),
+    RouteHelpers.admin_domain_allows_path({}),
+    RouteHelpers.admin_domain_allows_path(None),
+    RouteHelpers.widgets_path({"kind": "x"}, "2"),
+]
+want = [
+    "/admin/domain_allows?domain_allow%5Bdomain%5D=example.com",
+    "/admin/domain_allows?domain_allow%5Bdomain%5D=example.com&domain_allow%5Bnote%5D=x",
+    "/admin/domain_allows?domain_allow%5Bdomain%5D",
+    "/admin/domain_allows",
+    "/admin/domain_allows",
+    "/widgets?filter%5Bkind%5D=x&page=2",
+]
+if got != want:
+    raise AssertionError(f"{got!r}")
+print("python hash query passed")
+"#,
+    )
+    .expect("write probe");
+    let output = std::process::Command::new("python3").arg("probe.py").current_dir(&emitted).output().expect("run python3");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("python hash query passed"),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
