@@ -238,6 +238,11 @@ module ActiveRecord
       end
       @rows
     end
+
+    def map
+      mapped = @rows.map { |row| yield row }
+      mapped
+    end
   end
 
   # `connection.raw_connection` — see `Connection#raw_connection`.

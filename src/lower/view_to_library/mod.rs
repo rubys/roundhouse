@@ -50,7 +50,7 @@ use crate::span::Span;
 
 use self::extra_params::{drop_closure_names, flash_params, rewritten_extras};
 
-pub(crate) use self::extra_params::{flash_param_in_scope, flash_slot_of};
+pub(crate) use self::extra_params::{flash_param_in_scope, flash_slot_of, local_key_of};
 use self::form_wrapper::{FormWrapperHelper, form_wrapper_helpers};
 use self::walker::walk_body;
 
@@ -588,14 +588,17 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     let extra_params: Vec<String> =
         extra_params.iter().map(|k| crate::naming::safe_local(k)).collect();
     // The flash a partial this view renders reads (`ViewCtx::own_flash`).
-    // A param a render hands a local by its name holds that local there,
-    // and a strict-locals partial takes no flash.
+    // A param a render hands a local by its slot's name holds that local
+    // there (`local_key_of`), and a strict-locals partial takes no flash.
     let own_flash: [Option<String>; 2] = if is_partial && view.strict_locals.is_some() {
         Default::default()
     } else {
         flash_params(&extra_params).map(|param| {
             param
-                .filter(|n| !keys.is_some_and(|keys| keys.iter().any(|k| k == n)))
+                .filter(|n| {
+                    let key = local_key_of(&extra_params, n);
+                    !keys.is_some_and(|keys| keys.iter().any(|k| k == key))
+                })
                 .map(str::to_string)
         })
     };
@@ -2512,6 +2515,7 @@ pub(crate) fn render_locals_keys(
 ) -> crate::det::HashMap<(String, String), Vec<String>> {
     use std::collections::BTreeSet;
     use crate::det::HashMap;
+    use crate::lower::view::RenderPartial;
     let mut acc: HashMap<(String, String), BTreeSet<String>> = HashMap::default();
 
     fn scan(
@@ -2591,6 +2595,31 @@ pub(crate) fn render_locals_keys(
                     {
                         acc.entry(key).or_default().extend(keys);
                     }
+                } else if let Some(dir) = own_dir
+                    && let Some(rp) = crate::lower::view::classify_render_partial(
+                        None,
+                        method.as_str(),
+                        args,
+                        None,
+                        &|_| true,
+                        &|_| false,
+                    )
+                    && let RenderPartial::Collection { locals: Some(locals), .. }
+                    | RenderPartial::Record { locals: Some(locals), .. }
+                    | RenderPartial::Association { locals: Some(locals), .. }
+                    | RenderPartial::TypedCollection { locals: Some(locals), .. } = &rp
+                    && let Some(key) = render_partial_key(&rp, dir, stems)
+                {
+                    // `render @posts, flag: false` — the object form's
+                    // hash is its partial's locals, so its keys are the
+                    // partial's interface as an explicit `locals:` is.
+                    // Views only: a controller's `render @post` is not a
+                    // partial render.
+                    let keys = locals.iter().filter_map(|(lk, _)| match &*lk.node {
+                        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+                        _ => None,
+                    });
+                    acc.entry(key).or_default().extend(keys);
                 }
             }
         }
@@ -2660,9 +2689,10 @@ impl PartialCallContract {
     ///
     /// The first two extras are the flash pair (possibly renamed). When
     /// `caller_flash` is `Some`, those slots bind by **position**: an
-    /// explicit `locals:` value under the callee name still wins, then
-    /// the caller's flash param for that slot — not a same-named ivar
-    /// local that name lookup would prefer after rename.
+    /// explicit `locals:` value under the slot's name still wins
+    /// (`local_key_of`), then the caller's flash param for that slot —
+    /// not a same-named ivar local that name lookup would prefer after
+    /// rename.
     pub fn extras_args(
         &self,
         locals_lookup: impl Fn(&str) -> Option<Expr>,
@@ -2676,10 +2706,11 @@ impl PartialCallContract {
             .iter()
             .enumerate()
             .map(|(i, n)| {
+                let key = if self.keyword_extras { n.as_str() } else { local_key_of(&self.extras, n) };
                 if let (Some(flash), true) = (caller_flash, i < 2) {
-                    locals_lookup(n).or_else(|| param_lookup(&flash[i]))
+                    locals_lookup(key).or_else(|| param_lookup(&flash[i]))
                 } else {
-                    locals_lookup(n).or_else(|| param_lookup(n))
+                    locals_lookup(key).or_else(|| param_lookup(n))
                 }
             })
             .collect();

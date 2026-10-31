@@ -5,8 +5,8 @@
 #
 #   exceeded?  =  the window's count, after this request, > to
 #
-# The count lives in the controller's class-level `cache_store`
-# (`Rails.cache` unless the app sets another), Rails' default `store:`,
+# The count lives in the declared `store:`, or the controller's class-level
+# `cache_store` (`Rails.cache` unless the app sets another), Rails' default,
 # under the key the lowering builds — `rate-limit:<controller_path>
 # [:<name>]:<by>`, Rails' own shape — and the window is the entry's
 # TTL: the first request in a window writes it with `within` seconds to
@@ -23,7 +23,9 @@ require_relative "../rails"
 module ActionController
   module RateLimiter
     def self.exceeded?(store, key, within, to)
-      store.increment(key, 1, expires_in: within) > to
+      count = store.increment(key, 1, expires_in: within)
+      return false if count.nil?
+      count > to
     end
   end
 end

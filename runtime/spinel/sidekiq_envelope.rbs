@@ -10,8 +10,14 @@ module SidekiqEnvelope
   def self.queue: (untyped env) -> String
   def self.active_job?: (untyped env) -> bool
   def self.aj_payload: (untyped env) -> untyped
-  def self.dead?: (untyped env) -> bool
+  def self.retries?: (untyped env) -> bool
+  def self.next_retry_count: (untyped env) -> Integer
+  def self.exhausted?: (untyped env, Integer count, Integer max_retries, Integer now_ms) -> bool
+  def self.first_failed_seconds: (untyped env, Integer now_ms) -> Float
+  def self.discard_when_exhausted?: (untyped env) -> bool
+  def self.retry_delay: (Integer count) -> Integer
   def self.requeue_text: (String raw) -> String
   def self.with_error: (String raw, String queue, String error_class, String message, Integer now_ms) -> String
+  def self.with_enqueued_at: (String raw, Integer now_ms) -> String
   def self.truncate: (String message) -> String
 end

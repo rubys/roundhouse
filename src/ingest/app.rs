@@ -1853,6 +1853,7 @@ end
     // kept or dropped after every app file is read (see
     // `keep_initializer_defined`).
     let mut initializer_defined: Vec<LibraryClass> = Vec::new();
+    let mut rate_limit_stores = Vec::new();
     // `ActionController::Base.prepend_view_path …`, applied with the class
     // bodies' own once every class is read (see `view_paths`).
     let mut view_path_ops = Vec::new();
@@ -1909,6 +1910,7 @@ end
                         }
                     }
                 }
+                rate_limit_stores.extend(super::rate_limit::initializer_stores(&bytes, &path_str));
                 app.module_mixins.extend(mixins);
                 view_path_ops.extend(super::view_paths::extract_initializer_view_paths(&bytes, &path_str));
                 app.initializer_filters.extend(extract_initializer_filters(&bytes, &path_str));
@@ -2696,6 +2698,8 @@ end
     keep_initializer_defined(&mut app, dir, &sources, initializer_defined);
     // `self.queue_adapter =` on ApplicationJob (see `App::queue_adapter`).
     apply_application_job_queue_adapter(&mut app);
+    let const_resolver = crate::timings::phase("rubydex: wait", || const_resolver.finish());
+    let (rate_limit_stores, rate_limit_store_values) = super::rate_limit::install_boot_stores(&mut app, rate_limit_stores, &const_resolver.for_sources(&sources));
     if app.queue_adapter.as_deref() == Some("sidekiq") {
         sidekiq_warnings.into_iter().for_each(warn_sidekiq);
     }
@@ -2723,6 +2727,7 @@ end
         &engine_routes.keys().cloned().collect::<HashSet<String>>(),
         app.gem_lock.as_ref(),
         &app_namespaces,
+        &rate_limit_store_values,
     );
     // Carrier provenance must not depend on where a module lives:
     // models, services, helpers and lib all use the same splice.
@@ -2790,7 +2795,6 @@ end
     // A module-nested `class XController < BaseController` names
     // `Ns::BaseController`; `include Avatar` inside `class User` names
     // `User::Avatar`. The passes above leave both as written.
-    let const_resolver = crate::timings::phase("rubydex: wait", || const_resolver.finish());
     super::written_names::resolve(&mut app, &sources, &const_resolver.for_sources(&sources));
     // Before the concern splices: they read `library_classes`, and this
     // turns `Current`'s metaprogrammed surface into real methods first.
@@ -2921,7 +2925,7 @@ end
     // concern (before the splice carries both to the includer) or on
     // the controller that called it directly.
     super::allow_browser::lower_allow_browser(&mut app);
-    super::rate_limit::lower_rate_limit(&mut app);
+    super::rate_limit::lower_rate_limit(&mut app, rate_limit_stores, &const_resolver.for_sources(&sources));
     // The concern that wraps the pagy gem's `pagy` in a bounds check.
     super::pagy::lower_pagy(&mut app)?;
     super::invisible_captcha::lower_invisible_captcha(&mut app);
@@ -7126,9 +7130,7 @@ fn block_filter_from_macro_stmt(stmt: &crate::expr::Expr) -> Option<crate::expr:
         // parameter (`items.map { |controller| controller.name }`
         // would wrongly become `items.map { |controller| self.name }`)
         // or a plain reassignment of that name anywhere in the body
-        // (`controller = nil`, or a block-local's first write, which is
-        // all that's left to see of a block-local once ingestion has
-        // already dropped its declaration) — no scope-aware rewrite
+        // (`controller = nil`) — no scope-aware rewrite
         // exists here to tell any of those apart from a genuine read of
         // the filter block's own parameter.
         if body_shadows_param(&body, self_param) {
@@ -7206,16 +7208,9 @@ pub(super) fn is_symbol_or_symbol_array(e: &crate::expr::Expr) -> bool {
 ///     just as wrong as the lambda-shadowing case, only without a new
 ///     scope to blame.
 ///
-/// Both are checked by one scan, because a block-local (`|x; name|`)
-/// shadows exactly like a declared parameter does but ISN'T checked
-/// directly: the IR doesn't represent block-locals at all (ingestion
-/// already drops them — see `block_param_names` in `ingest/expr.rs`),
-/// so there is no declaration left to see by the time this runs. What
-/// IS still visible is the ASSIGNMENT such a block almost always needs
-/// to give its local a value (`controller = x.name`) — so the
-/// assignment check below catches a block-local shadow indirectly,
-/// through its first write, even though the declaration itself is
-/// invisible.
+/// A nested block-local (`|x; name|`) needs no check here: ingest has
+/// already renamed it apart (`scope_block_locals` in `ingest/expr.rs`),
+/// so its reads and writes no longer carry `name`.
 ///
 /// See `block_filter_from_macro_stmt`'s call site for why this refuses
 /// rather than rewriting scope-aware — no scope-aware rewrite exists

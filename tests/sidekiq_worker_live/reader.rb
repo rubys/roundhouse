@@ -28,9 +28,9 @@ end
 now = Time.now.to_f
 recent = ->(t) { t.is_a?(Time) && (now - t.to_f).abs < 120 }
 
-dead = Sidekiq::DeadSet.new.to_a.sort_by(&:display_class)
-check("dead set size", dead.size == 2, dead.size.to_s)
-boom, mailer = dead
+failed = Sidekiq::RetrySet.new.to_a.sort_by(&:display_class)
+check("retry set size", failed.size == 2, failed.size.to_s)
+boom, mailer = failed
 if boom
   check("boom: display_class", boom.display_class == "BoomJob", boom.display_class.inspect)
   check("boom: display_args", boom.display_args == ["b1"], boom.display_args.inspect)
@@ -40,7 +40,9 @@ if boom
   check("boom: failed_at", recent.(boom.failed_at), boom.failed_at.inspect)
   check("boom: queue", boom.queue == "default", boom.queue.inspect)
   check("boom: error?", boom.error?, "")
-  check("boom: dead score", (boom.score - now).abs < 120, boom.score.inspect)
+  # Sidekiq's first backoff: 15 s, plus up to 10 s of jitter, counted
+  # from the failure, so a slow run may read it with little time left.
+  check("boom: retry score", boom.score - now > 0 && boom.score - now < 26, (boom.score - now).inspect)
 end
 if mailer
   check("unknown job class: display_class", mailer.display_class == "MailerJob", mailer.display_class.inspect)
@@ -56,5 +58,5 @@ if (slow = default.first)
   check("requeued unchanged: enqueued_at", recent.(slow.enqueued_at), slow.enqueued_at.inspect)
 end
 check("low is empty", Sidekiq::Queue.new("low").size == 0, Sidekiq::Queue.new("low").size.to_s)
-check("nothing retried", Sidekiq::RetrySet.new.size == 0, Sidekiq::RetrySet.new.size.to_s)
+check("nothing dead", Sidekiq::DeadSet.new.size == 0, Sidekiq::DeadSet.new.size.to_s)
 puts "done"

@@ -919,7 +919,7 @@ fn framework_loop_supplies_postgres_and_pinned_spinel_pg_to_the_pg_gate() {
     let steps = job["steps"].as_sequence().unwrap();
     let checkout = steps
         .iter()
-        .find(|step| step["with"]["repository"].as_str() == Some("rubys/spinel-pg"))
+        .find(|step| step["with"]["repository"].as_str() == Some("roundhouse-rb/spinel-pg"))
         .expect("spinel-pg checkout");
     assert_eq!(
         checkout["with"]["ref"].as_str(),

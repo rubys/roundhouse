@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 # Where runtime/spinel/db_pg.rb's two drivers differ, for spinel-pg
-# (https://github.com/rubys/spinel-pg) on Spinel. On CRuby the pg gem
+# (https://github.com/roundhouse-rb/spinel-pg) on Spinel. On CRuby the pg gem
 # (libpq) drives db_pg.rb instead, and pg_driver_cruby.rb takes this
 # file's place as pg_driver.rb. Everything else db_pg.rb asks of the
 # driver is the API both share.

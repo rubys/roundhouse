@@ -330,19 +330,21 @@ fn a_nested_lambda_param_shadowing_the_filter_block_param_is_refused() {
     assert_refused(body, "stamp_header(1)");
 }
 
-/// A nested block's semicolon-declared LOCAL (`|x; controller|`) shadows
-/// exactly like a declared parameter, but the IR doesn't represent
-/// block-locals at all — ingestion drops the declaration, keeping only
-/// whatever the block's body does with it. What survives here is the
-/// local's first write (`controller = x.to_s`), which is still a
-/// same-named assignment at a nested depth and must be enough on its
-/// own to refuse the macro.
-#[test]
-fn a_nested_block_local_shadowing_the_filter_block_param_is_refused() {
-    let body = r#"      before_action(**kwargs) do |controller|
+/// A nested block's semicolon-declared LOCAL (`|x; controller|`) is the
+/// nested block's own variable. Ingest renames it apart (#687), so the
+/// filter block's `controller` and the local no longer share a name, and
+/// the rewrite to `self` can't reach the local. The macro expands.
+const BLOCK_LOCAL_BODY: &str = r#"      before_action(**kwargs) do |controller|
         response.headers['X-Stamp'] = value.map { |x; controller| controller = x.to_s; controller }.join(',')
       end"#;
-    assert_refused(body, "stamp_header([1, 2])");
+
+#[test]
+fn a_nested_block_local_named_like_the_filter_block_param_expands() {
+    let (app, gaps) = build(BLOCK_LOCAL_BODY, "stamp_header([1, 2])", "");
+    assert!(!has_gap(&gaps, "stamp_header"), "{gaps:?}");
+    let src = emitted_widgets(app);
+    assert!(src.contains("X-Stamp"), "{src}");
+    assert!(src.contains("__controller_"), "the block-local keeps a name of its own:\n{src}");
 }
 
 /// A plain reassignment of the filter block's OWN parameter, in the
@@ -531,6 +533,27 @@ expect("/widgets", "", [200, "Accept-Language"])
 expect("/gadgets", "", [200, nil])
 # The same lambda guard returning a value: the header is set.
 expect("/gadgets", "loud=1", [200, "Signature"])
+"#,
+        )
+        .assert_passes();
+}
+
+#[test]
+fn the_expanded_filter_with_a_block_local_runs_under_cruby() {
+    emit_and_run::empty_app()
+        .write("app/controllers/concerns/header_concern.rb", &concern_src(BLOCK_LOCAL_BODY))
+        .write("app/controllers/application_controller.rb", RUNTIME_APPLICATION_CONTROLLER)
+        .write(
+            "app/controllers/widgets_controller.rb",
+            "class WidgetsController < ApplicationController\n  stamp_header [1, 2]\n\n  def index\n    head :ok\n  end\nend\n",
+        )
+        .write("config/routes.rb", "Rails.application.routes.draw do\n  resources :widgets, only: :index\nend\n")
+        .write("db/schema.rb", RUNTIME_SCHEMA)
+        .run_ruby(
+            r#"env = { "REQUEST_METHOD" => "GET", "PATH_INFO" => "/widgets", "QUERY_STRING" => "", "rack.input" => StringIO.new("") }
+status, headers, _body = Main.run_rack(env)
+got = [status, headers["x-stamp"]]
+raise "GET /widgets answered #{got.inspect}, want [200, \"1,2\"]" unless got == [200, "1,2"]
 "#,
         )
         .assert_passes();

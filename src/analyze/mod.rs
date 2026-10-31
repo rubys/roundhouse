@@ -3062,6 +3062,7 @@ impl Analyzer {
         // closest definition wins on name conflicts (mirrors Ruby
         // method-resolution order).
         let _typing_controllers_b = crate::timings::begin("typing: controllers B");
+        let written_ivars = app_written_ivars(app);
         enum Channel { Action, Layout, Partial }
         enum Event {
             View(Channel, Symbol, Vec<(Symbol, Ty)>),
@@ -3324,9 +3325,23 @@ impl Analyzer {
                             env.insert(k.clone(), merged);
                         }
                     }
-                    let out: HashMap<Symbol, Ty> = env.into_iter()
+                    let mut out: HashMap<Symbol, Ty> = env.into_iter()
                         .map(|(k, v)| (k, v.strip_nil()))
                         .collect();
+                    // Not left unresolved: Ruby reads an ivar nothing in the app assigns as nil (lobsters' `@homeabout`).
+                    if let Some(written) = &written_ivars {
+                        let mut reads = BTreeSet::new();
+                        for action in controller.actions() {
+                            collect_ivar_reads(&action.body, &mut reads);
+                        }
+                        for name in reads {
+                            // Not nil: `@_`-prefixed ivars are the framework's own state, which Rails sets outside the app.
+                            if name.as_str().starts_with('_') || written.contains(&name) {
+                                continue;
+                            }
+                            out.entry(name).or_insert(Ty::Nil);
+                        }
+                    }
                     events.push(Event::IvarEnv(ctrl_name.clone(), out.clone()));
                     out
                 };
@@ -4442,6 +4457,11 @@ impl Analyzer {
             let mut throwaway = HashMap::default();
             let mut targets = Vec::new();
             extract_partial_render_sites(&view.body, &view.name, &mut throwaway, &mut targets);
+            record_render_edges(&mut render_edges, &view.name, targets);
+        }
+        // Not left to the helper's own (unseeded) ivars: Rails mixes helpers into the template's view instance, so their partials read its ivars.
+        for view in &app.views {
+            let targets = helper_rendered_partials(app, &view.body, &view.name);
             record_render_edges(&mut render_edges, &view.name, targets);
         }
         // A jbuilder template renders its partials through
@@ -7071,6 +7091,109 @@ fn body_tail_terminal_kind(
 /// jbuilder's empty list erased the ERB's three partials, so
 /// `_actions` and `_presentation` had no renderer, no ivar context,
 /// and no feeder, and the dead-view walk called them dead.
+fn helper_rendered_partials(app: &App, body: &Expr, renderer: &Symbol) -> Vec<Symbol> {
+    fn bare_calls(e: &Expr, out: &mut Vec<Symbol>) {
+        if let ExprNode::Send { recv, method, .. } = &*e.node {
+            if recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) {
+                out.push(method.clone());
+            }
+        }
+        e.node.for_each_child(&mut |c| bare_calls(c, out));
+    }
+    let helper_body = |name: &Symbol| -> Option<&Expr> {
+        let owner = app.helper_method_index.get(name)?;
+        app.library_classes
+            .iter()
+            .filter(|lc| &lc.name == owner)
+            .flat_map(|lc| lc.methods.iter())
+            .find(|m| &m.name == name)
+            .map(|m| &m.body)
+    };
+    let mut pending = Vec::new();
+    bare_calls(body, &mut pending);
+    let mut visited: BTreeSet<Symbol> = BTreeSet::new();
+    let mut targets = Vec::new();
+    while let Some(name) = pending.pop() {
+        if !visited.insert(name.clone()) {
+            continue;
+        }
+        let Some(helper) = helper_body(&name) else { continue };
+        let mut throwaway = HashMap::default();
+        extract_partial_render_sites(helper, renderer, &mut throwaway, &mut targets);
+        bare_calls(helper, &mut pending);
+    }
+    targets
+}
+
+// A computed `instance_variable_set` on an implicit self voids the set only where self can be a controller (its bodies, a mixin's): a class's own or a template's writes its own instance.
+fn app_written_ivars(app: &App) -> Option<BTreeSet<Symbol>> {
+    fn walk(e: &Expr, self_may_be_controller: bool, out: &mut BTreeSet<Symbol>, dynamic: &mut bool) {
+        match &*e.node {
+            ExprNode::Assign { target: LValue::Ivar { name }, .. }
+            | ExprNode::OpAssign { target: LValue::Ivar { name }, .. } => {
+                out.insert(name.clone());
+            }
+            ExprNode::MultiAssign { targets, .. } => {
+                for t in targets {
+                    if let LValue::Ivar { name } = t {
+                        out.insert(name.clone());
+                    }
+                }
+            }
+            ExprNode::Send { recv, method, args, .. } => match method.as_str() {
+                "instance_variable_set" => match args.first().map(|a| &*a.node) {
+                    Some(ExprNode::Lit { value: Literal::Str { value } }) => {
+                        out.insert(Symbol::from(value.trim_start_matches('@')));
+                    }
+                    Some(ExprNode::Lit { value: Literal::Sym { value } }) => {
+                        out.insert(Symbol::from(value.as_str().trim_start_matches('@')));
+                    }
+                    _ => {
+                        let on_self = recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef));
+                        if !on_self || self_may_be_controller {
+                            *dynamic = true;
+                        }
+                    }
+                },
+                "attr_writer" | "attr_accessor" => {
+                    for a in args {
+                        if let ExprNode::Lit { value: Literal::Sym { value } } = &*a.node {
+                            out.insert(value.clone());
+                        }
+                    }
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+        e.node.for_each_child(&mut |c| walk(c, self_may_be_controller, out, dynamic));
+    }
+    let mut out = BTreeSet::new();
+    let mut dynamic = false;
+    crate::lower::for_each_hook_body_ref(app, &mut |body| walk(body, false, &mut out, &mut dynamic));
+    for view in &app.views {
+        walk(&view.body, false, &mut out, &mut dynamic);
+    }
+    for controller in &app.controllers {
+        for action in controller.actions() {
+            walk(&action.body, true, &mut out, &mut dynamic);
+        }
+    }
+    for lc in app.library_classes.iter().filter(|lc| lc.is_module) {
+        for m in &lc.methods {
+            walk(&m.body, true, &mut out, &mut dynamic);
+        }
+    }
+    (!dynamic).then_some(out)
+}
+
+fn collect_ivar_reads(e: &Expr, out: &mut BTreeSet<Symbol>) {
+    if let ExprNode::Ivar { name } = &*e.node {
+        out.insert(name.clone());
+    }
+    e.node.for_each_child(&mut |c| collect_ivar_reads(c, out));
+}
+
 fn record_render_edges(
     render_edges: &mut HashMap<Symbol, Vec<Symbol>>,
     view: &Symbol,

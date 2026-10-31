@@ -4,10 +4,11 @@
 //! `queue_adapter :sidekiq` gets (`./app sidekiq`), over its real Redis
 //! client: redis-rb under CRuby, and spinel-redis when Spinel compiles
 //! it. It pushes jobs as the web role does, lets two processor threads
-//! run them, then shuts down with a job still running.
+//! run them and the scheduler move one pushed for a second later, then
+//! shuts down with a job still running.
 //! `tests/sidekiq_worker_live/reader.rb` reads what is left through
-//! Sidekiq's public API (`Sidekiq::DeadSet`, `Sidekiq::Queue`): the two
-//! failed jobs in the dead set with Sidekiq's error fields, and the
+//! Sidekiq's public API (`Sidekiq::RetrySet`, `Sidekiq::Queue`): the two
+//! failed jobs in the retry set with Sidekiq's error fields, and the
 //! running job back on its queue, unchanged. `tests/sidekiq_worker.rs`
 //! holds the bytes against Sidekiq's own; this gate proves the clients
 //! deliver them and Sidekiq reads them.
@@ -25,8 +26,8 @@
 //! was quiet, so no job is lost.
 //!
 //! One thread: the tests flush and fill the same scratch database, as
-//! `sidekiq_push_live` does. The Spinel tests need spinel-redis v0.3.1
-//! or later, for `brpop`.
+//! `sidekiq_push_live` does. The Spinel tests need a spinel-redis with
+//! `brpop` (v0.3.1) and, for the scheduler, `script` and `evalsha` (v0.3.2).
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -91,6 +92,7 @@ fn ruby(dir: &Path, url: &str, args: &[&str]) -> String {
 /// one pushed back.
 fn assert_worked(out: &str) {
     assert!(out.contains("ran r1,r2,r3\n"), "{out}");
+    assert!(out.contains("scheduled ran, 0 left, 2 to retry\n"), "{out}");
     assert!(out.contains("requeued, 1 on default\n"), "{out}");
     assert!(out.contains("worked "), "{out}");
 }
@@ -115,7 +117,7 @@ fn the_cruby_worker_runs_jobs_sidekiq_pushed_and_reads() {
 }
 
 #[test]
-#[ignore = "requires Spinel, SPINEL_REDIS_DIR (spinel-redis v0.3.1+), SIDEKIQ_LIVE_REDIS_URL and the sidekiq gem"]
+#[ignore = "requires Spinel, SPINEL_REDIS_DIR (spinel-redis with scripting), SIDEKIQ_LIVE_REDIS_URL and the sidekiq gem"]
 fn the_spinel_worker_runs_jobs_over_spinel_redis() {
     let url = required_env("SIDEKIQ_LIVE_REDIS_URL", "a scratch Redis database");
     let redis_dir = required_env("SPINEL_REDIS_DIR", "a spinel-redis checkout");
@@ -265,7 +267,7 @@ fn the_cruby_worker_process_shuts_down_on_term_and_loses_no_job() {
 }
 
 #[test]
-#[ignore = "requires Spinel, SPINEL_REDIS_DIR (spinel-redis v0.3.1+), SIDEKIQ_LIVE_REDIS_URL and the sidekiq and activejob gems"]
+#[ignore = "requires Spinel, SPINEL_REDIS_DIR (spinel-redis with scripting), SIDEKIQ_LIVE_REDIS_URL and the sidekiq and activejob gems"]
 fn the_spinel_worker_process_shuts_down_on_term_and_loses_no_job() {
     let url = required_env("SIDEKIQ_LIVE_REDIS_URL", "a scratch Redis database");
     let redis_dir = required_env("SPINEL_REDIS_DIR", "a spinel-redis checkout");

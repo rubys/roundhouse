@@ -1317,11 +1317,25 @@ pub struct SidekiqWorkerDefaults {
     pub concurrency: Option<i64>,
     pub timeout: Option<i64>,
     pub queues: Vec<(String, i64)>,
+    /// The retry limit for a job whose `retry` is `true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<i64>,
+    /// The dead set's trims: how many jobs it keeps, and for how long.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dead_max_jobs: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dead_timeout_in_seconds: Option<i64>,
+    /// The poller's interval: a fixed average, or the per-process one
+    /// that is scaled by the number of Sidekiq processes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll_interval_average: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub average_scheduled_poll_interval: Option<f64>,
 }
 
 impl SidekiqWorkerDefaults {
     pub fn is_empty(&self) -> bool {
-        self.concurrency.is_none() && self.timeout.is_none() && self.queues.is_empty()
+        *self == Self::default()
     }
 }
 

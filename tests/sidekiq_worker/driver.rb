@@ -126,7 +126,7 @@ check("klass", SidekiqEnvelope.klass(first) == "Sidekiq::ActiveJob::Wrapper", Si
 check("queue", SidekiqEnvelope.queue(first) == "default", SidekiqEnvelope.queue(first))
 check("jid", SidekiqEnvelope.jid(first).length == 24, SidekiqEnvelope.jid(first))
 check("active job", SidekiqEnvelope.active_job?(first), "")
-check("dead on failure", SidekiqEnvelope.dead?(first), "")
+check("retried on failure", SidekiqEnvelope.retries?(first), "")
 JobRegistry::RAN.clear
 check("pushed job runs", run_popped("default", envelopes[0]) == "0", "")
 check("scheduled job runs", run_popped("low", envelopes[1]) == "0", "")
@@ -146,11 +146,35 @@ check("raise fails", ActiveJob.perform_parsed(payload("BoomJob")) == ActiveJob::
 check("with its class", ActiveJob.failure_class == "ArgumentError", ActiveJob.failure_class)
 check("and message", ActiveJob.failure_message == "boom \"x\"\nsecond line", ActiveJob.failure_message)
 
-# Which failed jobs Sidekiq keeps in the dead set.
-check("retry: false is dropped", !SidekiqEnvelope.dead?(JSON.parse("{\"retry\":false}")), "")
-check("dead: false is dropped", !SidekiqEnvelope.dead?(JSON.parse("{\"retry\":true,\"dead\":false}")), "")
-check("retry: 0 is kept", SidekiqEnvelope.dead?(JSON.parse("{\"retry\":0}")), "")
-check("no retry key is dropped", !SidekiqEnvelope.dead?(JSON.parse("{}")), "")
+# Sidekiq's retry rules, read from the envelope.
+def env(json)
+  JSON.parse(json)
+end
+check("retry: false is dropped", !SidekiqEnvelope.retries?(env("{\"retry\":false}")), "")
+check("no retry key is dropped", !SidekiqEnvelope.retries?(env("{}")), "")
+check("retry: 0 takes the rules", SidekiqEnvelope.retries?(env("{\"retry\":0}")), "")
+check("first failure is count 0", SidekiqEnvelope.next_retry_count(env("{\"retry\":true}")) == 0, "")
+check("then one more", SidekiqEnvelope.next_retry_count(env("{\"retry\":true,\"retry_count\":4}")) == 5, "")
+check("retry: 0 is exhausted at once", SidekiqEnvelope.exhausted?(env("{\"retry\":0}"), 0, 25, NOW_MS), "")
+check("retry: 2 retries twice", !SidekiqEnvelope.exhausted?(env("{\"retry\":2}"), 1, 25, NOW_MS) &&
+  SidekiqEnvelope.exhausted?(env("{\"retry\":2}"), 2, 25, NOW_MS), "")
+check("retry: true uses max_retries", !SidekiqEnvelope.exhausted?(env("{\"retry\":true}"), 24, 25, NOW_MS) &&
+  SidekiqEnvelope.exhausted?(env("{\"retry\":true}"), 25, 25, NOW_MS) &&
+  SidekiqEnvelope.exhausted?(env("{\"retry\":true}"), 3, 3, NOW_MS), "")
+check("retry_for counts from failed_at", !SidekiqEnvelope.exhausted?(env("{\"retry\":true,\"retry_for\":60,\"failed_at\":" + (NOW_MS - 30_000).to_s + "}"), 9, 3, NOW_MS) &&
+  SidekiqEnvelope.exhausted?(env("{\"retry\":true,\"retry_for\":60,\"failed_at\":" + (NOW_MS - 61_000).to_s + "}"), 0, 25, NOW_MS), "")
+check("retry_for with Float seconds", SidekiqEnvelope.exhausted?(env("{\"retry\":true,\"retry_for\":60,\"failed_at\":" + ((NOW_MS - 61_000) / 1000.0).to_s + "}"), 0, 25, NOW_MS), "")
+check("retry_for on a first failure", !SidekiqEnvelope.exhausted?(env("{\"retry\":true,\"retry_for\":1}"), 0, 0, NOW_MS), "")
+check("dead: false discards when exhausted", SidekiqEnvelope.discard_when_exhausted?(env("{\"retry\":true,\"dead\":false}")) &&
+  !SidekiqEnvelope.discard_when_exhausted?(env("{\"retry\":true}")), "")
+delays_ok = true
+[0, 1, 4, 24].each do |count|
+  20.times do
+    d = SidekiqEnvelope.retry_delay(count)
+    delays_ok = false if d < count**4 + 15 || d >= count**4 + 15 + 10 * (count + 1)
+  end
+end
+check("backoff is count**4 + 15 plus jitter", delays_ok, "")
 
 # The rewrite: a long message is cut, and retry_queue wins.
 long = "x" * 10_005

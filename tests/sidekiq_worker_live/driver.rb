@@ -7,8 +7,9 @@
 # runs it with REDIS_URL naming a scratch database. It pushes jobs the
 # way the web role does, runs two processor threads until they have
 # taken them all, then shuts down with a slow job still running, as
-# TERM does. reader.rb then reads what is left through Sidekiq's own
-# API: the dead set, and the slow job back on its queue.
+# TERM does. On the way, the scheduler moves a job pushed for a second
+# later off the schedule set. reader.rb then reads what is left through
+# Sidekiq's own API: the retry set, and the slow job back on its queue.
 require_relative "stubs"
 
 module JobRegistry
@@ -37,7 +38,11 @@ end
 JobRegistry::RAN.clear
 
 def push(job_class, queue, label)
-  SidekiqPush.enqueue(job_class, queue, 0.0, ActiveJob::Payload.build_at(job_class, queue, 0.0,
+  push_at(job_class, queue, label, 0.0)
+end
+
+def push_at(job_class, queue, label, at)
+  SidekiqPush.enqueue(job_class, queue, at, ActiveJob::Payload.build_at(job_class, queue, at,
     ActiveJob::Arguments.list([ActiveJob::Arguments.str(label)])))
 end
 
@@ -65,8 +70,16 @@ probe = SidekiqRedis.worker_open(SidekiqPush.url)
 SidekiqWorker.parse(["sidekiq", "-q", "default", "-q", "low", "-c", "2", "-t", "1"])
 SidekiqWorker.install_traps
 SidekiqWorker.start(2)
-wait_until("the first jobs", 20.0) { ran.length == 3 && probe.zcard("dead") == 2 }
+wait_until("the first jobs", 20.0) { ran.length == 3 && probe.zcard("retry") == 2 }
 puts "ran " + ran.sort.join(",")
+
+# The scheduler moves a job pushed for a second from now off the
+# schedule set (its Lua pop, then the push), and a processor runs it.
+# The two failed jobs stay in the retry set: their backoff is 15 s.
+SidekiqScheduler.start(0.5, -1.0)
+push_at("RecordJob", "default", "later", Time.now.to_f + 1.0)
+wait_until("the scheduled job", 20.0) { ran.include?("later") }
+puts "scheduled ran, " + probe.zcard("schedule").to_s + " left, " + probe.zcard("retry").to_s + " to retry"
 
 push("SlowJob", "default", "s1")
 wait_until("the slow job", 20.0) { ran.include?("slow started") }
