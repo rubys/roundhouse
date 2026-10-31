@@ -9,7 +9,7 @@
 //! an empty `true_<scope>` would shadow the inherited method and return
 //! nil when not impersonating. A class-level
 //! `alias_method :true_<scope>, :current_<scope>` is not used here:
-//! `apply_alias_methods` copies bodies after the wrap is already in the
+//! `declarations::resolve` copies bodies after the wrap is already in the
 //! method list, which would recurse. Unsupported kwargs leave the call
 //! as `Unknown` for the survey. ActionCable `impersonates` is a different
 //! host and is not handled here.
@@ -149,7 +149,7 @@ fn method_source(imp: &Impersonation) -> String {
     let session_key = format!("impersonated_{scope}_id");
     // After this re-ingest succeeds, the caller renames local
     // `current_<scope>` → `true_<scope>` and appends this wrap. Do not
-    // emit `alias_method` here: `apply_alias_methods` would copy the
+    // emit `alias_method` here: `declarations::resolve` would copy the
     // already-wrapped `current_<scope>` body onto `true_<scope>`.
     format!(
         "  helper_method :true_{scope}\n\

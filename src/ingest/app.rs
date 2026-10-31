@@ -4791,29 +4791,15 @@ const CONSUMED_CONTROLLER_MACROS: &[&str] = &[
     // (already recognized): it changes what a VIEW can call, not the
     // controller's own instance surface, so it has nothing to do here.
     "helper",
-    // `delegate :a, :b, to: :assoc` — consumed by the controller→
-    // library lowering (`lower::controller_to_library::
-    // collect_delegate_calls` + `ingest::delegate::
-    // expand_delegates_in_class`), the same machinery a model's or
-    // concern's `delegate` already goes through. Left here rather
-    // than typed at ingest because the shape it can and can't expand
-    // (zero-arg forwarders only) is exactly `delegate.rs`'s call, and
-    // duplicating that decision would risk the two disagreeing.
+    // Controller class-body definitions are resolved together in source
+    // order by `lower::controller_to_library::declarations`. Delegate
+    // expansion retains its own eligibility checks; aliases snapshot the
+    // current local method. Unresolved aliases/undefs earn specific ledger
+    // entries rather than this generic unknown-call entry.
     "delegate",
-    // `attr_reader`/`attr_writer`/`attr_accessor` — consumed by
-    // `lower::controller_to_library::collect_attr_accessor_methods`,
-    // which synthesizes the same accessor `MethodDef`s
-    // `ingest::library_class` already does for models and concerns.
     "attr_reader",
     "attr_writer",
     "attr_accessor",
-    // `alias_method :new, :old` / `undef_method :a, :b` — consumed by
-    // `lower::controller_to_library::apply_alias_methods` /
-    // `apply_undef_methods`, which resolve against the controller's
-    // own already-built methods. A target that resolves to nothing
-    // (an inherited or concern-defined name this same-class-only scan
-    // can't see) earns its OWN specific ledger line from there, not
-    // this generic one — see those functions' doc comments.
     "alias_method",
     "undef_method",
     // `with_options(kw) do … end` — `ingest::controller::

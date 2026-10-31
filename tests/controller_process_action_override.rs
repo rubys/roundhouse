@@ -271,6 +271,144 @@ fn run_emitted_program(files: &[(String, String)], program: &str) -> String {
     String::from_utf8(result.stdout).unwrap()
 }
 
+// Each declaration-order case also runs through an application's hook. The
+// unwrapped arm guards against restricting collision resolution to hooks.
+fn declaration_order_cases() -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
+    vec![
+        ("reader_before_def", "attr_reader :x\ndef x; \"method\"; end", "x", "method"),
+        ("reader_after_def", "def x; \"method\"; end\nattr_reader :x", "x", "reader"),
+        ("alias_new_name", "def x; \"source\"; end\nalias_method :y, :x", "y", "source"),
+        ("alias_before_def", "def original; \"captured\"; end\nalias_method :x, :original\ndef x; \"method\"; end", "x", "method"),
+        ("alias_after_def", "def x; \"method\"; end\ndef original; \"captured\"; end\nalias_method :x, :original", "x", "captured"),
+        ("alias_snapshot", "def x; \"first\"; end\nalias_method :y, :x\ndef x; \"last\"; end", "y + \"|\" + x", "first|last"),
+        ("alias_after_redefinitions", "def x; \"first\"; end\ndef x; \"last\"; end\nalias_method :y, :x", "y + \"|\" + x", "last|last"),
+        ("reader_alias_snapshot", "attr_reader :x\nalias_method :y, :x\ndef x; \"method\"; end", "y + \"|\" + x", "reader|method"),
+        ("alias_chain_snapshot", "def x; \"first\"; end\nalias_method :y, :x\ndef x; \"last\"; end\nalias_method :z, :y", "z + \"|\" + y + \"|\" + x", "first|first|last"),
+        ("delegate_before_def", "def self.x; \"delegate\"; end\ndelegate :x, to: :class\ndef x; \"method\"; end", "x", "method"),
+        ("delegate_after_def", "def self.x; \"delegate\"; end\ndef x; \"method\"; end\ndelegate :x, to: :class", "x", "delegate"),
+        ("delegate_alias_snapshot", "def self.x; \"delegate\"; end\ndelegate :x, to: :class\nalias_method :y, :x\ndef x; \"method\"; end", "y + \"|\" + x", "delegate|method"),
+        ("undef_then_def", "def x; \"first\"; end\nundef_method :x\ndef x; \"last\"; end", "x", "last"),
+    ]
+}
+
+// These class accessors pin namespace/ordering structurally. Class-ivar
+// execution retains a separate analyzer gap, also present on main.
+fn class_declaration_order_cases() -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
+    vec![
+        ("class_reader_before_def", "def self.seed; @x = \"reader\"; end\nclass << self\nattr_reader :x\ndef x; \"method\"; end\nend", "ProbeController.seed && ProbeController.x", "method"),
+        ("class_reader_after_def", "def self.seed; @x = \"reader\"; end\nclass << self\ndef x; \"method\"; end\nattr_reader :x\nend", "ProbeController.seed && ProbeController.x", "reader"),
+    ]
+}
+
+fn declaration_order_files(declarations: &str, expression: &str, hook: bool) -> Vec<(String, String)> {
+    let hook = if hook {
+        "private\ndef process_action(action_name); super(action_name); end\n"
+    } else { "" };
+    vec![
+        ("db/schema.rb".into(), "ActiveRecord::Schema.define(version: 1) do\nend\n".into()),
+        ("app/controllers/application_controller.rb".into(), APPLICATION.into()),
+        ("config/routes.rb".into(), "Rails.application.routes.draw do\nget '/probe', to: 'probe#index'\nend\n".into()),
+        ("app/controllers/probe_controller.rb".into(), format!(
+            "class ProbeController < ApplicationController\n{declarations}\ndef index\n@x = \"reader\"\nrender plain: {expression}\nend\n{hook}end\n"
+        )),
+    ]
+}
+
+fn unresolved_declaration_cases() -> [(&'static str, &'static str, &'static str); 4] {
+    [
+        ("def slice(index); \"method\"; end\ndef target; \"abc\"; end\ndelegate :slice, to: :target\ndef demanded; slice(0); end", "demanded", "a"),
+        ("def x; \"method\"; end\nalias_method :x, :trace", "x", ""),
+        ("def trace; super(); end\ndef x; \"method\"; end\nalias_method :x, :trace", "x", ""),
+        ("include ActionController::Helpers\ndef x; \"method\"; end\nhelper_method :x\nattr_reader :x", "x", "reader"),
+    ]
+}
+
+#[test]
+fn source_declaration_order_resolves_controller_and_sidecar_collisions() {
+    for (name, declarations, expression, _) in declaration_order_cases().into_iter().chain(class_declaration_order_cases()) {
+        for hook in [false, true] {
+            let files = declaration_order_files(declarations, expression, hook);
+            let tree = files.into_iter().map(|(p, s)| (PathBuf::from(p), s.into_bytes())).collect();
+            let mut app = ingest_app_from_tree(tree).unwrap();
+            roundhouse::session::analyze_and_lower(&mut app);
+            let (emitted, diagnostics) = roundhouse::emit::diagnostics::scope(|| {
+                roundhouse::emit::ruby::emit_lowered_controllers(&app)
+            });
+            assert!(!diagnostics.iter().any(|d| d.severity == Severity::Error), "{name}, hook={hook}: {diagnostics:?}");
+            for extension in ["rb", "rbs"] {
+                let path = format!("probe_controller.{extension}");
+                let file = emitted.iter().find(|f| f.path.ends_with(&path))
+                    .unwrap_or_else(|| panic!("missing {path}: {name}, hook={hook}"));
+                let mut definitions = std::collections::HashSet::new();
+                for line in file.content.lines().map(str::trim) {
+                    if let Some(definition) = line.strip_prefix("def ") {
+                        let method = definition.split(['(', ':', ' ']).next().unwrap();
+                        assert!(definitions.insert(method), "duplicate {method} in {path}: {name}, hook={hook}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn declaration_order_does_not_hide_unresolvable_dispatch_collisions() {
+    for declarations in [
+        "def new; \"method\"; end\nattr_reader :new",
+        "attr_reader :new\ndef new; \"method\"; end",
+        "def process_action(action_name); super(action_name); end\nattr_reader :process_action",
+        "attr_reader :process_action\ndef process_action(action_name); super(action_name); end",
+    ].into_iter().chain(unresolved_declaration_cases().into_iter().map(|(declarations, _, _)| declarations)) {
+        for hook in [false, true] {
+            let files = declaration_order_files(declarations, "\"ok\"", hook);
+            let tree = files.into_iter().map(|(p, s)| (PathBuf::from(p), s.into_bytes())).collect();
+            let mut app = match ingest_app_from_tree(tree) {
+                Ok(app) => app,
+                Err(error) if declarations.contains("process_action") => {
+                    let message = format!("{error:?}");
+                    assert!(message.contains("process_action") && message.contains("redef"), "{message}");
+                    continue;
+                }
+                Err(error) => panic!("refusal declarations={declarations:?}, hook={hook}: {error:?}"),
+            };
+            roundhouse::session::analyze_and_lower(&mut app);
+            let (_, diagnostics) = roundhouse::emit::diagnostics::scope(|| {
+                roundhouse::emit::ruby::emit_lowered_controllers(&app)
+            });
+            assert!(diagnostics.iter().any(|d| d.severity == Severity::Error
+                && d.message.contains("controller_method_collision")), "refusal declarations={declarations:?}, hook={hook}: {diagnostics:?}");
+        }
+    }
+}
+
+#[test]
+fn rails_oracle_controller_declarations_and_alias_snapshots_follow_source_order() {
+    if !require_rails_oracle() { return; }
+    for (name, declarations, expression, expected) in declaration_order_cases() {
+        for hook in [false, true] {
+            eprintln!("declaration_oracle_case={name}:hook={hook}");
+            let files = declaration_order_files(declarations, expression, hook);
+            let reference = oracle_program(&files, "ProbeController", "puts c.response.body");
+            assert_eq!(reference, format!("{expected}\n"), "Rails: {name}, hook={hook}");
+            let entry = if hook { "_roundhouse_dispatch_action" } else { "process_action" };
+            let actual = run_emitted_program(&files, &format!(
+                "require_relative 'app/controllers/probe_controller'\nc = ProbeController.new\nc.{entry}(:index)\nputs c.body\n"
+            ));
+            assert_eq!(actual, reference, "{name}, hook={hook}");
+        }
+    }
+    // Rails can execute these; lowering cannot retain the alias's inherited
+    // target or super name, or forward the delegate's arguments.
+    for (declarations, expression, expected) in unresolved_declaration_cases() {
+        for hook in [false, true] {
+            let files = declaration_order_files(declarations, expression, hook);
+            assert_eq!(oracle_program(&files, "ProbeController", "puts c.response.body"), format!("{expected}\n"));
+            let (_, errors) = fixture(&files).emit(BuildTarget::Ruby);
+            assert!(errors.iter().any(|error| error.contains("controller_method_collision")), "{errors:?}");
+        }
+    }
+}
+
 #[test]
 fn rails_oracle_own_parent_and_concern_overrides_match_rails_with_and_without_super() {
     if !rails_oracle_available() {

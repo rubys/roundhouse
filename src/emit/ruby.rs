@@ -679,6 +679,7 @@ fn lower_controllers_for_spinel(app: &App, format_breadth: FormatBreadth, param_
         &app.controllers,
         model_extras,
         crate::lower::controller_to_library::LowerControllerOptions {
+            sources: &app.sources,
             ruby_read_values: true,
             carry_nested_params: true,
             param_binds,

@@ -84,36 +84,20 @@ impl<'a> DelegateEligibility<'a> {
         if declaration.has_unsupported_option {
             return None;
         }
-        let file = super::super::sources::path_of(call.span.file).unwrap_or_default();
-        let visibility_defaults =
-            self.visibility_cache
-                .entry(call.span.file)
-                .or_insert_with(|| {
-                    // Clone text first — `declaration_defaults` re-parses via
-                    // `prism::parse_silent`, which mutates the sources
-                    // registry. `with_text` would hold an immutable borrow
-                    // across that call and panic (`RefCell already borrowed`).
-                    super::super::sources::text_of(&file)
-                        .map(|source| {
-                            super::super::visibility::Visibility::declaration_defaults(
-                                &source, &file,
-                            )
-                        })
-                        .or_else(|| {
-                            call.span
-                                .file
-                                .0
-                                .checked_sub(1)
-                                .and_then(|index| self.sources.get(index as usize))
-                                .map(|source| {
-                                    super::super::visibility::Visibility::declaration_defaults(
-                                        &source.text,
-                                        &source.path,
-                                    )
-                                })
-                        })
-                        .unwrap_or_default()
-                });
+        // Emission can run after the ingest registry was drained or reused
+        // by synthesis. The app catalogue retains the original FileId map.
+        let source = call.span.file.0.checked_sub(1)
+            .and_then(|index| self.sources.get(index as usize));
+        let file = source.map(|source| source.path.clone())
+            .or_else(|| super::super::sources::path_of(call.span.file))
+            .unwrap_or_default();
+        let visibility_defaults = self.visibility_cache.entry(call.span.file).or_insert_with(|| {
+            // Own the text before re-parsing: the parser mutates the registry.
+            source.map(|source| source.text.clone())
+                .or_else(|| super::super::sources::text_of(&file))
+                .map(|text| super::super::visibility::Visibility::declaration_defaults(&text, &file))
+                .unwrap_or_default()
+        });
         let Some(&visibility) = visibility_defaults.get(&(call.span.start as usize)) else {
             super::super::survey::record(&crate::ingest::IngestError::Unsupported {
                 file,

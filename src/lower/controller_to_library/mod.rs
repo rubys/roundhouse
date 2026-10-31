@@ -26,6 +26,7 @@
 
 pub(crate) mod action_override;
 mod broadcasts;
+mod declarations;
 mod inertia;
 mod process_action;
 pub mod params;
@@ -245,6 +246,8 @@ pub fn lower_controllers_with_arel_views_and_assocs(
 /// positional args.
 #[derive(Default)]
 pub struct LowerControllerOptions<'a> {
+    /// Retained source text for class-body declaration visibility at emit time.
+    pub sources: &'a [crate::span::SourceFile],
     /// Ruby-family nullable read values; strict-target defaults stay unchanged.
     pub ruby_read_values: bool,
     /// Carry non-scalar permitted keys (`k: [[:a]]`, `k: {}`) as
@@ -309,6 +312,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     opts: LowerControllerOptions,
 ) -> Vec<LibraryClass> {
     let LowerControllerOptions {
+        sources,
         ruby_read_values,
         carry_nested_params,
         param_binds,
@@ -636,9 +640,6 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             debug_assert_eq!(method.name.as_str(), action_override::DISPATCH);
             dispatchers.insert(controller.name.clone(), (index, method));
         }
-        methods.extend(collect_attr_accessor_methods(controller));
-        apply_alias_methods(controller, &mut methods);
-        apply_undef_methods(controller, &mut methods);
         let mut lc = LibraryClass {
             name: controller.name.clone(),
             is_module: false,
@@ -651,11 +652,10 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             origin: None,
             constants: collect_class_constants(controller),
             conditional_definitions: Vec::new(),
-            unknown_calls: collect_delegate_calls(controller),
+            unknown_calls: Vec::new(),
             class_ivar_initializers: collect_class_ivar_initializers(controller),
         };
-        let forwarders = crate::ingest::delegate::expand_delegates_in_class(&mut lc);
-        lc.methods.extend(forwarders);
+        declarations::resolve(controller, &mut lc, sources);
         out.push(lc);
     }
     // Type-check synthesized Params class method bodies with a per-class
@@ -712,7 +712,7 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
     // rewrite falls back to in-scope ivars (legacy behavior for tests).
     let view_ivars: ViewIvarMap = crate::det::HashMap::default();
     let partials: PartialMap = crate::det::HashMap::default();
-    let mut methods = build_methods(
+    let methods = build_methods(
         controller,
         std::slice::from_ref(controller),
         &specs,
@@ -728,9 +728,6 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         None,
         None,
     ).methods;
-    methods.extend(collect_attr_accessor_methods(controller));
-    apply_alias_methods(controller, &mut methods);
-    apply_undef_methods(controller, &mut methods);
     let mut lc = LibraryClass {
         name: controller.name.clone(),
         is_module: false,
@@ -743,11 +740,10 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         origin: None,
         constants: collect_class_constants(controller),
         conditional_definitions: Vec::new(),
-        unknown_calls: collect_delegate_calls(controller),
+        unknown_calls: Vec::new(),
         class_ivar_initializers: collect_class_ivar_initializers(controller),
     };
-    let forwarders = crate::ingest::delegate::expand_delegates_in_class(&mut lc);
-    lc.methods.extend(forwarders);
+    declarations::resolve(controller, &mut lc, &[]);
     lc
 }
 
@@ -800,85 +796,7 @@ fn collect_class_constants(controller: &Controller) -> Vec<(Symbol, Expr)> {
     out
 }
 
-/// `delegate :a, :b, to: :assoc` calls from a controller body, as
-/// `Unknown` items — the raw shape `ingest::delegate::
-/// expand_delegates_in_class` expects (the same shape it reads off a
-/// model or concern's `LibraryClass::unknown_calls`). A controller
-/// isn't a `LibraryClass` until this exact lowering builds one, so
-/// `delegate` in a controller's own body never reached that file at
-/// all before: it round-tripped as `Unknown`, unconsumed, and the
-/// controller emitted without the forwarder Rails' `class_eval`
-/// would have defined — a receiverless call to the delegated name in
-/// any action raised.
-fn collect_delegate_calls(controller: &Controller) -> Vec<Expr> {
-    let mut out = Vec::new();
-    for item in &controller.body {
-        let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
-        let ExprNode::Send { recv: None, method, .. } = &*expr.node else { continue };
-        if method.as_str() == "delegate" {
-            out.push(expr.clone());
-        }
-    }
-    out
-}
-
-/// `attr_reader`/`attr_writer`/`attr_accessor` calls from a controller
-/// body → synthesized accessor `MethodDef`s — the exact treatment
-/// `ingest::library_class::walk_decl_body` gives them for models and
-/// concerns (surface form sacrificed for downstream uniformity; see
-/// that module's `LibraryClass::methods` doc). Deferred to lowering
-/// rather than typed at ingest because the output IS a `MethodDef`,
-/// which a `Controller`'s own body has no slot for — only the
-/// `LibraryClass` this lowering produces does.
-fn collect_attr_accessor_methods(controller: &Controller) -> Vec<MethodDef> {
-    use crate::expr::Literal;
-    let mut out = Vec::new();
-    for item in &controller.body {
-        let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
-        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
-        let (want_reader, want_writer) = match method.as_str() {
-            "attr_reader" => (true, false),
-            "attr_writer" => (false, true),
-            "attr_accessor" => (true, true),
-            _ => continue,
-        };
-        for arg in args {
-            let ExprNode::Lit { value: Literal::Sym { value: name } } = &*arg.node else {
-                continue;
-            };
-            if want_reader {
-                out.push(crate::ingest::library_class::synth_attr_reader(
-                    &controller.name,
-                    name,
-                    MethodReceiver::Instance,
-                ));
-            }
-            if want_writer {
-                out.push(crate::ingest::library_class::synth_attr_writer(
-                    &controller.name,
-                    name,
-                    MethodReceiver::Instance,
-                ));
-            }
-        }
-    }
-    out
-}
-
-/// `alias_method :new_name, :old_name` — a method named `new_name`
-/// with `old_name`'s existing body and signature, resolved against
-/// THIS controller's own already-built `methods` (actions and private
-/// helpers alike; by the time this runs, `methods` is complete).
-///
-/// `old_name` not found here — inherited from a parent, or defined by
-/// a spliced concern under a name this same-class-only scan can't see
-/// — is a real gap, not silently accepted: Ruby resolves the alias at
-/// class-body EXECUTION time, when the parent's methods already
-/// exist, an ordering this pass (which only ever sees one controller's
-/// own `methods`) doesn't have access to. Ledgered rather than
-/// dropped so the survey names exactly which alias didn't resolve.
-/// The `alias_method :new, :old` pairs in a controller's class body, in
-/// declaration order, as `(new, old)`.
+/// Raw alias pairs are also inspected before lowering for reserved names.
 fn alias_method_pairs(controller: &Controller) -> Vec<(Symbol, Symbol)> {
     use crate::expr::Literal;
     let sym = |e: &Expr| match &*e.node {
@@ -901,63 +819,6 @@ fn alias_method_pairs(controller: &Controller) -> Vec<(Symbol, Symbol)> {
             Some((new_name, old_name))
         })
         .collect()
-}
-
-fn apply_alias_methods(controller: &Controller, methods: &mut Vec<MethodDef>) {
-    for (new_name, old_name) in alias_method_pairs(controller) {
-        let Some(old) = methods.iter().find(|m| m.name == old_name).cloned() else {
-            crate::ingest::survey::record(&crate::ingest::IngestError::Unsupported {
-                file: controller.name.0.as_str().to_string(),
-                message: format!(
-                    "alias_method target not found: `:{}` names no method this controller defines itself (inherited or concern-defined; alias not created)",
-                    old_name.as_str()
-                ),
-            });
-            continue;
-        };
-        let mut aliased =
-            crate::ingest::library_class::copy_aliased_method(&old, new_name.as_str());
-        aliased.name_span = crate::span::Span::synthetic();
-        methods.push(aliased);
-    }
-}
-
-/// `undef_method :a, :b` — removes methods this controller itself
-/// defines (its own `methods`, built above) from its output. Matches
-/// only a same-class definition: Ruby's `undef_method` also blocks the
-/// name from resolving through ANY ancestor, which this can't express
-/// (there is no "undefined" marker in the IR to carry past this
-/// point), so an inherited method of the same name — undefined in
-/// Ruby, still callable here — is a documented gap, ledgered rather
-/// than silently kept.
-fn apply_undef_methods(controller: &Controller, methods: &mut Vec<MethodDef>) {
-    use crate::expr::Literal;
-    let mut names: Vec<Symbol> = Vec::new();
-    for item in &controller.body {
-        let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
-        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
-        if method.as_str() != "undef_method" {
-            continue;
-        }
-        for arg in args {
-            if let ExprNode::Lit { value: Literal::Sym { value } } = &*arg.node {
-                names.push(value.clone());
-            }
-        }
-    }
-    for name in names {
-        let before = methods.len();
-        methods.retain(|m| m.name != name);
-        if methods.len() == before {
-            crate::ingest::survey::record(&crate::ingest::IngestError::Unsupported {
-                file: controller.name.0.as_str().to_string(),
-                message: format!(
-                    "undef_method target not removed: `:{}` names no method this controller defines itself (inherited method stays callable; Ruby's ancestor-wide undef is not modeled)",
-                    name.as_str()
-                ),
-            });
-        }
-    }
 }
 
 /// Does `body` read the receiver's state — an ivar, or an implicit-self
@@ -1408,7 +1269,7 @@ fn build_methods(
             .chain(spliced.iter().cloned())
             .collect();
         // `alias_method :index, :show` makes `index` a public action
-        // when `show` is one. `apply_alias_methods` writes the copy
+        // when `show` is one. `declarations::resolve` writes the copy
         // only after this point, so count it here. An alias of an
         // alias resolves in declaration order, as Ruby does.
         for (new_name, old_name) in alias_method_pairs(controller) {
@@ -3294,7 +3155,7 @@ fn action_to_method(
         visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
-        name_span: crate::span::Span::synthetic(),
+        name_span: a.name_span,
         name: Symbol::from(method_name),
         receiver: MethodReceiver::Instance,
         params,

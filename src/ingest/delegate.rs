@@ -124,21 +124,10 @@ fn record_synthesis_failure(delegates: &[Delegation], diags: &[crate::diagnostic
     );
 }
 
-/// The per-class body of `lower_delegates`, factored out so a caller
-/// with a single `LibraryClass` in hand — rather than a whole `App` to
-/// loop over — can drive the same expansion. `lower_controller_to_
-/// library_class` is exactly that caller: a controller isn't a
-/// `LibraryClass` at the point `lower_delegates` runs over
-/// `app.library_classes` (ingest time; controllers only become one
-/// per-target at emit time — see `lower::controller_to_library`), so a
-/// `delegate` call in a controller body never reached this file at
-/// all until the controller lowering started collecting it into its
-/// own `unknown_calls` and calling this directly.
-///
-/// Returns the synthesized forwarder methods; does NOT append them to
-/// `lc.methods` itself (`lower_delegates` above batches that across the
-/// whole app; a single-class caller can just extend its own `methods`
-/// with the result).
+/// Per-class library expansion. Returns forwarders without appending them
+/// to `lc.methods`; `lower_delegates` batches that update across the app.
+/// Controllers use `expand_controller_declaration` below because aliases
+/// can capture forwarders that a later definition shadows.
 pub(crate) fn expand_delegates_in_class(lc: &mut LibraryClass) -> Vec<MethodDef> {
     expand_delegates(
         &lc.name,
@@ -150,6 +139,23 @@ pub(crate) fn expand_delegates_in_class(lc: &mut LibraryClass) -> Vec<MethodDef>
         &crate::det::HashSet::default(),
         &[],
     )
+}
+
+/// The controller lowerer resolves declarations one at a time. Keep a
+/// forwarder even if a later source definition will replace it: an intervening
+/// alias can still capture it. Controller emission runs after source ingest,
+/// so visibility comes from the retained app source catalogue.
+pub(crate) fn expand_controller_declaration(
+    lc: &mut LibraryClass,
+    sources: &[crate::span::SourceFile],
+) -> Vec<MethodDef> {
+    let called_with_args = names_called_with_arguments(&lc.methods, &[]);
+    let empty = crate::det::HashSet::default();
+    let mut eligibility = DelegateEligibility::new(
+        &lc.methods, &called_with_args, &empty, None, &empty, sources,
+    );
+    let delegates = take_delegate_decls_from_calls(&mut lc.unknown_calls, &mut eligibility);
+    synthesize_declarations(&lc.name, &[], delegates)
 }
 
 pub(super) fn expand_delegates(
@@ -172,6 +178,14 @@ pub(super) fn expand_delegates(
         sources,
     );
     let delegates = take_delegate_decls_from_calls(unknown_calls, &mut eligibility);
+    synthesize_declarations(name, methods, delegates)
+}
+
+fn synthesize_declarations(
+    name: &crate::ident::ClassId,
+    methods: &[MethodDef],
+    delegates: Vec<Delegation>,
+) -> Vec<MethodDef> {
     if delegates.is_empty() {
         return Vec::new();
     }
