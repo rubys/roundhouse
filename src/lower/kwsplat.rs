@@ -633,6 +633,15 @@ fn erased_splat(expr: &Expr, sigs: &Signatures) -> Option<ErasedSplat> {
     let ExprNode::Send { recv: Some(recv), method, args, .. } = &*expr.node else {
         return None;
     };
+    // `Klass.m(x)` reaches the CLASS side, and `sigs.methods` holds
+    // instance methods only: an instance `m(kw: true)` of the same name
+    // (`RolloutRecord#to_entity(load_associations:)` beside the class
+    // side `to_entity(rollout_record)`) would read the one positional
+    // argument as an erased `**x` and write it back as `to_entity(**self)`.
+    // `new` is the one class-side send that resolves to an instance method.
+    if matches!(&*recv.node, ExprNode::Const { .. }) && method.as_str() != "new" {
+        return None;
+    }
     let params = callee_params(recv.ty.as_ref()?, method, sigs)?;
     erased_splat_against(args, params)
 }
