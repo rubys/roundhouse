@@ -2012,7 +2012,8 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
             // `json.partial! @record` — a positional that is a record,
             // not a path. Jbuilder renders the record's own partial
             // (`record.to_partial_path`) with the record as its local.
-            // `partial:` and `as:` after it do not change that:
+            // `partial:` and `as:` after it, as literals, do not change
+            // that:
             // jbuilder's `partial!` sets `options[:partial]` to the
             // positional, over the option, and `as:` only names the
             // local (`record_partial_path` checks it is the name the
@@ -2020,7 +2021,9 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
             // rendering option Jbuilder strips from the locals with the
             // other two; for one record it only turns on fragment
             // caching (Action View's collection renderer is the only
-            // one that reads it), so it renders the same partial.
+            // one that reads it), so it renders the same partial. Ruby
+            // evaluates any of the three before the render, so one that
+            // is not a literal stays Unknown, as in the keyed form.
             //
             // Every other key is a local for the partial (`cache: true`
             // is one: Jbuilder has no such option), unless Action View
@@ -2038,7 +2041,7 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
                     2 => extract_hash(&args[1]).is_some_and(|opts| {
                         opts.iter().all(|(k, v)| match &*k.node {
                             ExprNode::Lit { value: Literal::Sym { value } } => match value.as_str() {
-                                "partial" | "as" | "cached" => true,
+                                "partial" | "as" | "cached" => is_literal_value(v),
                                 key if ACTION_VIEW_RENDER_OPTIONS.contains(&key) => false,
                                 _ => {
                                     let literal = matches!(
@@ -3364,6 +3367,11 @@ fn collect_local_names(e: &Expr, out: &mut crate::det::HashSet<Symbol>) {
 /// or without arguments: a local of that name would be read, or would
 /// shadow the method, at any of them. A `READS_ANY_LOCAL` name called
 /// on `self` (`self.binding`) counts too: it reads the same locals.
+/// So does one reached by dispatch, with no receiver or on `self`:
+/// `send(:binding)`, `public_send`/`__send__` alike, `method(:binding)`
+/// (a Send, or a `MethodRef` as a block argument `&method(:binding)`),
+/// and a `send` or `method` of a name that is not a literal, which may
+/// be any of them.
 fn collect_mentioned_names(e: &Expr, out: &mut crate::det::HashSet<Symbol>) {
     match &*e.node {
         ExprNode::Var { name, .. } | ExprNode::Send { recv: None, method: name, .. } => {
@@ -3374,7 +3382,31 @@ fn collect_mentioned_names(e: &Expr, out: &mut crate::det::HashSet<Symbol>) {
         {
             out.insert(method.clone());
         }
+        ExprNode::MethodRef { recv, name }
+            if recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
+                && READS_ANY_LOCAL.contains(&name.as_str()) =>
+        {
+            out.insert(name.clone());
+        }
         _ => {}
+    }
+    if let ExprNode::Send { recv, method, args, .. } = &*e.node {
+        let on_self = recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef));
+        let dispatch = matches!(method.as_str(), "send" | "public_send" | "__send__");
+        if on_self && (dispatch || method.as_str() == "method") {
+            let name = match args.first().map(|a| &*a.node) {
+                Some(ExprNode::Lit { value: Literal::Sym { value } }) => Some(value.as_str()),
+                Some(ExprNode::Lit { value: Literal::Str { value } }) => Some(value.as_str()),
+                Some(ExprNode::Lit { .. }) => None,
+                _ => {
+                    out.extend(READS_ANY_LOCAL.iter().map(|n| Symbol::from(*n)));
+                    None
+                }
+            };
+            if let Some(name) = name.filter(|n| READS_ANY_LOCAL.contains(n)) {
+                out.insert(Symbol::from(name));
+            }
+        }
     }
     e.node.for_each_child(&mut |c| collect_mentioned_names(c, out));
 }
