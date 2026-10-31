@@ -2084,11 +2084,11 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             };
             let name = Symbol::from(constant_id_str(&w.read_name()));
             let value = ingest_expr(&w.value(), file)?;
-            ExprNode::OpAssign {
+            guard_safe_nav_write(w.is_safe_navigation(), recv, |recv| ExprNode::OpAssign {
                 target: crate::expr::LValue::Attr { recv, name },
                 op: crate::expr::OpAssignOp::OrOr,
                 value,
-            }
+            })
         }
         n if n.as_call_and_write_node().is_some() => {
             let w = n.as_call_and_write_node().unwrap();
@@ -2103,11 +2103,11 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             };
             let name = Symbol::from(constant_id_str(&w.read_name()));
             let value = ingest_expr(&w.value(), file)?;
-            ExprNode::OpAssign {
+            guard_safe_nav_write(w.is_safe_navigation(), recv, |recv| ExprNode::OpAssign {
                 target: crate::expr::LValue::Attr { recv, name },
                 op: crate::expr::OpAssignOp::AndAnd,
                 value,
-            }
+            })
         }
         n if n.as_call_operator_write_node().is_some() => {
             let w = n.as_call_operator_write_node().unwrap();
@@ -2130,11 +2130,11 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                     ),
                 })?;
             let value = ingest_expr(&w.value(), file)?;
-            ExprNode::OpAssign {
+            guard_safe_nav_write(w.is_safe_navigation(), recv, |recv| ExprNode::OpAssign {
                 target: crate::expr::LValue::Attr { recv, name },
                 op,
                 value,
-            }
+            })
         }
         // `FOO ||= y`, `FOO &&= y`, `FOO += y` — constant compound writes.
         n if n.as_constant_or_write_node().is_some() => {
@@ -4681,6 +4681,41 @@ fn merge_call(recv: Expr, arg: Expr, span: Span) -> Expr {
             parenthesized: true,
         },
     )
+}
+
+/// `recv&.x ||= v` (and `&&=`, `+=`): Ruby evaluates the receiver once and
+/// skips the read, the operator and the write when it is nil, so the
+/// whole expression is nil. The IR has no safe-send flag, so it desugars
+/// as `&.` does for a send: `recv && recv.x ||= v`, with a receiver that
+/// is not a plain read bound once first (`(__safe_nav17 = a.b) &&
+/// __safe_nav17.x ||= v`). `request.details&.profile_id ||= …` read as
+/// `request.details.profile_id ||= …` raised on a request whose details
+/// were nil.
+fn guard_safe_nav_write(safe: bool, recv: Expr, build: impl FnOnce(Expr) -> ExprNode) -> ExprNode {
+    if !safe {
+        return build(recv);
+    }
+    let span = recv.span;
+    let (left, target) = if is_plain_read(&recv) {
+        (recv.clone(), recv)
+    } else {
+        let temp = Symbol::from(format!("__safe_nav{}", recv.span.start));
+        let read = Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: temp.clone() });
+        let bound = Expr::new(
+            span,
+            ExprNode::Assign {
+                target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: temp },
+                value: recv,
+            },
+        );
+        (bound, read)
+    };
+    ExprNode::BoolOp {
+        op: crate::expr::BoolOpKind::And,
+        surface: crate::expr::BoolOpSurface::Symbol,
+        left,
+        right: Expr::new(span, build(target)),
+    }
 }
 
 /// A receiver `&.` may read twice without changing what the program
