@@ -49,8 +49,8 @@ pub(super) fn apply(
         if targets.insert(mount.target.clone()) {
             writeln!(
                 source,
-                "require_relative \"../app/models/{}\"",
-                crate::naming::underscore(mount.target.0.as_str())
+                "require_relative \"../app/{}\"",
+                crate::emit::ruby::library_file_anchor(mount.target.0.as_str(), app)
             )
             .unwrap();
         }

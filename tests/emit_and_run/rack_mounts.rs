@@ -102,6 +102,59 @@ puts JSON.generate(rows)
     }
 }
 
+/// A nested target can share its enclosing class's emitted file. Boot must
+/// load that file, while module-only namespaces retain the target's own file.
+#[test]
+fn rack_mount_nested_targets_load_the_emitted_file_anchor_and_match_rails() {
+    use roundhouse::project::BuildTarget;
+    let probe = r#"
+require "json"
+require "stringio"
+rows = []
+["GET", "POST"].each do |method|
+  ["/files", "/files/child.json"].each do |path|
+    env = {"REQUEST_METHOD" => method, "SCRIPT_NAME" => "/outer", "PATH_INFO" => path,
+      "QUERY_STRING" => "q=1", "rack.input" => StringIO.new("payload"),
+      "rack.url_scheme" => "http", "HTTP_HOST" => "example.org"}
+    status, headers, body = endpoint.call(env)
+    chunks = []
+    body.each { |chunk| chunks << chunk }
+    rows << [method, path, status, headers, chunks.join]
+    body.close if body.respond_to?(:close)
+  end
+end
+puts JSON.generate(rows)
+"#;
+    for (source, target, anchor, absent) in [
+        (format!("class RackHost\n  class V1\n{APP}  end\nend\n"),
+            "RackHost::V1::StaticFiles", "models/rack_host", Some("models/rack_host/v1/static_files.rb")),
+        (format!("module RackNamespace\n  class Host\n{APP}  end\nend\n"),
+            "RackNamespace::Host::StaticFiles", "models/rack_namespace/host", Some("models/rack_namespace/host/static_files.rb")),
+        (format!("module RackNamespace\n{APP}end\n"),
+            "RackNamespace::StaticFiles", "models/rack_namespace/static_files", None),
+        (APP.to_string(), "StaticFiles", "models/static_files", None),
+    ] {
+        let route = format!("mount {target}, at: '/files'");
+        let routes = format!("Rails.application.routes.draw do\n{route}\nend\n");
+        let Some(want) = oracle(&source, &route, probe) else { return };
+        assert_eq!(want.as_array().unwrap().len(), 4);
+        assert!(want.as_array().unwrap().iter().all(|row| row[2] == 207 && row[4] == "first:q=1:last"), "{want}");
+        let run = app(&source, &routes).run_ruby(&format!("endpoint = Main.method(:run_rack)\n{probe}"));
+        run.assert_passes();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(run.stdout.trim()).unwrap(), want, "{target}");
+        for build in [BuildTarget::Ruby, BuildTarget::Jruby, BuildTarget::Spinel] {
+            let (tree, errors) = app(&source, &routes).emit(build);
+            assert!(errors.is_empty(), "{build:?}: {errors:?}");
+            let adapter = std::fs::read_to_string(tree.join("config/rack_mounts.rb")).unwrap();
+            assert!(adapter.contains(&format!("require_relative \"../app/{anchor}\"")), "{build:?}: {adapter}");
+            assert!(tree.join(format!("app/{anchor}.rb")).is_file(), "{build:?}: {anchor}");
+            if let Some(absent) = absent {
+                assert!(!tree.join(format!("app/{absent}")).exists(), "{build:?}: unexpected standalone target");
+            }
+        }
+    }
+}
+
 #[test]
 fn rack_mount_literal_boundary_leaves_later_routes_reachable() {
     let routes = r#"mount StaticFiles, at: "/files"
