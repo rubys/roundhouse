@@ -391,6 +391,32 @@ fn rewrite(expr: &mut Expr, sigs: &Signatures, diags: &mut Vec<Diagnostic>) {
         return;
     }
     restore_kwrest_on_typed_send(expr, sigs);
+    convert_splatted_object(expr, sigs);
+}
+
+/// `{ **attrs, k: v }` where `attrs` is an object of an app class: Ruby
+/// splats it through its `to_hash`. The ingest desugar wrote the merge
+/// chain `attrs.merge({ k: v })`, which asks the object for a `merge` it
+/// does not define (a log-attributes wrapper with only `to_hash`). A `merge` whose receiver is typed as an app class that
+/// defines `to_hash` and no `merge` of its own could only have been
+/// written as that splat, so the receiver is read through `to_hash`.
+fn convert_splatted_object(expr: &mut Expr, sigs: &Signatures) {
+    let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &mut *expr.node else { return };
+    if method.as_str() != "merge" || args.len() != 1 {
+        return;
+    }
+    let Some(ty) = recv.ty.as_ref() else { return };
+    if !matches!(ty, Ty::Class { .. })
+        || callee_params(ty, method, sigs).is_some()
+        || callee_params(ty, &Symbol::from("to_hash"), sigs).is_none()
+    {
+        return;
+    }
+    let inner = recv.clone();
+    *recv = Expr::new(
+        inner.span,
+        ExprNode::Send { recv: Some(inner), method: Symbol::from("to_hash"), args: vec![], block: None, parenthesized: false },
+    );
 }
 
 fn is_self_send(recv: Option<&Expr>) -> bool {
