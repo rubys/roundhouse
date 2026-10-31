@@ -99,6 +99,7 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     // own body wants every one of them applied.
     crate::lower::tag_block_passing::apply_helpers(&mut lcs);
     apply_scope_lowering(&mut lcs, app);
+    apply_sti_hydration(&mut lcs, app);
     // ActiveJob payloads: the enqueue arm of each planned job's
     // `perform_later`, and `to_gid_uri` beside `to_gid_param`.
     // Ruby-family only, like the GlobalID runtime it writes through.
@@ -2348,21 +2349,57 @@ fn invalidate_on_fk_write(lc: &mut LibraryClass, name: &Symbol, fk: &Symbol) {
 pub(crate) fn apply_sti_hydration(lcs: &mut [LibraryClass], app: &App) {
     // subclass -> base, from the one authority on the question.
     let bases = crate::lower::sti_bases(app);
-    if bases.is_empty() {
+    let plain = crate::lower::plain_subclass_bases(app);
+    if bases.is_empty() && plain.is_empty() {
         return;
     }
     let mut subs_of: HashMap<ClassId, Vec<ClassId>> = HashMap::default();
     for (sub, base) in &bases {
         subs_of.entry(base.clone()).or_default().push(sub.clone());
     }
+    for base in plain.values() { subs_of.entry(base.clone()).or_default(); }
     // Deterministic arm order — the map's iteration order is not.
     for v in subs_of.values_mut() {
         v.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
     }
     for lc in lcs.iter_mut() {
+        if bases.contains_key(&lc.name) || plain.contains_key(&lc.name) {
+            // The relation also needs the subclass restriction when a
+            // class helper inherited from the base starts the query.
+            let mut names: Vec<_> = bases.keys().filter(|candidate| {
+                let mut current = Some(*candidate);
+                for _ in 0..32 {
+                    let Some(id) = current else { break };
+                    if *id == lc.name { return true; }
+                    current = app.library_classes.iter().find(|c| c.name == *id).and_then(|c| c.parent.as_ref());
+                }
+                false
+            }).cloned().collect();
+            names.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+            let ret = Ty::Array { elem: std::sync::Arc::new(Ty::Str) };
+            let body = Expr::new(Span::synthetic(), ExprNode::Array {
+                elements: names.iter().map(|id| Expr::new(Span::synthetic(), ExprNode::Lit {
+                    value: Literal::Str { value: id.0.as_str().to_owned() },
+                })).collect(), style: crate::expr::ArrayStyle::Brackets,
+            });
+            lc.methods.push(crate::dialect::MethodDef {
+                visibility: crate::dialect::MethodVisibility::Public, unsupported_formals: None,
+                has_anonymous_block: false, name_span: Span::synthetic(),
+                name: Symbol::from("_sti_type_names"), receiver: crate::dialect::MethodReceiver::Class,
+                params: vec![], body, signature: Some(Ty::Fn {
+                    params: vec![].into(), block: None, ret: std::sync::Arc::new(ret), effects: Default::default(),
+                }),
+                effects: Default::default(), enclosing_class: Some(lc.name.0.clone()),
+                kind: crate::dialect::AccessorKind::Method, is_async: false, mutates_self: false, block_param: None,
+            });
+        }
         let Some(subs) = subs_of.get(&lc.name) else { continue };
         let base = lc.name.clone();
         for m in lc.methods.iter_mut() {
+            if !m.name_span.is_synthetic() { continue; }
+            if m.receiver == crate::dialect::MethodReceiver::Class {
+                self_from_row(&mut m.body, &base);
+            }
             // `instantiate` builds through the class it's called on, so a
             // subclass's relation (`Relation.new(Feature)`, whose `select`
             // rows `instantiate`) reaches `from_row` with `self` the
@@ -2384,7 +2421,7 @@ pub(crate) fn apply_sti_hydration(lcs: &mut [LibraryClass], app: &App) {
             // spellings are matched anyway: this pass reads the body a
             // sibling pass wrote, and pinning it to one shape is how a
             // reader goes stale.
-            let Some(type_read) = exprs.iter().find_map(|e| match &*e.node {
+            let type_read = exprs.iter().find_map(|e| match &*e.node {
                 ExprNode::Send { recv: Some(_), method, args, .. }
                     if method.as_str() == "type=" && args.len() == 1 =>
                 {
@@ -2396,9 +2433,7 @@ pub(crate) fn apply_sti_hydration(lcs: &mut [LibraryClass], app: &App) {
                     Some(value.clone())
                 }
                 _ => None,
-            }) else {
-                continue;
-            };
+            }).filter(|_| !subs.is_empty());
             for e in exprs.iter_mut() {
                 let ExprNode::Assign { target: LValue::Var { .. }, value } = &mut *e.node else {
                     continue;
@@ -2417,7 +2452,14 @@ pub(crate) fn apply_sti_hydration(lcs: &mut [LibraryClass], app: &App) {
                     }
                     _ => continue,
                 };
-                *value = sti_dispatch(&type_read, subs, &new_args, value.span);
+                *value = if let Some(type_read) = &type_read {
+                    sti_dispatch(type_read, subs, &new_args, value.span)
+                } else {
+                    Expr::new(value.span, ExprNode::Send {
+                        recv: Some(Expr::new(value.span, ExprNode::SelfRef)),
+                        method: Symbol::from("new"), args: new_args, block: None, parenthesized: true,
+                    })
+                };
                 break;
             }
         }
@@ -2428,7 +2470,7 @@ pub(crate) fn apply_sti_hydration(lcs: &mut [LibraryClass], app: &App) {
 fn self_from_row(body: &mut Expr, base: &ClassId) {
     body.node.for_each_child_mut(&mut |c| self_from_row(c, base));
     if let ExprNode::Send { recv: Some(r), method, .. } = &mut *body.node {
-        if method.as_str() == "from_row"
+        if matches!(method.as_str(), "from_row" | "from_stmt")
             && matches!(&*r.node, ExprNode::Const { path } if const_path_is(path, base))
         {
             *r = Expr::new(r.span, ExprNode::SelfRef);

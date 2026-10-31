@@ -154,6 +154,7 @@ module ActiveRecord
     # contradict the declared return type.
     def self.table_name: () -> String
     def self._table_sql: () -> String
+    def self._sti_type_names: () -> Array[String]
     def self.primary_key: () -> String
     def self._association_names: () -> Array[Symbol]
     def self.reflect_on_association: (Symbol | String name) -> ActiveRecord::Reflection::AssociationReflection?

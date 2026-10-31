@@ -4021,7 +4021,7 @@ fn view_ivar_models(app: &App, view_name: &Symbol) -> crate::det::HashMap<String
         .iter()
         .filter_map(|(name, ty)| match ty {
             crate::ty::Ty::Class { id, .. } => {
-                Some((name.as_str().to_string(), snake_case(id.0.as_str())))
+                Some((name.as_str().to_string(), crate::naming::model_param_key(id.0.as_str())))
             }
             _ => None,
         })

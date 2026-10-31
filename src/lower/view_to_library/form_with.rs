@@ -1109,14 +1109,12 @@ fn record_model_name(model: &Expr, ctx: &ViewCtx, fallback: &str) -> String {
     // named every field after the VIEW that reached the helper and the
     // composer posted `rooms_show[body]` where Rails posts
     // `message[body]`. The class is right there in the expression;
-    // Rails' `param_key` is its demodulized name, underscored, whether
-    // or not the constructor took arguments.
+    // Rails' default `param_key` underscores the complete class name,
+    // joining namespace segments with underscores too.
     if let ExprNode::Send { recv: Some(recv), method, .. } = &*model.node {
         if method.as_str() == "new" {
             if let ExprNode::Const { path } = &*recv.node {
-                if let Some(last) = path.last() {
-                    return snake_case(last.as_str());
-                }
+                return crate::naming::model_param_key(&path.iter().map(|part| part.as_str()).collect::<Vec<_>>().join("::"));
             }
         }
     }

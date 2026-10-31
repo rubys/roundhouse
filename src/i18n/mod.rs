@@ -1009,13 +1009,35 @@ pub struct FormI18n {
 
 impl FormI18n {
     pub fn of(app: &crate::app::App) -> Self {
+        let mut models: crate::det::HashMap<_, _> = app.models.iter()
+            .map(|m| (crate::naming::model_param_key(m.name.0.as_str()), m.i18n.clone())).collect();
+        let bases: crate::det::HashMap<_, _> = app.models.iter().map(|m| (&m.name, m)).collect();
+        let parents: crate::det::HashMap<_, _> = app.library_classes.iter()
+            .filter_map(|class| class.parent.as_ref().map(|parent| (&class.name, parent))).collect();
+        for class in app.library_classes.iter().filter(|class| !class.is_module) {
+            let key = crate::naming::model_param_key(class.name.0.as_str());
+            if models.contains_key(&key) { continue; }
+            let mut keys = vec![i18n_key(class.name.0.as_str())];
+            let mut parent = class.parent.as_ref();
+            let mut seen = crate::det::HashSet::default();
+            while let Some(id) = parent {
+                if !seen.insert(id) { break; }
+                if let Some(base) = bases.get(id) {
+                    let mut metadata = base.i18n.clone();
+                    keys.extend(metadata.keys.iter().cloned());
+                    let scope = metadata.scope().to_owned();
+                    metadata.keys = keys;
+                    metadata.catalog = app.i18n.subset_for(&scope, &metadata.keys);
+                    models.insert(key, metadata);
+                    break;
+                }
+                keys.push(i18n_key(id.0.as_str()));
+                parent = parents.get(id).copied();
+            }
+        }
         FormI18n {
             catalog: app.i18n.clone(),
-            models: app
-                .models
-                .iter()
-                .map(|m| (crate::naming::underscore(m.name.0.as_str()).replace('/', "_"), m.i18n.clone()))
-                .collect(),
+            models,
         }
     }
 

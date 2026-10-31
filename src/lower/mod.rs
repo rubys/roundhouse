@@ -254,7 +254,7 @@ pub use controller_class_render::apply_controller_class_render;
 pub use dirty_predicate_kwargs::apply_dirty_predicate_kwargs;
 pub use job_test_only::apply_job_test_only_lowering;
 pub use sti_scope::apply_sti_scope_lowering;
-pub(crate) use sti_scope::{sti_bases, untyped_subclass_diagnostics};
+pub(crate) use sti_scope::{sti_bases, plain_subclass_bases, untyped_subclass_diagnostics};
 pub use sti_subclass_callbacks::apply_sti_subclass_callbacks;
 pub use request_index::apply_request_index_lowering;
 pub use arel_attribute::apply_arel_attribute_lowering;
@@ -452,7 +452,8 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // Produces a `where` at a model Const root, which is vocabulary
     // every later pass already reads; consumes nothing any pass
     // produces, so no ordering constraints.
-    ("sti_scope", &[]),
+    ("dynamic_finders", &[]),
+    ("sti_scope", &["dynamic_finders"]),
     // `@ivar = <Relation>` → `@ivar = <Relation>.to_a` where the same
     // ivar is an Array on another branch. Reads assignment value TYPES
     // stamped by analysis and writes a `to_a` send no other pass keys
@@ -945,6 +946,15 @@ pub(crate) fn apply_post_analyze_lowerings_for(
     ran!("record_snapshot");
     diags.extend(where_range_split::apply_where_range_split(app));
     ran!("where_range_split");
+    for_each_hook_body(app, &mut |body| {
+        fn walk(body: &mut crate::expr::Expr, registry: &crate::det::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>, diags: &mut Vec<crate::diagnostic::Diagnostic>) {
+            body.node.for_each_child_mut(&mut |child| walk(child, registry, diags));
+            arel::normalize_dynamic_finder_send(body, registry, None, true);
+            if let Some(diagnostic) = arel::dynamic_finder_delegate_refusal(body, registry) { diags.push(diagnostic); }
+        }
+        walk(body, registry, &mut diags);
+    });
+    ran!("dynamic_finders");
     sti_scope::apply_sti_scope_lowering(app);
     ran!("sti_scope");
     relation_ivar_materialize::apply_relation_ivar_materialize(app);

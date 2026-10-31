@@ -279,6 +279,7 @@ impl Analyzer {
 
             let mut cls = ClassInfo::default();
             cls.table = Some(model.table.clone());
+            cls.active_record_model = is_ar_model;
             cls.default_scoped = crate::lower::default_scope::default_scope(model).is_some();
             cls.attributes = model.attributes.clone();
             cls.primary_key = model.primary_key.clone().or_else(|| app.schema.tables.get(&model.table.0)
@@ -635,6 +636,7 @@ impl Analyzer {
                     None => scope_return_seed(&scope.body, &model.name, &scope_names),
                 };
                 cls.class_methods.entry(scope.name.clone()).or_insert(seed);
+                cls.source_class_methods.insert(scope.name.clone());
                 cls.relation_derived.insert(scope.name.clone());
                 if materializing.contains_key(&scope.name) {
                     cls.materializing_scopes.insert(scope.name.clone());
@@ -1203,6 +1205,16 @@ impl Analyzer {
         {
             if method.receiver == crate::dialect::MethodReceiver::Class {
                 classes.entry(id.clone()).or_default().source_class_methods.insert(method.name.clone());
+                // A source finder delegate owns even an unresolved return.
+                // Harvesting must start from unknown, not retain the
+                // catalog's record seed when that body cannot be typed.
+                if matches!(method.name.as_str(), "find_by" | "find_by!")
+                    && method.signature.is_none()
+                    && !app.rbs_signatures.get(id).is_some_and(|s| s.contains_key(&method.name))
+                    && let Some(info) = classes.get_mut(id).filter(|c| c.active_record_model)
+                {
+                    info.class_methods.insert(method.name.clone(), Ty::Untyped);
+                }
                 if expr_calls_super(&method.body) {
                     classes.entry(id.clone()).or_default().delegating_class_methods.insert(method.name.clone());
                 }
@@ -1270,6 +1282,7 @@ impl Analyzer {
         );
 
         let const_resolver = app.const_resolver.for_sources(&app.sources);
+        record_class_side_ownership(&mut classes, app, &const_resolver);
         let data_factories = data::register(app, &const_resolver, &mut classes);
         let data_factories_without_custom_initialize = app
             .library_classes
@@ -1403,6 +1416,7 @@ impl Analyzer {
                     // constants bare; emitted, its nested classes open it.
                     || (self.source_indexed && self.includes_source_namespace(included.0.as_str()));
                 if known { continue; }
+                if let Some(info) = self.classes.get_mut(&class.name) { info.unresolved_include = true; }
                 let detail = format!("{} includes unresolved {}", class.name.0, included.0);
                 if class.unknown_calls.iter().any(|call| matches!(&call.diagnostic(),
                     Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, detail: old, .. })
@@ -8103,6 +8117,81 @@ fn redefined_reader_names(items: &[ModelBodyItem], out: &mut BTreeSet<Symbol>) {
             }
             _ => {}
         }
+    }
+}
+
+/// Shared by ingest qualification and the typed finder registry. Retained
+/// hooks are effects, whereas expanded carriers already have concrete defs.
+pub(crate) fn record_class_side_ownership(classes: &mut HashMap<ClassId, ClassInfo>, app: &App, resolver: &ConstResolver) {
+    fn extensions<'a>(exprs: impl Iterator<Item = &'a Expr>, resolver: &ConstResolver) -> Vec<ClassId> {
+        let mut out = Vec::new();
+        for expr in exprs {
+            let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
+            if method.as_str() != "extend" { continue; }
+            // Ruby gives the first argument precedence within one call;
+            // later calls still outrank earlier calls in the LIFO lookup.
+            for arg in args.iter().rev() {
+                let ExprNode::Const { path } = &*arg.node else { continue };
+                out.push(resolver.namespace(arg.span, path).cloned().unwrap_or_else(|| mixin_path_id(path)));
+            }
+        }
+        out
+    }
+    fn hook_methods(includes: &[ClassId], hook: &str, app: &App, resolver: &ConstResolver, seen: &mut crate::det::HashSet<(ClassId, String)>) -> crate::det::HashSet<Symbol> {
+        fn body(expr: &Expr, target: &Symbol, app: &App, resolver: &ConstResolver, seen: &mut crate::det::HashSet<(ClassId, String)>) -> Option<crate::det::HashSet<Symbol>> {
+            let mut methods = crate::det::HashSet::default();
+            match &*expr.node {
+                ExprNode::Seq { exprs } => for expr in exprs {
+                    methods.extend(body(expr, target, app, resolver, seen)?);
+                    if matches!(&*expr.node, ExprNode::Return { .. }) { break; }
+                },
+                ExprNode::Return { value } => return body(value, target, app, resolver, seen),
+                ExprNode::Lit { .. } => {},
+                ExprNode::Send { recv: Some(recv), method, args, block, .. }
+                    if matches!(&*recv.node, ExprNode::Var { name, .. } if name == target) => {
+                    if method.as_str() == "define_singleton_method" && block.is_some() && args.len() == 1 {
+                        let ExprNode::Lit { value: crate::expr::Literal::Sym { value } } = &*args[0].node else { return None };
+                        methods.insert(value.clone());
+                    } else if matches!(method.as_str(), "include" | "extend") && block.is_none() {
+                        let mut modules = Vec::new();
+                        for arg in args {
+                            let ExprNode::Const { path } = &*arg.node else { return None };
+                            modules.push(resolver.namespace(arg.span, path).cloned().unwrap_or_else(|| mixin_path_id(path)));
+                        }
+                        methods.extend(hook_methods(&modules, if method.as_str() == "include" { "included" } else { "extended" }, app, resolver, seen));
+                    } else { return None; }
+                },
+                _ => return None,
+            }
+            Some(methods)
+        }
+        let mut methods = crate::det::HashSet::default();
+        for id in includes {
+            if !seen.insert((id.clone(), hook.to_owned())) { continue; }
+            // A plain inclusion does not copy another module's singleton
+            // hook. Follow only explicit registration on the hook target.
+            if let Some(method) = app.library_classes.iter().rev().filter(|class| &class.name == id)
+                .flat_map(|class| class.methods.iter().rev())
+                .find(|method| method.receiver == MethodReceiver::Class && method.name.as_str() == hook && method.params.len() == 1)
+            {
+                if let Some(installed) = body(&method.body, &method.params[0].name, app, resolver, seen) { methods.extend(installed); }
+            }
+        }
+        methods
+    }
+    let declarations = app.models.iter().map(|model| {
+        let exprs = model.body.iter().filter_map(|item| match item { ModelBodyItem::Unknown { expr, .. } => Some(expr), _ => None });
+        (model.name.clone(), model_includes(model), extensions(exprs, resolver))
+    }).chain(app.library_classes.iter().map(|class|
+        (class.name.clone(), class.includes.clone(), extensions(class.unknown_calls.iter(), resolver))));
+    for (id, mut includes, extensions) in declarations {
+        let mut installed = hook_methods(&includes, "included", app, resolver, &mut crate::det::HashSet::default());
+        installed.extend(hook_methods(&extensions, "extended", app, resolver, &mut crate::det::HashSet::default()));
+        includes.extend(extensions.iter().cloned());
+        let info = classes.entry(id).or_default();
+        info.class_method_extensions.extend(extensions);
+        info.class_side_hook_methods.extend(installed);
+        info.unknown_class_side_hook |= crate::ingest::unconsumed_class_side_hook(&includes, app).is_some();
     }
 }
 

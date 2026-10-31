@@ -466,6 +466,15 @@ pub(crate) fn lower_models_inner_with_ruby_values(
     let mut out = Vec::new();
     for (mut methods, _, table, model) in all_methods {
         for method in &mut methods {
+            if runtime_relation == RuntimeRelation::Present && method.receiver == MethodReceiver::Class {
+                fn late_bound_self(expr: &mut Expr) {
+                    expr.node.for_each_child_mut(&mut late_bound_self);
+                    if matches!(&*expr.node, ExprNode::Const { .. })
+                        && expr.decisions & crate::expr::IMPLICIT_MODEL_FINDER_RECEIVER != 0
+                    { *expr.node = ExprNode::SelfRef; }
+                }
+                late_bound_self(&mut method.body);
+            }
             // Arel pass — rewrite recognized AR call sites
             // (`Comment.where(article_id: @id)`, `Article.find_by(id:
             // @id)`, `Comment.all`, `Comment.count`, `Comment.exists?`)
@@ -2486,6 +2495,7 @@ fn build_class_info_with_finder_inputs(
             info.source_class_methods.insert(method.name.clone());
         }
     }
+    info.source_class_methods.extend(model.scopes().map(|s| s.name.clone()));
 
     // Attributes row from schema columns.
     if let Some(t) = table {

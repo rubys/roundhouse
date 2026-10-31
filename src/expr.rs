@@ -173,6 +173,13 @@ pub const INHERITED_ALIAS_COPY: u64 = 1 << 36;
 
 /// A source-resolved library call whose native keyword ABI is preserved.
 pub const NATIVE_KEYWORD_ARGUMENTS: u64 = 1 << 35;
+/// A retained finder dispatch: subclass arms are explicit, or hook ownership
+/// is unknown. Later registries must not relicense a framework rewrite.
+pub const FINDER_DISPATCH_FALLBACK: u64 = 1 << 37;
+/// Ingest qualified a bare model finder; a runtime relation keeps its late-bound self.
+pub const IMPLICIT_MODEL_FINDER_RECEIVER: u64 = 1 << 38;
+/// Unknown-hook dynamic dispatch has no established emitted implementation.
+pub const FINDER_IMPLEMENTATION_UNKNOWN: u64 = 1 << 39;
 
 /// Whether `expr` is a [`SELF_BINDING`] cast.
 pub fn is_self_binding(expr: &Expr) -> bool {

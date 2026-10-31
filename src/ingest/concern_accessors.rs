@@ -118,6 +118,10 @@ fn uncertain_visibility(expr: &Expr, name: &Symbol, writer: &Symbol, nested: boo
 /// callbacks/defaults after block registration are inert; overriding the
 /// rest of the framework protocol can prevent that registration/execution.
 fn unconsumed_included_hook(model: &crate::dialect::Model, app: &App) -> Option<crate::ClassId> {
+    unconsumed_class_side_hook(&crate::analyze::model_includes(model), app)
+}
+
+pub(crate) fn unconsumed_class_side_hook(includes: &[ClassId], app: &App) -> Option<ClassId> {
     fn inert(expr: &Expr) -> bool {
         match &*expr.node {
             ExprNode::Lit { .. } => true,
@@ -127,7 +131,7 @@ fn unconsumed_included_hook(model: &crate::dialect::Model, app: &App) -> Option<
         }
     }
 
-    let mut pending = crate::analyze::model_includes(model);
+    let mut pending = includes.to_vec();
     let mut seen = HashSet::default();
     while let Some(id) = pending.pop() {
         if !seen.insert(id.clone()) {

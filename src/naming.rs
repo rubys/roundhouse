@@ -58,6 +58,11 @@ pub fn underscore(class_name: &str) -> String {
         .join("/")
 }
 
+/// ActiveModel's default parameter key keeps namespaces as underscores.
+pub fn model_param_key(class_name: &str) -> String {
+    underscore(class_name.trim_start_matches("::")).replace('/', "_")
+}
+
 pub fn camelize(snake: &str) -> String {
     // An app acronym (`inflect.acronym "API"`) camelizes as itself:
     // `api_keys` → `APIKeys`, `html_parser` → `HTMLParser`.

@@ -198,27 +198,96 @@ fn dynamic_finder_attr(method: &str) -> Option<(&str, bool)> {
 /// would rename that call into a bogus `find_by(password_reset_token:
 /// …)` querying a column that doesn't exist). A name that isn't a real
 /// column is left exactly as written, so it keeps dispatching to
-/// whatever method actually owns it. The model is resolved by walking
-/// the chain down to its root Const rather than trusting the
-/// receiver's stamped `ty`: this pass runs on the lowerer's OWN
-/// re-typing of the body, whose registry is assembled fresh per
-/// lowering call and doesn't carry the main analyze pass's full
-/// class-method catalog, so a `Model.includes(...)` chain root can
-/// still read back `Untyped` here even though the construct is fully
-/// supported end to end.
-fn normalize_dynamic_finder_send(expr: &mut Expr, registry: &HashMap<ClassId, ClassInfo>) -> bool {
-    let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &mut *expr.node
+/// whatever method actually owns it. A nominal model type describes
+/// instances too: only a proven class object or a typed relation can
+/// license this rewrite. At ingest, the caller supplies class-side
+/// context and resolves constant receivers before calling this rule.
+pub(crate) fn normalize_dynamic_finder_send(
+    expr: &mut Expr,
+    registry: &HashMap<ClassId, ClassInfo>,
+    self_class: Option<&ClassId>,
+    before_scope_threading: bool,
+) -> bool {
+    if expr.decisions & crate::expr::FINDER_DISPATCH_FALLBACK != 0
+        || dynamic_finder_delegate_refusal(expr, registry).is_some() { return false; }
+    if normalize_polymorphic_finder(expr, registry, self_class, before_scope_threading) {
+        return true;
+    }
+    let ExprNode::Send { recv, method, args, block, .. } = &mut *expr.node
     else {
         return false;
     };
-    let Some((attr, bang)) = dynamic_finder_attr(method.as_str()) else {
-        return false;
+    let reflected = matches!(method.as_str(), "send" | "public_send" | "__send__");
+    let name = if reflected {
+        let Some(Expr { node, .. }) = args.first() else { return false };
+        match &**node {
+            ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => value.clone(),
+            ExprNode::Lit { value: crate::expr::Literal::Str { value } } => Symbol::from(value.as_str()),
+            _ => return false,
+        }
+    } else {
+        method.clone()
     };
-    let [value] = &args[..] else { return false };
-    let owns_column = chain_root_class(recv, registry)
-        .and_then(|of| registry.get(&of))
-        .is_some_and(|ci| ci.has_schema_column(&Symbol::from(attr)));
-    if !owns_column {
+    if !matches!(name.as_str(), "find_by" | "find_by!") && dynamic_finder_attr(name.as_str()).is_none() { return false; }
+    let owner = match recv.as_ref().map(|r| &*r.node) {
+        None => self_class.cloned(),
+        Some(ExprNode::SelfRef) if self_class.is_some() => self_class.cloned(),
+        Some(ExprNode::Const { .. }) if before_scope_threading && self_class.is_some() => recv.as_ref().and_then(|r| match r.ty.as_ref() {
+            Some(Ty::Class { id, .. }) => Some(id.clone()),
+            _ => build::const_to_class_id(r, registry),
+        }),
+        _ => recv.as_ref().and_then(|r| match r.ty.as_ref() {
+            Some(Ty::Relation { of }) => Some(of.clone()),
+            Some(Ty::Class { id, args }) if id.0.as_str() == "Class" && args.len() == 1 => {
+                match &args[0] { Ty::Class { id, .. } => Some(id.clone()), _ => None }
+            }
+            // Nominal Class types also describe model instances. The
+            // analyzer's value proof survives copies without licensing
+            // record locals or arbitrary model-returning calls.
+            Some(Ty::Class { id, .. }) if r.decisions & crate::expr::CLASS_OBJECT_VALUE != 0 => Some(id.clone()),
+            _ => None,
+        }),
+    };
+    let Some(owner) = owner else { return false };
+    if ClassInfo::class_method_ownership_unknown(registry, &owner, &name) {
+        // A later registry built from lowered models must not rediscover a
+        // framework finder after the original hook provenance has gone.
+        expr.decisions |= crate::expr::FINDER_DISPATCH_FALLBACK;
+        if dynamic_finder_attr(name.as_str()).is_some()
+            && !ClassInfo::class_method_implementation_exists(registry, &owner, &name)
+            && !ClassInfo::class_method_implementation_exists(registry, &owner, &Symbol::from("method_missing"))
+            && !(reflected && ClassInfo::class_method_implementation_exists(registry, &owner, method))
+        {
+            expr.decisions |= crate::expr::FINDER_IMPLEMENTATION_UNKNOWN;
+        }
+        return false;
+    }
+    if block.is_some() { return false; }
+    let Some((attr, bang)) = dynamic_finder_attr(name.as_str()) else { return false };
+    let [value] = (if reflected { &args[1..] } else { &args[..] }) else { return false };
+    if matches!(&*value.node, ExprNode::Splat { .. } | ExprNode::KeywordSplat { .. }) { return false; }
+    if !ClassInfo::active_record_class(registry, &owner)
+        || ClassInfo::schema_column_owner(registry, &owner, &Symbol::from(attr)).is_none()
+        || ClassInfo::source_class_method(registry, &owner, &name)
+        || ClassInfo::class_method_ownership_unknown(registry, &owner, &name)
+        || ClassInfo::source_class_method(registry, &owner, &Symbol::from("method_missing"))
+        || (reflected && ClassInfo::source_class_method(registry, &owner, method))
+    {
+        return false;
+    }
+    // A source delegate runs on the class, rather than the relation's
+    // builtin find_by. Keep its dynamic spelling until scope threading
+    // has finished, so it cannot be mistaken for a relation terminal.
+    if before_scope_threading
+        && (if bang { &["find_by!", "find_by"][..] } else { &["find_by"][..] }).iter().any(|name|
+            ClassInfo::source_class_method(registry, &owner, &Symbol::from(*name)))
+    {
+        // Make implicit class self available to the later, typed pass,
+        // including a reflected send whose delegate is source-owned.
+        if recv.is_none() {
+            *recv = Some(Expr::new(expr.span, ExprNode::SelfRef));
+            return true;
+        }
         return false;
     }
     let span = value.span;
@@ -228,10 +297,201 @@ fn normalize_dynamic_finder_send(expr: &mut Expr, registry: &HashMap<ClassId, Cl
     );
     let hash = Expr::new(
         span,
-        ExprNode::Hash { entries: vec![(key, value.clone())], kwargs: true },
+        // ActiveRecord::DynamicMatchers passes an explicit positional hash.
+        ExprNode::Hash { entries: vec![(key, value.clone())], kwargs: false },
     );
     *method = Symbol::from(if bang { "find_by!" } else { "find_by" });
     *args = vec![hash];
+    if recv.is_none() {
+        *recv = Some(Expr::new(expr.span, ExprNode::SelfRef));
+    }
+    true
+}
+
+/// A relation's builtin find_by is not an application's class delegate.
+/// Until that delegate's scope can be threaded, retain the source call
+/// and refuse emission rather than silently bypass its return and work.
+pub(crate) fn dynamic_finder_delegate_refusal(
+    expr: &Expr, registry: &HashMap<ClassId, ClassInfo>,
+) -> Option<crate::diagnostic::Diagnostic> {
+    if expr.decisions & crate::expr::FINDER_IMPLEMENTATION_UNKNOWN != 0 {
+        return Some(crate::diagnostic::Diagnostic::unsupported(expr.span, None,
+            "dynamic finder without established implementation".to_owned(),
+            "class-side hook ownership is unknown and no emitted finder, missing handler or reflection wrapper is established".to_owned()));
+    }
+    let ExprNode::Send { recv: Some(receiver), method, args, block, .. } = &*expr.node else { return None };
+    let Some(Ty::Relation { of }) = receiver.ty.as_ref() else { return None };
+    let reflected = matches!(method.as_str(), "send" | "public_send" | "__send__");
+    let name = if reflected {
+        match args.first().map(|e| &*e.node) {
+            Some(ExprNode::Lit { value: crate::expr::Literal::Sym { value } }) => value.clone(),
+            Some(ExprNode::Lit { value: crate::expr::Literal::Str { value } }) => Symbol::from(value.as_str()),
+            _ => return None,
+        }
+    } else { method.clone() };
+    let (attr, bang) = dynamic_finder_attr(name.as_str())?;
+    if ClassInfo::class_method_ownership_unknown(registry, of, &name) {
+        return Some(crate::diagnostic::Diagnostic::unsupported(expr.span, None,
+            "relation finder with unknown class-side hook".to_owned(),
+            "retained hooks may own the model finder; the relation builtin cannot replace unknown dispatch".to_owned()));
+    }
+    if block.is_some() { return None; }
+    if args.len() != if reflected { 2 } else { 1 }
+        || ClassInfo::schema_column_owner(registry, of, &Symbol::from(attr)).is_none()
+        || ClassInfo::source_class_method(registry, of, &name)
+        || ClassInfo::source_class_method(registry, of, &Symbol::from("method_missing"))
+        || !(if bang { &["find_by!", "find_by"][..] } else { &["find_by"][..] }).iter()
+            .any(|name| ClassInfo::source_class_method(registry, of, &Symbol::from(*name))) { return None; }
+    Some(crate::diagnostic::Diagnostic::unsupported(expr.span, None,
+        "relation dynamic finder with source delegate".to_owned(),
+        "the application's class finder delegate requires relation scope threading; the relation builtin cannot replace it".to_owned()))
+}
+
+/// A class-valued local can hold either arm, and inherited helpers run
+/// with the subclass as self. Keep source dispatch on those arms rather
+/// than replacing their finder with the framework delegate.
+fn normalize_polymorphic_finder(
+    expr: &mut Expr,
+    registry: &HashMap<ClassId, ClassInfo>,
+    self_class: Option<&ClassId>,
+    before_scope_threading: bool,
+) -> bool {
+    let ExprNode::Send { recv, method, args, block: None, .. } = &*expr.node else { return false };
+    let reflected = matches!(method.as_str(), "send" | "public_send" | "__send__");
+    let name = if reflected {
+        match args.first().map(|e| &*e.node) {
+            Some(ExprNode::Lit { value: crate::expr::Literal::Sym { value } }) => value.clone(),
+            Some(ExprNode::Lit { value: crate::expr::Literal::Str { value } }) => Symbol::from(value.as_str()),
+            _ => return false,
+        }
+    } else { method.clone() };
+    let (attr, bang) = if let Some((attr, bang)) = dynamic_finder_attr(name.as_str()) {
+        (Some(attr), bang)
+    } else if matches!(name.as_str(), "find_by" | "find_by!")
+        && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
+    { (None, name.as_str().ends_with('!')) } else { return false };
+    let values = if reflected { &args[1..] } else { &args[..] };
+    if values.len() != 1 || matches!(&*values[0].node, ExprNode::Splat { .. } | ExprNode::KeywordSplat { .. }) { return false; }
+    let receiver = match recv {
+        None if self_class.is_some() => Expr::new(expr.span, ExprNode::SelfRef),
+        Some(r) if matches!(&*r.node, ExprNode::SelfRef | ExprNode::Var { .. })
+            && (self_class.is_some() && matches!(&*r.node, ExprNode::SelfRef)
+                || r.decisions & crate::expr::CLASS_OBJECT_VALUE != 0) => r.clone(),
+        _ => return false,
+    };
+    let mut union = Vec::new();
+    if let Some(Ty::Union { variants }) = receiver.ty.as_ref() {
+        for ty in variants.iter() {
+            let Ty::Class { id, .. } = ty else { return false };
+            if !ClassInfo::active_record_class(registry, id)
+                || attr.is_some_and(|attr| ClassInfo::schema_column_owner(registry, id, &Symbol::from(attr)).is_none()) { return false; }
+            union.push(id.clone());
+        }
+    }
+    let owner = self_class.cloned().or_else(|| match receiver.ty.as_ref() {
+        Some(Ty::Class { id, .. }) => Some(id.clone()), _ => None,
+    });
+    let mut arms = union.clone();
+    if arms.is_empty() {
+        let Some(owner) = owner else { return false };
+        if !ClassInfo::active_record_class(registry, &owner)
+            || attr.is_some_and(|attr| ClassInfo::schema_column_owner(registry, &owner, &Symbol::from(attr)).is_none()) { return false; }
+        if ClassInfo::source_class_method(registry, &owner, &name)
+            || ClassInfo::class_method_ownership_unknown(registry, &owner, &name)
+            || ClassInfo::source_class_method(registry, &owner, &Symbol::from("method_missing"))
+            || reflected && ClassInfo::source_class_method(registry, &owner, method)
+            || before_scope_threading && (if bang { &["find_by!", "find_by"][..] } else { &["find_by"][..] }).iter()
+                .any(|name| ClassInfo::source_class_method(registry, &owner, &Symbol::from(*name)))
+        { return false; }
+        for id in registry.keys() {
+            if *id == owner { continue; }
+            let mut current = registry.get(id).and_then(|c| c.parent.as_ref());
+            let mut seen = crate::det::HashSet::default();
+            while let Some(parent) = current {
+                if !seen.insert(parent) { break; }
+                if *parent == owner {
+                    if ClassInfo::source_class_method(registry, id, &name)
+                        || ClassInfo::source_class_method(registry, id, &Symbol::from("method_missing"))
+                        || reflected && ClassInfo::source_class_method(registry, id, method)
+                        || (if bang { &["find_by!", "find_by"][..] } else { &["find_by"][..] }).iter()
+                            .any(|name| ClassInfo::source_class_method(registry, id, &Symbol::from(*name)))
+                    { arms.push(id.clone()); }
+                    break;
+                }
+                current = registry.get(parent).and_then(|c| c.parent.as_ref());
+            }
+        }
+    }
+    if arms.is_empty() { return false; }
+    arms.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+    arms.dedup();
+    if arms.iter().any(|id| ClassInfo::source_class_method(registry, id, &Symbol::from("=="))) {
+        // The generated guards require identity comparison. An application
+        // class equality method can select a different finder arm.
+        crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
+            target: None, construct: Symbol::from("polymorphic finder with class equality override"),
+            detail: "source class equality cannot prove the identity guards needed for finder dispatch".to_owned(),
+        }));
+        expr.decisions |= crate::expr::FINDER_DISPATCH_FALLBACK;
+        return true;
+    }
+    let mut fallback = expr.clone();
+    // A generated fallback's receiver is the same class value, but the
+    // ordinary normalizer must not rediscover these polymorphic arms.
+    if let ExprNode::Send { recv, .. } = &mut *fallback.node {
+        let mut r = receiver.clone();
+        r.decisions &= !crate::expr::CLASS_OBJECT_VALUE;
+        *recv = Some(r);
+    }
+    // Normalize the framework arm using the lexical owner's proof.
+    if union.is_empty() {
+        let Some(owner) = self_class.cloned().or_else(|| match receiver.ty.as_ref() {
+            Some(Ty::Class { id, .. }) => Some(id.clone()), _ => None,
+        }) else { return false };
+        let mut constant = Expr::new(expr.span, ExprNode::Const { path: vec![owner.0.clone()] });
+        constant.ty = Some(Ty::Class { id: owner, args: vec![].into() });
+        constant.decisions |= crate::expr::CLASS_OBJECT_VALUE | crate::expr::RESOLVED_CLASS_REF | crate::expr::GENERATED_CONST_REF;
+        if let ExprNode::Send { recv, .. } = &mut *fallback.node { *recv = Some(constant); }
+        normalize_dynamic_finder_send(&mut fallback, registry, None, before_scope_threading);
+        if let ExprNode::Send { recv, .. } = &mut *fallback.node { *recv = Some(receiver.clone()); }
+        fallback.decisions |= crate::expr::FINDER_DISPATCH_FALLBACK;
+    }
+    for (i, id) in arms.iter().enumerate().rev() {
+        let mut constant = Expr::new(expr.span, ExprNode::Const { path: vec![id.0.clone()] });
+        constant.ty = Some(Ty::Class { id: id.clone(), args: vec![].into() });
+        constant.decisions |= crate::expr::CLASS_OBJECT_VALUE | crate::expr::RESOLVED_CLASS_REF | crate::expr::GENERATED_CONST_REF;
+        let mut call = expr.clone();
+        if let ExprNode::Send { recv, .. } = &mut *call.node { *recv = Some(constant.clone()); }
+        normalize_dynamic_finder_send(&mut call, registry, None, false);
+        if union.is_empty() && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) {
+            // Implicit and explicit self can call private methods. An
+            // explicit subclass constant cannot; invoke the original
+            // dispatch through an unowned builtin reflection entry.
+            if let Some(alias) = ["__send__", "send"].into_iter().find(|alias|
+                !ClassInfo::source_class_method(registry, id, &Symbol::from(*alias)))
+            {
+                if let ExprNode::Send { method, args, .. } = &mut *call.node {
+                    args.insert(0, Expr::new(expr.span, ExprNode::Lit {
+                        value: crate::expr::Literal::Sym { value: method.clone() },
+                    }));
+                    *method = Symbol::from(alias);
+                }
+            } else {
+                crate::expr::ExprCold::set_diagnostic(&mut call.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                    target: None, construct: Symbol::from("polymorphic finder"),
+                    detail: "source send and __send__ overrides prevent preserving implicit finder visibility".to_owned(),
+                }));
+            }
+        }
+        if !union.is_empty() && i + 1 == arms.len() { fallback = call; continue; }
+        let cond = Expr::new(expr.span, ExprNode::Send {
+            recv: Some(receiver.clone()), method: Symbol::from("=="), args: vec![constant],
+            block: None, parenthesized: true,
+        });
+        fallback = Expr::new(expr.span, ExprNode::If { cond, then_branch: call, else_branch: fallback });
+    }
+    fallback.ty = expr.ty.clone();
+    *expr = fallback;
     true
 }
 
@@ -421,7 +681,12 @@ fn rewrite_arel_inner(
             return false;
         }
     }
-    if let ExprNode::Send { .. } = expr.node.as_ref() {
+    // Literal reflection must use the same normalization as direct
+    // sends. Leave the normalized call on the runtime path: its
+    // delegate may be application-defined.
+    let normalized = normalize_dynamic_finder_send(expr, registry, None, false);
+    if !normalized && expr.decisions & crate::expr::FINDER_DISPATCH_FALLBACK == 0
+        && let ExprNode::Send { .. } = expr.node.as_ref() {
         if let Some((mut op, owner)) =
             build::try_build_arel_with_assocs(expr, schema, registry, assocs)
         {
@@ -460,7 +725,7 @@ fn rewrite_arel_inner(
                 || is_id_finder(method.as_str(), args)
     );
     if unlifted_relation_consumer {
-        let mut changed = normalize_dynamic_finder_send(expr, registry);
+        let mut changed = normalized;
         let ExprNode::Send { recv: Some(recv), args, .. } = &mut *expr.node else {
             unreachable!("matched Send with recv above");
         };
@@ -470,7 +735,7 @@ fn rewrite_arel_inner(
         }
         return changed;
     }
-    let mut changed = false;
+    let mut changed = normalized;
     walk_subexprs_mut(expr, &mut |e| {
         changed |= rewrite_arel_inner(e, schema, registry, assocs, refined, ruby_read_values, scopes, visitor)
     });
