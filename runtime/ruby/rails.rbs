@@ -25,6 +25,7 @@ module Rails
     def read: () -> String
     def exist?: () -> bool
     def expand_path: (?(String | AppPath)? dir) -> AppPath
+    def mkpath: () -> AppPath
   end
 
   class Env

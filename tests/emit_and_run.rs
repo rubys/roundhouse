@@ -68,6 +68,8 @@ mod branch_local_join;
 mod utc_zone_time;
 #[path = "emit_and_run/rspec_specs.rs"]
 mod rspec_specs;
+#[path = "emit_and_run/after_initialize.rs"]
+mod after_initialize;
 #[path = "emit_and_run/discard.rs"]
 mod discard;
 #[path = "emit_and_run/callback_abort.rs"]

@@ -475,6 +475,20 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
         Some(taken) => out.extend(taken.iter().cloned()),
         None => out.extend(diagnose_helper_modules(app)),
     }
+    // after_initialize bodies are the app's own code run at boot
+    // (`ingest::after_initialize`): checked like a model method, not under
+    // the library policy, so a call with no runtime behind it is an error.
+    if app.runs_after_initialize {
+        for class in app.library_classes.iter().filter(|c| c.name.0.as_str() == crate::app::AFTER_INITIALIZE_RUNNER) {
+            for method in &class.methods {
+                diagnose_expr(&method.body, &mut out);
+                // `run` is generated; only the callbacks carry the app's spans.
+                if !method.name_span.is_synthetic() {
+                    unchecked_callback_calls(&method.body, &mut out);
+                }
+            }
+        }
+    }
     for class in &app.library_classes {
         for initializer in &class.class_ivar_initializers {
             diagnose_expr(initializer, &mut out);
@@ -627,6 +641,39 @@ pub fn diagnose_helper_modules(app: &App) -> Vec<Diagnostic> {
         }
     }
     helper_out
+}
+
+/// A call in an `after_initialize` body that nothing checks: its receiver
+/// is the gradual escape or untyped, or an implicit-self call is
+/// unresolved. In a model method such a call is a warning; a carried
+/// callback runs at boot with no caller to rescue it, so the callback is
+/// carried only when every call resolves and this is an error. One report
+/// per chain: `a.b.c` on an untyped `a` names `b`, the first unchecked link.
+fn unchecked_callback_calls(expr: &Expr, out: &mut Vec<Diagnostic>) {
+    fn unchecked(expr: &Expr) -> bool {
+        match &*expr.node {
+            ExprNode::Send { recv: Some(r), .. } => {
+                matches!(r.ty, Some(Ty::Untyped)) || is_unknown_ty(r.ty.as_ref())
+            }
+            ExprNode::Send { recv: None, .. } => is_unknown_ty(expr.ty.as_ref()),
+            _ => false,
+        }
+    }
+    if let ExprNode::Send { recv, method, .. } = &*expr.node {
+        let link_of_reported_chain = recv.as_ref().is_some_and(|r| unchecked(r));
+        if unchecked(expr) && !link_of_reported_chain && expr.diagnostic().is_none() && !expr.span.is_synthetic() {
+            out.push(Diagnostic::unsupported(
+                expr.span,
+                None,
+                "after_initialize callback call",
+                format!(
+                    "`{}` has no typed receiver, so nothing checks that the emitted program answers it at boot",
+                    method.as_str()
+                ),
+            ));
+        }
+    }
+    expr.node.for_each_child(&mut |child| unchecked_callback_calls(child, out));
 }
 
 /// A type is "unknown" if it's `None` or `Ty::Var(n)` (a placeholder the

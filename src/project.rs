@@ -1146,6 +1146,28 @@ fn is_plain_ruby_class(app: &App, lc: &crate::dialect::LibraryClass) -> bool {
     true
 }
 
+/// A target that does not boot through `boot.rb` never runs the callbacks:
+/// each one is an unsupported construct there, not a silent drop.
+fn report_unrun_after_initialize(app: &App, target: BuildTarget) {
+    // Only the Ruby family and Spinel boot through `boot.rb`, where
+    // `apply_app_initializers` calls the runner; Blog and Futamura walk the source.
+    if !app.runs_after_initialize
+        || matches!(target, BuildTarget::Blog | BuildTarget::Futamura | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel)
+    {
+        return;
+    }
+    for class in app.library_classes.iter().filter(|c| c.name.0.as_str() == crate::app::AFTER_INITIALIZE_RUNNER) {
+        for method in class.methods.iter().filter(|m| !m.name_span.is_synthetic()) {
+            emit::diagnostics::report_unsupported(
+                method.name_span,
+                target.as_str(),
+                "after_initialize",
+                format!("{} has no boot step that runs an after_initialize callback", target.as_str()),
+            );
+        }
+    }
+}
+
 /// A non-integer primary key (`create_table …, id: :uuid`,
 /// `primary_key: "identifier", id: :string`) is carried end to end by
 /// the ruby-shape emit — CRuby, JRuby and Spinel: the analyzer types
@@ -2751,6 +2773,7 @@ fn target_files_inner(
     reject_unsupported_dates(app, target)?;
     reject_unsupported_forwarded_procs(app, target)?;
     report_unsupported_keys(app, target);
+    report_unrun_after_initialize(app, target);
     report_unemitted_library_classes(app, target);
     report_relation_class_calls(app, target);
     report_typescript_error_class(app, target);
@@ -4607,6 +4630,8 @@ fn ruby_family_runtime_files(
     }
     apply_conditional_declarations(&mut files, app);
     apply_file_programs(&mut files, app);
+    // Last, as in `spinel_files`: the overlay boot.rb replaced that one.
+    apply_app_initializers(&mut files, app);
     Ok(files)
 }
 
@@ -5259,6 +5284,23 @@ end\n";
     }
     helper.1 = helper.1.replace(TEST_SQLITE, TEST_POSTGRESQL);
     Ok(())
+}
+
+/// Run the app's `after_initialize` callbacks (the generated
+/// [`crate::app::AFTER_INITIALIZE_RUNNER`], `ingest::after_initialize`) at
+/// the end of `boot.rb`, where Rails fires them: after every initializer and
+/// once everything the bodies can name is loaded. One helper for the Spinel
+/// tree and the Ruby family, so both lanes run the same callbacks.
+fn apply_app_initializers(files: &mut [(String, String)], app: &App) {
+    if !app.runs_after_initialize {
+        return;
+    }
+    let call = format!("{}.run", crate::app::AFTER_INITIALIZE_RUNNER);
+    let Some((_, boot)) = files.iter_mut().find(|(p, _)| p == "boot.rb") else { return };
+    if boot.lines().any(|line| line.trim() == call) {
+        return;
+    }
+    boot.push_str(&format!("\n# The app's after_initialize callbacks (ingest::after_initialize).\n{call}\n"));
 }
 
 /// The JRuby tree's Gemfile: the committed scaffold Gemfile is MRI-only
@@ -9221,6 +9263,8 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     apply_pagination_demand(&mut files)?;
     apply_pagy_demand(&mut files, app)?;
     apply_pay_demand(&mut files, app)?;
+    // Last: the callbacks run once everything boot.rb loads is loaded.
+    apply_app_initializers(&mut files, app);
     Ok((files, test_stems))
 }
 

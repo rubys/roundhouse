@@ -144,6 +144,30 @@ module Rails
       path = File.expand_path(@base)
       AppPath.new(dir.nil? ? path : File.expand_path(path, dir))
     end
+
+    # Pathname#mkpath (`mkdir -p`): makes each missing directory, leaves an
+    # existing one, raises Errno::EEXIST through a file, answers the path.
+    def mkpath
+      parts = @base.split("/")
+      built = @base.start_with?("/") ? "/" : ""
+      i = 0
+      while i < parts.length
+        part = parts[i]
+        unless part.empty? || part == "."
+          built = built.empty? || built == "/" ? built + part : built + "/" + part
+          unless Dir.exist?(built)
+            begin
+              Dir.mkdir(built)
+            rescue SystemCallError
+              # Another process made it first: fine, as in FileUtils.mkdir_p; a file there still raises.
+              raise unless Dir.exist?(built)
+            end
+          end
+        end
+        i += 1
+      end
+      self
+    end
   end
 
   # One store per process. A fresh `Cache.new` per call would make every
