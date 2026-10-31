@@ -27,9 +27,17 @@ fn app(source: &str, routes: &str) -> Overlay {
 }
 
 const ORACLE_GUARD: &str = r#"
-unless RailsOracle.available?("railties", "actionpack", "actionview")
-  warn "Rack mount oracle requires #{RailsOracle.label}: railties, actionpack and actionview"
-  exit(ENV["CI"].to_s.empty? ? 77 : 1)
+begin
+  unless RailsOracle.available?("railties", "actionpack", "actionview")
+    warn "skipping Rack mount oracle: #{RailsOracle.label} requires railties, actionpack and actionview"
+    exit 77
+  end
+  RailsOracle.activate("railties", "actionpack", "actionview")
+  require "rails"
+  require "action_controller"
+rescue LoadError => error
+  warn "skipping Rack mount oracle: #{RailsOracle.label} dependency unavailable: #{error.message}"
+  exit 77
 end
 "#;
 
@@ -39,9 +47,6 @@ fn oracle(source: &str, routes: &str, probe: &str) -> Option<serde_json::Value> 
     let native = format!(r#"
 require {helper:?}
 {ORACLE_GUARD}
-RailsOracle.activate("railties", "actionpack", "actionview")
-require "rails"
-require "action_controller"
 {source}
 class HomeController < ActionController::Base
   def index
@@ -56,7 +61,7 @@ end
 "#);
     let output = Command::new("ruby").args(["-e", &native]).output().expect("Rails oracle");
     if output.status.code() == Some(77) {
-        eprintln!("explicit local skip: {}", String::from_utf8_lossy(&output.stderr));
+        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
         return None;
     }
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
@@ -64,7 +69,7 @@ end
 }
 
 /// The review's exact expanded matrix: eight verbs by twenty paths. These
-/// must all run in the unit partition, which installs the pinned Railties.
+/// always run on emitted output; the Rails comparison needs optional gems.
 #[test]
 fn rack_mount_environment_and_response_match_rails() {
     let probe = r#"
@@ -88,8 +93,7 @@ end
 puts JSON.generate(rows)
 "#;
     let routes = ROUTES.strip_prefix("Rails.application.routes.draw do\n").unwrap().strip_suffix("end\n").unwrap();
-    let Some(want) = oracle(APP, routes, probe) else { return };
-    assert_eq!(want.as_array().unwrap().len(), 160);
+    let want = oracle(APP, routes, probe);
     for source in [
         APP.to_string(),
         APP.replace("class StaticFiles", "module StaticFiles"),
@@ -98,7 +102,16 @@ puts JSON.generate(rows)
     ] {
         let run = app(&source, ROUTES).run_ruby(&format!("endpoint = Main.method(:run_rack)\n{probe}"));
         run.assert_passes();
-        assert_eq!(serde_json::from_str::<serde_json::Value>(run.stdout.trim()).unwrap(), want);
+        let got: serde_json::Value = serde_json::from_str(run.stdout.trim()).unwrap();
+        let rows = got.as_array().unwrap();
+        assert_eq!(rows.len(), 160);
+        for row in rows.iter().filter(|row| row[1] == "/files") {
+            assert_eq!(row[2], 207);
+            assert_eq!(row[3], "/outer/files");
+            assert_eq!(row[4], "/");
+            assert_eq!(row[5], "first:q=one%20two&x=%2f:last");
+        }
+        if let Some(want) = &want { assert_eq!(&got, want); }
     }
 }
 
@@ -136,12 +149,13 @@ puts JSON.generate(rows)
     ] {
         let route = format!("mount {target}, at: '/files'");
         let routes = format!("Rails.application.routes.draw do\n{route}\nend\n");
-        let Some(want) = oracle(&source, &route, probe) else { return };
-        assert_eq!(want.as_array().unwrap().len(), 4);
-        assert!(want.as_array().unwrap().iter().all(|row| row[2] == 207 && row[4] == "first:q=1:last"), "{want}");
+        let want = oracle(&source, &route, probe);
         let run = app(&source, &routes).run_ruby(&format!("endpoint = Main.method(:run_rack)\n{probe}"));
         run.assert_passes();
-        assert_eq!(serde_json::from_str::<serde_json::Value>(run.stdout.trim()).unwrap(), want, "{target}");
+        let got: serde_json::Value = serde_json::from_str(run.stdout.trim()).unwrap();
+        assert_eq!(got.as_array().unwrap().len(), 4);
+        assert!(got.as_array().unwrap().iter().all(|row| row[2] == 207 && row[4] == "first:q=1:last"), "{got}");
+        if let Some(want) = &want { assert_eq!(&got, want, "{target}"); }
         for build in [BuildTarget::Ruby, BuildTarget::Jruby, BuildTarget::Spinel] {
             let (tree, errors) = app(&source, &routes).emit(build);
             assert!(errors.is_empty(), "{build:?}: {errors:?}");
@@ -174,26 +188,46 @@ rows = ["/filesystem", "/files0", "/files_", "/files.json", "/files-other"].map 
 end
 puts JSON.generate(rows)
 "#;
-    let Some(want) = oracle(APP, routes, probe) else { return };
+    let want = oracle(APP, routes, probe);
     let run = app(APP, &format!("Rails.application.routes.draw do\n{routes}\nend\n"))
         .run_ruby(&format!("endpoint = Main.method(:run_rack)\n{probe}"));
     run.assert_passes();
-    assert_eq!(serde_json::from_str::<serde_json::Value>(run.stdout.trim()).unwrap(), want);
+    let got: serde_json::Value = serde_json::from_str(run.stdout.trim()).unwrap();
+    assert_eq!(got, serde_json::json!([
+        ["/filesystem", 200, null, null, "controller"],
+        ["/files0", 200, null, null, "controller"],
+        ["/files_", 200, null, null, "controller"],
+        ["/files.json", 207, "/outer/files", "/.json", "first::last"],
+        ["/files-other", 207, "/outer/files", "/-other", "first::last"],
+    ]));
+    if let Some(want) = &want { assert_eq!(&got, want); }
 }
 
 #[test]
-fn rack_mount_oracle_missing_gems_fail_in_ci_and_skip_explicitly_locally() {
+fn rack_mount_oracle_missing_gems_and_dependencies_skip_in_ci_and_locally() {
     let helper = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/rails_oracle.rb");
     let empty = std::env::temp_dir().join(format!("rack-oracle-no-gems-{}", std::process::id()));
     std::fs::create_dir_all(&empty).unwrap();
-    for ci in [true, false] {
-        let mut command = Command::new("ruby");
-        command.args(["-e", &format!("require {helper:?}\n{ORACLE_GUARD}")])
-            .env("GEM_HOME", &empty).env("GEM_PATH", &empty).env_remove("RUBYOPT");
-        if ci { command.env("CI", "true"); } else { command.env_remove("CI"); }
-        let output = command.output().unwrap();
-        assert_eq!(output.status.code(), Some(if ci { 1 } else { 77 }));
-        assert!(String::from_utf8_lossy(&output.stderr).contains("Rack mount oracle requires"));
+    let partial = empty.join("partial");
+    std::fs::create_dir_all(partial.join("specifications")).unwrap();
+    for name in ["railties", "actionpack", "actionview"] {
+        std::fs::write(partial.join(format!("specifications/{name}-8.1.4.gemspec")), format!(
+            "Gem::Specification.new do |s|\ns.name = '{name}'\ns.version = '8.1.4'\ns.add_runtime_dependency 'roundhouse_missing_oracle_dependency', '>= 0'\nend\n"
+        )).unwrap();
+    }
+    for gems in [&empty, &partial] {
+        for ci in [true, false] {
+            let mut command = Command::new("ruby");
+            command.args(["-e", &format!("require {helper:?}\n{ORACLE_GUARD}")])
+                .env("GEM_HOME", gems).env("GEM_PATH", gems)
+                .env("RH_RAILS_ORACLE", "8.1.4").env_remove("RUBYOPT");
+            if ci { command.env("CI", "true"); } else { command.env_remove("CI"); }
+            let output = command.output().unwrap();
+            assert_eq!(output.status.code(), Some(77), "{}", String::from_utf8_lossy(&output.stderr));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("skipping Rack mount oracle"), "{stderr}");
+            if gems == &partial { assert!(stderr.contains("roundhouse_missing_oracle_dependency"), "{stderr}"); }
+        }
     }
     std::fs::remove_dir_all(empty).unwrap();
 }
@@ -304,11 +338,18 @@ rows = ["/files/controller", "/files/later", "/files", "/files.json"].map do |pa
 end
 puts JSON.generate(rows)
 "#;
-    let Some(want) = oracle(&source, routes, probe) else { return };
+    let want = oracle(&source, routes, probe);
     let run = app(&source, &format!("Rails.application.routes.draw do\n{routes}\nend\n"))
         .run_ruby(&format!("endpoint = Main.method(:run_rack)\n{probe}"));
     run.assert_passes();
-    assert_eq!(serde_json::from_str::<serde_json::Value>(run.stdout.trim()).unwrap(), want);
+    let got: serde_json::Value = serde_json::from_str(run.stdout.trim()).unwrap();
+    assert_eq!(got, serde_json::json!([
+        ["/files/controller", 200, null, null, "controller"],
+        ["/files/later", 208, "/outer/files", "/later", "first:kept=yes:last"],
+        ["/files", 208, "/outer/files", "/", "first:kept=yes:last"],
+        ["/files.json", 208, "/outer/files", "/.json", "first:kept=yes:last"],
+    ]));
+    if let Some(want) = &want { assert_eq!(&got, want); }
 }
 
 #[test]

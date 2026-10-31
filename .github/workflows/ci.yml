@@ -580,7 +580,6 @@ jobs:
         run: |
           gem install --no-document rails-html-sanitizer sqlite3 bcrypt rack ruby-vips markly faraday faraday-multipart faraday-retry retryable jwt rest-client elastic-apm
           gem install --no-document activerecord -v '~> 8.1.0'
-          gem install --no-document railties -v 8.1.4
       - name: Download current-run test bundle
         uses: actions/download-artifact@v8
         with:
