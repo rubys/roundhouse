@@ -2618,6 +2618,19 @@ impl<'a> BodyTyper<'a> {
                 // A union of concrete arms that all lack the method
                 // (`Str | Nil` with `join`) still errors, as it should.
                 let has_var = variants.iter().any(|v| matches!(v, Ty::Var { .. }));
+                // `nil.dup` / `nil.clone` answer `nil` (Ruby >= 2.4), so
+                // the copy of a `T | Nil` is `T' | Nil`, not `T'`. A
+                // `@status_change = status_change.dup.freeze` over
+                // `[String?, String]?` was typed `Array[String?]`, the
+                // reader inherited it, and `status_change.present?` ground
+                // to `!status_change.empty?` -- nil at runtime.
+                if matches!(method.as_str(), "dup" | "clone")
+                    && args.is_empty()
+                    && !resolved.is_empty()
+                    && variants.iter().any(|v| matches!(v, Ty::Nil))
+                {
+                    resolved.push(Ty::Nil);
+                }
                 match resolved.len() {
                     0 if has_var => Ty::Untyped,
                     0 => unknown(),
