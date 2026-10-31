@@ -381,6 +381,8 @@ mod conditional_get;
 mod nil_body_length;
 #[path = "emit_and_run/inline_filter_guard.rs"]
 mod inline_filter_guard;
+#[path = "emit_and_run/concern_guarded_filter.rs"]
+mod concern_guarded_filter;
 #[path = "emit_and_run/before_action_return.rs"]
 mod before_action_return;
 #[path = "emit_and_run/sti_global_id.rs"]

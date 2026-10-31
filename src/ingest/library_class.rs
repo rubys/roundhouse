@@ -4965,39 +4965,7 @@ pub fn ingest_concern_filters(
             let Some(block) = call.block().and_then(|b| b.as_block_node()) else { continue };
             let Some(block_body) = block.body() else { continue };
             for inner in flatten_statements(block_body) {
-                match super::controller::parse_filter_call(&inner, file) {
-                    Ok(Some(fs)) => filters.extend(fs),
-                    // `parse_filter_call` itself only returns `Err` for a
-                    // non-literal `only:`/`except:` (refused rather than
-                    // silently applied to every action — that function's
-                    // doc comment). Strict mode must fail ingest the same
-                    // way a controller's own `only:`/`except:` would;
-                    // survey mode records the gap and keeps scanning.
-                    Err(err) => super::survey::continue_or_fail(err)?,
-                    Ok(None) => {
-                        if let Some(f) = content_security_policy_filter(&inner, file) {
-                            filters.push(f);
-                        } else if let Some(f) = block_form_concern_filter(&inner, file) {
-                            filters.push(f);
-                        } else if let Some(name) = forgery_macro_name(&inner) {
-                            // A forgery declaration `parse_filter_call` does not
-                            // model (`prepend:`, a custom `store:`, an unknown
-                            // `with:`) changes how every
-                            // includer checks requests. The `included` block is
-                            // otherwise dropped, so it would vanish without a
-                            // trace where the same line in a controller is a
-                            // survey gap; name it the same way.
-                            super::survey::record(&super::IngestError::Unsupported {
-                                file: file.to_string(),
-                                message: format!(
-                                    "controller concern macro not recognized: `{name}` (its effect is dropped from the output)"
-                                ),
-                            });
-                        } else {
-                            record_concern_csp_divergence(&inner, file);
-                        }
-                    }
-                }
+                ingest_included_filter_statement(&inner, file, &mut filters)?;
             }
         }
         if !filters.is_empty() {
@@ -5005,6 +4973,129 @@ pub fn ingest_concern_filters(
         }
     }
     Ok(out)
+}
+
+fn ingest_included_filter_statement(
+    inner: &Node<'_>,
+    file: &str,
+    filters: &mut Vec<crate::dialect::Filter>,
+) -> super::IngestResult<()> {
+    match super::controller::parse_filter_call(inner, file) {
+        Ok(Some(fs)) => filters.extend(fs),
+        // `parse_filter_call` itself only returns `Err` for a
+        // non-literal `only:`/`except:` (refused rather than
+        // silently applied to every action — that function's
+        // doc comment). Strict mode must fail ingest the same
+        // way a controller's own `only:`/`except:` would;
+        // survey mode records the gap and keeps scanning.
+        Err(err) => super::survey::continue_or_fail(err)?,
+        Ok(None) => {
+            if let Some(guarded) = controller_callback_guarded_body(inner) {
+                for stmt in guarded {
+                    ingest_included_filter_statement(&stmt, file, filters)?;
+                }
+            } else if let Some(f) = content_security_policy_filter(inner, file) {
+                filters.push(f);
+            } else if let Some(f) = block_form_concern_filter(inner, file) {
+                filters.push(f);
+            } else if let Some(name) = forgery_macro_name(inner) {
+                // A forgery declaration `parse_filter_call` does not
+                // model (`prepend:`, a custom `store:`, an unknown
+                // `with:`) changes how every
+                // includer checks requests. The `included` block is
+                // otherwise dropped, so it would vanish without a
+                // trace where the same line in a controller is a
+                // survey gap; name it the same way.
+                super::survey::record(&super::IngestError::Unsupported {
+                    file: file.to_string(),
+                    message: format!(
+                        "controller concern macro not recognized: `{name}` (its effect is dropped from the output)"
+                    ),
+                });
+            } else if let Some(name) = conditional_callback_macro_name(inner) {
+                // A filter behind a guard ingest cannot decide would otherwise
+                // vanish with the rest of the `included` block, so the
+                // includer's actions would run unfiltered without a trace.
+                super::survey::record(&super::IngestError::Unsupported {
+                    file: file.to_string(),
+                    message: format!(
+                        "controller concern `{name}` under a condition is not modelled (its effect is dropped from the output)"
+                    ),
+                });
+            } else {
+                record_concern_csp_divergence(inner, file);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The class methods `AbstractController::Callbacks` and
+/// `RequestForgeryProtection` give every controller.
+const CONTROLLER_CALLBACK_MACROS: &[&str] = &[
+    "before_action",
+    "prepend_before_action",
+    "append_before_action",
+    "skip_before_action",
+    "around_action",
+    "prepend_around_action",
+    "append_around_action",
+    "skip_around_action",
+    "after_action",
+    "prepend_after_action",
+    "append_after_action",
+    "skip_after_action",
+    "protect_from_forgery",
+    "skip_forgery_protection",
+];
+
+/// The statements under `if respond_to?(:before_action)` (modifier or
+/// block form) in an `included` block. Its filters only ever reach a
+/// controller (`App::concern_filters`), and a controller class answers
+/// true for every callback macro, so the `if` branch is the one Rails runs.
+fn controller_callback_guarded_body<'pr>(stmt: &Node<'pr>) -> Option<Vec<Node<'pr>>> {
+    let if_node = stmt.as_if_node()?;
+    let predicate = if_node.predicate().as_call_node()?;
+    if predicate.receiver().is_some_and(|r| r.as_self_node().is_none())
+        || constant_id_str(&predicate.name()) != "respond_to?"
+    {
+        return None;
+    }
+    let args: Vec<_> = predicate.arguments()?.arguments().iter().collect();
+    let [arg] = args.as_slice() else { return None };
+    if !CONTROLLER_CALLBACK_MACROS.contains(&symbol_value(arg)?.as_str()) {
+        return None;
+    }
+    Some(if_node.statements().map(|s| flatten_statements(s.as_node())).unwrap_or_default())
+}
+
+/// A callback macro anywhere under an `if` / `unless` that
+/// `controller_callback_guarded_body` does not decide.
+fn conditional_callback_macro_name(stmt: &Node<'_>) -> Option<&'static str> {
+    let branches: Vec<Node<'_>> = if let Some(if_node) = stmt.as_if_node() {
+        if_node.statements().map(|s| s.as_node()).into_iter().chain(if_node.subsequent()).collect()
+    } else if let Some(unless) = stmt.as_unless_node() {
+        unless
+            .statements()
+            .map(|s| s.as_node())
+            .into_iter()
+            .chain(unless.else_clause().and_then(|e| e.statements()).map(|s| s.as_node()))
+            .collect()
+    } else if let Some(else_node) = stmt.as_else_node() {
+        else_node.statements().map(|s| s.as_node()).into_iter().collect()
+    } else {
+        return None;
+    };
+    branches.into_iter().flat_map(flatten_statements).find_map(|inner| {
+        if let Some(call) = inner.as_call_node() {
+            let name = constant_id_str(&call.name());
+            return CONTROLLER_CALLBACK_MACROS
+                .iter()
+                .find(|m| call.receiver().is_none() && **m == name)
+                .copied();
+        }
+        conditional_callback_macro_name(&inner)
+    })
 }
 
 /// `protect_from_forgery` / `skip_forgery_protection`, receiverless.
