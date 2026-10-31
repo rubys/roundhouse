@@ -210,6 +210,35 @@ impl Recipe {
 }
 
 impl EnumConstants {
+    pub(in crate::ingest) fn enum_key_list(&self, node: &Node<'_>, owners: &[String]) -> Option<Vec<Literal>> {
+        let recipe = Recipe::of(node, owners, None, "")?;
+        if !recipe.reads_enum_method() {
+            return None;
+        }
+        // Inclusion currently reads stored attributes. A recipient with
+        // enum attributes can expose a label different from its stored
+        // value, so keep that case outside this extension.
+        if owners.first().is_some_and(|owner| self.has_enum_attributes(owner, &mut crate::det::HashSet::default())) {
+            return None;
+        }
+        let mut loading: Vec<String> = owners.first().cloned().into_iter().collect();
+        match self.evaluate(&recipe, &mut loading)? {
+            Value::List(labels) => Some(labels.into_iter().map(|value| Literal::Str { value }).collect()),
+            Value::Map { .. } => None,
+        }
+    }
+
+    fn has_enum_attributes(&self, owner: &str, visited: &mut crate::det::HashSet<String>) -> bool {
+        if !visited.insert(owner.to_string()) { return false; }
+        if self.enum_declarations.get(owner).is_some_and(|declarations| !declarations.is_empty()) {
+            return true;
+        }
+        self.parents.get(owner).is_some_and(|parents| parents.iter().any(|parent| {
+            self.resolve_name(&parent.path, &parent.owners)
+                .is_some_and(|parent| self.has_enum_attributes(&parent, visited))
+        }))
+    }
+
     /// For a mapping folded before the consumed sources were read: it
     /// read another owner's enum method, which those sources now say may
     /// answer something else.
@@ -240,6 +269,9 @@ impl EnumConstants {
                     && let Some(super::EnumConstant::Mapping(mapping)) = self.values.get(&name)
                 {
                     return Some(Value::List(mapping.iter().map(|(label, _)| label.clone()).collect()));
+                }
+                if !self.snapshot_constant_is_stable(path, owners) {
+                    return None;
                 }
                 let (_, member, table) = self.owner_constant(path, owners)?;
                 if let Some(labels) = table.labels.get(&member) {

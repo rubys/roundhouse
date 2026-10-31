@@ -2,7 +2,9 @@
 //!
 //! The shared `Relation#unscope` implements only `unscope(where: <column>)`
 //! and `unscope(where: [<column>, ...])`; `unscope(:where)` is rewritten to
-//! `Relation#unscope_where` first. Anything else -- `unscope(:order)`,
+//! `Relation#unscope_where` first, and a literal list of the other parts
+//! the runtime drops (`unscope(:order, :limit, :offset)`) to
+//! `Relation#unscope_parts`. Anything else -- `unscope(:select)`,
 //! `unscope(where: nil)`, a non-literal target -- is
 //! accepted by analysis (the method resolves) but raises at run time, or
 //! would silently remove nothing. A removed error is a claim the program
@@ -13,19 +15,47 @@ use crate::diagnostic::{Diagnostic, DiagnosticKind};
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::Symbol;
 
+/// The query parts `Relation#unscope_part!` drops, named as `unscope` takes them.
+const UNSCOPE_PARTS: &[&str] = &["where", "order", "limit", "offset"];
+
 /// `unscope(:where)` drops every WHERE condition: `Relation#unscope_where`.
+/// Other literal parts, alone or with `:where`, are `Relation#unscope_parts`
+/// of their list.
 pub fn rewrite_unscope_where(app: &mut App) {
     fn rewrite(e: &mut Expr) {
         e.node.for_each_child_mut(&mut rewrite);
+        let span = e.span;
         if let ExprNode::Send { recv: Some(_), method, args, block: None, .. } = &mut *e.node
             && method.as_str() == "unscope"
-            && matches!(args.as_slice(), [arg] if matches!(&*arg.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "where"))
+            && let Some(parts) = literal_parts(args)
         {
-            *method = Symbol::from("unscope_where");
-            args.clear();
+            if parts == ["where"] {
+                *method = Symbol::from("unscope_where");
+                args.clear();
+            } else {
+                *method = Symbol::from("unscope_parts");
+                let elements = std::mem::take(args);
+                *args = vec![Expr::new(span, ExprNode::Array { elements, style: crate::expr::ArrayStyle::Brackets })];
+            }
         }
     }
     super::for_each_hook_body(app, &mut rewrite);
+    // A test's relation is the same Relation, so its `unscope` reaches the same runtime methods.
+    super::for_each_test_body(app, &mut rewrite);
+}
+
+/// The part names of `unscope(:a, :b, …)` when every argument is a literal
+/// Symbol the runtime drops.
+fn literal_parts(args: &[Expr]) -> Option<Vec<&str>> {
+    if args.is_empty() {
+        return None;
+    }
+    args.iter()
+        .map(|arg| match &*arg.node {
+            ExprNode::Lit { value: Literal::Sym { value } } if UNSCOPE_PARTS.contains(&value.as_str()) => Some(value.as_str()),
+            _ => None,
+        })
+        .collect()
 }
 
 pub fn apply_unscope_check(app: &App) -> Vec<Diagnostic> {

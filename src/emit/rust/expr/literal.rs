@@ -74,8 +74,10 @@ pub(super) fn emit_hash(entries: &[(Expr, Expr)]) -> String {
             .iter()
             .map(|(k, v)| {
                 let k_s = emit_expr(k);
-                let v_s = emit_expr(v);
-                format!("(({k_s}).to_string(), serde_json::Value::from({v_s}))")
+                // A Value holds a time as its stored text.
+                let v_s = super::send::time_into_value(v)
+                    .unwrap_or_else(|| format!("serde_json::Value::from({})", emit_expr(v)));
+                format!("(({k_s}).to_string(), {v_s})")
             })
             .collect();
         return format!("std::collections::HashMap::from([{}])", pairs.join(", "));

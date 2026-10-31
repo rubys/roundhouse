@@ -171,9 +171,10 @@ pub(super) fn collect_dynamic_render_ivars(expr: &Expr, out: &mut crate::det::Ha
     expr.node.for_each_child(&mut |c| collect_dynamic_render_ivars(c, out));
 }
 
-/// Collect `@ivar = "string literal"` assignments whose ivar name is
-/// in `targets` (the dynamic-render ivar set). Returns each literal
-/// value — the content-partial basename the action wants rendered.
+/// Collect `@ivar = "string literal"` (or `@ivar = {partial: "string
+/// literal", …}`) assignments whose ivar name is in `targets` (the
+/// dynamic-render ivar set). Returns each literal value — the
+/// content-partial basename the action wants rendered.
 pub(super) fn collect_content_partial_literals(
     expr: &Expr,
     targets: &crate::det::HashSet<Symbol>,
@@ -181,8 +182,20 @@ pub(super) fn collect_content_partial_literals(
 ) {
     if let ExprNode::Assign { target: LValue::Ivar { name }, value } = &*expr.node {
         if targets.contains(name) {
-            if let ExprNode::Lit { value: Literal::Str { value } } = &*value.node {
-                out.push(value.clone());
+            match &*value.node {
+                ExprNode::Lit { value: Literal::Str { value } } => out.push(value.clone()),
+                ExprNode::Hash { entries, .. } => {
+                    for (k, v) in entries {
+                        let is_partial_key = matches!(
+                            &*k.node,
+                            ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "partial"
+                        );
+                        if let (true, ExprNode::Lit { value: Literal::Str { value } }) = (is_partial_key, &*v.node) {
+                            out.push(value.clone());
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }

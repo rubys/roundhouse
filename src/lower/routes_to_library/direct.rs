@@ -49,15 +49,18 @@ use crate::span::Span;
 use super::super::routes::FlatRoute;
 
 /// One `RouteHelpers.<name>_path` per `direct` declaration.
+/// `helper_params`: each generated route helper's parameter types, by
+/// name, so a `route_for` argument can meet its target's signature.
 pub fn lower_direct_helpers(
     module_path: &[Symbol],
     app: &App,
     flat: &[FlatRoute],
+    helper_params: &crate::det::HashMap<String, Vec<crate::ty::Ty>>,
 ) -> Vec<LibraryFunction> {
     app.routes
         .direct_helpers
         .iter()
-        .map(|h| build_direct_helper(module_path, h, flat))
+        .map(|h| build_direct_helper(module_path, h, flat, helper_params))
         .collect()
 }
 
@@ -65,6 +68,7 @@ fn build_direct_helper(
     module_path: &[Symbol],
     helper: &DirectHelper,
     flat: &[FlatRoute],
+    helper_params: &crate::det::HashMap<String, Vec<crate::ty::Ty>>,
 ) -> LibraryFunction {
     // The trailing options hash takes a `{}` default — see the header.
     let last = helper.params.len().saturating_sub(1);
@@ -81,7 +85,12 @@ fn build_direct_helper(
         })
         .collect();
     let mut body = helper.body.clone();
-    rewrite_route_for(&mut body, flat);
+    // The temporaries `rewrite_route_for` introduces take names the
+    // helper doesn't already use: its block parameters and its locals.
+    let mut taken: crate::det::HashSet<Symbol> = helper.params.iter().cloned().collect();
+    crate::lower::model_to_library::markers::collect_local_names(&body, &mut taken);
+    let fresh = FreshLocals { next: std::cell::Cell::new(0), taken: std::cell::RefCell::new(taken) };
+    rewrite_route_for(&mut body, flat, helper_params, &fresh);
     LibraryFunction {
         module_path: module_path.to_vec(),
         name: Symbol::from(format!("{}_path", helper.name.as_str())),
@@ -100,9 +109,14 @@ fn empty_hash() -> Expr {
 }
 
 /// `route_for :target, arg…, k: v` → `<target>_path(arg…)` + query.
-fn rewrite_route_for(expr: &mut Expr, flat: &[FlatRoute]) {
+fn rewrite_route_for(
+    expr: &mut Expr,
+    flat: &[FlatRoute],
+    helper_params: &crate::det::HashMap<String, Vec<crate::ty::Ty>>,
+    fresh: &FreshLocals,
+) {
     expr.node
-        .for_each_child_mut(&mut |c| rewrite_route_for(c, flat));
+        .for_each_child_mut(&mut |c| rewrite_route_for(c, flat, helper_params, fresh));
 
     let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
         return;
@@ -132,7 +146,38 @@ fn rewrite_route_for(expr: &mut Expr, flat: &[FlatRoute]) {
         return;
     }
     let span = expr.span;
-    let base = route_helpers_call(&helper, positional.to_vec(), span);
+    // An Integer into a segment the helper types `String` (a call site
+    // elsewhere fills it with a String) is its `to_s`, as Rails writes
+    // it with `to_param` and as the other call sites' rewrite does. A
+    // record and an Integer segment stay as they are.
+    let declared = helper_params.get(&helper);
+    let positional: Vec<Expr> = positional
+        .iter()
+        .enumerate()
+        .map(|(i, arg)| {
+            // An optional segment (`/archive(/:period)`) is declared
+            // `String | nil`: a String slot too.
+            let slot = declared.and_then(|tys| tys.get(i));
+            let wants_str = matches!(slot.map(crate::ty::Ty::peel_nilable), Some(crate::ty::Ty::Str));
+            let is_int = matches!(arg.ty, Some(crate::ty::Ty::Int))
+                || matches!(&*arg.node, ExprNode::Lit { value: Literal::Int { .. } });
+            // An Integer that can be nil, into an optional segment, keeps
+            // its nil (Rails drops the segment) and converts otherwise. A
+            // required segment is left as it was: Rails raises on nil there.
+            let optional_slot = matches!(slot, Some(crate::ty::Ty::Union { variants }) if variants.contains(&crate::ty::Ty::Nil));
+            let nilable_int = matches!(&arg.ty, Some(crate::ty::Ty::Union { variants })
+                if variants.contains(&crate::ty::Ty::Int)
+                    && variants.iter().all(|v| matches!(v, crate::ty::Ty::Int | crate::ty::Ty::Nil)));
+            if wants_str && is_int {
+                to_s(arg.clone(), arg.span)
+            } else if wants_str && optional_slot && nilable_int {
+                to_s_keeping_nil(arg.clone(), fresh)
+            } else {
+                arg.clone()
+            }
+        })
+        .collect();
+    let base = route_helpers_call(&helper, positional, span);
     *expr = with_query(base, &query, span);
 }
 
@@ -287,6 +332,49 @@ fn send0(recv: Expr, method: &str, span: Span) -> Expr {
             parenthesized: true,
         },
     )
+}
+
+/// Names for the temporaries one direct helper's rewrite introduces:
+/// `route_for_arg_<n>`, skipping any name the helper already uses.
+struct FreshLocals {
+    next: std::cell::Cell<usize>,
+    taken: std::cell::RefCell<crate::det::HashSet<Symbol>>,
+}
+
+impl FreshLocals {
+    fn name(&self) -> Symbol {
+        loop {
+            let n = self.next.get();
+            self.next.set(n + 1);
+            let candidate = Symbol::from(format!("route_for_arg_{n}"));
+            if self.taken.borrow_mut().insert(candidate.clone()) {
+                return candidate;
+            }
+        }
+    }
+}
+
+/// `value`'s `to_s`, or nil when it is nil: bound once to a fresh local,
+/// then `nil? ? nil : to_s`.
+fn to_s_keeping_nil(value: Expr, fresh: &FreshLocals) -> Expr {
+    use crate::ty::Ty;
+    let span = value.span;
+    let name = fresh.name();
+    let value_ty = value.ty.clone().unwrap_or(Ty::Untyped);
+    let typed = |node: ExprNode, ty: Ty| Expr { ty: Some(ty), ..Expr::new(span, node) };
+    let read = || typed(ExprNode::Var { id: VarId(0), name: name.clone() }, value_ty.clone());
+    let opt_str = Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
+    let mut is_nil = send0(read(), "nil?", span);
+    is_nil.ty = Some(Ty::Bool);
+    let check = typed(
+        ExprNode::If {
+            cond: is_nil,
+            then_branch: typed(ExprNode::Lit { value: Literal::Nil }, Ty::Nil),
+            else_branch: to_s(read(), span),
+        },
+        opt_str.clone(),
+    );
+    typed(ExprNode::Let { id: VarId(0), name, value, body: check }, opt_str)
 }
 
 fn to_s(e: Expr, span: Span) -> Expr {

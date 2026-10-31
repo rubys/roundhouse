@@ -22,6 +22,9 @@ mod emit_and_run;
 #[path = "support/i18n_locales_app.rs"]
 #[allow(dead_code)]
 mod i18n_locales_app;
+#[path = "support/record_slice_app.rs"]
+#[allow(dead_code)]
+mod record_slice_app;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -197,6 +200,36 @@ class I18nProbeTest {
 "#).expect("write probe test");
     let mut cmd = Command::new("gradle");
     cmd.args(["test", "--tests", "roundhouse.I18nProbeTest", "--console=plain", "--no-daemon", "-q"]).current_dir(&emitted);
+    if let Ok(jh) = std::env::var("KOTLIN_JAVA_HOME").or_else(|_| std::env::var("JAVA_HOME")) {
+        cmd.env("JAVA_HOME", jh);
+    }
+    let output = cmd.output().expect("run gradle test");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore]
+fn real_blog_record_slice_runs() {
+    // The answers `emit_and_run::record_slice` checks on CRuby.
+    let (emitted, errors) = record_slice_app::probe_app().emit(roundhouse::project::BuildTarget::Kotlin);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("src/test/kotlin/RecordSliceProbeTest.kt"), r#"package roundhouse
+
+class RecordSliceProbeTest {
+    @org.junit.jupiter.api.Test
+    fun sliceAnswersAsRails() {
+        val got = Article.sliced()
+        if (got != listOf("2", "Sliced", "7", "1", "Other", "3", "Bound", "5", "4", "A comment body.")) throw AssertionError("sliced: $got")
+    }
+}
+"#).expect("write probe test");
+    let mut cmd = Command::new("gradle");
+    cmd.args(["test", "--tests", "roundhouse.RecordSliceProbeTest", "--console=plain", "--no-daemon", "-q"]).current_dir(&emitted);
     if let Ok(jh) = std::env::var("KOTLIN_JAVA_HOME").or_else(|_| std::env::var("JAVA_HOME")) {
         cmd.env("JAVA_HOME", jh);
     }

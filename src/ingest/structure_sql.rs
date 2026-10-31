@@ -268,13 +268,14 @@ fn handle_create_table(
     let body = &after_name[open + 1..close];
 
     let mut columns: Vec<Column> = Vec::new();
+    let mut primary_key_columns: Vec<Symbol> = Vec::new();
     for seg in top_level_split(body, b',') {
         let seg = seg.trim();
         if seg.is_empty() {
             continue;
         }
         if is_table_level_constraint(seg) {
-            handle_inline_table_constraint(seg, &table_name, &mut columns, gaps, file);
+            handle_inline_table_constraint(seg, &mut columns, &mut primary_key_columns);
             continue;
         }
         match parse_column_def(seg, &table_name, file, enum_types) {
@@ -295,6 +296,7 @@ fn handle_create_table(
         foreign_keys: Vec::new(),
         virtual_module: None,
         known_keyless: false,
+        primary_key_columns,
     };
     let invalid_generated = crate::schema::generated::validate_table_with_dialect(&table, dialect);
     for (column, reason) in &invalid_generated {
@@ -325,17 +327,12 @@ fn is_table_level_constraint(seg: &str) -> bool {
 }
 
 /// `[CONSTRAINT name] PRIMARY KEY (cols)` inside the column-list parens
-/// sets the primary-key flag on the matching column(s); every other
-/// table-level constraint form (`UNIQUE`, `CHECK`, `EXCLUDE`, an
+/// sets the primary-key flag on a single key column, or records a
+/// composite key in `composite` (`Table.primary_key_columns`); every
+/// other table-level constraint form (`UNIQUE`, `CHECK`, `EXCLUDE`, an
 /// inline `FOREIGN KEY`) is recognized and skipped — it costs the DDL
 /// nothing schema.rb would have captured either.
-fn handle_inline_table_constraint(
-    seg: &str,
-    table_name: &str,
-    columns: &mut [Column],
-    gaps: &mut Vec<IngestError>,
-    file: &str,
-) {
+fn handle_inline_table_constraint(seg: &str, columns: &mut [Column], composite: &mut Vec<Symbol>) {
     let words = top_level_words(seg);
     let Some(pos) = word_seq_pos_after(&words, 0, &["PRIMARY", "KEY"]) else { return };
     let Some(open) = find_first_open_paren(seg, pos) else { return };
@@ -351,13 +348,7 @@ fn handle_inline_table_constraint(
                 col.primary_key = true;
             }
         }
-        _ => gaps.push(IngestError::Unsupported {
-            file: file.into(),
-            message: format!(
-                "primary key dropped: composite key ({table_name}({}))",
-                cols.join(", ")
-            ),
-        }),
+        _ => *composite = cols.iter().map(|c| Symbol::from(c.as_str())).collect(),
     }
 }
 
@@ -745,7 +736,7 @@ fn handle_alter_table(
     let words = top_level_words(after);
 
     if let Some(pos) = word_seq_pos_after(&words, 0, &["PRIMARY", "KEY"]) {
-        handle_add_primary_key(after, pos, &table_name, table_sym, schema, gaps, file);
+        handle_add_primary_key(after, pos, table_sym, schema);
         return;
     }
     if let Some(pos) = word_seq_pos_after(&words, 0, &["FOREIGN", "KEY"]) {
@@ -771,17 +762,10 @@ fn handle_alter_table(
 /// `ADD CONSTRAINT [name] PRIMARY KEY (cols)`. A composite key is a
 /// real shape in this dialect (Postgres partitioned tables routinely
 /// key on `(id, partition_key)`) that the single-column `Column.
-/// primary_key` flag cannot hold — ledgered rather than narrowed to
-/// one column, which would silently misrepresent the table's key.
-fn handle_add_primary_key(
-    after: &str,
-    pk_pos: usize,
-    table_name: &str,
-    table_sym: Symbol,
-    schema: &mut Schema,
-    gaps: &mut Vec<IngestError>,
-    file: &str,
-) {
+/// primary_key` flag cannot hold — kept whole in
+/// `Table.primary_key_columns` rather than narrowed to one column,
+/// which would silently misrepresent the table's key.
+fn handle_add_primary_key(after: &str, pk_pos: usize, table_sym: Symbol, schema: &mut Schema) {
     // A retracted partition shard (see `handle_attach_partition`) has
     // no table entry left to set a pk flag on — and, just as
     // importantly, no business ledgering a composite-key gap for a
@@ -808,13 +792,11 @@ fn handle_add_primary_key(
                 }
             }
         }
-        _ => gaps.push(IngestError::Unsupported {
-            file: file.into(),
-            message: format!(
-                "primary key dropped: composite key ({table_name}({}))",
-                cols.join(", ")
-            ),
-        }),
+        _ => {
+            if let Some(table) = schema.tables.get_mut(&table_sym) {
+                table.primary_key_columns = cols.iter().map(|c| Symbol::from(c.as_str())).collect();
+            }
+        }
     }
 }
 

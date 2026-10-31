@@ -1489,9 +1489,10 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
         // Not an `if` expression: Swift allows one only as a whole statement's value, and this binding sits inside an expression
         ExprNode::Let { body, .. } => {
             let ret = e.ty.as_ref().map(super::ty::swift_ty).unwrap_or_else(|| "Any?".to_string());
-            let try_kw = if body_throws(e, &current_class()) { "try " } else { "" };
+            // `throws` only with the `try`: an unmarked call to a throwing closure does not compile
+            let (try_kw, throws_kw) = if body_throws(e, &current_class()) { ("try ", "throws ") } else { ("", "") };
             let ExprNode::Let { name, value, .. } = n else { unreachable!() };
-            format!("({try_kw}{{ () throws -> {ret} in\n{}\n{}\n}}())", indent(&bind_let(name.as_str(), value)), indent(&wrap_return(body)))
+            format!("({try_kw}{{ () {throws_kw}-> {ret} in\n{}\n{}\n}}())", indent(&bind_let(name.as_str(), value)), indent(&wrap_return(body)))
         }
         // Not `rescue` too: a Swift raise is a fatalError or a typed throw, which a Ruby rescue clause does not map onto
         ExprNode::BeginRescue { body, rescues, else_branch: None, ensure: None, .. } if rescues.is_empty() => emit_expr(body),

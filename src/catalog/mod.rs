@@ -1077,6 +1077,16 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::NotApplicable,
         return_kind: Some(ReturnKind::Str),
     },
+    // `record.slice(:id, :name)`: the named attributes, String-keyed as
+    // Rails' indifferent Hash keys them. `lower::record_slice` grounds a
+    // typed site into reader calls; the ruby family answers the rest.
+    CatalogedMethod {
+        name: "slice",
+        receiver: ReceiverContext::Instance,
+        effect: EffectClass::Pure,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::HashStrUntyped),
+    },
     CatalogedMethod {
         name: "[]",
         receiver: ReceiverContext::Instance,

@@ -475,6 +475,63 @@ pub fn target_readme(target: BuildTarget) -> String {
     )
 }
 
+/// The controller's response state, in `@_`-prefixed ivars on the Ruby
+/// family and Spinel trees. The shared `action_controller` runtime keeps
+/// it in `@status`, `@body`, `@content_type` and the rest, but in Ruby
+/// those are the app controller's own ivars too, so a render overwrote
+/// an app's `@status`, and an app's `@headers` broke `response.headers`.
+/// Rails keeps its state in `@_response`, `@_request` and the like. The
+/// strict targets transpile the same source into fields and accessors,
+/// where no app ivar shares them, so they keep it as written.
+///
+/// Every use in these files is renamed, including `Current`'s own
+/// `@request` (a module ivar behind its own `self.request` accessors,
+/// so the rename is consistent in the file). An `attr_*` can't read an
+/// ivar of another name, so the two that name these are written out;
+/// they're matched exactly, and any other `attr_*` naming one is an
+/// error, so a drift in the runtime is a build error here.
+fn controller_state_ivars(files: &mut [(String, String)]) -> Result<(), String> {
+    const NAMES: &[&str] = &[
+        "status", "body", "content_type", "content_type_explicit", "performed", "location", "head_response",
+        "headers", "request",
+    ];
+    const STEMS: &[&str] = &["base", "cache_control", "conditional_get", "current", "default_headers", "inertia"];
+    const ATTRS: &[(&str, &str, &str)] = &[
+        (
+            "base",
+            "    attr_reader   :status, :body, :location, :content_type\n",
+            "    def status\n      @_status\n    end\n\n    def body\n      @_body\n    end\n\n    def location\n      @_location\n    end\n\n    def content_type\n      @_content_type\n    end\n",
+        ),
+        (
+            "current",
+            "    attr_accessor :request\n",
+            "    def request\n      @_request\n    end\n\n    def request=(value)\n      @_request = value\n    end\n",
+        ),
+    ];
+    let ivar = regex::Regex::new(&format!(r"(^|[^@\w])@({})\b", NAMES.join("|"))).expect("ivar pattern");
+    let attr = regex::Regex::new(&format!(r"attr_(reader|writer|accessor)\b[^\n]*:({})\b", NAMES.join("|"))).expect("attr pattern");
+    for stem in STEMS {
+        for path in [format!("runtime/action_controller/{stem}.rb"), format!("sig/runtime/action_controller/{stem}.rbs")] {
+            let Some((_, text)) = files.iter_mut().find(|(p, _)| *p == path) else {
+                return Err(format!("controller_state_ivars: {path} not in the tree"));
+            };
+            if path.ends_with(".rb") {
+                for (owner, narrow, wide) in ATTRS.iter().filter(|(owner, _, _)| owner == stem) {
+                    if !text.contains(narrow) {
+                        return Err(format!("controller_state_ivars: {owner}.rb no longer declares {narrow:?}"));
+                    }
+                    *text = text.replacen(narrow, wide, 1);
+                }
+                if let Some(m) = attr.find(text) {
+                    return Err(format!("controller_state_ivars: {path} has `{}`, which reads an unrenamed ivar", m.as_str()));
+                }
+            }
+            *text = ivar.replace_all(text, "${1}@_${2}").into_owned();
+        }
+    }
+    Ok(())
+}
+
 /// Produce the file set for `target`. `app` must already be ingested
 /// and analyzed. `fixture` is the source-app path on disk — needed
 /// by `Blog` (walks the fixture) and `Ruby` (copies `app/javascript`
@@ -3289,7 +3346,10 @@ fn with_sidekiq_readme(mut files: Vec<(String, String)>, target: BuildTarget, ap
          connection, and the database pool is sized to the threads plus headroom \
          unless `DATABASE_POOL_SIZE` is set. TSTP stops fetching; TERM or INT \
          waits for running jobs up to the timeout and pushes the rest back. A job \
-         that raises goes to the dead set; there are no retries yet.\n\n\
+         that raises is retried with Sidekiq's backoff (up to config/sidekiq.yml's \
+         `:max_retries:`, then 25), then goes to the dead set, and the worker moves \
+         due retries and scheduled jobs back onto their queues, as Sidekiq's \
+         scheduler does.\n\n\
          {cable}\n\n"
     );
     if let Some((_, readme)) = files.iter_mut().find(|(p, _)| p == "README.md") {
@@ -6254,7 +6314,9 @@ fn redis_setting_source(setting: Option<&crate::app::RedisSetting>) -> String {
 
 /// `JobRegistry`'s `config/sidekiq.yml` defaults for the worker:
 /// concurrency 0 and timeout -1 when the file gives none, and the queues
-/// as one String of `name` or `name,weight` words, `""` for none.
+/// as one String of `name` or `name,weight` words, `""` for none. The
+/// retry limit, the dead set's trims and the poller's intervals are -1
+/// (-1.0) when the file gives none, so the worker keeps Sidekiq's.
 fn worker_defaults_source(defaults: &crate::app::SidekiqWorkerDefaults) -> String {
     use crate::emit::ruby::expr::ruby_str_literal;
     let queues: Vec<String> = defaults
@@ -6262,12 +6324,22 @@ fn worker_defaults_source(defaults: &crate::app::SidekiqWorkerDefaults) -> Strin
         .iter()
         .map(|(name, weight)| if *weight == 0 { name.clone() } else { format!("{name},{weight}") })
         .collect();
-    format!(
-        "\n  def self.sidekiq_worker_concurrency\n    {}\n  end\n\n  def self.sidekiq_worker_timeout\n    {}\n  end\n\n  def self.sidekiq_worker_queues\n    {}\n  end\n",
-        defaults.concurrency.unwrap_or(0),
-        defaults.timeout.unwrap_or(-1),
-        ruby_str_literal(&queues.join(" ")),
-    )
+    let float = |v: Option<f64>| {
+        let v = v.unwrap_or(-1.0);
+        if v.fract() == 0.0 { format!("{v:.1}") } else { format!("{v}") }
+    };
+    let method = |name: &str, body: String| format!("\n  def self.{name}\n    {body}\n  end\n");
+    [
+        method("sidekiq_worker_concurrency", defaults.concurrency.unwrap_or(0).to_string()),
+        method("sidekiq_worker_timeout", defaults.timeout.unwrap_or(-1).to_string()),
+        method("sidekiq_worker_queues", ruby_str_literal(&queues.join(" "))),
+        method("sidekiq_worker_max_retries", defaults.max_retries.unwrap_or(-1).to_string()),
+        method("sidekiq_worker_dead_max_jobs", defaults.dead_max_jobs.unwrap_or(-1).to_string()),
+        method("sidekiq_worker_dead_timeout", defaults.dead_timeout_in_seconds.unwrap_or(-1).to_string()),
+        method("sidekiq_worker_poll_interval_average", float(defaults.poll_interval_average)),
+        method("sidekiq_worker_scheduled_poll_interval", float(defaults.average_scheduled_poll_interval)),
+    ]
+    .concat()
 }
 
 /// Whether the tree sends broadcasts through Redis: on `:sidekiq`
@@ -7693,6 +7765,7 @@ const RUBY_SPINEL_ONLY_METHODS: &[(&str, &str)] = &[
     ("ActiveSupport", "numericality_number"),
     ("ActiveSupport", "cast_boolean"),
     ("ActiveSupport", "cast_datetime"),
+    ("ActiveSupport", "change_time_usec"),
     ("ActiveSupport", "errors_to_hash"),
     ("ActiveSupport", "errors_messages"),
     ("ActiveSupport", "errors_attribute_names"),
@@ -8890,6 +8963,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
         }
     }
     widen_key_contract(app, &mut files)?;
+    controller_state_ivars(&mut files)?;
     // Relation Base→untyped rewrite is Spinel-only (see
     // `spinel_relation_model_handle` call sites). `ruby_family_runtime_files`
     // shares this tree and must keep Base for CRuby/JRuby Bar A/B.
@@ -11766,7 +11840,7 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
              # never a commit SHA (`git clone --branch <sha>` fails with\n\
              # `Remote branch ... not found`). It names the release tag, so\n\
              # a build doesn't pick up whatever lands on `main` next.\n\
-             bcrypt = { git = \"https://github.com/rubys/spinel-bcrypt\", ref = \"v0.1.1\" }\n",
+             bcrypt = { git = \"https://github.com/roundhouse-rb/spinel-bcrypt\", ref = \"v0.1.1\" }\n",
         );
     }
     if needs_vips {
@@ -11780,7 +11854,7 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
              # on Debian/Ubuntu, `brew install vips` on macOS) and loadable\n\
              # at run time (`libvips42`). Git form for the reason bcrypt\n\
              # gives above: matz/spin-index#7 is the registration.\n\
-             ruby-vips = { git = \"https://github.com/rubys/spinel-ruby-vips\", ref = \"v0.3.0\" }\n",
+             ruby-vips = { git = \"https://github.com/roundhouse-rb/spinel-ruby-vips\", ref = \"v0.3.0\" }\n",
         );
     }
     if needs_rqrcode {
@@ -11792,7 +11866,7 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
              # matrix and exporter over Nayuki's qrcodegen, carried in the\n\
              # package — no system library. Git form for the reason bcrypt\n\
              # gives above: matz/spin-index#8 is the registration.\n\
-             rqrcode = { git = \"https://github.com/rubys/spinel-rqrcode\", ref = \"v0.1.0\" }\n",
+             rqrcode = { git = \"https://github.com/roundhouse-rb/spinel-rqrcode\", ref = \"v0.1.0\" }\n",
         );
     }
     if needs_nokogiri {
@@ -11803,7 +11877,7 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
             "# HTML parsing, CSS/XPath and serialization: the nokogiri gem's\n\
              # surface over libxml2 2.13.9 with Nokogiri's patches, carried in\n\
              # the package. Git form until matz/spin-index#14 lands.\n\
-             nokogiri = { git = \"https://github.com/rubys/spinel-nokogiri\", ref = \"v0.3.1\" }\n",
+             nokogiri = { git = \"https://github.com/roundhouse-rb/spinel-nokogiri\", ref = \"v0.3.1\" }\n",
         );
     }
     if needs_commonmarker {
@@ -11814,7 +11888,7 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
             "# Markdown: the commonmarker gem's surface over cmark-gfm\n\
              # 0.29.0.gfm.13, carried in the package. Git form until\n\
              # matz/spin-index#9 lands.\n\
-             commonmarker = { git = \"https://github.com/rubys/spinel-commonmarker\", ref = \"v0.1.0\" }\n",
+             commonmarker = { git = \"https://github.com/roundhouse-rb/spinel-commonmarker\", ref = \"v0.1.0\" }\n",
         );
     }
     if needs_redis {
@@ -11827,8 +11901,9 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
              # sp_net. Git form, pinned to a tag because `ref` takes a branch\n\
              # or tag, never a SHA. 0.3.0 adds the connect_timeout: and\n\
              # read_timeout: this push sets to 0.2.0's url:, AUTH, zadd and\n\
-             # pipelined.\n\
-             redis = { git = \"https://github.com/rubys/spinel-redis\", ref = \"v0.3.1\" }\n",
+             # pipelined; 0.3.2 adds the script and evalsha the worker's\n\
+             # scheduler runs.\n\
+             redis = { git = \"https://github.com/roundhouse-rb/spinel-redis\", ref = \"v0.3.2\" }\n",
         );
     }
     files.push(("spin.toml".to_string(), manifest));
@@ -13885,7 +13960,7 @@ mod tests {
         assert!(!with.iter().any(|(p, _)| p == "sig/runtime/rqrcode_facade.rbs"), "sidecar must drop");
         let manifest = get(&with, "spin.toml");
         assert!(
-            manifest.contains("rqrcode = { git = \"https://github.com/rubys/spinel-rqrcode\""),
+            manifest.contains("rqrcode = { git = \"https://github.com/roundhouse-rb/spinel-rqrcode\""),
             "{manifest}"
         );
 
@@ -13946,7 +14021,7 @@ mod tests {
         let manifest = get(&with, "spin.toml");
         assert!(manifest.contains("[dependencies]\n"), "{manifest}");
         assert!(
-            manifest.contains("ruby-vips = { git = \"https://github.com/rubys/spinel-ruby-vips\""),
+            manifest.contains("ruby-vips = { git = \"https://github.com/roundhouse-rb/spinel-ruby-vips\""),
             "{manifest}"
         );
 

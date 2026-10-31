@@ -37,6 +37,9 @@ mod class_constants;
 #[path = "support/i18n_locales_app.rs"]
 #[allow(dead_code)]
 mod i18n_locales_app;
+#[path = "support/record_slice_app.rs"]
+#[allow(dead_code)]
+mod record_slice_app;
 
 use roundhouse::emit::typescript;
 use roundhouse::ingest::ingest_app;
@@ -627,4 +630,23 @@ console.log("locales passed");
     assert_eq!(out, "locales passed");
     std::fs::remove_file(emitted.join("check.ts")).unwrap();
     assert_tsc_passes("real-blog with two locales", &emitted);
+}
+
+#[test]
+#[ignore]
+fn real_blog_record_slice_runs_under_tsx() {
+    // The answers `emit_and_run::record_slice` checks on CRuby.
+    let (emitted, errors) = record_slice_app::probe_app().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        r#"import { Article } from "./app/models/article.js";
+const got = Article.sliced();
+if (JSON.stringify(got) !== JSON.stringify(["2", "Sliced", "7", "1", "Other", "3", "Bound", "5", "4", "A comment body."])) throw new Error("sliced: " + JSON.stringify(got));
+console.log("slice passed");
+"#,
+    );
+    assert_eq!(out, "slice passed");
+    std::fs::remove_file(emitted.join("check.ts")).unwrap();
+    assert_tsc_passes("real-blog with record slices", &emitted);
 }

@@ -201,6 +201,12 @@ fn ruby_to_s_emit(recv: &Expr, recv_s: &str, ufcs: bool) -> String {
                     format!("{recv_s}.clone().unwrap_or_default()")
                 }
                 Some(Ty::Array { .. }) => format!("{recv_s}.to_string()"),
+                // An element of a Value-valued Hash is a Value whatever
+                // the read's own type says: qualified, so a model file
+                // that does not `use RubyToS` compiles.
+                Some(Ty::Hash { value, .. }) if super::super::super::ty::rust_value_shaped(value) => {
+                    format!("<serde_json::Value as crate::http::RubyToS>::ruby_to_s(&({recv_s}))")
+                }
                 Some(ty)
                     if ufcs
                         && (super::super::super::ty::rust_value_shaped(ty)

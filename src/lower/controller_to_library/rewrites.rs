@@ -3079,17 +3079,22 @@ fn params_option_value(arg: &Expr) -> Option<&Expr> {
 /// body-typer. A route helper's segment parameter is an id; an argument
 /// that types to a class is a record standing where its id belongs.
 /// Idempotent — a projected argument types `Integer`, not a class.
-pub fn project_route_helper_ids(expr: &Expr) -> Expr {
-    map_expr(expr, &project_route_helper_ids_node)
+///
+/// `direct_helpers` (`routes::direct_helper_names`) are the app's
+/// `direct` helpers: a block that receives its options hash as written
+/// (`options[:preview]`, where `"false"` would be truthy), so a scalar
+/// under one of their keys is left as it is.
+pub fn project_route_helper_ids(expr: &Expr, direct_helpers: &crate::det::HashSet<String>) -> Expr {
+    map_expr(expr, &|e: &Expr| project_route_helper_ids_node(e, direct_helpers))
 }
 
 /// In-place twin. Returns whether any argument was projected so the
 /// test lowerer can skip a follow-up typing pass.
-pub fn project_route_helper_ids_in_place(expr: &mut Expr) -> bool {
-    map_expr_mut(expr, &project_route_helper_ids_node)
+pub fn project_route_helper_ids_in_place(expr: &mut Expr, direct_helpers: &crate::det::HashSet<String>) -> bool {
+    map_expr_mut(expr, &|e: &Expr| project_route_helper_ids_node(e, direct_helpers))
 }
 
-fn project_route_helper_ids_node(e: &Expr) -> Option<Expr> {
+fn project_route_helper_ids_node(e: &Expr, direct_helpers: &crate::det::HashSet<String>) -> Option<Expr> {
     let ExprNode::Send { recv: Some(r), method, args, block, parenthesized } = &*e.node else {
         return None;
     };
@@ -3101,10 +3106,17 @@ fn project_route_helper_ids_node(e: &Expr) -> Option<Expr> {
     if !(method.as_str().ends_with("_path") || method.as_str().ends_with("_url")) {
         return None;
     }
-    if !args.iter().any(arg_carries_a_model) && !args.iter().any(query_carries_an_int) {
+    let direct = direct_helpers.contains(method.as_str());
+    if !args.iter().any(arg_carries_a_model) && (direct || !args.iter().any(query_carries_a_scalar)) {
         return None;
     }
-    let projected: Vec<Expr> = args.iter().map(project_arg).collect();
+    // A helper call nested in an argument (`next: inner_path(flag: true)`)
+    // is projected first: the walk doesn't revisit a replacement, so once
+    // this call is rebuilt the nested one would keep its own options.
+    let projected: Vec<Expr> = args
+        .iter()
+        .map(|a| project_arg(&project_route_helper_ids(a, direct_helpers), direct))
+        .collect();
     Some(Expr::new(
         e.span,
         ExprNode::Send {
@@ -3129,9 +3141,10 @@ fn project_route_helper_ids_node(e: &Expr) -> Option<Expr> {
 /// at all — campfire's `messages_controller_test` pages this way twice.
 ///
 /// Only the VALUES move. A key is a Symbol by construction.
-fn project_arg(a: &Expr) -> Expr {
+fn project_arg(a: &Expr, direct: bool) -> Expr {
+    let query_text = |k: &Expr, v: &Expr| !direct && query_text_in_slot(k, v);
     if let ExprNode::Hash { entries, kwargs } = &*a.node {
-        if entries.iter().any(|(k, v)| records_a_model(v) || int_in_query_slot(k, v)) {
+        if entries.iter().any(|(k, v)| records_a_model(v) || query_text(k, v)) {
             // `to_param`, not `id`: a query value is a String on the
             // wire and the helper's option is typed `String?` (the
             // name-based rule in `routes_to_library::param_ty` — only
@@ -3146,7 +3159,7 @@ fn project_arg(a: &Expr) -> Expr {
                 .map(|(k, v)| {
                     let v = if records_a_model(v) {
                         to_s_of(id_of(v))
-                    } else if int_in_query_slot(k, v) {
+                    } else if query_text(k, v) {
                         to_s_of(v.clone())
                     } else {
                         v.clone()
@@ -3164,25 +3177,61 @@ fn project_arg(a: &Expr) -> Expr {
     a.clone()
 }
 
-/// An Integer-typed value under a query key the helper types
+/// How a scalar under a query key reaches a helper that types the key
 /// `String?` — every key but `id` / `*_id` (Integer segments) and
-/// `format`.
-pub(crate) fn int_in_query_slot(k: &Expr, v: &Expr) -> bool {
+/// `format`. Rails writes a query value with `to_param`, which on a
+/// scalar is its `to_s` (`featured: true` is `?featured=true`, `ratio:
+/// 1.5` is `?ratio=1.5`), and leaves a nil value out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum QueryScalar {
+    /// An Integer, Float or boolean: its `to_s`.
+    Text,
+    /// One of those or nil: its `to_s` when it isn't nil, so the helper
+    /// still leaves the key out for a nil.
+    TextOrNil,
+}
+
+pub(crate) fn scalar_in_query_slot(k: &Expr, v: &Expr) -> Option<QueryScalar> {
     let ExprNode::Lit { value: crate::expr::Literal::Sym { value: key } } = &*k.node else {
-        return false;
+        return None;
     };
     let key = key.as_str();
     if key == "id" || key.ends_with("_id") || key == "format" {
-        return false;
+        return None;
     }
-    matches!(v.ty, Some(crate::ty::Ty::Int))
+    scalar_value(v)
 }
 
-/// Is there an Integer in a String-typed query slot anywhere
+/// What a scalar value needs to reach a `String?` query slot: its
+/// `to_s`, or its `to_s` with nil kept. `None` for anything else.
+pub(crate) fn scalar_value(v: &Expr) -> Option<QueryScalar> {
+    use crate::ty::Ty;
+    let scalar = |t: &Ty| matches!(t, Ty::Int | Ty::Float | Ty::Bool);
+    match v.ty.as_ref()? {
+        t if scalar(t) => Some(QueryScalar::Text),
+        Ty::Union { variants }
+            if variants.contains(&Ty::Nil)
+                && variants.iter().any(|t| scalar(t))
+                && variants.iter().all(|t| scalar(t) || *t == Ty::Nil) =>
+        {
+            Some(QueryScalar::TextOrNil)
+        }
+        _ => None,
+    }
+}
+
+/// A value under a query key that `project_arg` turns into its `to_s`.
+/// A test body has no fresh local to keep a nil in, so only a value
+/// that can't be nil counts here.
+fn query_text_in_slot(k: &Expr, v: &Expr) -> bool {
+    scalar_in_query_slot(k, v) == Some(QueryScalar::Text)
+}
+
+/// Is there a scalar in a String-typed query slot anywhere
 /// `project_arg` would reach?
-fn query_carries_an_int(a: &Expr) -> bool {
+fn query_carries_a_scalar(a: &Expr) -> bool {
     match &*a.node {
-        ExprNode::Hash { entries, .. } => entries.iter().any(|(k, v)| int_in_query_slot(k, v)),
+        ExprNode::Hash { entries, .. } => entries.iter().any(|(k, v)| query_text_in_slot(k, v)),
         _ => false,
     }
 }

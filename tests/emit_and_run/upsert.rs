@@ -260,3 +260,65 @@ fn receiverless_and_rooted_inserts_are_unsupported_on_strict_targets() {
     assert_eq!(reported("insert!"), 1, "{errors:#?}");
     assert_eq!(reported("insert_all"), 2, "{errors:#?}");
 }
+
+/// A record's own integer key is written, as Rails writes it: `create`
+/// with an `id:` and an inlined `insert_all` row's `id:` keep it, a row
+/// whose key is taken is skipped, and a record given none still takes the
+/// database's.
+#[test]
+fn a_supplied_integer_key_is_written() {
+    keystore_app()
+        .write(
+            "test/models/keystore_key_test.rb",
+            r#"require "test_helper"
+
+class KeystoreKeyTest < ActiveSupport::TestCase
+  test "a supplied id is the row's" do
+    Keystore.create!(id: 900, key: "given", value: 1)
+    assert_equal "given", Keystore.find(900).key
+    Keystore.insert_all([{ id: 910, key: "bulk", value: 2 }])
+    assert_equal "bulk", Keystore.find(910).key
+    Keystore.insert_all([{ id: 910, key: "taken", value: 4 }])
+    assert_equal "bulk", Keystore.find(910).key
+    assert_not Keystore.exists?(key: "taken")
+    assigned = Keystore.create!(key: "assigned", value: 3)
+    assert assigned.id > 0
+    assert_equal "assigned", Keystore.find(assigned.id).key
+  end
+end
+"#,
+        )
+        .run_test("test/models/keystore_key_test.rb")
+        .assert_passes();
+}
+
+/// A table with a generated column inserts through `RETURNING`; a supplied
+/// integer key is written there too, and the generated value still hydrates.
+#[test]
+fn a_supplied_integer_key_is_written_beside_a_generated_column() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "    t.string \"title\"\n    t.text \"body\"\n    t.datetime \"created_at\", null: false\n",
+            "    t.string \"title\"\n    t.text \"body\"\n    t.virtual \"display_text\", type: :string, as: \"coalesce(title, '') || ' / ' || coalesce(body, '')\", stored: true\n    t.datetime \"created_at\", null: false\n",
+        )
+        .write(
+            "test/models/article_generated_key_test.rb",
+            r#"require "test_helper"
+
+class ArticleGeneratedKeyTest < ActiveSupport::TestCase
+  test "a supplied id is written and the generated column hydrates" do
+    given = Article.create!(id: 950, title: "Given", body: "Long enough body text")
+    assert_equal 950, given.id
+    assert_equal "Given / Long enough body text", given.display_text
+    assert_equal "Given", Article.find(950).title
+    assigned = Article.create!(title: "Assigned", body: "Long enough body text")
+    assert assigned.id > 0
+    assert_equal "Assigned / Long enough body text", Article.find(assigned.id).display_text
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_generated_key_test.rb")
+        .assert_passes();
+}

@@ -326,7 +326,15 @@ end
 # `cookies` (runtime/action_controller_cookies.rb).
 module ActionController
   class Base
-    attr_accessor :request
+    # In `@_request`, as Rails keeps it: an app's controller may use
+    # `@request` for itself.
+    def request
+      @_request
+    end
+
+    def request=(value)
+      @_request = value
+    end
   end
 
   # Per-request context reachable from module-function helpers. Rails

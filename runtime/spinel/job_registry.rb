@@ -62,6 +62,26 @@ module JobRegistry
     ""
   end
 
+  def self.sidekiq_worker_max_retries
+    -1
+  end
+
+  def self.sidekiq_worker_dead_max_jobs
+    -1
+  end
+
+  def self.sidekiq_worker_dead_timeout
+    -1
+  end
+
+  def self.sidekiq_worker_poll_interval_average
+    -1.0
+  end
+
+  def self.sidekiq_worker_scheduled_poll_interval
+    -1.0
+  end
+
   def self.cable_redis?
     false
   end

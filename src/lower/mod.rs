@@ -194,6 +194,7 @@ pub mod params_permit;
 pub mod normalizes;
 pub mod relation_select_block;
 pub mod send_dispatch;
+pub mod record_slice;
 pub mod relation_counted_terminal;
 pub(crate) mod secure_password;
 pub mod attached;
@@ -704,6 +705,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // outside the module names `@@x`. Consumes ingest's mattr expansion,
     // which no pass rewrites; no constraints.
     ("module_mattr_storage", &[]),
+    // `record.slice(:a, :b)` on a typed model → a Hash of its typed
+    // readers. Reads the analyzer's receiver types; nothing keys on it.
+    ("record_slice", &[]),
     ("send_static_dispatch", &[]),
     // Grounds the plural duration-unit calls that send_static_dispatch
     // synthesizes into case arms, so it must observe that pass's output.
@@ -1086,6 +1090,8 @@ pub(crate) fn apply_post_analyze_lowerings_for(
     ran!("transaction_after_commit");
     module_mattr_storage::apply_module_mattr_storage(app);
     ran!("module_mattr_storage");
+    diags.extend(record_slice::apply_record_slice_lowering(app, registry));
+    ran!("record_slice");
     diags.extend(crate::timings::phase("post-analyze: send_dispatch", || {
         send_dispatch::apply_send_static_dispatch(app, registry)
     }));

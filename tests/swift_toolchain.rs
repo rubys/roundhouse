@@ -28,6 +28,9 @@ mod emit_and_run;
 #[path = "support/i18n_locales_app.rs"]
 #[allow(dead_code)]
 mod i18n_locales_app;
+#[path = "support/record_slice_app.rs"]
+#[allow(dead_code)]
+mod record_slice_app;
 
 use roundhouse::emit::swift;
 use roundhouse::ingest::ingest_app;
@@ -187,6 +190,34 @@ final class I18nProbeTests: XCTestCase {
 "#).expect("write probe test");
     let output = Command::new("swift")
         .args(["test", "--filter", "I18nProbeTests"])
+        .current_dir(&emitted)
+        .output()
+        .expect("run swift test");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore]
+fn real_blog_record_slice_runs() {
+    // The answers `emit_and_run::record_slice` checks on CRuby.
+    let (emitted, errors) = record_slice_app::probe_app().emit(roundhouse::project::BuildTarget::Swift);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("Tests/AppTests/RecordSliceProbeTests.swift"), r#"import XCTest
+@testable import App
+
+final class RecordSliceProbeTests: XCTestCase {
+    func testSliceAnswersAsRails() throws {
+        XCTAssertEqual(try Article.sliced(), ["2", "Sliced", "7", "1", "Other", "3", "Bound", "5", "4", "A comment body."])
+    }
+}
+"#).expect("write probe test");
+    let output = Command::new("swift")
+        .args(["test", "--filter", "RecordSliceProbeTests"])
         .current_dir(&emitted)
         .output()
         .expect("run swift test");

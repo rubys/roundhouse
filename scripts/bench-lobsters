@@ -1191,7 +1191,7 @@ the machine that ran the benchmark, so shipping it would fail here with
 "not in the index: bcrypt". The app needs it for password hashing on the
 login path. Either:
 
-    spin add bcrypt --git https://github.com/rubys/spinel-bcrypt
+    spin add bcrypt --git https://github.com/roundhouse-rb/spinel-bcrypt
 
 or point at a local checkout and let spin re-lock. Nothing the benchmark
 measures goes through bcrypt — the frozen sequence is authenticated once at

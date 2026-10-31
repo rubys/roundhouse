@@ -180,6 +180,13 @@ pub const INHERITED_ALIAS_COPY: u64 = 1 << 36;
 /// A source-resolved library call whose native keyword ABI is preserved.
 pub const NATIVE_KEYWORD_ARGUMENTS: u64 = 1 << 35;
 
+/// On a route-helper call `lower::route_format_suffix` renamed for its
+/// literal `format:` (`widget_url(w, format: :json)` to
+/// `widget_json_url(w)`): the only calls `routes_to_library` builds a
+/// format variant for. A `<route>_<word>_url` written in the source is
+/// not a Rails helper, whatever it splits into.
+pub const FORMAT_VARIANT_CALL: u64 = 1 << 37;
+
 /// Whether `expr` is a [`SELF_BINDING`] cast.
 pub fn is_self_binding(expr: &Expr) -> bool {
     expr.decisions & SELF_BINDING != 0

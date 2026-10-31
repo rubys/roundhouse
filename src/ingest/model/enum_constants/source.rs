@@ -280,7 +280,7 @@ impl EnumConstants {
                     && self.parents.iter().all(|parent| {
                         matches!(parent, Node::ProgramNode { .. } | Node::StatementsNode { .. })
                     });
-                if (direct || boot_top_level) && node.as_constant_write_node().is_some() {
+                if (direct || boot_top_level || matches!(self.kind, SourceKind::Mutations)) && node.as_constant_write_node().is_some() {
                     self.direct_writes.insert(node.location().start_offset());
                 }
                 // `const_set(:X, …)` / `self.send(:remove_const, :X)` in a
@@ -460,14 +460,18 @@ impl EnumConstants {
             let direct_writes = collector.direct_writes;
             match kind {
                 SourceKind::Inputs => {
-                    let (tainted, reflected) = super::super::ConstTaint::scan_tree(&result.node(), direct_writes);
+                    let (tainted, reflected, snapshot_taint, aliases) = super::super::ConstTaint::scan_tree(&result.node(), direct_writes);
                     self.foreign_taint.extend(tainted);
                     self.reflected.extend(reflected);
+                    self.snapshot_taint.extend(snapshot_taint);
+                    self.snapshot_aliases.extend(aliases);
                 }
                 // A boot source calls the app's classes freely (`Gadget.count`):
                 // the scan skips a receiver rooted at a class or module
                 // (`ConstTaint::names_boot_namespace`).
                 SourceKind::Boot => {
+                    let (_, reflected, _, _) = super::super::ConstTaint::scan_tree(&result.node(), direct_writes.clone());
+                    self.snapshot_reflected.extend(reflected);
                     let namespaces: crate::det::HashSet<String> = self
                         .values
                         .iter()
@@ -476,10 +480,17 @@ impl EnumConstants {
                         .collect();
                     let (tainted, aliases) =
                         super::super::ConstTaint::scan_boot(&result.node(), direct_writes, namespaces);
+                    self.snapshot_taint.extend(tainted.iter().cloned());
+                    self.snapshot_aliases.extend(aliases.iter().cloned());
                     self.foreign_taint.extend(tainted);
                     self.boot_aliases.extend(aliases);
                 }
-                SourceKind::Mutations => {}
+                SourceKind::Mutations => {
+                    let (_, reflected, tainted, aliases) = super::super::ConstTaint::scan_tree(&result.node(), direct_writes);
+                    self.snapshot_taint.extend(tainted);
+                    self.snapshot_aliases.extend(aliases);
+                    self.snapshot_reflected.extend(reflected);
+                }
             }
         }
     }

@@ -604,6 +604,12 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
             .unwrap_or(Ty::Untyped);
         all_props.entry(n.clone()).or_insert(ty);
     }
+    // The temporal computed properties (`createdAt`), so `self.created_at`
+    // reads the property instead of calling it.
+    for m in &temporal_readers {
+        let ret = m_sig_ret(m).unwrap_or(Ty::Union { variants: vec![Ty::Time, Ty::Nil].into() });
+        all_props.entry(camel(m.name.as_str())).or_insert(ret);
+    }
     super::expr::set_instance_prop_types(all_props);
     super::expr::set_current_class(&class_name);
 

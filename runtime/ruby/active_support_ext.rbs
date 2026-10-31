@@ -108,6 +108,7 @@ module ActiveSupport
   def self.months_ago: (Time t, ?Integer n) -> Time
   def self.years_since: (Time t, ?Integer n) -> Time
   def self.years_ago: (Time t, ?Integer n) -> Time
+  def self.change_time_usec: (Time time, Integer usec) -> Time
   def self.beginning_of_minute: (Time t) -> Time
   def self.end_of_minute: (Time t) -> Time
   def self.beginning_of_hour: (Time t) -> Time

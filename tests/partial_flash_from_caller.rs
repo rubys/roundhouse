@@ -5,7 +5,8 @@
 //! `locals:` hash, so a partial's `notice` was nil wherever it was
 //! rendered from — a view, a layout, a collection, another partial, or
 //! an action's `render partial:`. The flash is only ever the flash: a
-//! `local_assigns[:notice_]` is no flash slot, and a partial's `notice:`
+//! `local_assigns[:notice_]` is no flash slot, a `local_assigns[:notice]`
+//! is the render's `notice:` local or nil, and a partial's `notice:`
 //! local does not reach the partials it renders.
 //!
 //! Each test follows the blog's own redirects, so the flash rides the
@@ -27,6 +28,10 @@ const CREATED: &str = "<p id=\"partial-notice\">Article was successfully created
 const OPT: &str = "app/views/articles/_flash_opt.html.erb";
 
 const OPT_ERB: &str = "<p id=\"opt\"><%= notice %>|<%= local_assigns[:notice_] %></p>\n";
+
+const LOCAL: &str = "app/views/articles/_flash_local.html.erb";
+
+const LOCAL_ERB: &str = "<p class=\"local\"><%= notice %>|<%= local_assigns[:notice] || \"none\" %></p>\n";
 
 /// The blog with `show` rendering `erb` under its heading, and the create
 /// test following the redirect to it and asserting each of `expect`.
@@ -173,6 +178,77 @@ fn an_omitted_notice_underscore_local_stays_nil() {
     .assert_passes();
 }
 
+/// `local_assigns[:notice]` is the render's `notice:` local, nil when it
+/// passes none, never the flash a bare `notice` beside it falls back to.
+/// A `notice: nil` local is nil for both.
+#[test]
+fn local_assigns_notice_is_only_the_local() {
+    shown_after_create(
+        "  <%= render \"flash_local\" %>\n  <%= render \"flash_local\", notice: \"Local\" %>\n  \
+         <%= render \"flash_local\", notice: nil %>\n",
+        &[
+            "<p class=\"local\">Article was successfully created.|none</p>",
+            "<p class=\"local\">Local|Local</p>",
+            "<p class=\"local\">|none</p>",
+        ],
+    )
+    .write(LOCAL, LOCAL_ERB)
+    .run_test(CONTROLLER_TEST)
+    .assert_passes();
+}
+
+/// The same for `local_assigns[:alert]`, per element of a collection.
+#[test]
+fn local_assigns_alert_is_only_the_local_per_element() {
+    shown_after_create(
+        "  <%= render partial: \"flash_alert_row\", collection: Article.where(title: \"New Title\"), as: :article %>\n",
+        &["<p class=\"alert-row\">New Title: Check it|none</p>"],
+    )
+    .write(
+        "app/views/articles/_flash_alert_row.html.erb",
+        "<p class=\"alert-row\"><%= article.title %>: <%= alert %>|<%= local_assigns[:alert] || \"none\" %></p>\n",
+    )
+    .edit(
+        "app/controllers/articles_controller.rb",
+        "redirect_to @article, notice: \"Article was successfully created.\"",
+        "redirect_to @article, notice: \"Article was successfully created.\", alert: \"Check it\"",
+    )
+    .run_test(CONTROLLER_TEST)
+    .assert_passes();
+}
+
+/// A partial handing its own `local_assigns[:notice]` on hands the local
+/// or nil, never its flash.
+#[test]
+fn a_partial_hands_on_its_local_assigns_notice() {
+    shown_after_create(
+        "  <%= render \"flash_pass\" %>\n  <%= render \"flash_pass\", notice: \"Local\" %>\n",
+        &[
+            "<div class=\"pass\"><p class=\"local\">|none</p>",
+            "<div class=\"pass\"><p class=\"local\">Local|Local</p>",
+        ],
+    )
+    .write(LOCAL, LOCAL_ERB)
+    .write(
+        "app/views/articles/_flash_pass.html.erb",
+        "<div class=\"pass\"><%= render \"flash_local\", notice: local_assigns[:notice] %></div>\n",
+    )
+    .run_test(CONTROLLER_TEST)
+    .assert_passes();
+}
+
+/// An action's template has no locals, so its `local_assigns[:notice]`
+/// is nil beside the flash.
+#[test]
+fn a_template_s_local_assigns_notice_is_nil() {
+    shown_after_create(
+        "  <p id=\"template-local\"><%= local_assigns[:notice] || \"none\" %>|<%= notice %></p>\n",
+        &["<p id=\"template-local\">none|Article was successfully created.</p>"],
+    )
+    .run_test(CONTROLLER_TEST)
+    .assert_passes();
+}
+
 /// Rails does not hand a partial's locals on: the partial it renders
 /// reads its own `notice`, never the outer one's `notice:` local.
 #[test]
@@ -310,9 +386,31 @@ fn an_action_s_partial_leaves_an_omitted_notice_underscore_local_nil() {
         .assert_passes();
 }
 
+/// As is its `local_assigns[:notice]`, and an action's `notice:` local
+/// is what both read.
+#[test]
+fn an_action_s_partial_reads_local_assigns_notice_as_the_local() {
+    rendered_by_an_action("flash_local", LOCAL_ERB, "<p class=\"local\">Rendered now|none</p>")
+        .run_test(CONTROLLER_TEST)
+        .assert_passes();
+    rendered_by_an_action_with(
+        "flash_local",
+        LOCAL_ERB,
+        ", locals: { notice: \"Given\" }",
+        "<p class=\"local\">Given|Given</p>",
+    )
+    .run_test(CONTROLLER_TEST)
+    .assert_passes();
+}
+
 /// The blog with an action that sets `flash.now[:notice]` and renders
 /// the partial `name` (`erb`), and a test asserting `expect` in it.
 fn rendered_by_an_action(name: &str, erb: &str, expect: &str) -> emit_and_run::Overlay {
+    rendered_by_an_action_with(name, erb, "", expect)
+}
+
+/// `rendered_by_an_action` with `options` after the render's partial name.
+fn rendered_by_an_action_with(name: &str, erb: &str, options: &str, expect: &str) -> emit_and_run::Overlay {
     emit_and_run::real_blog()
         .write(&format!("app/views/articles/_{name}.html.erb"), erb)
         .edit(
@@ -328,7 +426,7 @@ fn rendered_by_an_action(name: &str, erb: &str, expect: &str) -> emit_and_run::O
             "  # GET /articles/new\n",
             &format!(
                 "  def {name}\n    flash.now[:notice] = \"Rendered now\"\n    \
-                 render partial: \"{name}\"\n  end\n\n  # GET /articles/new\n"
+                 render partial: \"{name}\"{options}\n  end\n\n  # GET /articles/new\n"
             ),
         )
         .edit(

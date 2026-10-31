@@ -682,6 +682,7 @@ const FATES: &[(&str, GemFate)] = &[
     ("uri", GemFate::Stdlib),
     ("yaml", GemFate::Stdlib),
     // ── Modeled (each row names where) ───────────────────────────
+    ("acts_as_tenant", GemFate::Modeled), // ingest/acts_as_tenant: acts_as_tenant -> belongs_to + dynamic default_scope + create stamp; validates_uniqueness_to_tenant; ActsAsTenant as CurrentAttributes (current_tenant, with_tenant, without_tenant); set_current_tenant_through_filter (not has_global_records/through/polymorphic/require_tenant/subdomain/immutability)
     ("acts_as_votable", GemFate::Modeled), // ingest/acts_as_votable: ActsAsVotable::Vote on `votes`; acts_as_votable/acts_as_voter macros -> votes_for/votes + vote_by/liked_by/unvote_by/update_cached_votes (not vote_up_for/get_voted/association extensions)
     ("addressable", GemFate::Modeled), // catalog/gems: Addressable::URI
     ("bcrypt", GemFate::Modeled),      // catalog/gems: BCrypt::*; has_secure_password

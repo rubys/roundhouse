@@ -188,7 +188,6 @@ fn real_errors(errors: &[String]) -> Vec<&String> {
 
 /// The model files natively and emitted, same PostgreSQL.
 #[test]
-#[ignore = "fork spec: postgresql"]
 fn relation_chain_methods_leave_the_receiver_alone_like_native_rails_on_postgresql() {
     let (emitted, errors) = overlay().emit(roundhouse::project::BuildTarget::Ruby);
     let Some((native, emitted_lines)) = pg_probe::native_and_emitted(

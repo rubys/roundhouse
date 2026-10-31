@@ -1302,6 +1302,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             &app.models,
             test_extras,
             &crate::lower::routes::helper_id_segments(app),
+            &crate::lower::routes::direct_helper_names(app),
         );
 
         let mut test_entries: Vec<(String, String)> = Vec::new();

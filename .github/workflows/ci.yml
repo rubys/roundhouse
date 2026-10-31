@@ -57,15 +57,15 @@ env:
   MASTODON_SHA: 163f96cee4dea23365bff9b433871e68d20d9ee7
   RUBY_BENCH_SHA: d771f81f1ce9db51376e03ca7b8e6a83160556d4
   CAMPFIRE_SHA: c8f74a0b0e1e93146c4d7c1d6ac80c9079682216
-  # rubys/spinel-pg, the PostgreSQL driver the Spinel Db shim
+  # roundhouse-rb/spinel-pg, the PostgreSQL driver the Spinel Db shim
   # (runtime/spinel/db_pg.rb) is tested against in spinel-framework.
   # Pinned like the apps above; bump deliberately.
   SPINEL_PG_SHA: f48735c91aa8cde258299e1189957972667a0d1f
   # spinel-redis, the Redis client the Sidekiq push runs on in a Spinel
   # tree, tested against a live Redis in sidekiq-live. The same repository
   # and tag the emitted spin.toml pins (src/project.rs); bump both together.
-  SPINEL_REDIS_REPO: rubys/spinel-redis
-  SPINEL_REDIS_REF: v0.3.1
+  SPINEL_REDIS_REPO: roundhouse-rb/spinel-redis
+  SPINEL_REDIS_REF: v0.3.2
 
 jobs:
   plan:
@@ -963,7 +963,7 @@ jobs:
         if: ${{ contains(matrix.tests, 'spinel_pg_db') }}
         uses: actions/checkout@v7
         with:
-          repository: rubys/spinel-pg
+          repository: roundhouse-rb/spinel-pg
           ref: ${{ env.SPINEL_PG_SHA }}
           path: spinel-pg
       # Not the runner's system Ruby: a suite compares the binary with CRuby, and the baseline's messages are 3.4's

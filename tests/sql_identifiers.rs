@@ -214,6 +214,7 @@ fn virtual_table_name_is_quoted_without_rewriting_module_arguments() {
             indexes: vec![],
             foreign_keys: vec![],
             known_keyless: false,
+            primary_key_columns: Vec::new(),
             virtual_module: Some(roundhouse::schema::VirtualModule {
                 module: "fts5".into(),
                 args: vec!["body".into(), "tokenize=porter".into()],

@@ -95,7 +95,6 @@ fn real_errors(errors: &[String]) -> Vec<&String> {
 
 /// The compiler side: `id` and `id=` are the declared column's.
 #[test]
-#[ignore = "fork spec: postgresql"]
 fn declared_single_primary_key_is_the_id() {
     let (emitted, errors) = overlay().emit(roundhouse::project::BuildTarget::Ruby);
     assert!(real_errors(&errors).is_empty(), "{}", errors.join("\n"));
@@ -107,7 +106,6 @@ fn declared_single_primary_key_is_the_id() {
 
 /// The model files natively and emitted, same PostgreSQL.
 #[test]
-#[ignore = "fork spec: postgresql"]
 fn declared_single_primary_key_matches_native_rails_on_postgresql() {
     let (emitted, errors) = overlay().emit(roundhouse::project::BuildTarget::Ruby);
     let Some((native, emitted_lines)) = pg_probe::native_and_emitted(

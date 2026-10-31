@@ -2901,7 +2901,7 @@ pub(super) fn time_method(method: &Symbol) -> Option<Ty> {
         // `==`/`!=` are handled by `universal_method` (checked before
         // this arm); the ordered comparisons aren't, so type them here:
         // `created_at >= cutoff` → Bool.
-        "<" | ">" | "<=" | ">=" | "between?"
+        "<" | ">" | "<=" | ">=" | "between?" | "utc?" | "dst?"
         | "after?" | "before?" | "past?" | "future?" | "today?" | "yesterday?" | "tomorrow?"
         | "monday?" | "tuesday?" | "wednesday?" | "thursday?" | "friday?"
         | "saturday?" | "sunday?" | "on_weekend?" | "on_weekday?" => Ty::Bool,

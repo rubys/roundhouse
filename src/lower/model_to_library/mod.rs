@@ -1158,9 +1158,7 @@ fn writable_permit_fields(
         .iter()
         .filter(|field| {
             let public_writer = model_defines_public_writer(model, field);
-            let private_override =
-                table.is_none() && model_defines_writer(model, field) && !public_writer;
-            if (writable.contains(*field) && !private_override) || public_writer {
+            if writable.contains(*field) || public_writer {
                 return true;
             }
             let private = model_defines_writer(model, field);
@@ -1220,7 +1218,7 @@ fn writable_field_set_for_table(
     table: Option<&crate::schema::Table>,
 ) -> std::collections::BTreeSet<crate::ident::Symbol> {
     use crate::dialect::{Association, ModelBodyItem};
-    use crate::expr::{ExprNode, Literal};
+    use crate::expr::ExprNode;
     use crate::ident::Symbol;
 
     let mut writable: std::collections::BTreeSet<Symbol> = std::collections::BTreeSet::new();
@@ -1232,8 +1230,6 @@ fn writable_field_set_for_table(
             writable.insert(name.clone());
         }
     }
-    // `attr_accessor` / `attr_writer` virtuals (mirrors the scan in
-    // markers::push_attr_accessor_methods).
     for item in &model.body {
         let ModelBodyItem::Unknown { expr, .. } = item else { continue };
         let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
@@ -1242,11 +1238,7 @@ fn writable_field_set_for_table(
         if !matches!(method.as_str(), "attr_accessor" | "attr_writer") {
             continue;
         }
-        for arg in args {
-            if let ExprNode::Lit { value: Literal::Sym { value } } = &*arg.node {
-                writable.insert(value.clone());
-            }
-        }
+        writable.extend(self::markers::accessor_names(model, args));
     }
     for (_store, attrs) in crate::lower::typed_store::typed_store_decls(&model.body) {
         for attr in attrs {
@@ -1289,6 +1281,10 @@ fn writable_field_set_for_table(
     // writer yet (Many appends via the proxy, not mass-assign), so the
     // attrs stay OUT of the writable set — putting them in would make
     // `update(uploads: …)` / permit emit a missing writer (inv. 6).
+    writable.retain(|field| {
+        let is_column = table.is_some_and(|t| t.columns.iter().any(|c| c.name == *field));
+        is_column || !model_defines_writer(model, field) || model_defines_public_writer(model, field)
+    });
     writable
 }
 
@@ -1439,7 +1435,7 @@ fn build_methods_with_finder_inputs(
             methods.push(adapter_emit::synth_find_primary_key_input(&model.name, table));
             methods.push(adapter_emit::synth_exists_primary_key_input(&model.name, table));
         }
-        push_adapter_methods(&mut methods, model, table, schema, param_binds);
+        push_adapter_methods(&mut methods, model, table, schema, param_binds, runtime_relation == RuntimeRelation::Present);
         match crate::lower::default_scope::default_scope(model) {
             Some(crate::lower::default_scope::DefaultScope::Static(scope)) => {
                 methods.push(crate::lower::default_scope::synth_default_scope_where(model, &scope));
@@ -1616,7 +1612,7 @@ fn build_methods_with_finder_inputs(
     // AFTER push_user_methods, unlike the macros above: its skip guard
     // reads the accumulated list, so a model's own `to_param` (already
     // pushed) wins over the synthesized `@id.to_s`.
-    self::markers::push_to_param_method(&mut methods, model);
+    self::markers::push_to_param_method(&mut methods, model, schema.tables.get(&model.table.0));
     // Not before push_user_methods: its skip guard has to see the model's own methods.
     self::select_aliases::push_select_alias_methods(&mut methods, model, runtime_relation);
     // Also after push_user_methods: its BODY branches on whether the

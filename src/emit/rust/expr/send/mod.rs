@@ -13,7 +13,7 @@ mod index;
 mod ops;
 
 pub(crate) use coerce::coerce_arg_for_param_ty;
-pub(super) use coerce::{cast_via_value_for_union, coerce_arg_for_field_ty};
+pub(super) use coerce::{cast_via_value_for_union, coerce_arg_for_field_ty, time_into_value};
 
 use coerce::coerce_arg_for_class_method;
 use dispatch::external_class_method_param_tys;

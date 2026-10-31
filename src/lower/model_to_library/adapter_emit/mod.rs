@@ -58,12 +58,13 @@ pub(super) fn push_adapter_methods(
     table: &Table,
     schema: &Schema,
     param_binds: bool,
+    writes_supplied_keys: bool,
 ) {
     let owner = &model.name;
     methods.push(synth_adapter_find_by_id(owner, table, schema, param_binds));
     methods.push(synth_adapter_all(owner, table, schema));
     methods.push(synth_adapter_last(owner, table, schema));
-    methods.push(synth_adapter_insert(owner, table, schema));
+    methods.push(synth_adapter_insert(owner, table, schema, writes_supplied_keys));
     methods.push(synth_adapter_update(owner, table, schema));
     methods.push(synth_adapter_touch(owner, table, schema));
     methods.push(synth_adapter_delete(owner, table, schema));
@@ -308,7 +309,13 @@ fn synth_adapter_last(owner: &ClassId, table: &Table, schema: &Schema) -> Method
 /// `await` on the call result rather than the receiver. See the
 /// reload comment for the underlying emit issue with
 /// `self.class.<async_method>`.
-fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema) -> MethodDef {
+///
+/// With `writes_supplied_keys` (the Ruby family, whose runtime carries the
+/// rest of Rails' persistence), an integer key the record was given is
+/// written too, as Rails writes it: `create(id: 900)`, or a key column
+/// with no database default. A record that left it unset (0) keeps the
+/// database's value, as before.
+fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema, writes_supplied_keys: bool) -> MethodDef {
     use crate::schema::ColumnType;
 
     // An integer key is the database's to assign: it stays out of the
@@ -338,6 +345,7 @@ fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
         assignments,
         returns_rowid: supplied_key.is_none(),
     };
+    let insert_with_key = insert.clone();
     let op = ArelOp::Insert(insert.clone());
     let generated: Vec<&crate::schema::Column> =
         table.columns.iter().filter(|c| c.generated.is_some()).collect();
@@ -355,10 +363,14 @@ fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
         if let Some(k) = supplied_key {
             exprs.push(ivar_ref(&k.name));
         }
-        if exprs.len() == 1 {
+        let assigned = if exprs.len() == 1 {
             exprs.pop().expect("one ordinary insert expression")
         } else {
             Expr::new(Span::synthetic(), ExprNode::Seq { exprs })
+        };
+        match key.filter(|c| writes_supplied_keys && supplied_key.is_none() && c.generated.is_none()) {
+            Some(k) => supplied_key_insert(owner, table, schema, k, assigned),
+            None => assigned,
         }
     } else {
         let returning_key = key_column(table)
@@ -374,6 +386,33 @@ fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
             &returning_columns,
         );
         let hydrated = hydrate_generated_after_insert(table, &generated, insert, &ret_ty);
+        // The supplied integer key on this path too: the same RETURNING
+        // insert with the key named, chosen as `supplied_key_insert` chooses.
+        let hydrated = match key.filter(|c| writes_supplied_keys && supplied_key.is_none() && c.generated.is_none()) {
+            Some(k) => {
+                let mut keyed = insert_with_key.clone();
+                keyed.assignments.insert(
+                    0,
+                    Assignment { column: k.name.clone(), value: Value::Runtime { expr: storage_value(k), ty: value_type_for_column(k) } },
+                );
+                let written = SqliteVisitor::default().visit_insert_returning(
+                    &keyed,
+                    schema,
+                    &returning_key,
+                    key_is_integer(table),
+                    &returning_columns,
+                );
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::If {
+                        cond: supplied_key_given(k),
+                        then_branch: hydrate_generated_after_insert(table, &generated, written, &ret_ty),
+                        else_branch: hydrated,
+                    },
+                )
+            }
+            None => hydrated,
+        };
         if let Some(mint) = uuid_mint {
             Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![mint, hydrated] })
         } else {
@@ -1246,6 +1285,47 @@ use crate::lower::arel::visitor::concat_chain as arel_concat;
 /// is `WHERE id = <str>`, not an integer compare against text (#90).
 /// A table with no key column (a join table) keeps `id`/Int, the
 /// shape the primitives always assumed.
+/// `if @id.to_i != 0 then <INSERT naming the key>; @id else <assigned> end`:
+/// the integer key the record holds is written when it was given one.
+fn supplied_key_insert(owner: &ClassId, table: &Table, schema: &Schema, key: &crate::schema::Column, assigned: Expr) -> Expr {
+    let assignments: Vec<Assignment> = table
+        .columns
+        .iter()
+        .filter(|c| c.generated.is_none())
+        .map(|c| Assignment {
+            column: c.name.clone(),
+            value: Value::Runtime { expr: storage_value(c), ty: value_type_for_column(c) },
+        })
+        .collect();
+    let insert = Insert { table: TableRef(table.name.clone()), assignments, returns_rowid: false };
+    let written = SqliteVisitor::default().visit(&ArelOp::Insert(insert), schema, owner);
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond: supplied_key_given(key),
+            then_branch: Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![written, ivar_ref(&key.name)] }),
+            else_branch: assigned,
+        },
+    )
+}
+
+/// `@id.to_i != 0`: the record was given its integer key.
+fn supplied_key_given(key: &crate::schema::Column) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Send { recv: Some(ivar_ref(&key.name)), method: Symbol::from("to_i"), args: vec![], block: None, parenthesized: false },
+            )),
+            method: Symbol::from("!="),
+            args: vec![crate::lower::typing::lit_int(0)],
+            block: None,
+            parenthesized: false,
+        },
+    )
+}
+
 fn key_column(table: &Table) -> Option<&crate::schema::Column> {
     super::primary_key_column(table)
 }

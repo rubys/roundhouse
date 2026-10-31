@@ -21,6 +21,9 @@ mod emit_and_run;
 #[path = "support/i18n_locales_app.rs"]
 #[allow(dead_code)]
 mod i18n_locales_app;
+#[path = "support/record_slice_app.rs"]
+#[allow(dead_code)]
+mod record_slice_app;
 
 use roundhouse::emit::crystal;
 use roundhouse::ingest::ingest_app;
@@ -183,4 +186,32 @@ puts "locales passed"
         .expect("run crystal");
     let stdout = String::from_utf8_lossy(&run.stdout);
     assert!(run.status.success() && stdout.contains("locales passed"), "{stdout}\n{}", String::from_utf8_lossy(&run.stderr));
+}
+
+#[test]
+#[ignore]
+fn real_blog_record_slice_runs() {
+    // The answers `emit_and_run::record_slice` checks on CRuby.
+    let (emitted, errors) = record_slice_app::probe_app().emit(roundhouse::project::BuildTarget::Crystal);
+    assert!(errors.is_empty(), "{errors:?}");
+    shards_install(&emitted);
+    std::fs::write(
+        emitted.join("probe.cr"),
+        r##"require "./src/app"
+def expect(what, got, want)
+  raise "#{what}: #{got.inspect}" unless got == want
+end
+expect("sliced", Article.sliced, ["2", "Sliced", "7", "1", "Other", "3", "Bound", "5", "4", "A comment body."])
+puts "slice passed"
+"##,
+    )
+    .unwrap();
+    let run = Command::new("crystal")
+        .args(["run", "probe.cr"])
+        .current_dir(&emitted)
+        .env("CRYSTAL_CACHE_DIR", emitted.join(".crystal-cache"))
+        .output()
+        .expect("run crystal");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(run.status.success() && stdout.contains("slice passed"), "{stdout}\n{}", String::from_utf8_lossy(&run.stderr));
 }

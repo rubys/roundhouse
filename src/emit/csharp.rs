@@ -224,6 +224,7 @@ fn emit_tests(
         &app.models,
         test_extras,
         &crate::lower::routes::helper_id_segments(app),
+        &crate::lower::routes::direct_helper_names(app),
     );
     for lowered in &test_lowered {
         files.push(library::emit_test_class_file(

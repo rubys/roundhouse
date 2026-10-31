@@ -1090,6 +1090,19 @@ module ActiveSupport
     months_since(t, -12 * n)
   end
 
+  def self.change_time_usec(time, usec)
+    raise ArgumentError, "argument out of range" if usec >= 1_000_000
+    raise ArgumentError, "argument out of range" if time.sec * 1_000_000 + usec < 0
+    changed = Time.at(time.to_i, usec, :usec)
+    return changed.getutc if time.utc?
+    return changed.getlocal(time.utc_offset) if time.zone.to_s.empty?
+    local = Time.at(time.to_i).getlocal
+    if local.zone != time.zone || local.utc_offset != time.utc_offset || local.dst? != time.dst?
+      raise NotImplementedError, "Time#change with a custom or changed system timezone is not supported"
+    end
+    changed.getlocal
+  end
+
   def self.beginning_of_minute(t)
     local_time(t.year, t.month, t.day, t.hour, t.min, 0, 0)
   end

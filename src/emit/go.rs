@@ -85,7 +85,7 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
     // App-wide nullable-column set, for cross-class reads (a view
     // renders `article.title`, whose model isn't the class being
     // emitted). Per-class tables are set by `emit_library_class`.
-    expr::set_all_nullable_columns(nullable_column_pairs(app));
+    expr::set_all_nullable_columns(nullable_column_go_tys(app));
     expr::reset_error_classes();
 
     // Hand-written runtime — copied verbatim under `app/v2/`.
@@ -1153,6 +1153,23 @@ pub(super) fn nullable_column_pairs(app: &crate::App) -> Vec<(String, String)> {
         for c in &table.columns {
             if c.nullable && !c.primary_key {
                 out.push((m.name.0.as_str().to_string(), c.name.as_str().to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// `(Model, column, Go pointer type)` for every nullable column: the
+/// type a read of it from another class has (`*int64` for an integer
+/// column), as the model's own struct field declares it.
+pub(super) fn nullable_column_go_tys(app: &crate::App) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    for m in &app.models {
+        let Some(table) = app.schema.tables.get(&m.table.0) else { continue };
+        for c in &table.columns {
+            if c.nullable && !c.primary_key {
+                let ty = crate::lower::model_to_library::ty_of_column_slot(c);
+                out.push((m.name.0.as_str().to_string(), c.name.as_str().to_string(), ty::go_ty_ptr(Some(&ty))));
             }
         }
     }

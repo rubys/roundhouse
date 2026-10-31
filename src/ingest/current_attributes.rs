@@ -96,7 +96,9 @@ pub fn lower_current_attributes(app: &mut crate::App) {
     for (class, name, signature) in signatures {
         app.rbs_signatures.entry(class).or_default().entry(name).or_insert(signature);
     }
-    app.current_attribute_classes = lowered;
+    // Extended, not replaced: a later pass (`acts_as_tenant`) lowers a
+    // class it synthesizes the same way.
+    app.current_attribute_classes.extend(lowered);
 }
 
 /// `attribute :session, :user, :request` — consumed, not replayed.

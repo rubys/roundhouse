@@ -128,6 +128,7 @@ pub fn lower_overlay(app: &App) -> OverlayLcs {
         &app.models,
         fixture_extras,
         &crate::lower::routes::helper_id_segments(app),
+        &crate::lower::routes::direct_helper_names(app),
     );
     OverlayLcs { controllers, models, views, route_helpers, importmap, route_table, fixtures, tests }
 }

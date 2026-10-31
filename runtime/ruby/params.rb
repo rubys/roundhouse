@@ -60,6 +60,25 @@ module Params
     filtered
   end
 
+  def self.record_list(sub, key, allowed)
+    value = Params.nested(sub, key, allowed, "list")
+    if value.is_a?(Array)
+      records = []
+      value.each do |item|
+        records.push(item) if item.is_a?(Hash)
+      end
+      records
+    elsif value.is_a?(Hash)
+      numbered = {}
+      value.each do |name, item|
+        numbered[name] = item if item.is_a?(Hash)
+      end
+      numbered
+    else
+      nil
+    end
+  end
+
   def self.nested_key(key)
     if key.is_a?(Symbol)
       key.to_s

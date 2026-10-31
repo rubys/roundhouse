@@ -124,8 +124,9 @@ pub fn lower_test_modules_to_library_classes(
     models: &[Model],
     extras: Vec<(ClassId, ClassInfo)>,
     route_id_segments: &crate::det::HashMap<String, Vec<bool>>,
+    direct_helpers: &crate::det::HashSet<String>,
 ) -> Vec<LibraryClass> {
-    lower_test_modules_with_inner(test_modules, fixtures, models, extras, route_id_segments)
+    lower_test_modules_with_inner(test_modules, fixtures, models, extras, route_id_segments, direct_helpers)
         .into_iter()
         .map(|m| m.test_class)
         .collect()
@@ -144,8 +145,11 @@ pub fn lower_test_modules_with_inner(
     // projects to `.id` only where an id is what the segment holds —
     // `crate::lower::routes::helper_id_segments`.
     route_id_segments: &crate::det::HashMap<String, Vec<bool>>,
+    // The app's `direct` helpers (`crate::lower::routes::direct_helper_names`),
+    // whose options reach them as written.
+    direct_helpers: &crate::det::HashSet<String>,
 ) -> Vec<LoweredTestModule> {
-    lower_test_modules_with_inner_opts(test_modules, fixtures, models, extras, route_id_segments, false)
+    lower_test_modules_with_inner_opts(test_modules, fixtures, models, extras, route_id_segments, direct_helpers, false)
 }
 
 /// `lower_test_modules_with_inner`, with `owner_objects` for the Ruby
@@ -157,6 +161,7 @@ pub fn lower_test_modules_with_inner_opts(
     models: &[Model],
     extras: Vec<(ClassId, ClassInfo)>,
     route_id_segments: &crate::det::HashMap<String, Vec<bool>>,
+    direct_helpers: &crate::det::HashSet<String>,
     owner_objects: bool,
 ) -> Vec<LoweredTestModule> {
     let mut classes: HashMap<ClassId, ClassInfo> = HashMap::default();
@@ -428,7 +433,7 @@ pub fn lower_test_modules_with_inner_opts(
             // recognize, and both asserted a redirect to
             // `/rooms/#<Room:0x000000012339eda0>`.
             rewritten |= crate::lower::controller_to_library::rewrites::
-                project_route_helper_ids_in_place(&mut method.body);
+                project_route_helper_ids_in_place(&mut method.body, direct_helpers);
             // Inline assert_*/refute_* sends — replaces vacuous
             // Minitest dispatch with real `raise` so spinel's
             // assertion-correctness signal is non-fake. See
