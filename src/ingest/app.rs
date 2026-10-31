@@ -11934,7 +11934,13 @@ fn read_active_job_retry_jitter<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> f64 {
             continue;
         };
         let Some((_, v)) = line[i..].split_once('=') else { continue };
-        let v: String = v.trim().chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+        // The whole numeric literal: `0.15`, `1e-2`, `1_0.0`.
+        let v: String = v
+            .trim()
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || matches!(c, '.' | 'e' | 'E' | '-' | '+' | '_'))
+            .filter(|c| *c != '_')
+            .collect();
         if let Ok(v) = v.parse::<f64>() {
             jitter = v;
         }

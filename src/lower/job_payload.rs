@@ -732,13 +732,16 @@ fn used_by_payload_jobs(app: &App, lc: &LibraryClass) -> bool {
 fn exception_class(app: &App, owner: &LibraryClass, e: &Expr) -> Option<String> {
     let ExprNode::Const { path } = &*e.node else { return None };
     let name = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+    let rooted = name.starts_with("::");
     let name = name.trim_start_matches("::").to_string();
     if RUNTIME_EXCEPTIONS.contains(&name.as_str()) {
         return Some(name);
     }
     // Ruby's lexical lookup: the job's own namespace first (a class
-    // declared inside the job), then each enclosing one, then the top.
-    let mut scope: Vec<&str> = owner.name.0.as_str().split("::").collect();
+    // declared inside the job), then each enclosing one, then the top;
+    // a rooted `::Name` names the top-level class only.
+    let mut scope: Vec<&str> =
+        if rooted { Vec::new() } else { owner.name.0.as_str().split("::").collect() };
     loop {
         let candidate =
             if scope.is_empty() { name.clone() } else { format!("{}::{}", scope.join("::"), name) };
