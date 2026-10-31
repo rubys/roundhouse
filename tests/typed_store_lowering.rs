@@ -127,3 +127,67 @@ fn typed_store_accessors_render_on_the_ruby_tree() {
         "boolean writer must cast rather than store the form value verbatim: {user_src}",
     );
 }
+
+#[path = "support/emit_and_run.rs"]
+mod emit_and_run;
+
+/// The store column's own reader answers the gem's Hash of the declared
+/// attributes, at their defaults until written, and `[]=` writes back
+/// into the column the record saves. a large app's `Shop#plan_name` reads
+/// `settings[:plan_name]` and its tests write
+/// `shop.settings[:gift_cards_activated] = true`; the column reader
+/// answered the serialized String: TypeError (no implicit conversion of
+/// Symbol into Integer).
+#[test]
+fn the_store_column_reads_and_writes_as_a_hash() {
+    emit_and_run::empty_app()
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table :shops do |t|\n    t.string :name\n    t.text :settings\n  end\nend\n",
+        )
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n",
+        )
+        .write(
+            "app/models/shop.rb",
+            r#"class Shop < ApplicationRecord
+  DEFAULT_TIMEZONE = "Eastern Time (US & Canada)"
+
+  typed_store :settings do |s|
+    s.string :timezone, blank: false, default: DEFAULT_TIMEZONE
+    s.string :plan_name
+    s.boolean :gift_cards_activated, default: false
+  end
+
+  def plan_name
+    settings[:plan_name] || "basic"
+  end
+
+  def zone
+    settings[:timezone]
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"
+shop = Shop.new(name: "snow")
+raise "default plan" unless shop.plan_name == "basic"
+raise "declared default #{shop.zone.inspect}" unless shop.zone == "Eastern Time (US & Canada)"
+raise "bool default" unless shop.settings[:gift_cards_activated] == false
+raise "key? declared" unless shop.settings.key?(:plan_name) && shop.settings.key?("timezone")
+shop.settings[:gift_cards_activated] = "1"
+shop.settings["plan_name"] = "plus"
+raise "write through #{shop.plan_name.inspect}" unless shop.plan_name == "plus"
+raise "cast bool" unless shop.gift_cards_activated == true
+raise "indifferent" unless shop.settings.fetch("gift_cards_activated") == true
+shop.save!
+again = Shop.find(shop.id)
+raise "persisted #{again.settings.to_h.inspect}" unless again.plan_name == "plus" && again.gift_cards_activated
+raise "to_h" unless again.settings.to_h["timezone"] == "Eastern Time (US & Canada)"
+puts "PASS"
+"#,
+        )
+        .assert_passes();
+}
