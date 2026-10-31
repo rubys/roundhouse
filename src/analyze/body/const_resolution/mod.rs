@@ -6,6 +6,8 @@
 
 use crate::ingest::prism_api::PrismLocation;
 mod hoist;
+mod per_name;
+pub(crate) use per_name::ConstantLookup;
 
 use std::collections::hash_map::Entry;
 use crate::det::{HashMap, HashSet};
@@ -255,19 +257,20 @@ fn core_value_type(name: &str) -> Option<Ty> {
 
 const CORE_URI: &str = "roundhouse-core:rbs";
 const RUNTIME_URI_PREFIX: &str = "roundhouse-runtime:";
+const EXTERNAL_URI_PREFIX: &str = "roundhouse-external-declarations:";
 
+#[derive(Clone)]
 pub(super) enum ResolvedConstant {
-    Namespace { class: Arc<ClassId>, runtime: bool },
+    Namespace { class: Arc<ClassId>, runtime: bool, external: bool },
     /// `runtime_decl`: declared only by the runtime's sources, so a
     /// registry class of the same exact name describes this constant.
-    /// `singleton`: declared in a `class << self` (`X::<X>::NAME`), whose
-    /// segment `name` leaves out.
-    Value { declaration: DeclarationId, name: Arc<ClassId>, runtime: Option<Arc<Ty>>, runtime_decl: bool, singleton: bool },
+    Value { declaration: DeclarationId, name: Arc<ClassId>, runtime: Option<Arc<Ty>>, runtime_decl: bool, external: bool, singleton: bool },
 }
 
 /// Rubydex answers for one source file.
 #[derive(Default)]
 struct FileAnswers {
+    per_name: Option<Box<per_name::FileNames>>,
     /// Keyed by the byte offset where each written constant name starts.
     references: HashMap<u32, Option<ResolvedConstant>>,
     class_references: HashSet<u32>,
@@ -291,7 +294,9 @@ struct FileAnswers {
     singleton_owners: HashSet<Box<str>>,
 }
 
+
 pub(crate) struct ConstResolver {
+    per_name: Option<per_name::NameIndex>,
     /// Indexed by `FileId - 1`. `None` marks a source that Rubydex did
     /// not index, such as an ERB template.
     files: Vec<Option<FileAnswers>>,
@@ -305,6 +310,8 @@ pub(crate) struct ConstResolver {
     source_fingerprint: u64,
     /// Complete, canonical ancestry from the same graph, for source admission.
     class_ancestry: HashMap<ClassId, Vec<ClassId>>,
+    mixin_order: HashMap<ClassId, Vec<ClassId>>,
+    singleton_mixin_order: HashMap<ClassId, Vec<ClassId>>,
 }
 
 fn is_indexed(source: &SourceFile) -> bool {
@@ -335,6 +342,7 @@ impl Document<'_> {
         constant_graph(
             build_local_graph(uri, self.text, &self.language, IndexerBackend::RubyIndexer),
             self.text,
+            self.uri_prefix == EXTERNAL_URI_PREFIX,
         )
     }
 }
@@ -348,19 +356,77 @@ impl Document<'_> {
 /// No written name resolves through those references, and in a large
 /// app they are 38% of all references, so they leave too. The rebuilt
 /// document lists only the kept entries.
-fn constant_graph(local: LocalGraph, text: &str) -> LocalGraph {
+fn constant_graph(local: LocalGraph, text: &str, external: bool) -> LocalGraph {
     let (uri_id, document, definitions, strings, names, constant_references, _, _) =
         local.into_parts();
     let mut constant_document = RubydexDocument::new(document.uri().into(), text);
-    for diagnostic in document.diagnostics().iter()
+    for diagnostic in document
+        .diagnostics()
+        .iter()
         .filter(|diagnostic| *diagnostic.rule() == Rule::DynamicSingletonDefinition)
     {
         constant_document.add_diagnostic(RubydexDiagnostic::new(
-            *diagnostic.rule(), *diagnostic.uri_id(), diagnostic.offset().clone(), diagnostic.message().into(),
+            *diagnostic.rule(),
+            *diagnostic.uri_id(),
+            diagnostic.offset().clone(),
+            diagnostic.message().into(),
         ));
     }
     let mut graph = LocalGraph::from_parts(uri_id, constant_document, strings, names);
-    for definition in definitions.into_values() {
+    let marker_refs: HashMap<_, String> = if external {
+        constant_references
+            .iter()
+            .filter_map(|(id, reference)| {
+                let name = graph.names().get(reference.name_id())?;
+                let text = graph.strings().get(name.str())?.as_str();
+                use crate::ingest::source_declarations::{ConstantEffect, constant_effect};
+                let invalid = match constant_effect(text)? {
+                    ConstantEffect::All => "<roundhouse:incomplete-constant-namespace>".to_string(),
+                    ConstantEffect::Name(name) => {
+                        format!("<roundhouse:uncertain-name:{}>", name.as_str())
+                    }
+                };
+                Some((*id, invalid))
+            })
+            .collect()
+    } else {
+        HashMap::default()
+    };
+    for mut definition in definitions.into_values() {
+        let mixins = match &definition {
+            Definition::Class(d) => d.mixins(),
+            Definition::Module(d) => d.mixins(),
+            _ => &[],
+        };
+        let markers: Vec<_> = mixins
+            .iter()
+            .filter_map(|m| {
+                marker_refs
+                    .get(m.constant_reference_id())
+                    .map(|name| (*m.constant_reference_id(), name.clone()))
+            })
+            .collect();
+        for (reference_id, name) in markers {
+            use rubydex::model::{
+                definitions::{IncludeDefinition, Mixin},
+                references::ConstantReference,
+            };
+            let string = graph.intern_string(name);
+            let name = graph.add_name(string, ParentScope::TopLevel, None);
+            let offset = constant_references
+                .get(&reference_id)
+                .unwrap()
+                .offset()
+                .clone();
+            let reference =
+                graph.add_constant_reference(ConstantReference::new(name, uri_id, offset));
+            let mixin = Mixin::Include(IncludeDefinition::new(reference));
+            match &mut definition {
+                Definition::Class(d) => d.add_mixin(mixin),
+                Definition::Module(d) => d.add_mixin(mixin),
+                _ => unreachable!(),
+            }
+        }
         let keep = match &definition {
             Definition::Class(_)
             | Definition::SingletonClass(_)
@@ -475,6 +541,17 @@ fn is_runtime_declaration(graph: &Graph, declaration: &Declaration) -> bool {
     })
 }
 
+/// Knowledge from external declarations is not a runtime-loading fact.
+fn is_external_declaration(graph: &Graph, declaration: &Declaration) -> bool {
+    declaration.definitions().iter().any(|id| {
+        graph
+            .definitions()
+            .get(id)
+            .and_then(|definition| graph.documents().get(definition.uri_id()))
+            .is_some_and(|document| document.uri().starts_with(EXTERNAL_URI_PREFIX))
+    })
+}
+
 fn resolved_namespace(graph: &Graph, name: NameId) -> Option<&Declaration> {
     let id = graph.name_id_to_declaration_id(name)?;
     let id = graph.resolve_alias(id).unwrap_or(*id);
@@ -557,6 +634,345 @@ pub(crate) fn definition_index(sources: &[SourceFile]) -> DefinitionIndex {
     index
 }
 
+pub(crate) fn external_definition_names(sources: &[SourceFile], declarations: &[SourceFile]) -> HashSet<Box<str>> {
+    let mut graph = index_sources_with_declarations(sources, declarations);
+    Resolver::new(&mut graph).resolve();
+    graph.declarations().values()
+        .filter(|d| d.kind() != "SingletonClass" && !d.name().contains('<') && is_external_declaration(&graph, d))
+        .map(|d| hoisted_name(d.name()).as_ref().into()).collect()
+}
+
+fn prune_external_mixins(
+    graph: &Graph,
+    declarations: &[SourceFile],
+    effects: &[per_name::ReceiverEffect],
+) -> Vec<SourceFile> {
+    let all = effects
+        .iter()
+        .any(|e| e.owner.is_none());
+    let mut invalid = HashMap::<ClassId, HashSet<Symbol>>::default();
+    for effect in effects {
+        if effect.mixin_override
+            && let (Some(owner), Some(method)) = (&effect.owner, &effect.member)
+        {
+            invalid
+                .entry(owner.clone())
+                .or_default()
+                .insert(method.clone());
+        }
+    }
+    if !all && invalid.is_empty() {
+        return declarations.to_vec();
+    }
+    struct Mixins<'a> {
+        answers: &'a FileAnswers,
+        invalid: &'a HashMap<ClassId, HashSet<Symbol>>,
+        all: bool,
+        scopes: Vec<Option<ClassId>>,
+        remove: Vec<(usize, usize)>,
+    }
+    impl<'pr> ruby_prism::Visit<'pr> for Mixins<'_> {
+        fn visit_class_node(&mut self, n: &ruby_prism::ClassNode<'pr>) {
+            self.scopes.push(
+                self.answers
+                    .namespace_bodies
+                    .get(&(n.constant_path().location().end_offset() as u32))
+                    .cloned(),
+            );
+            if let Some(body) = n.body() {
+                self.visit(&body);
+            }
+            self.scopes.pop();
+        }
+        fn visit_module_node(&mut self, n: &ruby_prism::ModuleNode<'pr>) {
+            self.scopes.push(
+                self.answers
+                    .namespace_bodies
+                    .get(&(n.constant_path().location().end_offset() as u32))
+                    .cloned(),
+            );
+            if let Some(body) = n.body() {
+                self.visit(&body);
+            }
+            self.scopes.pop();
+        }
+        fn visit_call_node(&mut self, n: &ruby_prism::CallNode<'pr>) {
+            let name = n.name();
+            if !matches!(name.as_slice(), b"include" | b"prepend" | b"extend")
+                || !n.receiver().is_none_or(|n| n.as_self_node().is_some())
+            {
+                return;
+            }
+            // These includes are logical effect annotations, not Ruby calls.
+            if n.arguments().is_some_and(|args| {
+                args.arguments().iter().any(|arg| {
+                    std::str::from_utf8(arg.location().as_slice())
+                        .ok()
+                        .is_some_and(|name| {
+                            crate::ingest::source_declarations::constant_effect(
+                                name.trim_start_matches("::"),
+                            )
+                            .is_some()
+                        })
+                })
+            }) {
+                return;
+            }
+            let method = Symbol::new(std::str::from_utf8(name.as_slice()).unwrap());
+            let owner = self
+                .scopes
+                .last()
+                .cloned()
+                .unwrap_or_else(|| Some(ClassId(Symbol::new("Object"))));
+            if self.all
+                || owner.as_ref().is_some_and(|owner| {
+                    self.invalid
+                        .get(owner)
+                        .is_some_and(|methods| methods.contains(&method))
+                })
+            {
+                self.remove
+                    .push((n.location().start_offset(), n.location().end_offset()));
+            }
+        }
+    }
+    declarations
+        .iter()
+        .map(|source| {
+            let file = SourceFile {
+                path: format!("{EXTERNAL_URI_PREFIX}{}", source.path),
+                text: source.text.clone(),
+            };
+            let answers = answer_file(graph, &file, &mut IdentityHashMap::default(), false);
+            let parsed = crate::ingest::prism::parse_silent(file.text.as_bytes());
+            let mut mixins = Mixins {
+                answers: &answers,
+                invalid: &invalid,
+                all,
+                scopes: Vec::new(),
+                remove: Vec::new(),
+            };
+            ruby_prism::Visit::visit(&mut mixins, &parsed.node());
+            let mut text = source.text.clone();
+            for (start, end) in mixins.remove.into_iter().rev() {
+                text.replace_range(start..end, "");
+            }
+            SourceFile {
+                path: source.path.clone(),
+                text,
+            }
+        })
+        .collect()
+}
+
+/// Give the RBI projection the same namespace identities as the constant graph.
+/// No syntactic lexical prefix is an independently verified class name.
+pub(crate) fn canonical_external_declarations(
+    sources: &[SourceFile],
+    declarations: &[SourceFile],
+) -> Vec<SourceFile> {
+    let mut declarations = declarations.to_vec();
+    let (graph, effects) = loop {
+        let mut graph = index_sources_with_declarations(sources, &declarations);
+        Resolver::new(&mut graph).resolve();
+        let effects = per_name::receiver_effects(&graph, &declarations);
+        let pruned = prune_external_mixins(&graph, &declarations, &effects);
+        if declarations
+            .iter()
+            .zip(&pruned)
+            .all(|(a, b)| a.text == b.text)
+        {
+            break (graph, effects);
+        }
+        // Every changed pass removes at least one finite input edge.
+        declarations = pruned;
+    };
+    let kinds: HashMap<_, _> = graph
+        .declarations()
+        .values()
+        .filter_map(|d| {
+            (d.kind() != "SingletonClass")
+                .then(|| d.as_namespace())
+                .flatten()
+                .map(|_| {
+                    (
+                        ClassId(Symbol::new(hoisted_name(d.name()).as_ref())),
+                        d.kind() == "Module",
+                    )
+                })
+        })
+        .collect();
+    declarations
+        .iter()
+        .map(|source| {
+            let uri = format!("{EXTERNAL_URI_PREFIX}{}", source.path);
+            let Some(document) = graph.documents().get(&UriId::from(uri.as_str())) else {
+                return SourceFile {
+                    path: source.path.clone(),
+                    text: String::new(),
+                };
+            };
+            let mut definitions = HashMap::default();
+            for definition in document
+                .definitions()
+                .iter()
+                .filter_map(|id| graph.definitions().get(id))
+            {
+                if !matches!(
+                    definition,
+                    Definition::Class(_)
+                        | Definition::Module(_)
+                        | Definition::Constant(_)
+                        | Definition::ConstantAlias(_)
+                ) {
+                    continue;
+                }
+                let Some(offset) = definition.name_offset() else {
+                    continue;
+                };
+                let Some(id) = graph.definition_to_declaration_id(definition) else {
+                    continue;
+                };
+                let id = if matches!(definition, Definition::Class(_) | Definition::Module(_)) {
+                    graph.resolve_alias(id).unwrap_or(*id)
+                } else {
+                    *id
+                };
+                let Some(declaration) = graph.declarations().get(&id) else {
+                    continue;
+                };
+                let name = hoisted_name(declaration.name());
+                if !name.contains('<') {
+                    definitions.insert(offset.end(), format!("::{name}"));
+                }
+            }
+            struct References<'a> {
+                answers: &'a FileAnswers,
+                definitions: &'a HashMap<u32, String>,
+                edits: Vec<(usize, usize, String)>,
+            }
+            impl References<'_> {
+                fn definition(&mut self, location: ruby_prism::Location<'_>) {
+                    if let Some(name) = self.definitions.get(&(location.end_offset() as u32)) {
+                        self.edits.push((
+                            location.start_offset(),
+                            location.end_offset(),
+                            name.clone(),
+                        ));
+                    }
+                }
+                fn keep(&mut self, start: usize, end: usize, key: u32) {
+                    let Some(Some(answer)) = self.answers.references.get(&key) else {
+                        return;
+                    };
+                    let name = match answer {
+                        ResolvedConstant::Namespace { class, .. } => class.0.as_str(),
+                        ResolvedConstant::Value { name, .. } => name.0.as_str(),
+                    };
+                    if !name.contains('<')
+                        && crate::ingest::source_declarations::constant_effect(name).is_none()
+                    {
+                        self.edits.push((start, end, format!("::{name}")));
+                    }
+                }
+            }
+            impl<'pr> ruby_prism::Visit<'pr> for References<'_> {
+                fn visit_class_node(&mut self, n: &ruby_prism::ClassNode<'pr>) {
+                    self.definition(n.constant_path().location());
+                    if let Some(parent) = n.superclass() {
+                        self.visit(&parent);
+                    }
+                    if let Some(body) = n.body() {
+                        self.visit(&body);
+                    }
+                }
+                fn visit_module_node(&mut self, n: &ruby_prism::ModuleNode<'pr>) {
+                    self.definition(n.constant_path().location());
+                    if let Some(body) = n.body() {
+                        self.visit(&body);
+                    }
+                }
+                fn visit_constant_write_node(&mut self, n: &ruby_prism::ConstantWriteNode<'pr>) {
+                    self.definition(n.name_loc());
+                    self.visit(&n.value());
+                }
+                fn visit_constant_path_write_node(
+                    &mut self,
+                    n: &ruby_prism::ConstantPathWriteNode<'pr>,
+                ) {
+                    self.definition(n.target().location());
+                    self.visit(&n.value());
+                }
+                fn visit_constant_read_node(&mut self, n: &ruby_prism::ConstantReadNode<'pr>) {
+                    self.keep(
+                        n.location().start_offset(),
+                        n.location().end_offset(),
+                        n.location().start_offset() as u32,
+                    );
+                }
+                fn visit_constant_path_node(&mut self, n: &ruby_prism::ConstantPathNode<'pr>) {
+                    self.keep(
+                        n.location().start_offset(),
+                        n.location().end_offset(),
+                        n.name_loc().start_offset() as u32,
+                    );
+                }
+            }
+            let file = SourceFile {
+                path: uri,
+                text: source.text.clone(),
+            };
+            let answers = answer_file(&graph, &file, &mut IdentityHashMap::default(), false);
+            let mut references = References {
+                answers: &answers,
+                definitions: &definitions,
+                edits: Vec::new(),
+            };
+            let parsed = crate::ingest::prism::parse_silent(source.text.as_bytes());
+            ruby_prism::Visit::visit(&mut references, &parsed.node());
+            let mut edits = references.edits;
+            edits.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+            let mut text = String::new();
+            let mut end = 0;
+            for (start, stop, replacement) in edits {
+                if start < end || stop > source.text.len() {
+                    continue;
+                }
+                text.push_str(&source.text[end..start]);
+                text.push_str(&replacement);
+                end = stop;
+            }
+            text.push_str(&source.text[end..]);
+            if effects.iter().any(|effect| effect.source == source.path && effect.owner.is_none()) {
+                text.push_str(&format!("::Object.{}()\n", crate::ingest::source_declarations::UNBOUNDED_EFFECT));
+            }
+            for effect in effects.iter().filter(|effect| effect.source == source.path) {
+                if let Some(owner) = &effect.owner
+                    && let Some(is_module) = kinds.get(owner)
+                {
+                    let marker = if effect.mixin_override || effect.member.is_none() {
+                        crate::ingest::source_declarations::OPAQUE_CONSTANTS.to_string()
+                    } else {
+                        crate::ingest::source_declarations::named_marker(
+                            effect.member.as_ref().unwrap().as_str(),
+                        )
+                    };
+                    text.push_str(&format!(
+                        "{} ::{}\ninclude ::{}\nend\n",
+                        if *is_module { "module" } else { "class" },
+                        owner.0,
+                        marker
+                    ));
+                }
+            }
+            SourceFile {
+                path: source.path.clone(),
+                text,
+            }
+        })
+        .collect()
+}
+
 /// Does any `class`/`module` definition in `sources` name its namespace
 /// with a relative constant path (`class B::C` written inside `module A`)
 /// whose namespace the indexed sources do not define? Ruby looks that
@@ -570,15 +986,24 @@ pub(crate) fn has_ambiguous_namespace(sources: &[SourceFile]) -> bool {
     }
     let mut graph = index_sources(sources);
     Resolver::new(&mut graph).resolve();
-    sources.iter().filter(|source| is_indexed(source)).any(|source| {
-        let Some(document) = graph.documents().get(&UriId::from(source.path.as_str())) else { return false };
-        document.definitions().iter().any(|definition_id| {
-            let Some(definition @ (Definition::Class(_) | Definition::Module(_))) = graph.definitions().get(definition_id) else {
+    sources
+        .iter()
+        .filter(|source| is_indexed(source))
+        .any(|source| {
+            let Some(document) = graph.documents().get(&UriId::from(source.path.as_str())) else {
                 return false;
             };
-            definition.name_id().is_some_and(|name_id| namespace_is_ambiguous(&graph, *name_id))
+            document.definitions().iter().any(|definition_id| {
+                let Some(definition @ (Definition::Class(_) | Definition::Module(_))) =
+                    graph.definitions().get(definition_id)
+                else {
+                    return false;
+                };
+                definition
+                    .name_id()
+                    .is_some_and(|name_id| namespace_is_ambiguous(&graph, *name_id))
+            })
         })
-    })
 }
 
 /// Is `name_id` a relative path (`B::C`) written inside a body, whose
@@ -586,11 +1011,17 @@ pub(crate) fn has_ambiguous_namespace(sources: &[SourceFile]) -> bool {
 /// Rubydex still creates a declaration for such a namespace; it just has
 /// no definitions.
 fn namespace_is_ambiguous(graph: &Graph, name_id: NameId) -> bool {
-    let Some(name) = graph.names().get(&name_id) else { return false };
-    let ParentScope::Some(namespace_id) = name.parent_scope() else { return false };
+    let Some(name) = graph.names().get(&name_id) else {
+        return false;
+    };
+    let ParentScope::Some(namespace_id) = name.parent_scope() else {
+        return false;
+    };
     let mut leftmost_id = *namespace_id;
     loop {
-        let Some(segment) = graph.names().get(&leftmost_id) else { return false };
+        let Some(segment) = graph.names().get(&leftmost_id) else {
+            return false;
+        };
         match segment.parent_scope() {
             ParentScope::Some(next_id) => leftmost_id = *next_id,
             // `::B::C`, or a path on a singleton, resolves without lexical scope.
@@ -609,11 +1040,14 @@ fn namespace_is_ambiguous(graph: &Graph, name_id: NameId) -> bool {
         .and_then(|declaration_id| graph.declarations().get(declaration_id))
         .is_none_or(|namespace| namespace.definitions().is_empty())
 }
-
 impl ConstResolver {
     /// Index real Ruby app sources with their original 1-based file IDs.
     pub(crate) fn from_app_sources(sources: &[SourceFile]) -> Self {
-        let mut graph = crate::timings::phase("rubydex: index", || index_sources(sources));
+        Self::with_declarations(sources, &[])
+    }
+
+    fn with_declarations(sources: &[SourceFile], declarations: &[SourceFile]) -> Self {
+        let mut graph = crate::timings::phase("rubydex: index", || index_sources_with_declarations(sources, declarations));
         // Rubydex resolves all source references after every file enters
         // its graph, including declarations in later files.
         crate::timings::phase("rubydex: resolve", || Resolver::new(&mut graph).resolve());
@@ -634,7 +1068,40 @@ impl ConstResolver {
             }
             Some((ClassId(Symbol::from(hoisted_name(declaration.name()).as_ref())), ancestors))
         }).collect();
-        let files = crate::timings::phase("rubydex: answers", || collect_answers(&graph, sources));
+        let mixin_order = if declarations.is_empty() { HashMap::default() } else {
+            graph.declarations().iter().filter_map(|(own, declaration)| {
+                let namespace = declaration.as_namespace()?;
+                let mut modules = Vec::new();
+                for ancestor in namespace.ancestors() {
+                    let Ancestor::Complete(id) = ancestor else { break };
+                    if id == own { continue; }
+                    let Some(declaration) = graph.declarations().get(id) else { continue };
+                    if declaration.kind() == "Class" { break; }
+                    if declaration.kind() == "Module" {
+                        modules.push(ClassId(Symbol::from(hoisted_name(declaration.name()).as_ref())));
+                    }
+                }
+                Some((ClassId(Symbol::from(hoisted_name(declaration.name()).as_ref())), modules))
+            }).collect()
+        };
+        let singleton_mixin_order = if declarations.is_empty() { HashMap::default() } else {
+            graph.declarations().values().filter_map(|declaration| {
+                let namespace = declaration.as_namespace()?;
+                let own = namespace.singleton_class()?;
+                let singleton = graph.declarations().get(own)?.as_namespace()?;
+                let mut modules = Vec::new();
+                for ancestor in singleton.ancestors() {
+                    let Ancestor::Complete(id) = ancestor else { break };
+                    if id == own { continue; }
+                    let Some(ancestor) = graph.declarations().get(id) else { continue };
+                    if ancestor.kind() != "Module" { break; }
+                    modules.push(ClassId(Symbol::from(hoisted_name(ancestor.name()).as_ref())));
+                }
+                Some((ClassId(Symbol::from(hoisted_name(declaration.name()).as_ref())), modules))
+            }).collect()
+        };
+        let files = crate::timings::phase("rubydex: answers", || collect_answers(&graph, sources, !declarations.is_empty()));
+        let per_name = (!declarations.is_empty()).then(|| per_name::NameIndex::new(&graph, declarations));
         drop(graph);
         let mut declared: Vec<&str> = files.iter().flatten().flat_map(|file| file.class_definitions.iter().map(|name| name.as_ref())).collect();
         declared.sort_unstable();
@@ -648,7 +1115,7 @@ impl ConstResolver {
                 source_namespaces.insert(target.clone());
             }
         }
-        Self { files, nested_namespaces, source_namespaces, source_fingerprint: source_fingerprint(sources), class_ancestry }
+        Self { per_name, files, nested_namespaces, source_namespaces, source_fingerprint: source_fingerprint(sources), class_ancestry, mixin_order, singleton_mixin_order }
     }
 
     fn file(&self, file: FileId) -> Option<&FileAnswers> {
@@ -701,6 +1168,12 @@ impl ConstResolver {
     /// IR spans cover the entire `A::B::C` path. Rubydex records the
     /// final name at the span end minus the name's byte length. The typer
     /// can qualify a relative path, but the final name stays the same.
+    pub(in crate::analyze) fn constant_lookup(&self, span: Span, path: &[Symbol], scope: Option<&ClassId>, generated: bool) -> Option<ConstantLookup<'_>> {
+        let index = self.per_name.as_ref()?;
+        let site = (!generated).then(|| self.file(span.file)?.per_name.as_ref()?.sites.get(&span.end)).flatten();
+        Some(index.lookup(site, path, scope))
+    }
+
     pub(super) fn reference(
         &self,
         span: Span,
@@ -795,7 +1268,7 @@ impl ConstResolver {
 
     pub(crate) fn is_runtime_class(&self, span: Span, path: &[Symbol], name: &str) -> bool {
         matches!(self.reference(span, path),
-            Some(Some(ResolvedConstant::Namespace { class, runtime: true }))
+            Some(Some(ResolvedConstant::Namespace { class, runtime: true, .. }))
                 if class.0.as_str() == name)
     }
 
@@ -820,6 +1293,20 @@ impl ConstResolver {
         })
     }
 
+    pub(in crate::analyze) fn modeled_value(&self, name: &ClassId) -> Option<Ty> {
+        core_value_type(name.0.as_str()).or_else(|| runtime_value_types().get(name.0.as_str()).map(|ty| (**ty).clone()))
+    }
+
+    pub(in crate::analyze) fn has_external_declarations(&self) -> bool { self.per_name.is_some() }
+
+    pub(in crate::analyze) fn singleton_mixin_order(&self, name: &ClassId) -> Option<&[ClassId]> {
+        self.singleton_mixin_order.get(name).map(Vec::as_slice)
+    }
+
+    pub(in crate::analyze) fn mixin_order(&self, name: &ClassId) -> Option<&[ClassId]> {
+        self.mixin_order.get(name).map(Vec::as_slice)
+    }
+
     pub(in crate::analyze) fn class_ancestry(&self, name: &ClassId) -> Option<&[ClassId]> {
         self.class_ancestry.get(name).map(Vec::as_slice)
     }
@@ -828,9 +1315,18 @@ impl ConstResolver {
 /// Rubydex answers that ingest resolved for `App::sources`. They derive
 /// from the sources, so `App` does not serialize or compare them.
 #[derive(Clone, Default)]
-pub struct PreparedConstResolver(Option<Arc<ConstResolver>>);
+pub struct PreparedConstResolver(Option<Arc<ConstResolver>>, Arc<Vec<SourceFile>>);
 
 impl PreparedConstResolver {
+    pub(in crate::analyze) fn has_external_declarations(&self) -> bool { !self.1.is_empty() }
+
+    /// Separate declaration documents, never app sources or emitted bodies.
+    #[cfg(test)]
+    pub(crate) fn with_external_declarations(sources: &[SourceFile], declarations: Vec<SourceFile>) -> Self {
+        let resolver = ConstResolver::with_declarations(sources, &declarations);
+        Self(Some(Arc::new(resolver)), Arc::new(declarations))
+    }
+
     /// The answers that ingest prepared, if they cover these sources.
     /// Cloning an app retains the cache, but callers can edit its public
     /// sources. Rebuild when paths, text or file order have changed.
@@ -839,7 +1335,7 @@ impl PreparedConstResolver {
             Some(resolver) if resolver.source_fingerprint == source_fingerprint(sources) => {
                 Arc::clone(resolver)
             }
-            _ => Arc::new(ConstResolver::from_app_sources(sources)),
+            _ => Arc::new(ConstResolver::with_declarations(sources, &self.1)),
         }
     }
 }
@@ -861,6 +1357,7 @@ impl std::fmt::Debug for PreparedConstResolver {
 /// register no sources. The browser build has no threads, so it
 /// resolves before those passes.
 pub(crate) struct ConstResolverTask {
+    declarations: Arc<Vec<SourceFile>>,
     #[cfg(not(target_arch = "wasm32"))]
     thread: std::thread::JoinHandle<ConstResolver>,
     #[cfg(target_arch = "wasm32")]
@@ -869,18 +1366,24 @@ pub(crate) struct ConstResolverTask {
 
 impl ConstResolverTask {
     pub(crate) fn start(sources: Arc<Vec<SourceFile>>) -> Self {
+        Self::start_with_declarations(sources, Arc::default())
+    }
+
+    pub(crate) fn start_with_declarations(sources: Arc<Vec<SourceFile>>, declarations: Arc<Vec<SourceFile>>) -> Self {
+        let retained = Arc::clone(&declarations);
         #[cfg(not(target_arch = "wasm32"))]
         {
             let thread = std::thread::Builder::new()
                 .name("rubydex".into())
                 .stack_size(crate::stack::COMPILER_STACK_BYTES)
-                .spawn(move || ConstResolver::from_app_sources(&sources))
+                .spawn(move || ConstResolver::with_declarations(&sources, &declarations))
                 .expect("spawn the Rubydex thread");
-            Self { thread }
+            Self { thread, declarations: retained }
         }
         #[cfg(target_arch = "wasm32")]
         Self {
-            resolver: ConstResolver::from_app_sources(&sources),
+            resolver: ConstResolver::with_declarations(&sources, &declarations),
+            declarations: retained,
         }
     }
 
@@ -892,7 +1395,7 @@ impl ConstResolverTask {
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
         #[cfg(target_arch = "wasm32")]
         let resolver = self.resolver;
-        PreparedConstResolver(Some(Arc::new(resolver)))
+        PreparedConstResolver(Some(Arc::new(resolver)), self.declarations)
     }
 }
 
@@ -900,6 +1403,10 @@ impl ConstResolverTask {
 /// Ruby core RBS, never from fabricated suffix aliases. App sources keep
 /// their paths as URIs so answers map back to their file IDs.
 fn index_sources(sources: &[SourceFile]) -> Graph {
+    index_sources_with_declarations(sources, &[])
+}
+
+fn index_sources_with_declarations(sources: &[SourceFile], declarations: &[SourceFile]) -> Graph {
     let mut documents = vec![Document {
         uri_prefix: CORE_URI,
         path: "",
@@ -925,6 +1432,12 @@ fn index_sources(sources: &[SourceFile]) -> Graph {
                 language: LanguageId::Ruby,
             }),
     );
+    documents.extend(declarations.iter().map(|source| Document {
+        uri_prefix: EXTERNAL_URI_PREFIX,
+        path: &source.path,
+        text: &source.text,
+        language: LanguageId::Ruby,
+    }));
     index_documents(&documents)
 }
 
@@ -933,7 +1446,7 @@ fn index_sources(sources: &[SourceFile]) -> Graph {
 /// leaves memory before the inference fixpoint starts. The answers for
 /// each file are independent, so workers collect them in parallel.
 #[cfg(not(target_arch = "wasm32"))]
-fn collect_answers(graph: &Graph, sources: &[SourceFile]) -> Vec<Option<FileAnswers>> {
+fn collect_answers(graph: &Graph, sources: &[SourceFile], with_names: bool) -> Vec<Option<FileAnswers>> {
     let workers = std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
         .min(MAX_WORKERS);
@@ -941,7 +1454,7 @@ fn collect_answers(graph: &Graph, sources: &[SourceFile]) -> Vec<Option<FileAnsw
     std::thread::scope(|scope| {
         let chunks: Vec<_> = sources
             .chunks(chunk)
-            .map(|chunk| scope.spawn(move || answer_files(graph, chunk)))
+            .map(|chunk| scope.spawn(move || answer_files(graph, chunk, with_names)))
             .collect();
         chunks
             .into_iter()
@@ -956,15 +1469,15 @@ fn collect_answers(graph: &Graph, sources: &[SourceFile]) -> Vec<Option<FileAnsw
 
 /// The browser build has no threads.
 #[cfg(target_arch = "wasm32")]
-fn collect_answers(graph: &Graph, sources: &[SourceFile]) -> Vec<Option<FileAnswers>> {
-    answer_files(graph, sources)
+fn collect_answers(graph: &Graph, sources: &[SourceFile], with_names: bool) -> Vec<Option<FileAnswers>> {
+    answer_files(graph, sources, with_names)
 }
 
-fn answer_files(graph: &Graph, sources: &[SourceFile]) -> Vec<Option<FileAnswers>> {
+fn answer_files(graph: &Graph, sources: &[SourceFile], with_names: bool) -> Vec<Option<FileAnswers>> {
     let mut class_cache = IdentityHashMap::default();
     sources
         .iter()
-        .map(|source| is_indexed(source).then(|| answer_file(graph, source, &mut class_cache)))
+        .map(|source| is_indexed(source).then(|| answer_file(graph, source, &mut class_cache, with_names)))
         .collect()
 }
 
@@ -1000,12 +1513,85 @@ fn parenthesized_factory_receivers(text: &str) -> HashSet<u32> {
     receivers.0
 }
 
+fn retained_answer(
+    graph: &Graph,
+    id: DeclarationId,
+    declaration: &Declaration,
+    class_cache: &mut IdentityHashMap<DeclarationId, (Arc<ClassId>, bool, bool)>,
+) -> ResolvedConstant {
+    if declaration.as_namespace().is_some() && !is_assigned_value(graph, declaration) {
+        let (class, runtime, external) = class_cache.entry(id).or_insert_with(|| {
+            (
+                Arc::new(ClassId(Symbol::from(
+                    hoisted_name(declaration.name()).as_ref(),
+                ))),
+                is_runtime_declaration(graph, declaration),
+                is_external_declaration(graph, declaration),
+            )
+        });
+        ResolvedConstant::Namespace {
+            class: Arc::clone(class),
+            runtime: *runtime,
+            external: *external,
+        }
+    } else {
+        // An app write to the same declaration must never
+        // borrow the runtime's previous literal type.
+        let app_write = declaration.definitions().iter().any(|id| {
+            graph.definitions().get(id).is_some_and(|definition| {
+                matches!(
+                    definition,
+                    Definition::Constant(_) | Definition::ConstantAlias(_)
+                ) && graph
+                    .documents()
+                    .get(definition.uri_id())
+                    .is_some_and(|document| {
+                        !document.uri().starts_with(RUNTIME_URI_PREFIX)
+                            && !document.uri().starts_with(EXTERNAL_URI_PREFIX)
+                    })
+            })
+        });
+        let external = !app_write && is_external_declaration(graph, declaration);
+        let name = declaration.name();
+        let builtin = core_value_type(name).filter(|_| {
+            declaration.definitions().iter().all(|id| {
+                graph
+                    .definitions()
+                    .get(id)
+                    .and_then(|definition| graph.documents().get(definition.uri_id()))
+                    .is_some_and(|document| {
+                        document.uri() == CORE_URI
+                            || document.uri().starts_with(EXTERNAL_URI_PREFIX)
+                    })
+            })
+        });
+        let runtime_decl = !app_write && is_runtime_declaration(graph, declaration);
+        let runtime = if let Some(ty) = builtin {
+            Some(Arc::new(ty))
+        } else if runtime_decl {
+            runtime_value_types().get(declaration.name()).cloned()
+        } else {
+            None
+        };
+        ResolvedConstant::Value {
+            declaration: id,
+            name: Arc::new(ClassId(Symbol::from(hoisted_name(name).as_ref()))),
+            runtime,
+            runtime_decl,
+            external,
+            singleton: name.contains("::<"),
+        }
+    }
+}
+
 fn answer_file(
     graph: &Graph,
     source: &SourceFile,
-    class_cache: &mut IdentityHashMap<DeclarationId, (Arc<ClassId>, bool)>,
+    class_cache: &mut IdentityHashMap<DeclarationId, (Arc<ClassId>, bool, bool)>,
+    with_names: bool,
 ) -> FileAnswers {
     let mut answers = FileAnswers::default();
+    if with_names { answers.per_name = Some(Box::new(per_name::FileNames::new(&source.text))); }
     let Some(document) = graph.documents().get(&UriId::from(source.path.as_str())) else {
         return answers;
     };
@@ -1058,55 +1644,11 @@ fn answer_file(
         {
             answers.namespace_definitions.insert(hoisted_name(target.name()).into());
         }
-        let target = graph
-            .name_id_to_declaration_id(*reference.name_id())
+        let target = graph.name_id_to_declaration_id(*reference.name_id())
             .and_then(|id| graph.declarations().get(id).map(|decl| (*id, decl)))
             .map(|(id, declaration)| {
-                if declaration.kind() == "Class" {
-                    answers.class_references.insert(key);
-                }
-                if declaration.as_namespace().is_some() && !is_assigned_value(graph, declaration) {
-                    let (class, runtime) = class_cache.entry(id).or_insert_with(|| {
-                        (
-                            Arc::new(ClassId(Symbol::from(hoisted_name(declaration.name()).as_ref()))),
-                            is_runtime_declaration(graph, declaration),
-                        )
-                    });
-                    ResolvedConstant::Namespace {
-                        class: Arc::clone(class),
-                        runtime: *runtime,
-                    }
-                } else {
-                    // An app write to the same declaration must never
-                    // borrow the runtime's previous literal type.
-                    let app_write = declaration.definitions().iter().any(|id| {
-                        graph.definitions().get(id).is_some_and(|definition| {
-                            matches!(definition, Definition::Constant(_) | Definition::ConstantAlias(_))
-                                && graph.documents().get(definition.uri_id()).is_some_and(|document| {
-                                    !document.uri().starts_with(RUNTIME_URI_PREFIX)
-                                })
-                        })
-                    });
-                    let name = declaration.name();
-                    let builtin = core_value_type(name).filter(|_| {
-                        declaration.definitions().iter().all(|id| {
-                            graph
-                                .definitions()
-                                .get(id)
-                                .and_then(|definition| graph.documents().get(definition.uri_id()))
-                                .is_some_and(|document| document.uri() == CORE_URI)
-                        })
-                    });
-                    let runtime_decl = !app_write && is_runtime_declaration(graph, declaration);
-                    let runtime = if let Some(ty) = builtin {
-                        Some(Arc::new(ty))
-                    } else if runtime_decl {
-                        runtime_value_types().get(declaration.name()).cloned()
-                    } else {
-                        None
-                    };
-                    ResolvedConstant::Value { declaration: id, name: Arc::new(ClassId(Symbol::from(hoisted_name(name).as_ref()))), runtime, runtime_decl, singleton: name.contains("::<") }
-                }
+                if declaration.kind() == "Class" { answers.class_references.insert(key); }
+                retained_answer(graph, id, declaration, class_cache)
             });
         match answers.references.entry(key) {
             Entry::Vacant(slot) => {
@@ -1225,6 +1767,7 @@ fn answer_file(
         }
     }
     answers.constants.sort_unstable_by_key(|(end, ..)| *end);
+    if let Some(names) = answers.per_name.as_mut() { names.resolve_scopes(&answers.namespace_bodies); }
     answers
 }
 

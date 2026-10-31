@@ -2,10 +2,11 @@
 //! so dispatch can answer for them ([`crate::gem_boundary`]).
 //!
 //! Purely additive. A class the registry already has -- the app's own,
-//! the framework catalog's, the stdlib's -- is left exactly as it is:
+//! the framework catalog's, the stdlib's -- keeps its method/value model:
 //! an RBI describes what a gem defines, and a name the app or the
 //! catalog also defines is a different (or a better-known) thing that
-//! this table has no business overriding. Core classes an RBI merely
+//! this table has no business overriding. Source constant-namespace
+//! uncertainty is retained independently. Core classes an RBI merely
 //! reopens (`class String`, `module Kernel`) are never registered for
 //! the same reason: registering `Object` would turn every "ancestor we
 //! don't model" gradual escape into a hard miss.
@@ -47,7 +48,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>, ap
         .filter(|id| {
             let name = id.0.as_str();
             let top = name.split("::").next().unwrap_or(name);
-            !RUBY_CORE.contains(&top) && !classes.contains_key(*id)
+            let external_nested = declared[*id].declarations_only && !RUBY_CORE.contains(&name);
+            (!RUBY_CORE.contains(&top) || external_nested) && !classes.contains_key(*id)
         })
         .collect();
 
@@ -80,7 +82,11 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>, ap
     for id in &fresh {
         let gem = &declared[*id];
         let scope = id.0.as_str();
-        let mut info = ClassInfo { gem_boundary: true, ..ClassInfo::default() };
+        let mut info = ClassInfo {
+            gem_boundary: true,
+            declarations_only: gem.declarations_only,
+            ..ClassInfo::default()
+        };
         for (name, ty) in &gem.instance_methods {
             info.instance_methods.insert(name.clone(), prune(ty, scope));
         }

@@ -99,6 +99,8 @@ pub mod prism;
 pub(crate) mod prism_api;
 mod propshaft;
 pub mod rbi;
+pub mod source_declarations;
+pub(crate) mod external_declarations;
 pub mod rate_limit;
 pub mod inertia;
 pub mod initializer_ledger;

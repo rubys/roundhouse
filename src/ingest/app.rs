@@ -77,6 +77,14 @@ fn read_to_string_or_ledger<V: Vfs + ?Sized>(vfs: &V, path: &Path) -> IngestResu
 /// this guard covers every other caller (the LSP and MCP servers, the
 /// test suites against a fixture that has not been generated).
 pub fn ingest_app(dir: &Path) -> IngestResult<App> {
+    ingest_app_from_disk(dir, None)
+}
+
+pub(crate) fn ingest_app_for_check(dir: &Path, inputs: &super::external_declarations::Inputs) -> IngestResult<App> {
+    ingest_app_from_disk(dir, Some(inputs))
+}
+
+fn ingest_app_from_disk(dir: &Path, inputs: Option<&super::external_declarations::Inputs>) -> IngestResult<App> {
     if !dir.is_dir() {
         return Err(IngestError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -86,7 +94,7 @@ pub fn ingest_app(dir: &Path) -> IngestResult<App> {
     // Absolute lockfile remotes must resolve identically whether the CLI
     // names this app by a relative path or an absolute one.
     let dir = dir.canonicalize()?;
-    ingest_app_with_vfs(&FsVfs::new(), &dir)
+    ingest_app_with_vfs_options(&FsVfs::new(), &dir, inputs)
 }
 
 /// Ingest a Rails app from an in-memory `path → bytes` tree. Path keys
@@ -316,6 +324,10 @@ fn keep_initializer_defined(
 }
 
 pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<App> {
+    ingest_app_with_vfs_options(vfs, dir, None)
+}
+
+fn ingest_app_with_vfs_options<V: Vfs + ?Sized>(vfs: &V, dir: &Path, inputs: Option<&super::external_declarations::Inputs>) -> IngestResult<App> {
     // Front-end dispatch: a rack app with no config/routes.rb whose
     // app.rb subclasses Roda takes the Roda + Sequel walker (issue
     // #67); everything else is a Rails-convention tree.
@@ -327,7 +339,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     let mut auto: Vec<String> = Vec::new();
     loop {
         let marks = (super::survey::mark(), super::prism::mark());
-        let mut app = ingest_rails_app(vfs, dir, &auto)?;
+        let mut app = ingest_rails_app(vfs, dir, &auto, inputs)?;
         let more: Vec<String> = super::auto_source_gems::candidates(&app, vfs, dir)
             .into_iter()
             .filter(|g| !auto.contains(g))
@@ -343,7 +355,8 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     }
 }
 
-fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[String]) -> IngestResult<App> {
+fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[String], inputs: Option<&super::external_declarations::Inputs>) -> IngestResult<App> {
+    let declaration_vfs = vfs;
     super::sources::reset();
     super::each_validator::reset();
     let _source_root = super::sources::set_root(dir);
@@ -2212,8 +2225,12 @@ end
     // against an unrelated real file (see `ingest::sources`'s module
     // doc). The real drain runs after them, below.
     let sources = std::sync::Arc::new(super::sources::snapshot());
-    let const_resolver =
-        crate::analyze::ConstResolverTask::start(std::sync::Arc::clone(&sources));
+    let const_resolver = if let Some(inputs) = inputs {
+        let declarations = crate::timings::phase("external declarations", || super::external_declarations::prepare(declaration_vfs, dir, &mut app, inputs));
+        crate::analyze::ConstResolverTask::start_with_declarations(std::sync::Arc::clone(&sources), std::sync::Arc::new(declarations))
+    } else {
+        crate::analyze::ConstResolverTask::start(std::sync::Arc::clone(&sources))
+    };
 
     // Logical stylesheets — file stems of `.css` files found in
     // `app/assets/stylesheets/` and `app/assets/builds/`. Rails'

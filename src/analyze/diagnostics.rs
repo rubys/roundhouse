@@ -4,6 +4,7 @@
 //! (pure code motion). `diagnose` / `diagnose_with_coverage` are re-exported
 //! from `crate::analyze` so external call paths are unchanged.
 
+use crate::ingest::prism_api::PrismLocation;
 use crate::App;
 use crate::ide::render_ty;
 use crate::diagnostic::{Diagnostic, DiagnosticKind};
@@ -114,6 +115,99 @@ fn unlowered_form_builder_calls(app: &App) -> Vec<Diagnostic> {
     out
 }
 
+// A declaration-only dependency can be present in the inventory while its
+// source raises before loading. Include/superclass metadata is not an Expr
+// constant read, so retain that loading gap here as well as in method bodies.
+fn declaration_dependency_loading(app: &App) -> Vec<Diagnostic> {
+    if !app.const_resolver.has_external_declarations() {
+        return Vec::new();
+    }
+    let resolver = app.const_resolver.for_sources(&app.sources);
+    if !resolver.has_external_declarations() {
+        return Vec::new();
+    }
+    struct Edges {
+        spans: Vec<(usize, usize, String)>,
+    }
+    impl Edges {
+        fn edge(&mut self, node: &ruby_prism::Node<'_>) {
+            if node.as_constant_read_node().is_some() || node.as_constant_path_node().is_some() {
+                let location = node.location();
+                self.spans.push((
+                    location.start_offset(),
+                    location.end_offset(),
+                    String::from_utf8_lossy(location.as_slice()).into_owned(),
+                ));
+            }
+        }
+    }
+    impl<'pr> ruby_prism::Visit<'pr> for Edges {
+        fn visit_def_node(&mut self, _: &ruby_prism::DefNode<'pr>) {}
+        fn visit_lambda_node(&mut self, _: &ruby_prism::LambdaNode<'pr>) {}
+        fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+            if let Some(parent) = node.superclass() {
+                self.edge(&parent);
+            }
+            if let Some(body) = node.body() {
+                self.visit(&body);
+            }
+        }
+        fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+            if node.receiver().is_none_or(|n| n.as_self_node().is_some())
+                && matches!(node.name().as_slice(), b"include" | b"prepend" | b"extend")
+                && let Some(args) = node.arguments()
+            {
+                for arg in args.arguments().iter() {
+                    self.edge(&arg);
+                }
+            }
+            if let Some(block) = node.block() {
+                self.visit(&block);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for (index, source) in app.sources.iter().enumerate() {
+        let parsed = crate::ingest::prism::parse_silent(source.text.as_bytes());
+        if parsed.errors().next().is_some() {
+            continue;
+        }
+        let mut edges = Edges { spans: Vec::new() };
+        ruby_prism::Visit::visit(&mut edges, &parsed.node());
+        for (start, end, written) in edges.spans {
+            let span = crate::span::Span {
+                file: crate::span::FileId(index as u32 + 1),
+                start: start as u32,
+                end: end as u32,
+            };
+            let path: Vec<_> = written.split("::").map(Symbol::new).collect();
+            let through = match resolver.constant_lookup(span, &path, None, false) {
+                Some(super::body::ConstantLookup::Unknown(through)) => Some(Some(through)),
+                Some(super::body::ConstantLookup::Known {
+                    unverified_loading: true,
+                    ..
+                }) => Some(None),
+                Some(super::body::ConstantLookup::ExternalValueNamespace { .. }) => {
+                    Some(Some(Symbol::new("a dynamic namespace value")))
+                }
+                _ => None,
+            };
+            if let Some(through) = through {
+                let kind = DiagnosticKind::ConstantUncertainty {
+                    name: Symbol::new(written.trim_start_matches("::")),
+                    through,
+                };
+                out.push(Diagnostic {
+                    span,
+                    severity: Diagnostic::default_severity(&kind),
+                    message: Diagnostic::stub_text(&kind),
+                    kind,
+                });
+            }
+        }
+    }
+    out
+}
 /// Builder methods the view lowering serves outside
 /// `classify_form_builder_method`.
 const FORM_BUILDER_HANDLED_ELSEWHERE: &[&str] = &["object"];
@@ -337,6 +431,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     // Only validated synthesized Alba serializers, with per-constructor
     // evidence; this does not widen the general library diagnostic policy.
     out.extend(super::alba::diagnose(app));
+    out.extend(declaration_dependency_loading(app));
     out.extend(crate::gems::extension_gem_refusals(app, None));
     // graphql-ruby object types: their bodies, and each `null: false`
     // field's resolved value.
@@ -371,6 +466,16 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
         }
     }
     fn collect_constants(expr: &Expr, out: &mut Vec<Diagnostic>) {
+        // Support methods have a narrower diagnostic policy than actions,
+        // but uncertainty in a constant they read must remain visible.
+        if let Some(kind @ DiagnosticKind::ConstantUncertainty { .. }) = &expr.diagnostic() {
+            out.push(Diagnostic {
+                span: expr.span,
+                severity: Diagnostic::default_severity(kind),
+                kind: kind.clone(),
+                message: Diagnostic::stub_text(kind),
+            });
+        }
         if let Some(kind @ DiagnosticKind::IncompatibleBinop { op, lhs_ty, .. }) = &expr.diagnostic() {
             if nominal_class_operand(lhs_ty) {
             out.push(Diagnostic {
@@ -854,6 +959,7 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
             DiagnosticKind::UnconsumedInitializer { .. } => Diagnostic::stub_text(kind),
             // Produced by `ingest::model::validations` as a pushed note.
             DiagnosticKind::IgnoredValidatorOption { .. } => Diagnostic::stub_text(kind),
+            DiagnosticKind::ConstantUncertainty { .. } => Diagnostic::stub_text(kind),
         };
         if !matches!(
             kind,

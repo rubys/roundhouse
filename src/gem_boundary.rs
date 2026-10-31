@@ -96,4 +96,12 @@ pub struct GemClass {
     /// rather than a name. A lookup that misses is then unknown, not
     /// wrong.
     pub dynamic: bool,
+    /// An incomplete, check-only source/RBS declaration, rather than a
+    /// complete Tapioca API. May add fresh nested names under a core
+    /// namespace, but must never replace the core namespace's own model.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub declarations_only: bool,
+    /// Source extraction omitted effects that can add/shadow constants.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub constant_namespace_incomplete: bool,
 }

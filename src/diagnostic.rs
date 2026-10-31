@@ -56,6 +56,10 @@ pub enum Severity {
     Error,
 }
 
+/// Policy for named unknowns from the opt-in, check-only declaration input.
+/// Change Warning to Error to make an unproven name fail check (#1510 option 2).
+pub const GEM_DECLARATION_UNKNOWN_SEVERITY: Severity = Severity::Warning;
+
 impl Diagnostic {
     /// Short identifier for this diagnostic kind — a grep-friendly
     /// code the user can search for (`ivar_unresolved`,
@@ -63,6 +67,8 @@ impl Diagnostic {
     /// `gradual_untyped`).
     pub fn code(&self) -> &'static str {
         match self.kind {
+            DiagnosticKind::ConstantUncertainty { through: Some(_), .. } => "constant_lookup_unknown",
+            DiagnosticKind::ConstantUncertainty { through: None, .. } => "constant_loading_unverified",
             DiagnosticKind::IvarUnresolved { .. } => "ivar_unresolved",
             DiagnosticKind::SendDispatchFailed { .. } => "send_dispatch_failed",
             DiagnosticKind::IncompatibleBinop { .. } => "incompatible_binop",
@@ -87,6 +93,8 @@ impl Diagnostic {
     /// elevating to Error at emit time.
     pub fn default_severity(kind: &DiagnosticKind) -> Severity {
         match kind {
+            DiagnosticKind::ConstantUncertainty { through: Some(_), .. } => GEM_DECLARATION_UNKNOWN_SEVERITY,
+            DiagnosticKind::ConstantUncertainty { through: None, .. } => Severity::Warning,
             DiagnosticKind::GradualUntyped { .. } => Severity::Warning,
             DiagnosticKind::UnresolvedType { .. } => Severity::Warning,
             DiagnosticKind::MissingPreload { .. } => Severity::Warning,
@@ -190,6 +198,10 @@ impl Diagnostic {
             DiagnosticKind::IncompatibleBinop { op, .. } => {
                 format!("`{}` with incompatible operand types", op.as_str())
             }
+            DiagnosticKind::ConstantUncertainty { name, through: Some(through) } => format!(
+                "constant `{name}` is unknown: lookup may cross incomplete namespace `{through}`; no later ancestor is assumed"),
+            DiagnosticKind::ConstantUncertainty { name, through: None } => format!(
+                "constant `{name}` is declared; runtime availability is unknown because source loading is unverified"),
             DiagnosticKind::IvarUnresolved { name } => {
                 format!("@{} has no known type", name.as_str())
             }
@@ -436,6 +448,10 @@ mod tests {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DiagnosticKind {
+    /// Check-only source declaration uncertainty. A blocked lookup is gradual,
+    /// never a claim that a later ancestor supplies the value. A resolved
+    /// external name still needs a separate runtime-loading fact.
+    ConstantUncertainty { name: Symbol, through: Option<Symbol> },
     /// `@name` read at a site where no action seeded the ivar — the
     /// controller→view channel (or before_action flow) didn't bind it.
     /// Produced by the walker in `analyze::diagnose`.
