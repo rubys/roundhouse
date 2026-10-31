@@ -2512,6 +2512,7 @@ pub(crate) fn render_locals_keys(
 ) -> crate::det::HashMap<(String, String), Vec<String>> {
     use std::collections::BTreeSet;
     use crate::det::HashMap;
+    use crate::lower::view::RenderPartial;
     let mut acc: HashMap<(String, String), BTreeSet<String>> = HashMap::default();
 
     fn scan(
@@ -2591,6 +2592,31 @@ pub(crate) fn render_locals_keys(
                     {
                         acc.entry(key).or_default().extend(keys);
                     }
+                } else if let Some(dir) = own_dir
+                    && let Some(rp) = crate::lower::view::classify_render_partial(
+                        None,
+                        method.as_str(),
+                        args,
+                        None,
+                        &|_| true,
+                        &|_| false,
+                    )
+                    && let RenderPartial::Collection { locals: Some(locals), .. }
+                    | RenderPartial::Record { locals: Some(locals), .. }
+                    | RenderPartial::Association { locals: Some(locals), .. }
+                    | RenderPartial::TypedCollection { locals: Some(locals), .. } = &rp
+                    && let Some(key) = render_partial_key(&rp, dir, stems)
+                {
+                    // `render @posts, flag: false` — the object form's
+                    // hash is its partial's locals, so its keys are the
+                    // partial's interface as an explicit `locals:` is.
+                    // Views only: a controller's `render @post` is not a
+                    // partial render.
+                    let keys = locals.iter().filter_map(|(lk, _)| match &*lk.node {
+                        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+                        _ => None,
+                    });
+                    acc.entry(key).or_default().extend(keys);
                 }
             }
         }

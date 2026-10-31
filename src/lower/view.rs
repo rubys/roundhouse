@@ -116,7 +116,13 @@ pub enum RenderPartial<'a> {
     /// collection, calling a partial per element. `name` is the
     /// collection's surface name (used by emitters to derive the
     /// partial-fn name and any foreign-key/class lookups).
-    Collection { collection: &'a Expr, name: &'a str },
+    ///
+    /// `locals` is the trailing hash of `render @posts, flag: false`,
+    /// which Rails passes to every element render as its locals, as an
+    /// explicit `locals:` does for [`Self::CollectionNamed`]. The same
+    /// holds for [`Self::Record`], [`Self::Association`] and
+    /// [`Self::TypedCollection`].
+    Collection { collection: &'a Expr, name: &'a str, locals: Option<&'a [(Expr, Expr)]> },
     /// `render @post` — render ONE record's partial. Rails picks
     /// between this and [`Self::Collection`] at runtime, on whether the
     /// argument answers `to_ary`; statically the discriminator is the
@@ -131,16 +137,16 @@ pub enum RenderPartial<'a> {
     /// (`@edit_user` → `Views::EditUsers.edit_user`) resolves to the
     /// name's plural, the same convention every other name-directed
     /// consumer in this lowering follows.
-    Record { record: &'a Expr, name: &'a str },
+    Record { record: &'a Expr, name: &'a str, locals: Option<&'a [(Expr, Expr)]> },
     /// `render @post.comments` — iterate an association method on
     /// a receiver Var/Ivar, calling a partial per element.
-    Association { receiver: &'a Expr, method: &'a str },
+    Association { receiver: &'a Expr, method: &'a str, locals: Option<&'a [(Expr, Expr)]> },
     /// `render @author.posts.order(:title)` — any other call the
     /// analyzer typed as a collection of a class. No name in the
     /// expression says which partial it renders (`order` is not a
     /// model), so `partial` is the element class's `to_partial_path`
     /// (`posts/post`), as Rails picks it per record.
-    TypedCollection { collection: &'a Expr, partial: String },
+    TypedCollection { collection: &'a Expr, partial: String, locals: Option<&'a [(Expr, Expr)]> },
     /// `render "posts/post", post: @post` — call a named partial
     /// with the first hash entry's value as its argument. When the
     /// kwarg form carries an explicit `locals:` hash (`render partial:
@@ -270,11 +276,13 @@ pub fn classify_render_partial<'a>(
                     Some(RenderPartial::Record {
                         record: arg,
                         name: name.as_str(),
+                        locals: None,
                     })
                 } else {
                     Some(RenderPartial::Collection {
                         collection: arg,
                         name: name.as_str(),
+                        locals: None,
                     })
                 }
             }
@@ -289,6 +297,7 @@ pub fn classify_render_partial<'a>(
                 Some(RenderPartial::Association {
                     receiver: r,
                     method: m.as_str(),
+                    locals: None,
                 })
             }
             // `render "layouts/lightbox"` — a named partial with NO
@@ -326,16 +335,17 @@ pub fn classify_render_partial<'a>(
                 Some(RenderPartial::TypedCollection {
                     collection: arg,
                     partial: model_partial_path(id.0.as_str()),
+                    locals: None,
                 })
             }
             _ => None,
         },
         [a, b] => {
-            let ExprNode::Lit { value: Literal::Str { value: partial } } = &*a.node else {
-                return None;
-            };
             let ExprNode::Hash { entries, .. } = &*b.node else {
                 return None;
+            };
+            let ExprNode::Lit { value: Literal::Str { value: partial } } = &*a.node else {
+                return classify_object_render_locals(a, entries, is_local, is_options_ivar);
             };
             // Shorthand locals (`render "comments/comment", :comment =>
             // c, :show_story => true`): Rails treats the whole hash as
@@ -351,6 +361,45 @@ pub fn classify_render_partial<'a>(
                 arg,
                 locals: Some(entries),
             })
+        }
+        _ => None,
+    }
+}
+
+/// `render @posts, flag: false` — for any first argument but a Hash,
+/// Rails renders it as `render partial: @posts, locals: { flag: false }`:
+/// the object's partial, once per element for a collection, with EVERY
+/// key of the hash a local (`as:` or `collection:` here are locals, not
+/// options). So the first argument classifies as it does alone, and the
+/// hash rides as its `locals`.
+///
+/// Only a literal hash with symbol keys is read. A `**opts` splat is a
+/// `merge` chain, not a Hash, and never gets here. An options ivar
+/// (`DynamicNamed`) stays unrecognized: Rails ignores the locals when
+/// its value is a Hash and uses them when it is a String, which a static
+/// lowering cannot tell apart.
+fn classify_object_render_locals<'a>(
+    object: &'a Expr,
+    entries: &'a [(Expr, Expr)],
+    is_local: &impl Fn(&str) -> bool,
+    is_options_ivar: &impl Fn(&str) -> bool,
+) -> Option<RenderPartial<'a>> {
+    if matches!(&*object.node, ExprNode::Hash { .. })
+        || !entries.iter().all(|(k, _)| matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { .. } }))
+    {
+        return None;
+    }
+    let locals = Some(entries);
+    match classify_render_partial(None, "render", std::slice::from_ref(object), None, is_local, is_options_ivar)? {
+        RenderPartial::Collection { collection, name, .. } => {
+            Some(RenderPartial::Collection { collection, name, locals })
+        }
+        RenderPartial::Record { record, name, .. } => Some(RenderPartial::Record { record, name, locals }),
+        RenderPartial::Association { receiver, method, .. } => {
+            Some(RenderPartial::Association { receiver, method, locals })
+        }
+        RenderPartial::TypedCollection { collection, partial, .. } => {
+            Some(RenderPartial::TypedCollection { collection, partial, locals })
         }
         _ => None,
     }
