@@ -14,7 +14,7 @@ fn category() -> Ty {
 }
 
 #[test]
-fn w088_review_extension_order_returns_match_singleton_precedence() {
+fn extension_order_returns_match_singleton_precedence() {
     for (extensions, expected) in [
         ("extend FirstFinder, LastFinder", category()),
         ("extend FirstFinder\nextend LastFinder", Ty::Nil),
@@ -32,7 +32,7 @@ fn w088_review_extension_order_returns_match_singleton_precedence() {
 }
 
 #[test]
-fn w088_review_retained_hooks_keep_finder_returns_unknown() {
+fn retained_hooks_keep_finder_returns_unknown() {
     for hook in ["find_by_name", "find_by_name!", "find_by", "find_by!", "method_missing", "public_send", "audit_label"] {
         for inclusion in ["direct", "nested", "parent"] {
             let external = format!("module ExternalFinder\ndef self.included(klass)\nklass.define_singleton_method(:{hook}) {{ |*args| \"hook owner\" }}\nend\nend\n");
@@ -47,7 +47,7 @@ fn w088_review_retained_hooks_keep_finder_returns_unknown() {
 }
 
 #[test]
-fn w088_review_singleton_decoys_do_not_own_included_class_finders() {
+fn singleton_decoys_do_not_own_included_class_finders() {
     for (inclusion, definitions, expected) in [
         ("include ExternalFinder", "def self.find_by(attrs); \"decoy\"; end\ndef self.find_by!(attrs); \"decoy\"; end", nilable(category())),
         ("extend ExternalFinder", "def find_by(attrs); \"extended\"; end\ndef find_by!(attrs); \"extended\"; end", Ty::Str),

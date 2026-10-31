@@ -733,7 +733,7 @@ fn review_dynamic_finder_parity(sources: &[(&str, &str)], assertions: &str) {
 }
 
 #[test]
-fn w088_review_unrelated_hook_dynamic_finders_are_explicitly_refused() {
+fn unrelated_hook_dynamic_finders_are_explicitly_refused() {
     let schema = "ActiveRecord::Schema.define do\ncreate_table(:categories) { |t| t.string :name; t.boolean :active, default: true }\nend\n";
     let hook = "module ExternalFinder\ndef self.included(klass)\nklass.define_singleton_method(:audit_label) { \"audit\" }\nend\nend\n";
     for finder in ["find_by_name", "find_by_name!"] {
@@ -781,7 +781,7 @@ fn w088_review_unrelated_hook_dynamic_finders_are_explicitly_refused() {
 }
 
 #[test]
-fn w088_review_extension_order_matches_ruby_and_rails() {
+fn extension_order_matches_ruby_and_rails() {
     for (extensions, first) in [
         ("extend FirstFinder, LastFinder", true),
         ("extend FirstFinder\nextend LastFinder", false),
@@ -805,7 +805,7 @@ fn w088_review_extension_order_matches_ruby_and_rails() {
 }
 
 #[test]
-fn w088_review_retained_include_hooks_preserve_dynamic_dispatch() {
+fn retained_include_hooks_preserve_dynamic_dispatch() {
     for (hook, finder, reflection) in [
         ("find_by_name", "find_by_name", false),
         ("find_by_name!", "find_by_name!", false),
@@ -835,7 +835,7 @@ fn w088_review_retained_include_hooks_preserve_dynamic_dispatch() {
 }
 
 #[test]
-fn w088_review_plain_include_does_not_install_singleton_delegates() {
+fn plain_include_does_not_install_singleton_delegates() {
     for extension in [false, true] {
         let definitions = if extension {
             "def find_by(attrs); \"extended\"; end\ndef find_by!(attrs); \"extended\"; end"
@@ -874,7 +874,7 @@ fn w088_review_plain_include_does_not_install_singleton_delegates() {
 }
 
 #[test]
-fn w088_review_unknown_relation_hook_dispatch_is_explicitly_refused() {
+fn unknown_relation_hook_dispatch_is_explicitly_refused() {
     let schema = "ActiveRecord::Schema.define do\ncreate_table(:categories) { |t| t.string :name }\nend\n";
     let hook = "module ExternalFinder\ndef self.included(klass)\nklass.define_singleton_method(:find_by_name) { |name| \"hook owner\" }\nend\nend\n";
     let category = "class Category < ActiveRecord::Base\ninclude ExternalFinder\nend\n";
@@ -893,7 +893,7 @@ fn w088_review_unknown_relation_hook_dispatch_is_explicitly_refused() {
 }
 
 #[test]
-fn w088_review_subclass_forms_keep_routes_parameter_keys_and_errors() {
+fn subclass_forms_keep_routes_parameter_keys_and_errors() {
     // The oracle below pins this release; unit partitions do not install
     // its optional ActionView and ActionPack components.
     let oracle = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/rails_oracle.rb");

@@ -1,4 +1,4 @@
-//! Paired regressions for the seven review claims on #1607.
+//! Paired regressions for finder ownership, STI hydration and form parameter keys.
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -21,7 +21,7 @@ fn native(components: &[&str], program: &str) {
         eprintln!("skipping native Rails 8.1.4 oracle: missing {components:?}");
         return;
     }
-    let program = format!("require {oracle:?}\nRailsOracle.activate({gems}, sqlite3: \">= 2.9\")\nrequire 'tmpdir'\nDir.mktmpdir('roundhouse-w088-oracle') do |root|\nDir.mkdir(File.join(root, 'lib'))\nDir.chdir(root) do\n{program}\nend\nend\n");
+    let program = format!("require {oracle:?}\nRailsOracle.activate({gems}, sqlite3: \">= 2.9\")\nrequire 'tmpdir'\nDir.mktmpdir('roundhouse-finder-oracle') do |root|\nDir.mkdir(File.join(root, 'lib'))\nDir.chdir(root) do\n{program}\nend\nend\n");
     let result = emit_and_run::ruby().env("RH_RAILS_ORACLE", "8.1.4")
         .args(["-e", &program]).output().expect("native Rails oracle");
     assert!(result.status.success(), "native Rails 8.1.4: {}", String::from_utf8_lossy(&result.stderr));
@@ -31,7 +31,7 @@ const AR: &str = "require 'active_record'\nActiveRecord::Base.establish_connecti
 const CATEGORIES: &str = "ActiveRecord::Schema.define do\ncreate_table(:categories) { |t| t.string :name }\nend\n";
 
 #[test]
-fn w088_cr_extension_include_hooks_keep_finder_returns_unknown() {
+fn extension_include_hooks_keep_finder_returns_unknown() {
     let hook = "module FinderHook\ndef self.included(klass)\nklass.define_method(:find_by) { |attributes| \"extension hook\" }\nklass.define_method(:find_by!) { |attributes| \"extension hook\" }\nend\nend\n";
     let extension = "module FinderExtension\ninclude FinderHook\nend\n";
     let category = "class Category < ActiveRecord::Base\nextend FinderExtension\nend\n";
@@ -59,7 +59,7 @@ fn w088_cr_extension_include_hooks_keep_finder_returns_unknown() {
 }
 
 #[test]
-fn w088_cr_unresolved_extension_includes_do_not_invent_record_returns() {
+fn unresolved_extension_includes_do_not_invent_record_returns() {
     let extension = "module FinderExtension\ninclude ExternalFinders\nend\n";
     let category = "class Category < ActiveRecord::Base\nextend FinderExtension\nend\n";
     native(&["activerecord"], &format!("{AR}{CATEGORIES}\nmodule ExternalFinders\ndef find_by(attributes); 'external owner'; end\nend\n{extension}{category}\nraise 'external owner' unless Category.find_by_name('found') == 'external owner'"));
@@ -79,7 +79,7 @@ fn w088_cr_unresolved_extension_includes_do_not_invent_record_returns() {
 }
 
 #[test]
-fn w088_cr_disabled_sti_hydrates_the_queried_plain_subclass() {
+fn disabled_sti_hydrates_the_queried_plain_subclass() {
     const SCHEMA: &str = "ActiveRecord::Schema.define do\ncreate_table(:articles) { |t| t.string :title; t.string :type }\nend\n";
     const ARTICLE: &str = "class Article < ActiveRecord::Base\nend\n";
     const STICKY: &str = "class Sticky < Article\nend\n";
@@ -126,10 +126,10 @@ fn association_finder_case(hook: bool) {
 }
 
 #[test]
-fn w088_cr_association_finders_keep_extension_ownership() { association_finder_case(false); }
+fn association_finders_keep_extension_ownership() { association_finder_case(false); }
 
 #[test]
-fn w088_cr_association_finders_keep_hook_ownership() { association_finder_case(true); }
+fn association_finders_keep_hook_ownership() { association_finder_case(true); }
 
 fn paired_form(model: &str, schema: &str, sources: &[(&str, &str)], native_prefix: &str, key: &str, values: bool) {
     let constructor = format!("{model}.new(nickname: \"kept\", enabled: true, published: true)");
@@ -178,7 +178,7 @@ check_form(view.render(inline: {constructed:?}))
 }
 
 #[test]
-fn w088_cr_isolated_engine_form_keys_are_relative() {
+fn isolated_engine_form_keys_are_relative() {
     let engine = "module Blog\nclass Engine < ::Rails::Engine\nisolate_namespace Blog\nend\nend\n";
     paired_form("Blog::Post", "ActiveRecord::Schema.define do\ncreate_table(:blog_posts) { |t| t.boolean :published }\nend\n", &[
         ("lib/blog/engine.rb", engine),
@@ -187,14 +187,14 @@ fn w088_cr_isolated_engine_form_keys_are_relative() {
 }
 
 #[test]
-fn w088_cr_namespaced_form_metadata_preserves_attribute_values() {
+fn namespaced_form_metadata_preserves_attribute_values() {
     paired_form("Admin::User", "ActiveRecord::Schema.define do\ncreate_table(:users) { |t| t.boolean :published }\nend\n", &[
         ("app/models/admin/user.rb", "module Admin\nclass User < ActiveRecord::Base\nself.table_name = \"users\"\nattribute :nickname, :string\nattribute :enabled, :boolean\nend\nend\n"),
     ], "", "admin_user", true);
 }
 
 #[test]
-fn w088_cr_acronym_form_keys_keep_word_boundaries() {
+fn acronym_form_keys_keep_word_boundaries() {
     native(&["activerecord"], "require 'active_record'\nmodule API\nclass HTTPResponse < ActiveRecord::Base; end\nend\nraise 'param_key' unless API::HTTPResponse.model_name.param_key == 'api_http_response'\n");
     assert_eq!(roundhouse::naming::model_param_key("API::HTTPResponse"), "api_http_response");
     paired_form("API::HTTPResponse", "ActiveRecord::Schema.define do\ncreate_table(:responses) { |t| t.boolean :published }\nend\n", &[
@@ -203,7 +203,7 @@ fn w088_cr_acronym_form_keys_keep_word_boundaries() {
 }
 
 #[test]
-fn w088_cr_form_keys_respect_registered_acronyms() {
+fn form_keys_respect_registered_acronyms() {
     const INFLECTIONS: &str = "ActiveSupport::Inflector.inflections(:en) { |inflect| inflect.acronym \"OAuth\" }\n";
     native(&["activerecord"], &format!("require 'active_record'\n{INFLECTIONS}module Admin; class OAuthApplication < ActiveRecord::Base; end; end\nraise 'registered acronym' unless Admin::OAuthApplication.model_name.param_key == 'admin_oauth_application'"));
     let previous = roundhouse::naming::app_inflections();
@@ -220,7 +220,7 @@ fn w088_cr_form_keys_respect_registered_acronyms() {
 }
 
 #[test]
-fn w088_cr_standard_forwardable_keeps_known_finder_returns() {
+fn standard_forwardable_keeps_known_finder_returns() {
     use roundhouse::ident::{ClassId, Symbol};
     use roundhouse::ty::Ty;
     for shadow in [false, true] {
