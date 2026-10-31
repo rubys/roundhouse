@@ -1445,14 +1445,14 @@ fn build_methods(
             reads,
             &missing,
         );
-        // Block-form filters are inlined into `process_action` after
-        // `rewrite_controller_route_helpers` has already run on action
-        // bodies. A CSP block calls `service_worker_path(format: :js)`,
-        // which `route_format_suffix` renamed. The rewrite is idempotent
-        // on nodes it has already touched, so every dispatcher gets it —
-        // the next block filter that names a helper would otherwise stay bare.
-        dispatcher.body =
-            rewrite_controller_route_helpers(&dispatcher.body, &shadows, route_id_segments);
+        // Block callbacks and rescue handlers are spliced in after action
+        // lowering. Give them the same response and route-helper rewrites,
+        // without appending an implicit render to the dispatcher.
+        dispatcher.body = lower_action_body(
+            &dispatcher.body, controller, "process_action", &privs, &params_privs,
+            /*is_public=*/ false, params_specs, assocs, &[], view_ivars, partials,
+            format_breadth, &shadows, route_id_segments, false, false, None, None, &[],
+        ).0;
         methods.insert(dispatcher_at, dispatcher);
     }
     // The empty set for both non-public loops below: `is_public: false`
