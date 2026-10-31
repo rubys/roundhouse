@@ -1510,27 +1510,26 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         // `o` (once) flag is dropped: it only memoizes the first
         // interpolation, so re-evaluating is identical for
         // deterministic parts (and merely re-computes otherwise).
-        // Encoding flags (e/s/u/n) change match semantics and stay
-        // a (rarer) visible gap.
+        // The `u` flag becomes the FIXEDENCODING bit (16). Encoding
+        // flags e/s/n change match semantics and stay a (rarer)
+        // visible gap.
         n if n.as_interpolated_regular_expression_node().is_some() => {
             let r = n.as_interpolated_regular_expression_node().unwrap();
-            if r.is_euc_jp()
-                || r.is_windows_31j()
-                || r.is_utf_8()
-                || r.is_ascii_8bit()
-            {
+            if r.is_euc_jp() || r.is_windows_31j() || r.is_ascii_8bit() {
                 return Err(IngestError::Unsupported {
                     file: file.into(),
-                    message: "interpolated regex with once/encoding flag not yet supported".into(),
+                    message: "interpolated regex with e/s/n encoding flag not yet supported".into(),
                 });
             }
             let mut parts: Vec<InterpPart> = Vec::new();
             collect_interp_parts(r.parts(), &mut parts, file)?;
             let pattern_expr = Expr::new(Span::synthetic(), ExprNode::StringInterp { parts });
-            // Ruby Regexp option bits: IGNORECASE=1, EXTENDED=2, MULTILINE=4.
+            // Ruby Regexp option bits: IGNORECASE=1, EXTENDED=2, MULTILINE=4,
+            // FIXEDENCODING=16 (what the `u` literal flag sets).
             let opts = (r.is_ignore_case() as i64)
                 | ((r.is_extended() as i64) << 1)
-                | ((r.is_multi_line() as i64) << 2);
+                | ((r.is_multi_line() as i64) << 2)
+                | ((r.is_utf_8() as i64) << 4);
             let mut args = vec![pattern_expr];
             if opts != 0 {
                 args.push(Expr::new(

@@ -3901,6 +3901,10 @@ pub(super) fn sym_method(method: &Symbol) -> Ty {
     // Sym-specific shapes here.
     match method.as_str() {
         "to_sym" => Ty::Sym,
+        // `SERIALIZE_PROC = :as_pack.to_proc` (paquito's registry): a
+        // constant holding it was a value with no inferred type, so
+        // every read of it was "constant not supported".
+        "to_proc" => Ty::Class { id: crate::ident::ClassId(crate::ident::Symbol::from("Proc")), args: vec![].into() },
         "length" | "size" => Ty::Int,
         "upcase" | "downcase" | "capitalize" | "swapcase" => Ty::Sym,
         "empty?" => Ty::Bool,
