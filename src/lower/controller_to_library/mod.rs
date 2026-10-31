@@ -53,7 +53,7 @@ use crate::lower::controller::body::{
 
 use self::params::{helper_spec_map, ParamsSpec, ParamsSpecs};
 use self::process_action::{
-    dispatcher_bodies, halt_if_performed, synthesize_process_action, PreambleStmt,
+    dispatcher_bodies, halt_if_performed, lower_dispatcher_bodies, synthesize_process_action, PreambleStmt,
     RescueHandler,
 };
 use self::rewrites::{
@@ -1063,7 +1063,7 @@ fn subclass_template_hooks(
                         parenthesized: true,
                     },
                 );
-                rewrites::rewrite_render_to_views(&render, Some(&module), &[], view_ivars, partials, &template, true, &[])
+                rewrites::rewrite_render_to_views(&render, Some(&module), &[], view_ivars, partials, &template, true, false, &[])
             };
             methods.push(MethodDef {
                 visibility: crate::dialect::MethodVisibility::Public,
@@ -1427,12 +1427,23 @@ fn build_methods(
             &deferred_renders, &mut deferred_tails,
         ));
     }
-    if let Some((preamble, wraps)) = pending_dispatcher {
-        let rescues = collect_rescue_handlers(controller, all_controllers, format_breadth);
+    if let Some((mut preamble, mut wraps)) = pending_dispatcher {
+        let mut rescues = collect_rescue_handlers(controller, all_controllers, format_breadth);
+        lower_dispatcher_bodies(&mut preamble, &mut wraps, &mut rescues, |body| {
+            lower_action_body(
+                body, controller, "process_action", &privs, &params_privs,
+                /*is_public=*/ false, params_specs, assocs, &[], view_ivars, partials,
+                format_breadth, &shadows, route_id_segments, false, false, None, None, &[],
+                /*preserve_named_layout=*/ true,
+            ).0
+        });
+        // Template lowering can introduce a read of self.action_name.
         let reads = reads_action_name(
             controller,
             all_controllers,
             &dispatcher_bodies(&preamble, &wraps, &rescues),
+            view_ivars,
+            partials,
         );
         let mut dispatcher = synthesize_process_action(
             &preamble,
@@ -1445,14 +1456,11 @@ fn build_methods(
             reads,
             &missing,
         );
-        // Block callbacks and rescue handlers are spliced in after action
-        // lowering. Give them the same response and route-helper rewrites,
-        // without appending an implicit render to the dispatcher.
-        dispatcher.body = lower_action_body(
-            &dispatcher.body, controller, "process_action", &privs, &params_privs,
-            /*is_public=*/ false, params_specs, assocs, &[], view_ivars, partials,
-            format_breadth, &shadows, route_id_segments, false, false, None, None, &[],
-        ).0;
+        // Assembly adds expressions after action lowering. Route-helper
+        // rewriting is idempotent and must still cover the final dispatcher;
+        // response lowering is not, so deferred action tails stay untouched.
+        dispatcher.body =
+            rewrite_controller_route_helpers(&dispatcher.body, &shadows, route_id_segments);
         methods.insert(dispatcher_at, dispatcher);
     }
     // The empty set for both non-public loops below: `is_public: false`
@@ -2573,16 +2581,34 @@ fn ancestor_chain<'a>(controller: &Controller, all: &'a [Controller]) -> Vec<&'a
 /// lambda filters stay `Unknown` in the controller body, so only
 /// `dispatched` has them. A concern's methods count too, because ingest
 /// splices them into the controller.
-fn reads_action_name(controller: &Controller, all: &[Controller], dispatched: &[&Expr]) -> bool {
+fn reads_action_name(
+    controller: &Controller,
+    all: &[Controller],
+    dispatched: &[&Expr],
+    view_ivars: &ViewIvarMap,
+    partials: &PartialMap,
+) -> bool {
     let action_name = Symbol::from("action_name");
     let reads = |e: &Expr| body_calls_method(e, &action_name);
     let mut chain = ancestor_chain(controller, all);
     chain.push(controller);
     // A method that renders a partial passes the request's `action_name` on to it, outside an action too (a helper, an inherited one).
     let renders_partial = |e: &Expr| body_renders_partial(e);
+    // Named callback/rescue methods are lowered separately, possibly on
+    // an ancestor. Their template binding can introduce the same reader
+    // as an inline callback. Inspect that binding from source too.
+    let contextual_views = view_ivars.values().any(|view| view.uses_action_name);
+    let renders_with_action_name = |c: &Controller, e: &Expr| {
+        contextual_views && reads(&rewrite_render_to_views(
+            e, views_module_name(c).as_deref(), &[], view_ivars, partials,
+            "", false, false, &[],
+        ))
+    };
     dispatched.iter().any(|e| reads(e))
         || chain.iter().any(|c| {
-            c.actions().any(|a| reads(&a.body) || renders_partial(&a.body))
+            c.actions().any(|a| {
+                reads(&a.body) || renders_partial(&a.body) || renders_with_action_name(c, &a.body)
+            })
                 || c.filters().any(|f| {
                     [&f.block, &f.if_cond_expr, &f.unless_cond_expr]
                         .into_iter()
@@ -3093,6 +3119,7 @@ fn action_to_method(
         inherited_spec,
         formats_template.as_ref(),
         &inheritor_modules,
+        /*preserve_named_layout=*/ false,
     );
     if let Some(tail) = deferred_tail {
         deferred_out.insert(a.name.clone(), tail);
@@ -3333,6 +3360,7 @@ fn lower_action_body(
     inherited_params_spec: Option<&ParamsSpec>,
     formats_only_render: Option<&Symbol>,
     inheritor_modules: &[String],
+    preserve_named_layout: bool,
 ) -> (Expr, Option<Expr>) {
     // BEFORE everything else: this turns a helper the permit recognizer
     // could not read into one that yields the params class, so every
@@ -3435,6 +3463,7 @@ fn lower_action_body(
             partials,
             action_name,
             is_public,
+            preserve_named_layout,
             inheritor_modules,
         )
     };

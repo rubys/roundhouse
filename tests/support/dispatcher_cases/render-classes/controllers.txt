@@ -1,0 +1,6 @@
+app/controllers/pages_controller.rb
+app/controllers/named_pages_controller.rb
+app/controllers/inherited_pages_controller.rb
+app/controllers/rescue_pages_controller.rb
+app/controllers/other_pages_controller.rb
+app/controllers/encoded_controller.rb
