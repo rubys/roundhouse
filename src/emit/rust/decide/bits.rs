@@ -85,6 +85,11 @@ pub const CLONE_AT: u64 = 1 << 34;
 // same commit. The position is now `crate::expr::NATIVE_KEYWORD_ARGUMENTS`,
 // a Ruby-family-local lowering decision, so Rust must not allocate it.
 
+// Bits 36–39 are also allocated in `crate::expr`: `INHERITED_ALIAS_COPY`
+// (36), `FORMAT_VARIANT_CALL` (37), `INDEXER_CLASS_QUERY_VALUE` (38), and
+// `INDEXER_INSTANCE_VALUE` (39). They share `Expr.decisions` with the
+// Rust flags above, so Rust must not reuse these positions.
+
 // ────────────────────────────────────────────────────────────────────
 // Enum-valued fields (bit groups)
 // ────────────────────────────────────────────────────────────────────

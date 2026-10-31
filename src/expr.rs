@@ -25,7 +25,7 @@ pub const RESOLVED_CLASS_REF: u64 = 1 << 2;
 pub const CLASS_OBJECT_VALUE: u64 = 1 << 5;
 /// Positive instance provenance for generated model-indexer key lowering.
 /// A nominal `Ty::Class` alone is not instance evidence.
-pub const INDEXER_INSTANCE_VALUE: u64 = 1 << 37;
+pub const INDEXER_INSTANCE_VALUE: u64 = 1 << 39;
 /// A class-valued query, possibly an unknown subclass. Unlike
 /// `CLASS_OBJECT_VALUE`, this does not establish exact class identity.
 pub const INDEXER_CLASS_QUERY_VALUE: u64 = 1 << 38;
