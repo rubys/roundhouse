@@ -367,14 +367,26 @@ impl ClassInfo {
     }
 
     pub(crate) fn class_method_ownership_unknown(classes: &HashMap<ClassId, ClassInfo>, model: &ClassId, method: &Symbol) -> bool {
-        let mut current = Some(model);
+        use crate::dialect::MethodReceiver::{Class, Instance};
+        let mut pending = vec![(model, Class)];
         let mut seen = crate::det::HashSet::default();
-        while let Some(id) = current {
-            if !seen.insert(id) { break; }
-            let Some(class) = classes.get(id) else { break; };
+        while let Some((id, side)) = pending.pop() {
+            if !seen.insert((id, side)) { continue; }
+            // A source extension can survive only as a namespace/concern,
+            // without a modeled method table. Its absence proves no owner.
+            let Some(class) = classes.get(id) else {
+                if side == Instance { return true; }
+                continue;
+            };
             if class.unresolved_include || class.unknown_class_side_hook { return true; }
-            if class.source_class_methods.contains(method) { return false; }
-            current = class.parent.as_ref();
+            let methods = if side == Class { &class.source_class_methods } else { &class.source_instance_methods };
+            if methods.contains(method) { return false; }
+            pending.extend(class.parent.iter().map(|id| (id, side)));
+            if side == Class {
+                pending.extend(class.class_method_extensions.iter().map(|id| (id, Instance)));
+            } else {
+                pending.extend(class.includes.iter().map(|id| (id, Instance)));
+            }
         }
         false
     }
@@ -421,7 +433,10 @@ impl ClassInfo {
         let mut seen = crate::det::HashSet::default();
         while let Some((id, side)) = pending.pop() {
             if !seen.insert((id, side)) { continue; }
-            let Some(class) = classes.get(id) else { continue };
+            let Some(class) = classes.get(id) else {
+                if side == Instance { return None; }
+                continue;
+            };
             if class.unresolved_include || class.unknown_class_side_hook { return None; }
             let methods = if side == Class { &class.source_class_methods } else { &class.source_instance_methods };
             if methods.contains(method) {

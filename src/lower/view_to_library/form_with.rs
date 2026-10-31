@@ -1114,7 +1114,8 @@ fn record_model_name(model: &Expr, ctx: &ViewCtx, fallback: &str) -> String {
     if let ExprNode::Send { recv: Some(recv), method, .. } = &*model.node {
         if method.as_str() == "new" {
             if let ExprNode::Const { path } = &*recv.node {
-                return crate::naming::model_param_key(&path.iter().map(|part| part.as_str()).collect::<Vec<_>>().join("::"));
+                let name = path.iter().map(|part| part.as_str()).collect::<Vec<_>>().join("::");
+                return ctx.model_param_keys.get(&name).cloned().unwrap_or_else(|| crate::naming::model_param_key(&name));
             }
         }
     }
@@ -1560,6 +1561,7 @@ mod tests {
             route_helper_arity: Default::default(),
             form_wrappers: Default::default(),
             form_with_entry: true,
+            model_param_keys: Default::default(),
             stylesheets: Vec::new(),
             lexxy: false,
             lexxy_editor_adapter: false,

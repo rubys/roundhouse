@@ -237,6 +237,7 @@ fn tiny_blog_round_trips() {
         source_index_required: false,
         root: String::new(),
         app_roots: vec!["app".to_string()],
+        isolated_namespaces: Vec::new(),
         spinel_int_overflow: None,
     };
 

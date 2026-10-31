@@ -1278,7 +1278,7 @@ pub(crate) fn emit_relation_scope_delegates(app: &App) -> Option<EmittedFile> {
     // rest, whatever built the relation: campfire's
     // `Current.user.reachable_messages.search(q).last_page_of_matches(n)`
     // is a through-association, with no foreign key to seed from.
-    let assocs = crate::lower::scope_chain::build_assoc_registry(&app.models);
+    let assocs = crate::lower::scope_chain::build_assoc_registry_for_app(app);
     let (assoc_class_methods, _) =
         crate::lower::scope_chain::survey_assoc_class_methods(app, &assocs, &scopes);
     let mut class_methods: std::collections::BTreeMap<
@@ -1794,7 +1794,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
         }
     }
     let scopes = crate::lower::scope_chain::build_scope_registry(&app.models);
-    let assocs = crate::lower::scope_chain::build_assoc_registry(&app.models);
+    let assocs = crate::lower::scope_chain::build_assoc_registry_for_app(app);
     let query_arguments = crate::lower::scope_chain::query_arguments::QueryArguments::build(app);
     // Class methods reached THROUGH an association (`user.sessions
     // .start!`) — demand-gated on the call sites this app actually
@@ -2358,11 +2358,32 @@ pub(crate) fn apply_sti_hydration(lcs: &mut [LibraryClass], app: &App) {
         subs_of.entry(base.clone()).or_default().push(sub.clone());
     }
     for base in plain.values() { subs_of.entry(base.clone()).or_default(); }
+    let mixed: std::collections::HashSet<_> = plain.values()
+        .filter(|base| subs_of.get(*base).is_some_and(|subs| !subs.is_empty())).cloned().collect();
     // Deterministic arm order — the map's iteration order is not.
     for v in subs_of.values_mut() {
         v.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
     }
     for lc in lcs.iter_mut() {
+        if mixed.contains(&lc.name)
+            || bases.get(&lc.name).is_some_and(|base| mixed.contains(base))
+            || plain.get(&lc.name).is_some_and(|base| mixed.contains(base))
+        {
+            // A disabled sibling inherits the base's factories but must not
+            // dispatch its rows to that base's STI subclasses.
+            lc.methods.push(crate::dialect::MethodDef {
+                visibility: crate::dialect::MethodVisibility::Public, unsupported_formals: None,
+                has_anonymous_block: false, name_span: Span::synthetic(),
+                name: Symbol::from("_sti_hydrates_subclasses"), receiver: crate::dialect::MethodReceiver::Class,
+                params: vec![], body: Expr::new(Span::synthetic(), ExprNode::Lit {
+                    value: Literal::Bool { value: !plain.contains_key(&lc.name) },
+                }), signature: Some(Ty::Fn {
+                    params: vec![].into(), block: None, ret: std::sync::Arc::new(Ty::Bool), effects: Default::default(),
+                }),
+                effects: Default::default(), enclosing_class: Some(lc.name.0.clone()),
+                kind: crate::dialect::AccessorKind::Method, is_async: false, mutates_self: false, block_param: None,
+            });
+        }
         if bases.contains_key(&lc.name) || plain.contains_key(&lc.name) {
             // The relation also needs the subclass restriction when a
             // class helper inherited from the base starts the query.
@@ -2452,13 +2473,22 @@ pub(crate) fn apply_sti_hydration(lcs: &mut [LibraryClass], app: &App) {
                     }
                     _ => continue,
                 };
-                *value = if let Some(type_read) = &type_read {
-                    sti_dispatch(type_read, subs, &new_args, value.span)
-                } else {
-                    Expr::new(value.span, ExprNode::Send {
+                let construct = Expr::new(value.span, ExprNode::Send {
                         recv: Some(Expr::new(value.span, ExprNode::SelfRef)),
-                        method: Symbol::from("new"), args: new_args, block: None, parenthesized: true,
-                    })
+                        method: Symbol::from("new"), args: new_args.clone(), block: None, parenthesized: true,
+                    });
+                *value = if let Some(type_read) = &type_read {
+                    let dispatch = sti_dispatch(type_read, subs, &new_args, value.span);
+                    if mixed.contains(&base) {
+                        Expr::new(value.span, ExprNode::If {
+                            cond: Expr::new(value.span, ExprNode::Send {
+                                recv: Some(Expr::new(value.span, ExprNode::SelfRef)),
+                                method: Symbol::from("_sti_hydrates_subclasses"), args: vec![], block: None, parenthesized: true,
+                            }),
+                            then_branch: dispatch, else_branch: construct,
+                        })
+                    } else { dispatch }
+                } else { construct
                 };
                 break;
             }

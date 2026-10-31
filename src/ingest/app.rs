@@ -612,6 +612,8 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
             }
         }
     }
+    app.isolated_namespaces = isolated_prefixes.keys().cloned().collect();
+    app.isolated_namespaces.sort();
     for (module, prefix) in isolated_prefixes {
         table_prefixes.entry(module).or_insert(prefix);
     }
@@ -4629,30 +4631,7 @@ fn qualify_model_class_method_ar_calls(app: &mut App, resolver: &crate::analyze:
 
     // Concerns have already been spliced. Preserve class-side ownership
     // across the complete source ancestry, including tableless parents.
-    let mut classes = crate::det::HashMap::default();
-    for model in &app.models {
-        let mut info = crate::analyze::ClassInfo::default();
-        info.parent = model.parent.clone();
-        info.attributes = model.attributes.clone();
-        info.source_class_methods = model.methods()
-            .filter(|m| m.receiver == MethodReceiver::Class)
-            .map(|m| m.name.clone()).collect();
-        info.source_class_methods.extend(model.scopes().map(|s| s.name.clone()));
-        classes.insert(model.name.clone(), info);
-    }
-    for class in &app.library_classes {
-        let mut info = crate::analyze::ClassInfo::default();
-        info.parent = class.parent.clone();
-        info.source_class_methods = class.methods.iter()
-            .filter(|m| m.receiver == MethodReceiver::Class)
-            .map(|m| m.name.clone()).collect();
-        info.source_instance_methods = class.methods.iter()
-            .filter(|m| m.receiver == MethodReceiver::Instance)
-            .map(|m| m.name.clone()).collect();
-        info.includes = class.includes.clone();
-        classes.entry(class.name.clone()).or_insert(info);
-    }
-    crate::analyze::record_class_side_ownership(&mut classes, app, resolver);
+    let classes = crate::analyze::source_finder_classes(app, resolver);
     for model in &mut app.models {
         let recv = Expr::new(
             crate::span::Span::synthetic(),

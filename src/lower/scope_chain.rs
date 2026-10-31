@@ -1464,6 +1464,10 @@ pub enum AssocBuildTarget {
 }
 
 impl AssocRegistry {
+    pub(crate) fn with_finder_classes(mut self, classes: &HashMap<ClassId, crate::analyze::ClassInfo>) -> Self {
+        self.finder_classes.clone_from(classes);
+        self
+    }
     /// Does some model hold what `<name>` builds or is pushed (see the
     /// field)?
     fn is_held_name(&self, name: &Symbol) -> bool {
@@ -1904,6 +1908,11 @@ pub fn automatic_inverse(models: &[Model], owner: &Model, assoc: &Association) -
         }
         _ => None,
     })
+}
+
+pub(crate) fn build_assoc_registry_for_app(app: &crate::App) -> AssocRegistry {
+    let resolver = app.const_resolver.for_sources(&app.sources);
+    build_assoc_registry(&app.models).with_finder_classes(&crate::analyze::source_finder_classes(app, &resolver))
 }
 
 pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {

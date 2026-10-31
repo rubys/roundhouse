@@ -60,7 +60,34 @@ pub fn underscore(class_name: &str) -> String {
 
 /// ActiveModel's default parameter key keeps namespaces as underscores.
 pub fn model_param_key(class_name: &str) -> String {
-    underscore(class_name.trim_start_matches("::")).replace('/', "_")
+    let class_name = class_name.trim_start_matches("::");
+    let acronyms = APP_INFLECTIONS.with(|a| a.borrow().acronym.clone());
+    if acronyms.is_empty() { return underscore_words(class_name); }
+    class_name.split("::").map(|segment| {
+        let mut word = String::new();
+        let mut offset = 0;
+        let mut previous: Option<char> = None;
+        while offset < segment.len() {
+            let rest = &segment[offset..];
+            let boundary = previous.is_none_or(|c| c.is_ascii_alphanumeric() || !(c.is_alphanumeric() || c == '_'));
+            let acronym = boundary.then(|| acronyms.iter().find(|name| {
+                !name.is_empty() && rest.starts_with(name.as_str())
+                    && rest[name.len()..].chars().next().is_none_or(|c| !c.is_ascii_lowercase())
+            })).flatten();
+            if let Some(name) = acronym {
+                if previous.is_some_and(|c| c.is_ascii_alphanumeric()) { word.push('_'); }
+                word.push_str(&name.to_ascii_lowercase());
+                previous = name.chars().last();
+                offset += name.len();
+            } else {
+                let c = rest.chars().next().unwrap();
+                word.push(c);
+                previous = Some(c);
+                offset += c.len_utf8();
+            }
+        }
+        underscore_words(&word)
+    }).collect::<Vec<_>>().join("_")
 }
 
 pub fn camelize(snake: &str) -> String {

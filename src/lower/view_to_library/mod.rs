@@ -275,6 +275,7 @@ pub struct ViewLowerCtx<'a> {
     /// See the ViewCtx field of the same name. Off unless the emitter
     /// opts in with [`ViewLowerCtx::observe_form_with_entry`].
     form_with_entry: bool,
+    model_param_keys: std::rc::Rc<crate::det::HashMap<String, String>>,
 }
 
 impl<'a> ViewLowerCtx<'a> {
@@ -300,6 +301,9 @@ impl<'a> ViewLowerCtx<'a> {
                 .collect();
         Self {
             app,
+            model_param_keys: std::rc::Rc::new(app.models.iter().map(|m| &m.name)
+                .chain(app.library_classes.iter().map(|c| &c.name))
+                .map(|id| (id.0.as_str().to_owned(), app.model_param_key(id.0.as_str()))).collect()),
             known_models: app
                 .models
                 .iter()
@@ -322,7 +326,7 @@ impl<'a> ViewLowerCtx<'a> {
             model_singulars: std::rc::Rc::new(
                 app.models
                     .iter()
-                    .map(|m| crate::naming::snake_case(m.name.0.as_str()))
+                    .map(|m| app.model_param_key(m.name.0.as_str()))
                     .collect(),
             ),
             slug_models: std::rc::Rc::new(
@@ -335,7 +339,7 @@ impl<'a> ViewLowerCtx<'a> {
                                 if method.name.as_str() == "to_param"
                         ))
                     })
-                    .map(|m| crate::naming::snake_case(m.name.0.as_str()))
+                    .map(|m| app.model_param_key(m.name.0.as_str()))
                     .collect(),
             ),
             bool_readers: std::rc::Rc::new(bool_reader_names(app)),
@@ -830,6 +834,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         route_helper_arity: lx.route_helper_arity.clone(),
         form_wrappers: lx.form_wrappers.clone(),
         form_with_entry: lx.form_with_entry,
+        model_param_keys: lx.model_param_keys.clone(),
         stylesheets: app.stylesheets.clone(),
         lexxy: app.gem_lock.as_ref().is_some_and(|lock| lock.has("lexxy")),
         lexxy_editor_adapter: app.gem_lock.as_ref().is_some_and(lexxy_uses_editor_adapter),
@@ -4021,7 +4026,7 @@ fn view_ivar_models(app: &App, view_name: &Symbol) -> crate::det::HashMap<String
         .iter()
         .filter_map(|(name, ty)| match ty {
             crate::ty::Ty::Class { id, .. } => {
-                Some((name.as_str().to_string(), crate::naming::model_param_key(id.0.as_str())))
+                Some((name.as_str().to_string(), app.model_param_key(id.0.as_str())))
             }
             _ => None,
         })
@@ -4819,6 +4824,7 @@ pub(super) struct ViewCtx {
     /// `ActionView::Base.new.form_with` entry (Ruby family only — see
     /// `form_with::form_with_entry`).
     pub(super) form_with_entry: bool,
+    pub(super) model_param_keys: std::rc::Rc<crate::det::HashMap<String, String>>,
     /// Stylesheet logical names ingested from `app/assets/stylesheets/`
     /// + `app/assets/builds/`. Used by the `stylesheet_link_tag(:app,
     /// ...)` expansion: a `:app` symbol arg fans out to one call per
@@ -4974,7 +4980,7 @@ fn bool_reader_names(
                 set.insert(name.as_str().to_string());
             }
         }
-        out.insert(crate::naming::snake_case(m.name.0.as_str()), set);
+        out.insert(app.model_param_key(m.name.0.as_str()), set);
     }
     out
 }
@@ -5008,7 +5014,7 @@ fn store_reader_names(
                 set.remove(col.name.as_str());
             }
         }
-        out.insert(crate::naming::snake_case(m.name.0.as_str()), set);
+        out.insert(app.model_param_key(m.name.0.as_str()), set);
     }
     out
 }
@@ -5049,7 +5055,7 @@ fn reference_target_names(app: &App) -> crate::det::HashMap<String, String> {
                 _ => continue,
             };
             let key = name.as_str().to_string();
-            let val = crate::naming::snake_case(target.0.as_str());
+            let val = app.model_param_key(target.0.as_str());
             match out.get(&key) {
                 Some(existing) if existing != &val => {
                     ambiguous.insert(key);

@@ -8110,9 +8110,52 @@ fn redefined_reader_names(items: &[ModelBodyItem], out: &mut BTreeSet<Symbol>) {
     }
 }
 
+/// The source ownership facts shared by class and association finder lowering.
+pub(crate) fn source_finder_classes(app: &App, resolver: &ConstResolver) -> HashMap<ClassId, ClassInfo> {
+    let mut classes = crate::det::HashMap::default();
+    for model in &app.models {
+        let mut info = crate::analyze::ClassInfo::default();
+        info.parent = model.parent.clone();
+        info.attributes = model.attributes.clone();
+        info.includes = model_includes(model);
+        info.source_instance_methods = model.methods().filter(|m| m.receiver == MethodReceiver::Instance).map(|m| m.name.clone()).collect();
+        info.unresolved_include = model.body.iter().any(|item| matches!(item,
+            ModelBodyItem::Unknown { expr, .. } if matches!(expr.diagnostic(),
+                Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. }) if construct.as_str() == "include")));
+        info.source_class_methods = model.methods()
+            .filter(|m| m.receiver == MethodReceiver::Class)
+            .map(|m| m.name.clone()).collect();
+        info.source_class_methods.extend(model.scopes().map(|s| s.name.clone()));
+        classes.insert(model.name.clone(), info);
+    }
+    for class in &app.library_classes {
+        let mut info = crate::analyze::ClassInfo::default();
+        info.parent = class.parent.clone();
+        info.source_class_methods = class.methods.iter()
+            .filter(|m| m.receiver == MethodReceiver::Class)
+            .map(|m| m.name.clone()).collect();
+        info.source_instance_methods = class.methods.iter()
+            .filter(|m| m.receiver == MethodReceiver::Instance)
+            .map(|m| m.name.clone()).collect();
+        info.includes = class.includes.clone();
+        info.unresolved_include = class.unknown_calls.iter().any(|expr| matches!(expr.diagnostic(),
+            Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. }) if construct.as_str() == "include"));
+        classes.entry(class.name.clone()).or_insert(info);
+    }
+    record_class_side_ownership(&mut classes, app, resolver);
+    classes
+}
+
 /// Shared by ingest qualification and the typed finder registry. Retained
 /// hooks are effects, whereas expanded carriers already have concrete defs.
 pub(crate) fn record_class_side_ownership(classes: &mut HashMap<ClassId, ClassInfo>, app: &App, resolver: &ConstResolver) {
+    // Forwardable's stdlib macros define instance delegates, not finders on
+    // the extending class. An app reopening must keep its source ownership.
+    if !resolver.has_source_namespace("Forwardable") {
+        classes.entry(ClassId(Symbol::from("Forwardable"))).or_insert_with(|| ClassInfo {
+            is_module: true, ..Default::default()
+        });
+    }
     fn extensions<'a>(exprs: impl Iterator<Item = &'a Expr>, resolver: &ConstResolver) -> Vec<ClassId> {
         let mut out = Vec::new();
         for expr in exprs {

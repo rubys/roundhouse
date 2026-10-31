@@ -1847,6 +1847,7 @@ mod tests {
             route_helper_arity: Default::default(),
             form_wrappers: Default::default(),
             form_with_entry: false,
+            model_param_keys: Default::default(),
             stylesheets: Vec::new(),
             lexxy: false,
             lexxy_editor_adapter: false,

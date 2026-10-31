@@ -906,8 +906,7 @@ fn w088_review_subclass_forms_keep_routes_parameter_keys_and_errors() {
     assert!(probe.status.success() && matches!(available.as_str(), "true" | "false"),
         "Rails oracle availability probe failed: {available}\n{}", String::from_utf8_lossy(&probe.stderr));
     if available == "false" {
-        eprintln!("skipping: Rails 8.1.4 form oracle requires activerecord, actionview, actionpack and sqlite3 >= 2.9");
-        return;
+        eprintln!("skipping native oracle: Rails 8.1.4 form oracle requires activerecord, actionview, actionpack and sqlite3 >= 2.9");
     }
     const SCHEMA: &str = "ActiveRecord::Schema.define do\ncreate_table(:rooms) { |t| t.string :name; t.string :type }\nend\n";
     const ROOM: &str = "class Room < ActiveRecord::Base\nattr_accessor :user_ids_input\nend\n";
@@ -963,8 +962,10 @@ room = Rooms::Direct.new
   check_form(view.render(inline: {template:?}), condition)
 end
 "#, template = TEMPLATE);
-    let oracle = std::process::Command::new("ruby").args(["-e", &native]).output().unwrap();
-    assert!(oracle.status.success(), "Rails 8.1.4: {}", String::from_utf8_lossy(&oracle.stderr));
+    if available == "true" {
+        let oracle = std::process::Command::new("ruby").args(["-e", &native]).output().unwrap();
+        assert!(oracle.status.success(), "Rails 8.1.4: {}", String::from_utf8_lossy(&oracle.stderr));
+    }
     let (emitted, app, errors) = emit_and_run::empty_app()
         .write("db/schema.rb", SCHEMA)
         .write("app/models/room.rb", ROOM)
@@ -990,7 +991,7 @@ room = Rooms::Direct.new
   check_form(Views::Rooms::Directs._new(room), condition)
 end
 "#);
-    let output = std::process::Command::new("ruby").args(["-e", &script]).current_dir(&emitted).env("BLOG_DB", ":memory:").output().unwrap();
+    let output = emit_and_run::ruby().args(["-e", &script]).current_dir(&emitted).env("BLOG_DB", ":memory:").output().unwrap();
     assert!(output.status.success(), "emitted form: {}", String::from_utf8_lossy(&output.stderr));
 }
 

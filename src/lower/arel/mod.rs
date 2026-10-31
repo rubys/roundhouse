@@ -335,6 +335,13 @@ pub(crate) fn dynamic_finder_delegate_refusal(
             "relation finder with unknown class-side hook".to_owned(),
             "retained hooks may own the model finder; the relation builtin cannot replace unknown dispatch".to_owned()));
     }
+    if ClassInfo::source_class_method_owner(registry, of, &name)
+        .is_some_and(|(_, side)| side == crate::dialect::MethodReceiver::Instance)
+    {
+        return Some(crate::diagnostic::Diagnostic::unsupported(expr.span, None,
+            "relation dynamic finder with source delegate".to_owned(),
+            "the model's extension owns this finder; relation delegation is not established".to_owned()));
+    }
     if block.is_some() { return None; }
     if args.len() != if reflected { 2 } else { 1 }
         || ClassInfo::schema_column_owner(registry, of, &Symbol::from(attr)).is_none()

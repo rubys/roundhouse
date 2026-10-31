@@ -260,6 +260,8 @@ pub struct LowerControllerOptions<'a> {
     /// App library classes — used to resolve controller-side partial
     /// render contracts.
     pub library_classes: &'a [crate::dialect::LibraryClass],
+    /// Source singleton ownership, including extensions and retained hooks.
+    pub finder_classes: Option<&'a crate::det::HashMap<ClassId, crate::analyze::ClassInfo>>,
     /// Association graph — lowers `includes(:assoc)` to eager-load
     /// preloads (issue #27).
     pub assocs: &'a [crate::lower::model_associations::AssociationEdge],
@@ -314,6 +316,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         schema,
         views,
         library_classes,
+        finder_classes,
         assocs,
         routed_by_controller,
         format_breadth,
@@ -344,6 +347,9 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // What `@parent.<assoc>.build` / `.find` expand to: the same
     // declarations the typed association seed reads.
     let assoc_registry = crate::lower::scope_chain::build_assoc_registry(models);
+    let assoc_registry = if let Some(classes) = finder_classes {
+        assoc_registry.with_finder_classes(classes)
+    } else { assoc_registry };
 
     // The view↔controller ivar contract: each action view's read-ivars,
     // so the render rewrite passes `@<name>` for each (matching the view's
