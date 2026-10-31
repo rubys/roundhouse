@@ -61,9 +61,12 @@ fn the_store_fixture_checks_clean() {
     let (code, err) = check(&[store]);
     assert_eq!(code, 0, "{err}");
     assert!(
-        err.contains("0 parse error(s), 0 error(s), 0 warning(s), 0 gap-attributed note(s), 0 survey gap(s)"),
+        err.contains("0 parse error(s), 0 error(s), 1 warning(s), 0 gap-attributed note(s), 0 survey gap(s)"),
         "{err}"
     );
+    // The partial's local_assigns[:in_gallery] has an unknown-bearing
+    // union. #964 makes that escape visible, while check still succeeds.
+    assert!(err.contains("active_storage/blobs/_blob.html.erb:3:56: warning[gradual_untyped]"), "{err}");
 }
 
 #[test]
