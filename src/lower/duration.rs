@@ -390,7 +390,7 @@ fn rewrite_time_duration_arith(expr: &mut Expr, time_operands: bool) {
                 parenthesized: true,
             },
         );
-        args[0].ty = Some(Ty::Untyped);
+        args[0].ty = Some(Ty::untyped());
         return;
     }
     let ExprNode::Send { args, .. } = &mut *expr.node else { unreachable!() };
@@ -625,7 +625,7 @@ pub(crate) fn rewrite_durations(expr: &mut Expr) {
             parenthesized: true,
         };
         if matches!(expr.ty, None | Some(Ty::Var { .. })) {
-            expr.ty = Some(Ty::Untyped);
+            expr.ty = Some(Ty::untyped());
         }
     }
 }

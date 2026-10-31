@@ -131,7 +131,7 @@ pub(super) fn push_select_alias_methods(methods: &mut Vec<MethodDef>, model: &Mo
         method.enclosing_class = Some(model.name.0.clone());
         method.body.inherit_span(span);
         if method.name.as_str() == KEEP {
-            let row_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) };
+            let row_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::untyped()) };
             method.signature = Some(super::fn_sig(vec![(Symbol::from("row"), row_ty)], Ty::Nil));
             method.mutates_self = true;
         }

@@ -472,7 +472,7 @@ fn method_signature_ty(
             // Untyped or proc-typed block — keep the placeholder for
             // backward compatibility with code paths that only checked
             // presence-of-block.
-            Some(Ty::Untyped)
+            Some(Ty::untyped())
         }
     } else {
         None
@@ -791,7 +791,7 @@ fn ty_from_node(node: &Node<'_>, ctx: TyCtx<'_>) -> Result<Ty, String> {
         // gradual escape (TS `any`, Python `Any`) emit it cleanly,
         // strict targets (Rust, Go) elevate it to a Diagnostic::Error
         // at emit time.
-        Node::AnyType(_) => Ok(Ty::Untyped),
+        Node::AnyType(_) => Ok(Ty::gradual_untyped()),
         Node::OptionalType(opt) => {
             let inner = ty_from_node(&opt.type_(), ctx)?;
             Ok(union_or_single(vec![inner, Ty::Nil]))
@@ -894,12 +894,12 @@ fn ty_from_node(node: &Node<'_>, ctx: TyCtx<'_>) -> Result<Ty, String> {
         // `top` is the supertype of everything, on which RBS lets you
         // call nothing. Nothing dispatches on it, so `untyped` answers
         // the same without inventing a class.
-        Node::TopType(_) => Ok(Ty::Untyped),
+        Node::TopType(_) => Ok(Ty::untyped()),
         // A method-level type variable (`[T] (T) -> T`). The analyzer
         // does not instantiate a signature's variables per call, so the
         // variable is an unmodelled boundary: `untyped`, not a class
         // called `T`. Stated here so it is one place to change.
-        Node::VariableType(_) => Ok(Ty::Untyped),
+        Node::VariableType(_) => Ok(Ty::untyped()),
         // `A & B`: see `intersection_ty`.
         Node::IntersectionType(inter) => {
             let members: Vec<Ty> = inter
@@ -941,8 +941,8 @@ pub(crate) fn intersection_ty(members: Vec<Ty>) -> Ty {
         .collect();
     match real.as_slice() {
         [only] => (*only).clone(),
-        [] => members.into_iter().next().unwrap_or(Ty::Untyped),
-        _ => Ty::Untyped,
+        [] => members.into_iter().next().unwrap_or(Ty::untyped()),
+        _ => Ty::untyped(),
     }
 }
 
@@ -1045,8 +1045,8 @@ fn map_class_instance(name: &str, args: Vec<Ty>) -> Ty {
         },
         // A bare `Hash` / `Array` is the unparameterized container, not a
         // class named Hash with nothing to call on it.
-        ("Hash", []) => Ty::Hash { key: std::sync::Arc::new(Ty::Untyped), value: std::sync::Arc::new(Ty::Untyped) },
-        ("Array", []) => Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) },
+        ("Hash", []) => Ty::Hash { key: std::sync::Arc::new(Ty::gradual_untyped()), value: std::sync::Arc::new(Ty::gradual_untyped()) },
+        ("Array", []) => Ty::Array { elem: std::sync::Arc::new(Ty::gradual_untyped()) },
         _ => Ty::Class {
             id: ClassId(Symbol::new(name)),
             args: args.into(),
@@ -1185,7 +1185,7 @@ pub fn print_ty(ty: &Ty) -> String {
         // Value-position function types would need RBS proc syntax,
         // which the parse direction rejects — degrade.
         Ty::Fn { .. } => "untyped".to_string(),
-        Ty::Var { .. } | Ty::Untyped => "untyped".to_string(),
+        Ty::Var { .. } | Ty::Untyped { .. } => "untyped".to_string(),
         _ => "untyped".to_string(),
     }
 }

@@ -338,7 +338,7 @@ pub(super) fn emit_bool_op(
                     let value_ty_untyped = matches!(
                         r.ty.as_ref().map(peel_nil),
                         Some(crate::ty::Ty::Hash { value, .. })
-                            if matches!(value.as_ref(), crate::ty::Ty::Untyped)
+                            if matches!(value.as_ref(), crate::ty::Ty::Untyped { .. })
                     );
                     // String default literal -> `.to_string()` (defer
                     // to str_color if already annotated).
@@ -370,7 +370,7 @@ pub(super) fn emit_bool_op(
             // needs to be `Value`-shaped.
             let lhs_inner_untyped = matches!(
                 left.ty.as_ref().map(peel_nil),
-                Some(crate::ty::Ty::Untyped)
+                Some(crate::ty::Ty::Untyped { .. })
             );
             // `Option<Str>` (rust emits as `Option<String>`) `||`
             // literal-str — `unwrap_or` expects `String`, but Str
@@ -491,7 +491,7 @@ pub(super) fn emit_case(scrutinee: &Expr, arms: &[crate::expr::Arm]) -> String {
     }
     let scrutinee_s = emit_expr(scrutinee);
     let return_ty = current_return_ty();
-    let return_is_value = matches!(return_ty.as_ref(), Some(crate::ty::Ty::Untyped));
+    let return_is_value = matches!(return_ty.as_ref(), Some(crate::ty::Ty::Untyped { .. }));
     let arm_strs: Vec<String> = arms
         .iter()
         .map(|arm| {

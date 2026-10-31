@@ -1437,7 +1437,7 @@ fn target_value_is_widening(target_ty: &Ty) -> bool {
 fn literal_ty_uninformative(e: &Expr) -> bool {
     match e.ty.as_ref() {
         None => true,
-        Some(Ty::Untyped) => true,
+        Some(Ty::Untyped { .. }) => true,
         Some(Ty::Var { .. }) => true,
         Some(Ty::Hash { key, value }) => {
             key.as_ref().is_unknown() && value.as_ref().is_unknown()
@@ -1598,14 +1598,14 @@ fn collect_module_singleton_slots(methods: &[MethodDef]) -> Vec<(String, Ty)> {
         let ty = match m.kind {
             AccessorKind::AttributeReader => match m.signature.as_ref() {
                 Some(Ty::Fn { ret, .. }) => (**ret).clone(),
-                _ => Ty::Untyped,
+                _ => Ty::untyped(),
             },
             AccessorKind::AttributeWriter => match m.signature.as_ref() {
                 Some(Ty::Fn { params, .. }) => params
                     .first()
                     .map(|p| (*p.ty).clone())
-                    .unwrap_or(Ty::Untyped.into()),
-                _ => Ty::Untyped.into(),
+                    .unwrap_or(Ty::untyped().into()),
+                _ => Ty::untyped().into(),
             },
             _ => continue,
         };
@@ -1621,7 +1621,7 @@ fn collect_module_singleton_slots(methods: &[MethodDef]) -> Vec<(String, Ty)> {
 fn collect_assigned_ivars(e: &crate::expr::Expr, out: &mut Vec<(String, Ty)>) {
     if let crate::expr::ExprNode::Assign { target: crate::expr::LValue::Ivar { name }, value } = &*e.node {
         if !out.iter().any(|(n, _)| n == name.as_str()) {
-            out.push((name.as_str().to_string(), value.ty.clone().unwrap_or(Ty::Untyped)));
+            out.push((name.as_str().to_string(), value.ty.clone().unwrap_or(Ty::untyped())));
         }
     }
     e.node.for_each_child(&mut |c| collect_assigned_ivars(c, out));

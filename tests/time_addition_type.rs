@@ -57,7 +57,7 @@ end
         .iter()
         .find(|method| method.name.as_str() == "difference")
         .unwrap();
-    assert_eq!(difference.body.ty, Some(Ty::Untyped));
+    assert_eq!(difference.body.ty, Some(Ty::untyped()));
     let custom = app
         .library_classes
         .iter()

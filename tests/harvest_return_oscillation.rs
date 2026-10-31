@@ -124,3 +124,174 @@ fn circular_config_load_emits_configuration_not_gradual_churn() {
     );
 }
 
+#[test]
+fn pending_presence_chain_with_a_nilable_name_still_emits_string_or_nil() {
+    let mut tree = HashMap::new();
+    tree.insert(PathBuf::from("db/schema.rb"), b"ActiveRecord::Schema.define do\nend\n".to_vec());
+    tree.insert(PathBuf::from("lib/a_user.rb"), br#"
+class User
+  def name
+    "Ada"
+  end
+end
+"#.to_vec());
+    tree.insert(PathBuf::from("lib/room_names.rb"), br#"
+module RoomNames
+  def self.room_display_name(title)
+    for_user = [User.new, nil].first
+    title.presence || for_user&.name
+  end
+
+  def self.for_room
+    room_display_name("Room")
+  end
+end
+"#.to_vec());
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let rbs = emit_library(&app).into_iter()
+        .filter(|f| f.path.extension().is_some_and(|e| e == "rbs"))
+        .map(|f| f.content).collect::<Vec<_>>().join("\n");
+    assert!(rbs.contains("def self.room_display_name: (String title) -> String?"),
+            "pending presence must not leave a gradual return, got:\n{rbs}");
+}
+
+#[test]
+fn gradual_json_value_forwarded_through_a_pending_stub_stays_gradual() {
+    let mut tree = HashMap::new();
+    tree.insert(PathBuf::from("db/schema.rb"), b"ActiveRecord::Schema.define do\nend\n".to_vec());
+    tree.insert(PathBuf::from("lib/wrapped_locale.rb"), br#"
+module WrappedLocale
+  def self.locale_for(x)
+    x&.dig("lang") || :en
+  end
+
+  def self.forward(x)
+    x
+  end
+
+  def self.resolve(raw)
+    locale_for(forward(JSON.parse(raw)))
+  end
+end
+"#.to_vec());
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let rbs = emit_library(&app).into_iter()
+        .filter(|f| f.path.extension().is_some_and(|e| e == "rbs"))
+        .map(|f| f.content).collect::<Vec<_>>().join("\n");
+    assert!(rbs.contains("def self.locale_for: (untyped x) -> untyped"),
+            "a forwarded JSON value is still gradual, got:\n{rbs}");
+    assert!(rbs.contains("def self.resolve: (untyped raw) -> untyped"),
+            "forwarding a JSON value must not declare resolve as Symbol, got:\n{rbs}");
+}
+
+fn declarations_for(source: &str) -> (roundhouse::App, String) {
+    declarations_with_caller(source, None)
+}
+
+fn declarations_with_caller(source: &str, caller: Option<&str>) -> (roundhouse::App, String) {
+    let mut tree = HashMap::from([
+        (PathBuf::from("db/schema.rb"), b"ActiveRecord::Schema.define do\nend\n".to_vec()),
+        (PathBuf::from("lib/probe.rb"), source.as_bytes().to_vec()),
+    ]);
+    if let Some(caller) = caller {
+        tree.insert(PathBuf::from("config/routes.rb"), b"Rails.application.routes.draw { get '/probe', to: 'probes#show' }".to_vec());
+        tree.insert(PathBuf::from("app/controllers/probes_controller.rb"), format!(
+            "class ProbesController < ActionController::Base\n def show\n {caller}\n head :ok\n end\nend\n").into_bytes());
+    }
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let rbs = emit_library(&app).into_iter()
+        .filter(|f| f.path.extension().is_some_and(|e| e == "rbs"))
+        .map(|f| f.content).collect::<Vec<_>>().join("\n");
+    (app, rbs)
+}
+
+#[test]
+fn room_return_and_broadcast_parameter_admit_the_runtime_object() {
+    let (_, rbs) = declarations_for(r#"class Rooms
+  Room = Struct.new(:lock, :members)
+
+  def self.room(id)
+    state = Rails.application.room_state
+    state[:lock].synchronize { state[:rooms][id] ||= Room.new(Mutex.new, {}) }
+  end
+
+  def self.join(id, socket)
+    room = room(id)
+    room.lock.synchronize do
+      return if socket.closed?
+      return :full if room.members.length >= 100
+      broadcast(room)
+    end
+    room
+  end
+
+  def self.broadcast(room)
+    room.members.each_key { |socket| socket.send("presence") }
+  end
+
+  def self.open(id, socket)
+    result = join(id, socket)
+    return if result == :full
+    broadcast(result)
+  end
+end
+"#);
+    for name in ["join", "room"] {
+        let line = rbs.lines().find(|line| line.contains(&format!("def self.{name}:"))).unwrap();
+        assert!(line.ends_with("-> untyped") || line.contains("-> Rooms::Room"), "{rbs}");
+    }
+    assert!(rbs.contains("def self.broadcast: (untyped room)"), "{rbs}");
+}
+
+#[test]
+fn gradual_arguments_stay_unknown_bare_or_beside_a_fallback() {
+    for call in [r#"take(JSON.parse("42") || :fallback)"#,
+                 r#"take(:fallback); take(JSON.parse("42"))"#,
+                 r#"take(JSON.parse("42")); take(:fallback)"#] {
+        let source = format!("module Probe\n def self.take(value); value; end\n def self.run; {call}; end\nend\n");
+        let (_, rbs) = declarations_for(&source);
+        assert!(rbs.contains("def self.take: (untyped value) -> untyped"), "{call}: {rbs}");
+    }
+}
+
+#[test]
+fn known_block_unwinds_retain_invalid_call_errors() {
+    for body in [
+        "JSON.parse(raw).tap { explode } rescue \"ok\"",
+        "JSON.parse(raw).tap { p = Kernel.proc { return \"ok\" }; alias_proc = p; alias_proc[] }",
+        "JSON.parse(raw).tap { begin; Kernel.raise(\"x\", \"y\"); rescue RuntimeError; nil; end } rescue \"ok\"",
+    ] {
+        let source = format!("module Probe\n def self.value(raw); {body}; end\n def self.explode; raise \"x\"; end\n def self.run; value(\"42\").no_such_method; end\nend\n");
+        let (app, rbs) = declarations_with_caller(&source, Some(r#"Probe.value("42").no_such_method"#));
+        assert!(rbs.contains("def self.value: (String raw) -> String"), "{body}: {rbs}");
+        let diagnostics = roundhouse::analyze::diagnose(&app);
+        assert!(diagnostics.iter().any(|d| matches!(&d.kind,
+            roundhouse::diagnostic::DiagnosticKind::SendDispatchFailed { method, .. } if method.as_str() == "no_such_method")),
+            "{body}: {diagnostics:?}");
+    }
+}
+
+#[test]
+fn unknown_bearing_unions_report_the_gradual_boundary() {
+    let (app, _) = declarations_with_caller("module Probe\n def self.value; JSON.parse(\"42\") || :fallback; end\nend\n",
+        Some("Probe.value.no_such_method"));
+    let diagnostics = roundhouse::analyze::diagnose(&app);
+    assert!(diagnostics.iter().any(|d| matches!(&d.kind,
+        roundhouse::diagnostic::DiagnosticKind::GradualUntyped { .. })
+        && app.sources[d.span.file.0 as usize - 1].text[d.span.start as usize..].starts_with("Probe.value.no_such_method")),
+        "the unknown-bearing call must report its own boundary: {diagnostics:?}");
+}
+
+#[test]
+fn computed_unknown_results_are_not_promises_of_the_fallback_type() {
+    let (_, rbs) = declarations_for(r#"module Probe
+  def self.value
+    [JSON.parse("42")].first || :fallback
+  end
+end
+"#);
+    assert!(rbs.contains("def self.value: () -> untyped"), "{rbs}");
+}

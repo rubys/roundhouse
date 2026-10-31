@@ -8154,7 +8154,7 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
         // `runtime/ruby/active_record/connection.rb` carries `upsert_all` and the
         // `insert_all` forms the lowering does not inline; no strict runtime transpiles it.
         let answers_result = matches!(&expr.ty, Some(crate::ty::Ty::Class { id, .. }) if id.0.as_str() == "ActiveRecord::Result");
-        let answers_rows = matches!(&expr.ty, Some(crate::ty::Ty::Array { elem }) if **elem == crate::ty::Ty::Untyped);
+        let answers_rows = matches!(&expr.ty, Some(crate::ty::Ty::Array { elem }) if **elem == crate::ty::Ty::untyped());
         if !matches!(target, "jruby" | "spinel")
             && let crate::expr::ExprNode::Send { recv, method, args, block, .. } = &*expr.node
             && ((matches!(method.as_str(), "upsert" | "upsert_all" | "insert" | "insert!" | "insert_all!") && answers_result)

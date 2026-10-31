@@ -87,7 +87,7 @@ impl Seeds {
     pub(super) fn fn_params(&self, params: &[Symbol]) -> Vec<crate::ty::Param> {
         let mut out = Vec::new();
         for (name, slot) in params.iter().zip(self.positional.iter()) {
-            let ty = slot.clone().unwrap_or(Ty::Untyped);
+            let ty = slot.clone().unwrap_or(Ty::untyped());
             out.push(crate::ty::Param {
                 name: name.clone(),
                 ty: std::sync::Arc::new(ty),
@@ -126,7 +126,7 @@ fn merge_positional(acc: &mut Vec<Option<Ty>>, next: &[Option<Ty>]) -> bool {
     let mut changed = false;
     for (i, slot) in next.iter().enumerate() {
         let Some(ty) = slot else { continue };
-        if matches!(ty, Ty::Var { .. } | Ty::Untyped) {
+        if matches!(ty, Ty::Var { .. } | Ty::Untyped { .. }) {
             continue;
         }
         if i >= acc.len() {
@@ -153,7 +153,7 @@ fn merge_positional(acc: &mut Vec<Option<Ty>>, next: &[Option<Ty>]) -> bool {
 }
 
 fn merge_keyword(acc: &mut Vec<(Symbol, Ty)>, name: &Symbol, ty: &Ty) -> bool {
-    if matches!(ty, Ty::Var { .. } | Ty::Untyped) {
+    if matches!(ty, Ty::Var { .. } | Ty::Untyped { .. }) {
         return false;
     }
     if let Some((_, prev)) = acc.iter_mut().find(|(n, _)| n == name) {
@@ -249,7 +249,7 @@ fn evidence(args: &[Expr]) -> Option<Evidence> {
 
 fn typed(ty: &Option<Ty>) -> Option<Ty> {
     match ty {
-        Some(Ty::Var { .. } | Ty::Untyped) | None => None,
+        Some(Ty::Var { .. } | Ty::Untyped { .. }) | None => None,
         Some(ty) => Some(ty.clone()),
     }
 }

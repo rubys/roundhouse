@@ -230,7 +230,7 @@ pub(crate) fn push_has_json_methods(methods: &mut Vec<MethodDef>, model: &Model)
                 vec![Param::positional(value.clone())],
                 write_body(&decl.column, a),
                 Some(super::model_to_library::fn_sig(
-                    vec![(value, Ty::Untyped)],
+                    vec![(value, Ty::untyped())],
                     Ty::Nil,
                 )),
                 AccessorKind::Method,
@@ -487,7 +487,7 @@ pub(crate) fn column_hash_read(model: &Model, column: &Symbol) -> Option<Expr> {
         .collect();
     Some(super::typing::with_ty(
         sp(ExprNode::Hash { entries, kwargs: false }),
-        Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) },
+        Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::untyped()) },
     ))
 }
 

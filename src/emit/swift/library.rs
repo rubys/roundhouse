@@ -165,7 +165,7 @@ fn emit_module_ivars(methods: &[MethodDef], exclude: &BTreeMap<String, Ty>) -> S
     let mut props: crate::det::HashMap<String, Ty> = crate::det::HashMap::default();
     let mut out = String::new();
     for (n, info) in &ivars {
-        props.insert(n.clone(), info.ty.clone().unwrap_or(Ty::Untyped));
+        props.insert(n.clone(), info.ty.clone().unwrap_or(Ty::untyped()));
         // An accessor-backed ivar is declared by the accessor's
         // `static var`, not here.
         if exclude.contains_key(n) {
@@ -263,7 +263,7 @@ pub fn emit_test_class(
     // DB-reset/fixture-reload hook + the controller-test dispatch surface.
     out.push_str(&format!("final class {class_name}: RoundhouseTestCase {{\n"));
     for (n, info) in &body_ivars {
-        all_props.insert(n.clone(), info.ty.clone().unwrap_or(Ty::Untyped));
+        all_props.insert(n.clone(), info.ty.clone().unwrap_or(Ty::untyped()));
         match (&info.ty, info.saw_nil) {
             (Some(t), false) => match try_default_for(t) {
                 Some(d) => out.push_str(&format!("    var {n}: {} = {d}\n", swift_ty(t))),
@@ -601,7 +601,7 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
             .get(n)
             .cloned()
             .or_else(|| info.ty.clone())
-            .unwrap_or(Ty::Untyped);
+            .unwrap_or(Ty::untyped());
         all_props.entry(n.clone()).or_insert(ty);
     }
     // The temporal computed properties (`createdAt`), so `self.created_at`
@@ -1295,7 +1295,7 @@ fn default_return(ret_ty: Option<&Ty>) -> String {
             "return nil".to_string()
         }
         // An untyped return is `Any?`, so Ruby's bare `nil` answers as itself
-        Some(Ty::Untyped | Ty::Var { .. }) => "return nil".to_string(),
+        Some(Ty::Untyped { .. } | Ty::Var { .. }) => "return nil".to_string(),
         _ => "fatalError(\"unimplemented\")".to_string(),
     }
 }
@@ -1323,7 +1323,7 @@ fn collect_ivars(e: &Expr, out: &mut BTreeMap<String, IvarInfo>) {
                 info.saw_nil = true;
             } else if info.ty.is_none() {
                 if let Some(t) = value.ty.as_ref() {
-                    if !matches!(t, Ty::Nil | Ty::Untyped | Ty::Var { .. }) {
+                    if !matches!(t, Ty::Nil | Ty::Untyped { .. } | Ty::Var { .. }) {
                         info.ty = Some(t.clone());
                     }
                 }
@@ -1406,7 +1406,7 @@ fn try_default_for(ty: &Ty) -> Option<String> {
         Ty::Union { variants } if variants.iter().any(|v| matches!(v, Ty::Nil)) => {
             "nil".to_string()
         }
-        Ty::Untyped | Ty::Var { .. } => "nil".to_string(),
+        Ty::Untyped { .. } | Ty::Var { .. } => "nil".to_string(),
         _ => return None,
     })
 }

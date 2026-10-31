@@ -377,7 +377,7 @@ fn normalize_condition(model: &ClassId, attr: &Symbol, value: Expr) -> Expr {
     read.ty = Some(elem.as_ref().clone());
     let normalized = call_normalizer(model, attr, read.clone());
     let can_be_nil = match elem.as_ref() {
-        Ty::Nil | Ty::Untyped => true,
+        Ty::Nil | Ty::Untyped { .. } => true,
         Ty::Union { variants } => variants.contains(&Ty::Nil),
         _ => false,
     };

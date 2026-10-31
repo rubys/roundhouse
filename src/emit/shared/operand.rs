@@ -29,7 +29,7 @@ use crate::ty::Ty;
 /// module docs for the four gradual/unknown cases.
 pub fn is_gradual_operand(t: Option<&Ty>) -> bool {
     match t {
-        None | Some(Ty::Var { .. }) | Some(Ty::Untyped) => true,
+        None | Some(Ty::Var { .. }) | Some(Ty::Untyped { .. }) => true,
         // Not `Incompatible`: a request-params value is whatever the request carried, so its operators are the native ones.
         Some(Ty::Class { id, .. }) if id.0.as_str() == crate::analyze::PARAM_VALUE => true,
         Some(Ty::Union { variants }) => {
@@ -72,7 +72,7 @@ mod tests {
         assert!(is_gradual_operand(Some(&Ty::Var {
             var: crate::ident::TyVar(0),
         })));
-        assert!(is_gradual_operand(Some(&Ty::Untyped)));
+        assert!(is_gradual_operand(Some(&Ty::untyped())));
     }
 
     #[test]
@@ -93,7 +93,7 @@ mod tests {
 
         // One gradual arm makes the whole union gradual.
         let with_untyped = Ty::Union {
-            variants: vec![Ty::Float, Ty::Untyped].into(),
+            variants: vec![Ty::Float, Ty::untyped()].into(),
         };
         assert!(is_gradual_operand(Some(&with_untyped)));
 
@@ -101,7 +101,7 @@ mod tests {
         let nested = Ty::Union {
             variants: vec![
                 Ty::Union {
-                    variants: vec![Ty::Untyped, Ty::Untyped].into(),
+                    variants: vec![Ty::untyped(), Ty::untyped()].into(),
                 },
                 Ty::Int,
             ].into(),

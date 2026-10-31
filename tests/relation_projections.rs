@@ -95,7 +95,7 @@ fn source_projection_overrides_keep_their_return_types() {
         (
             "rows",
             Ty::Array {
-                elem: std::sync::Arc::new(Ty::Untyped),
+                elem: std::sync::Arc::new(Ty::untyped()),
             },
         ),
         ("ancestor_pick", Ty::Int),

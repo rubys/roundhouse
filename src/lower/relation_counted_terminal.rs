@@ -234,7 +234,7 @@ mod tests {
         let mut open = int_arg();
         open.ty = None;
         let mut gradual = int_arg();
-        gradual.ty = Some(Ty::Untyped);
+        gradual.ty = Some(Ty::untyped());
         let mut variable = int_arg();
         variable.ty = Some(Ty::Var { var: TyVar(0) });
         for arg in [open, gradual, variable] {

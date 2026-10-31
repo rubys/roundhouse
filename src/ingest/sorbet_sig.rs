@@ -693,7 +693,7 @@ pub(super) fn sorbet_ty(
                     .arguments()?
                     .arguments()
                     .iter()
-                    .map(|a| sorbet_ty(&a, self_is_instance, aliases).unwrap_or(Ty::Untyped))
+                    .map(|a| sorbet_ty(&a, self_is_instance, aliases).unwrap_or(Ty::untyped()))
                     .collect();
                 return Some(Ty::Class { id: ClassId(Symbol::new(&container)), args });
             }
@@ -711,7 +711,7 @@ pub(super) fn sorbet_ty(
             return None;
         }
         return match method.as_str() {
-            "untyped" => Some(Ty::Untyped),
+            "untyped" => Some(Ty::gradual_untyped()),
             // The receiver-dependent type, and the reason this whole
             // seam exists: a factory declared once on a base class
             // answers with an instance of whichever subclass called
@@ -731,11 +731,11 @@ pub(super) fn sorbet_ty(
             "noreturn" => Some(Ty::Bottom),
             // The supertype of everything; nothing can be called on it,
             // so `untyped` answers the same.
-            "anything" => Some(Ty::Untyped),
+            "anything" => Some(Ty::untyped()),
             // `T.type_parameter(:U)`, declared by `type_parameters(:U)`.
             // The analyzer does not instantiate a signature's variables
             // per call: an unmodelled boundary, so `untyped`.
-            "type_parameter" => Some(Ty::Untyped),
+            "type_parameter" => Some(Ty::untyped()),
             "all" => {
                 let members: Vec<Ty> = index
                     .arguments()?
@@ -827,7 +827,7 @@ fn sorbet_proc_ty(
         Some(Ty::Fn {
             params: params.into(),
             block: None,
-            ret: std::sync::Arc::new(ret.unwrap_or(Ty::Untyped)),
+            ret: std::sync::Arc::new(ret.unwrap_or(Ty::untyped())),
             effects: EffectSet::default(),
         })
     };
@@ -841,8 +841,8 @@ fn named_ty(name: &str) -> Ty {
         "Integer" => Ty::Int,
         "Float" => Ty::Float,
         "String" => Ty::Str,
-        "Hash" => Ty::Hash { key: std::sync::Arc::new(Ty::Untyped), value: std::sync::Arc::new(Ty::Untyped) },
-        "Array" => Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) },
+        "Hash" => Ty::Hash { key: std::sync::Arc::new(Ty::untyped()), value: std::sync::Arc::new(Ty::untyped()) },
+        "Array" => Ty::Array { elem: std::sync::Arc::new(Ty::untyped()) },
         "Symbol" => Ty::Sym,
         "TrueClass" | "FalseClass" => Ty::Bool,
         "NilClass" => Ty::Nil,
@@ -925,7 +925,7 @@ fn rbs_comment_signature(
         return None;
     }
     if let Some((name, _)) = def_block {
-        let ty = declared_block.into_iter().next().map(|p| p.ty).unwrap_or(Ty::Untyped.into());
+        let ty = declared_block.into_iter().next().map(|p| p.ty).unwrap_or(Ty::untyped().into());
         params.push(Param { name: Symbol::new(name), ty, kind: ParamKind::Block });
     }
     Some(Ty::Fn { params: params.into(), block, ret, effects })

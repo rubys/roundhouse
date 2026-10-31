@@ -77,7 +77,7 @@ pub(super) fn sorbet_declared_type(node: &Node<'_>) -> Option<Ty> {
     // `T.unsafe(x)` is the escape hatch: no second argument, the value
     // is untyped from there on.
     if method == "unsafe" {
-        return Some(Ty::Untyped);
+        return Some(Ty::gradual_untyped());
     }
     if !matches!(method, "let" | "cast" | "bind") {
         return None;

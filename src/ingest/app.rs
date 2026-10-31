@@ -4220,7 +4220,7 @@ fn splice_concerns_into_controllers(app: &mut App) {
                     match &p.default {
                         Some(d) => opt_params.push((p.name.clone(), d.clone())),
                         None => {
-                            params.fields.insert(p.name.clone(), Ty::Untyped);
+                            params.fields.insert(p.name.clone(), Ty::untyped());
                         }
                     }
                 }

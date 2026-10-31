@@ -64,7 +64,7 @@ pub fn apply_has_one_builder_lowering(app: &mut App) {
                 let owner_key_ty = if owner_key.as_str() == "id" {
                     Ty::Int
                 } else {
-                    model.attributes.fields.get(&owner_key).cloned().unwrap_or(Ty::Untyped)
+                    model.attributes.fields.get(&owner_key).cloned().unwrap_or(Ty::untyped())
                 };
                 table
                     .entry(model.name.clone())
@@ -200,7 +200,7 @@ fn rewrite(expr: &mut Expr, table: &Builders, self_owner: Option<&ClassId>) {
 
     let span = expr.span;
     let mut attrs = Expr::new(span, ExprNode::Hash { entries, kwargs: true });
-    attrs.ty = Some(Ty::Untyped);
+    attrs.ty = Some(Ty::untyped());
     *expr = Expr::new(
         span,
         ExprNode::Send {

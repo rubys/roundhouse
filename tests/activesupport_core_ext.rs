@@ -161,7 +161,7 @@ fn index_with_returns_a_hash_and_durations_stay_typed() {
     let typed = body("class Probe\n  def values(items)\n    items.index_with { |item| item }\n    2.days\n    3.hours\n    4.minutes\n    1.to_d\n  end\nend\n");
     let debug = format!("{typed:?}");
     assert!(debug.contains("index_with"), "{debug}");
-    assert!(matches!(typed.ty, Some(Ty::Class { .. }) | Some(Ty::Untyped) | Some(Ty::Int)), "{:?}", typed.ty);
+    assert!(matches!(typed.ty, Some(Ty::Class { .. }) | Some(Ty::Untyped { .. }) | Some(Ty::Int)), "{:?}", typed.ty);
     fn find<'a>(expr: &'a roundhouse::Expr, name: &str) -> Option<&'a roundhouse::Expr> {
         if let ExprNode::Send { method, .. } = &*expr.node {
             if method.as_str() == name {

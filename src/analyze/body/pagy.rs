@@ -37,21 +37,21 @@ impl<'a> BodyTyper<'a> {
     /// is not a scope, or a union of different scopes.
     fn pagy_scope_ty(&self, ty: Option<&Ty>) -> Option<Ty> {
         match ty {
-            None | Some(Ty::Untyped) | Some(Ty::Var { .. }) => Some(Ty::Untyped),
+            None | Some(Ty::Untyped { .. }) | Some(Ty::Var { .. }) => Some(Ty::untyped()),
             Some(Ty::Relation { of }) => Some(Ty::Relation { of: of.clone() }),
             Some(Ty::Array { .. }) => None,
             Some(Ty::Union { variants }) => {
                 let mut closed: Option<Ty> = None;
                 for variant in variants {
                     match self.pagy_scope_ty(Some(variant))? {
-                        Ty::Untyped => {}
+                        Ty::Untyped { .. } => {}
                         known => match &closed {
                             Some(prev) if *prev != known => return None,
                             _ => closed = Some(known),
                         },
                     }
                 }
-                Some(closed.unwrap_or(Ty::Untyped))
+                Some(closed.unwrap_or(Ty::untyped()))
             }
             _ => None,
         }
@@ -129,7 +129,7 @@ impl<'a> BodyTyper<'a> {
         match args {
             [] => {
                 refuse("`pagy` needs a collection".into(), refusal);
-                return Some(result(Ty::Untyped));
+                return Some(result(Ty::untyped()));
             }
             [first, ..] if matches!(&*first.node, ExprNode::Lit { value: crate::expr::Literal::Sym { .. } }) => {
                 refuse(
@@ -138,7 +138,7 @@ impl<'a> BodyTyper<'a> {
                         .into(),
                     refusal,
                 );
-                return Some(result(Ty::Untyped));
+                return Some(result(Ty::untyped()));
             }
             _ => {}
         }
@@ -202,6 +202,6 @@ impl<'a> BodyTyper<'a> {
                 ),
             });
         }
-        Some(result(records.unwrap_or(Ty::Untyped)))
+        Some(result(records.unwrap_or(Ty::untyped())))
     }
 }

@@ -30,6 +30,10 @@ use std::process::Command;
 
 use roundhouse::ingest::ingest_app;
 
+#[path = "support/gradual_returns.rs"]
+mod gradual_returns_contract;
+#[path = "spinel_toolchain/gradual_returns.rs"]
+mod gradual_returns;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 #[path = "support/time_change_usec.rs"]

@@ -335,13 +335,13 @@ pub(super) fn lower_graphql_types(app: &mut crate::App) {
             let ty = arg_ty(&a, input, &ctx, &kinds);
             signatures.push((input.clone(), a.keyword.clone(), ty));
         }
-        signatures.push((input.clone(), Symbol::from("[]"), Ty::Untyped));
+        signatures.push((input.clone(), Symbol::from("[]"), Ty::untyped()));
         signatures.push((
             input.clone(),
             Symbol::from("to_h"),
             Ty::Hash {
                 key: std::sync::Arc::new(Ty::Sym),
-                value: std::sync::Arc::new(Ty::Untyped),
+                value: std::sync::Arc::new(Ty::untyped()),
             },
         ));
     }
@@ -372,7 +372,7 @@ pub(super) fn lower_graphql_types(app: &mut crate::App) {
         let params = if name.as_str() == "[]" {
             vec![crate::ty::Param {
                 name: Symbol::from("key"),
-                ty: Ty::Untyped.into(),
+                ty: Ty::untyped().into(),
                 kind: crate::ty::ParamKind::Required,
             }]
         } else {
@@ -735,10 +735,10 @@ struct ArgKinds {
 /// The Ruby value graphql-ruby passes for an argument.
 fn arg_ty(a: &ArgDecl, scope: &ClassId, ctx: &Ctx<'_>, kinds: &ArgKinds) -> Ty {
     if a.transformed {
-        return Ty::Untyped;
+        return Ty::untyped();
     }
     let Some(path) = &a.type_path else {
-        return Ty::Untyped;
+        return Ty::untyped();
     };
     let written = path
         .iter()
@@ -762,14 +762,14 @@ fn arg_ty(a: &ArgDecl, scope: &ClassId, ctx: &Ctx<'_>, kinds: &ArgKinds) -> Ty {
                 } else if kinds.enums.contains(&id) {
                     Ty::Str
                 } else {
-                    Ty::Untyped
+                    Ty::untyped()
                 }
             } else {
-                Ty::Untyped
+                Ty::untyped()
             }
         }
     };
-    if matches!(base, Ty::Untyped) {
+    if matches!(base, Ty::Untyped { .. }) {
         return base;
     }
     let base = if a.list {

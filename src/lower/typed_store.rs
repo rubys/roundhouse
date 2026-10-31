@@ -153,11 +153,11 @@ pub(crate) fn push_typed_store_methods(methods: &mut Vec<MethodDef>, model: &Mod
     let stores = typed_store_decls(&model.body);
     for (col, attrs) in &stores {
         for a in attrs {
-            let elem_ty = typed_store_ty(a.decl_ty.as_str()).unwrap_or(Ty::Untyped);
+            let elem_ty = typed_store_ty(a.decl_ty.as_str()).unwrap_or(Ty::untyped());
             // `array: true` stores a list of the scalar type; `any`
             // stays the gradual escape even as an array (mirrors
             // `register_typed_store_decls`).
-            let attr_ty = if a.is_array && !matches!(elem_ty, Ty::Untyped) {
+            let attr_ty = if a.is_array && !matches!(elem_ty, Ty::Untyped { .. }) {
                 Ty::Array { elem: std::sync::Arc::new(elem_ty) }
             } else {
                 elem_ty
@@ -226,7 +226,7 @@ pub(crate) fn push_typed_store_methods(methods: &mut Vec<MethodDef>, model: &Mod
             // own is: what a cast accepts is not one type. The body
             // narrows it immediately, so nothing downstream stays wide.
             let (writer_ty, writer_value) = if a.is_bool {
-                (Ty::Untyped, bool_cast(value_ref()))
+                (Ty::untyped(), bool_cast(value_ref()))
             } else {
                 (attr_ty, value_ref())
             };

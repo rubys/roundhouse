@@ -360,7 +360,7 @@ fn to_s_keeping_nil(value: Expr, fresh: &FreshLocals) -> Expr {
     use crate::ty::Ty;
     let span = value.span;
     let name = fresh.name();
-    let value_ty = value.ty.clone().unwrap_or(Ty::Untyped);
+    let value_ty = value.ty.clone().unwrap_or(Ty::untyped());
     let typed = |node: ExprNode, ty: Ty| Expr { ty: Some(ty), ..Expr::new(span, node) };
     let read = || typed(ExprNode::Var { id: VarId(0), name: name.clone() }, value_ty.clone());
     let opt_str = Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };

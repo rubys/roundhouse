@@ -330,7 +330,7 @@ fn a_nil_seed_reassigned_from_a_lambda_call_includes_the_result() {
     assert_eq!(variants.len(), 2, "{ty:?}");
     assert!(variants.contains(&roundhouse::ty::Ty::Int), "{ty:?}");
     assert!(variants.contains(&roundhouse::ty::Ty::Nil), "{ty:?}");
-    assert!(!variants.iter().any(|v| matches!(v, roundhouse::ty::Ty::Untyped)), "{ty:?}");
+    assert!(!variants.iter().any(|v| matches!(v, roundhouse::ty::Ty::Untyped { .. })), "{ty:?}");
 }
 
 fn plain_lambda_result(source: &str) -> roundhouse::ty::Ty {

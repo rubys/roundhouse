@@ -49,7 +49,7 @@ pub fn apply_to_param_residue_lowering(app: &mut App) {
 /// A receiver whose `to_param` no static method answers.
 fn is_residue(ty: Option<&Ty>) -> bool {
     match ty {
-        None | Some(Ty::Untyped) | Some(Ty::Var { .. }) => true,
+        None | Some(Ty::Untyped { .. }) | Some(Ty::Var { .. }) => true,
         Some(Ty::Union { variants }) => variants.iter().any(|v| !matches!(v, Ty::Class { .. })),
         _ => false,
     }

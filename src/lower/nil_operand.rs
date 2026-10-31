@@ -91,7 +91,7 @@ fn rewrite(e: &mut Expr, next: &mut usize) {
         ExprNode::Send { recv: None, method: Symbol::from("raise"), args: vec![error_class, message], block: None, parenthesized: true },
         Ty::Nil,
     );
-    let result_ty = e.ty.clone().unwrap_or(Ty::Untyped);
+    let result_ty = e.ty.clone().unwrap_or(Ty::untyped());
     let operate = typed(
         ExprNode::Send { recv: Some(read(present_ty(lhs_ty))), method: op, args: vec![rhs], block: None, parenthesized: false },
         result_ty.clone(),

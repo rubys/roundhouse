@@ -90,7 +90,7 @@ fn returns(app: &App, module: &str, method: &str, class_side: bool) -> Option<Ty
 /// Unresolved or gradual: what such a body answered before the view
 /// fallback.
 fn unresolved(ty: &Option<Ty>) -> bool {
-    matches!(ty, None | Some(Ty::Var { .. }) | Some(Ty::Untyped))
+    matches!(ty, None | Some(Ty::Var { .. }) | Some(Ty::Untyped { .. }))
 }
 
 #[test]

@@ -162,7 +162,7 @@ fn direct_env_calls_do_not_gain_hash_only_methods() {
         assert!(
             matches!(
                 ret.as_ref(),
-                roundhouse::ty::Ty::Untyped | roundhouse::ty::Ty::Var { .. }
+                roundhouse::ty::Ty::Untyped { .. } | roundhouse::ty::Ty::Var { .. }
             ),
             "{ret:?}"
         );
@@ -189,7 +189,7 @@ fn an_env_value_does_not_gain_hash_only_methods() {
         assert!(
             matches!(
                 ret.as_ref(),
-                roundhouse::ty::Ty::Untyped | roundhouse::ty::Ty::Var { .. }
+                roundhouse::ty::Ty::Untyped { .. } | roundhouse::ty::Ty::Var { .. }
             ),
             "{ret:?}"
         );

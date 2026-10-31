@@ -333,7 +333,7 @@ fn self_send(method: &str) -> Expr {
             vec![],
             false,
         ),
-        Ty::Untyped,
+        Ty::untyped(),
     )
 }
 
@@ -341,7 +341,7 @@ fn self_send(method: &str) -> Expr {
 pub(super) fn self_call(method: &str) -> Expr {
     with_ty(
         send(Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)), method, vec![], true),
-        Ty::Untyped,
+        Ty::untyped(),
     )
 }
 

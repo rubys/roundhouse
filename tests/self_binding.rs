@@ -93,7 +93,7 @@ fn t_bind_binds_self_like_the_comment() {
 fn self_as_untyped_makes_self_gradual() {
     let config = "class Config\n  #: -> void\n  def loose\n    Builder.configure do\n      #: self as untyped\n      anything.goes\n    end\n  end\nend\n";
     let app = analyzed(config);
-    assert_eq!(send_types(&app, "goes"), vec![Some(Ty::Untyped)]);
+    assert_eq!(send_types(&app, "goes"), vec![Some(Ty::untyped())]);
 }
 
 #[test]

@@ -275,7 +275,7 @@ pub(in crate::analyze) fn register(
             ("cc", addresses.clone()),
             ("bcc", addresses.clone()),
             ("reply_to", addresses),
-            ("subject", Ty::Untyped),
+            ("subject", Ty::untyped()),
             ("body", Ty::Str),
             ("multipart?", Ty::Bool),
             ("text_part", part.clone()),
@@ -341,7 +341,7 @@ pub(in crate::analyze) fn register(
                     Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
                     _ => None,
                 })
-                .unwrap_or(Ty::Untyped);
+                .unwrap_or_else(Ty::untyped);
             let cls = classes.entry(lc.name.clone()).or_default();
             cls.parent = lc.parent.clone();
             for (entry, ty) in [
@@ -443,7 +443,7 @@ fn ar_instance_ty(kind: crate::catalog::ReturnKind) -> Option<Ty> {
             Some(Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Str) })
         }
         ReturnKind::HashStrUntyped => {
-            Some(Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) })
+            Some(Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::untyped()) })
         }
         ReturnKind::ArrayOfSym => Some(Ty::Array { elem: std::sync::Arc::new(Ty::Sym) }),
         ReturnKind::ArrayOfInt => Some(Ty::Array { elem: std::sync::Arc::new(Ty::Int) }),

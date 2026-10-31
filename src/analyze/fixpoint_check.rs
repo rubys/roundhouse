@@ -160,11 +160,16 @@ impl Checks {
 }
 
 /// Structural hash of a type: union arms sorted and deduplicated, record
-/// fields sorted by name, inference variables' ids ignored.
+/// fields sorted by name, inference variables' ids ignored. Reasons
+/// participate because stabilization reads them even when values match.
 pub(super) fn type_hash(t: &Ty) -> u64 {
     let mut h = DefaultHasher::new();
     std::mem::discriminant(t).hash(&mut h);
     match t {
+        Ty::Untyped { why } => {
+            why.is_pending_only().hash(&mut h);
+            why.is_gradual().hash(&mut h);
+        },
         Ty::Array { elem } => type_hash(elem).hash(&mut h),
         Ty::Hash { key, value } => {
             type_hash(key).hash(&mut h);
@@ -354,7 +359,7 @@ struct Census {
 
 fn holds_untyped(t: &Ty) -> bool {
     match t {
-        Ty::Untyped => true,
+        Ty::Untyped { .. } => true,
         Ty::Array { elem } => holds_untyped(elem),
         Ty::Hash { key, value } => holds_untyped(key) || holds_untyped(value),
         Ty::Tuple { elems } => elems.iter().any(holds_untyped),
@@ -375,7 +380,7 @@ impl Census {
         match &e.ty {
             Some(t) => {
                 self.typed += 1;
-                self.bare_untyped += u64::from(matches!(t, Ty::Untyped));
+                self.bare_untyped += u64::from(matches!(t, Ty::Untyped { .. }));
                 self.untyped_anywhere += u64::from(holds_untyped(t));
             }
             None => self.missing += 1,
@@ -618,6 +623,20 @@ mod tests {
     }
 
     #[test]
+    fn type_hash_observes_nested_inference_reasons() {
+        let reasons = [Ty::pending_untyped(), Ty::untyped(), Ty::gradual_untyped()];
+        for (i, left) in reasons.iter().enumerate() {
+            for right in &reasons[i + 1..] {
+                for ((name, left), (_, right)) in crate::ty::reason_tests::shapes(left.clone())
+                    .into_iter().zip(crate::ty::reason_tests::shapes(right.clone()))
+                {
+                    assert_ne!(type_hash(&left), type_hash(&right), "{name}: {left:?} vs {right:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn stats_are_per_analyze() {
         const CHILD: &str = "ROUNDHOUSE_FIXPOINT_STATS_TEST_CHILD";
         if std::env::var_os(CHILD).is_some() {
@@ -733,7 +752,7 @@ end
     fn untyped_is_found_at_any_depth() {
         let deep = Ty::Hash {
             key: std::sync::Arc::new(Ty::Str),
-            value: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(union(vec![Ty::Int, Ty::Untyped])) }),
+            value: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(union(vec![Ty::Int, Ty::untyped()])) }),
         };
         assert!(holds_untyped(&deep));
         assert!(!holds_untyped(&Ty::Array { elem: std::sync::Arc::new(Ty::Int) }));
