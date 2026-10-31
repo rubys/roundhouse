@@ -1808,7 +1808,8 @@ impl<'a> BodyTyper<'a> {
                     return crate::analyze::instantiate_return_kind(kind, id);
                 }
                 // Class-side defs stay a fallback: a value typed as an instance may still be a class object (`@klass = Post`).
-                let instance_side = instance_receiver && self.defines_instance_method(id, method);
+                let instance_side = instance_receiver && (self.defines_instance_method(id, method)
+                    || self.declares_instance_method(id, method));
                 let mut current_id: Option<&ClassId> = Some(id);
                 let mut depth = 0usize;
                 // Set when the chain reaches a *named* superclass we don't
@@ -1980,7 +1981,7 @@ impl<'a> BodyTyper<'a> {
                         || (instance_side && cls.source_instance_methods.contains(method)
                             && !cls.instance_methods.contains_key(method))
                     {
-                        return Ty::pending_untyped();
+                        return unknown();
                     }
                     if !instance_side && let Some(ty) = cls.class_methods.get(method) {
                         // Same projection the relation arm uses. A source
@@ -4548,7 +4549,7 @@ mod source_receiver_reason_tests {
         let receiver = Ty::Class { id, args: vec![].into() };
         for (method, instance) in [("value", true), ("load", false)] {
             let result = typer.dispatch_on(Some(&receiver), &Symbol::from(method), None, &[], instance);
-            assert!(result.inference_eq(&Ty::pending_untyped()), "{method}: {result:?}");
+            assert!(result.inference_eq(&unknown()), "{method}: {result:?}");
         }
         let external = typer.dispatch_on(Some(&receiver), &Symbol::from("external"), None, &[], true);
         assert!(external.inference_eq(&Ty::untyped()), "{external:?}");
