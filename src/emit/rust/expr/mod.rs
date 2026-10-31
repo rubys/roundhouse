@@ -398,60 +398,17 @@ fn collect_var_assign_counts(
     out: &mut crate::det::HashMap<String, usize>,
 ) {
     match &*e.node {
-        ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
-            *out.entry(name.as_str().to_string()).or_insert(0) += 1;
-            collect_var_assign_counts(value, out);
-        }
-        ExprNode::Assign { target, value } => {
-            if let LValue::Attr { recv, .. } | LValue::Index { recv, .. } = target {
-                collect_var_assign_counts(recv, out);
-            }
-            collect_var_assign_counts(value, out);
-        }
+        ExprNode::Assign { target: LValue::Var { name, .. }, .. }
         // `x += v` reassigns `x` (it desugars to `x = x + v`), so it
         // counts toward `let mut` exactly as the spelled-out form does.
-        ExprNode::OpAssign { target: LValue::Var { name, .. }, value, .. } => {
+        | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. } => {
             *out.entry(name.as_str().to_string()).or_insert(0) += 1;
-            collect_var_assign_counts(value, out);
         }
-        ExprNode::OpAssign { target, value, .. } => {
-            if let LValue::Attr { recv, .. } | LValue::Index { recv, .. } = target {
-                collect_var_assign_counts(recv, out);
-            }
-            collect_var_assign_counts(value, out);
-        }
-        ExprNode::Seq { exprs } => exprs.iter().for_each(|e| collect_var_assign_counts(e, out)),
-        ExprNode::If { cond, then_branch, else_branch } => {
-            collect_var_assign_counts(cond, out);
-            collect_var_assign_counts(then_branch, out);
-            collect_var_assign_counts(else_branch, out);
-        }
-        ExprNode::While { cond, body, .. } => {
-            collect_var_assign_counts(cond, out);
-            collect_var_assign_counts(body, out);
-        }
-        ExprNode::Send { recv, args, block, .. } => {
-            if let Some(r) = recv { collect_var_assign_counts(r, out); }
-            args.iter().for_each(|a| collect_var_assign_counts(a, out));
-            if let Some(b) = block { collect_var_assign_counts(b, out); }
-        }
-        ExprNode::Return { value } => collect_var_assign_counts(value, out),
-        ExprNode::Hash { entries, .. } => entries
-            .iter()
-            .for_each(|(k, v)| {
-                collect_var_assign_counts(k, out);
-                collect_var_assign_counts(v, out);
-            }),
-        ExprNode::Array { elements, .. } => {
-            elements.iter().for_each(|e| collect_var_assign_counts(e, out))
-        }
-        ExprNode::StringInterp { parts } => parts.iter().for_each(|p| {
-            if let InterpPart::Expr { expr } = p {
-                collect_var_assign_counts(expr, out);
-            }
-        }),
         _ => {}
     }
+    // Every child, block bodies included: a block's `x = true` writes
+    // the method's `x` from inside the closure it emits as.
+    e.node.for_each_child(&mut |c| collect_var_assign_counts(c, out));
 }
 
 pub(super) fn render_self_literal() -> String {
