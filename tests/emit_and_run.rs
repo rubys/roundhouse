@@ -20437,6 +20437,8 @@ mod module_factory;
 mod spinel_unknown_gem;
 #[path = "emit_and_run/json_column_name.rs"]
 mod json_column_name;
+#[path = "emit_and_run/block_locals.rs"]
+mod block_locals;
 
 /// `ActiveSupport::JSON.encode(value, escape: false)` — Rails' document
 /// without the HTML-entity escaping, which campfire's fragment keys can

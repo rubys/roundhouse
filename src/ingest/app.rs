@@ -6867,9 +6867,7 @@ fn block_filter_from_macro_stmt(stmt: &crate::expr::Expr) -> Option<crate::expr:
         // parameter (`items.map { |controller| controller.name }`
         // would wrongly become `items.map { |controller| self.name }`)
         // or a plain reassignment of that name anywhere in the body
-        // (`controller = nil`, or a block-local's first write, which is
-        // all that's left to see of a block-local once ingestion has
-        // already dropped its declaration) — no scope-aware rewrite
+        // (`controller = nil`) — no scope-aware rewrite
         // exists here to tell any of those apart from a genuine read of
         // the filter block's own parameter.
         if body_shadows_param(&body, self_param) {
@@ -6947,16 +6945,9 @@ pub(super) fn is_symbol_or_symbol_array(e: &crate::expr::Expr) -> bool {
 ///     just as wrong as the lambda-shadowing case, only without a new
 ///     scope to blame.
 ///
-/// Both are checked by one scan, because a block-local (`|x; name|`)
-/// shadows exactly like a declared parameter does but ISN'T checked
-/// directly: the IR doesn't represent block-locals at all (ingestion
-/// already drops them — see `block_param_names` in `ingest/expr.rs`),
-/// so there is no declaration left to see by the time this runs. What
-/// IS still visible is the ASSIGNMENT such a block almost always needs
-/// to give its local a value (`controller = x.name`) — so the
-/// assignment check below catches a block-local shadow indirectly,
-/// through its first write, even though the declaration itself is
-/// invisible.
+/// A nested block-local (`|x; name|`) needs no check here: ingest has
+/// already renamed it apart (`scope_block_locals` in `ingest/expr.rs`),
+/// so its reads and writes no longer carry `name`.
 ///
 /// See `block_filter_from_macro_stmt`'s call site for why this refuses
 /// rather than rewriting scope-aware — no scope-aware rewrite exists
