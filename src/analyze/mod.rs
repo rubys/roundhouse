@@ -2451,6 +2451,11 @@ impl Analyzer {
         global_constants: &body::ConstScope,
         dirty: Option<&crate::det::HashSet<ClassId>>,
     ) {
+        let mut upload_array_fields = crate::lower::controller_to_library::params::upload_array_fields(&app.controllers);
+        for controller in &app.controllers {
+            self.classes.entry(controller.name.clone()).or_default().upload_array_fields =
+                upload_array_fields.remove(&controller.name).unwrap_or_default();
+        }
         // Type the actual initializer trees, not only registry clones.
         // Their lexical class references become load-time dependencies
         // when a source file's nested declarations emit into separate files.
