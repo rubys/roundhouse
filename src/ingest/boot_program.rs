@@ -70,6 +70,8 @@ pub(super) fn build<V: Vfs + ?Sized>(
         class_ivar_initializers: Vec::new(),
     };
     let no_engines = crate::det::HashSet::default();
+    // Top-level constants an earlier boot statement assigned: this program's own, free to fill.
+    let mut defined: crate::det::HashSet<String> = crate::det::HashSet::default();
     for file in initializer_ledger::ledger(vfs, dir, &[], &no_engines) {
         let wanted: Vec<(String, u32)> = file
             .findings
@@ -96,6 +98,9 @@ pub(super) fn build<V: Vfs + ?Sized>(
             if carried_rate_limit_stores.iter().any(|value| value.file == file_id && value.start >= start && value.end <= end) {
                 continue;
             }
+            if node.as_def_node().is_none() && reshapes_the_program(&node, &defined) {
+                continue;
+            }
             // Not the branches alone, which is all the ledger weighs for a conditional: the condition runs at boot too.
             if let Some(predicate) = predicate_of(&node) {
                 let loc = predicate.location();
@@ -108,16 +113,29 @@ pub(super) fn build<V: Vfs + ?Sized>(
                 if def.receiver().is_some() {
                     continue;
                 }
-                let mut method = super::library_class::ingest_library_method_with_keywords(
+                let Ok(mut method) = super::library_class::ingest_library_method_with_keywords(
                     &def,
                     &module.name,
                     &file_name,
                     true,
-                )?;
+                ) else {
+                    continue;
+                };
                 method.receiver = MethodReceiver::Class;
                 module.methods.push(method);
             } else {
-                app.boot_program.push(super::expr::ingest_expr(&node, &file_name)?);
+                // Not the ingest error: a statement this cannot read stays on the ledger, as before.
+                let (read, _) = super::prism::scope(|| super::survey::without_recording(|| super::expr::ingest_expr(&node, &file_name)));
+                let Ok(expr) = read else { continue };
+                if let Some(write) = node.as_constant_write_node() {
+                    defined.insert(super::util::constant_id_str(&write.name()).to_string());
+                }
+                if let Some(write) = node.as_constant_path_write_node() {
+                    if let Some(name) = write.target().name() {
+                        defined.insert(super::util::constant_id_str(&name).to_string());
+                    }
+                }
+                app.boot_program.push(expr);
             }
             taken.insert((path.clone(), start));
         }
@@ -174,6 +192,70 @@ fn predicate_of<'a>(node: &ruby_prism::Node<'a>) -> Option<ruby_prism::Node<'a>>
         return Some(n.predicate());
     }
     node.as_unless_node().map(|n| n.predicate())
+}
+
+/// Does the statement change the program rather than run in it: define a
+/// class, module or method, write into an existing namespace's constant,
+/// mutate a constant in place, or reopen a class by reflection? That is
+/// the rest of #841 (E4's folds and the reopen rules), so it stays on the
+/// ledger.
+fn reshapes_the_program(node: &ruby_prism::Node<'_>, defined: &crate::det::HashSet<String>) -> bool {
+    struct Finder<'d> {
+        found: bool,
+        defined: &'d crate::det::HashSet<String>,
+    }
+    const REFLECTION: &[&str] = &[
+        "send", "public_send", "__send__", "class_eval", "module_eval", "instance_eval", "class_exec",
+        "module_exec", "instance_exec", "const_set", "remove_const", "define_method", "define_singleton_method",
+        "alias_method", "remove_method", "undef_method", "include", "prepend", "extend",
+    ];
+    const MUTATORS: &[&str] = &[
+        "<<", "push", "append", "unshift", "prepend", "concat", "replace", "clear", "delete", "delete_if",
+        "reject!", "select!", "keep_if", "merge!", "update", "store", "[]=", "insert", "fill", "map!", "sort!",
+    ];
+    impl<'pr> ruby_prism::Visit<'pr> for Finder<'_> {
+        fn visit_def_node(&mut self, _: &ruby_prism::DefNode<'pr>) {
+            self.found = true;
+        }
+        fn visit_class_node(&mut self, _: &ruby_prism::ClassNode<'pr>) {
+            self.found = true;
+        }
+        fn visit_module_node(&mut self, _: &ruby_prism::ModuleNode<'pr>) {
+            self.found = true;
+        }
+        fn visit_singleton_class_node(&mut self, _: &ruby_prism::SingletonClassNode<'pr>) {
+            self.found = true;
+        }
+        fn visit_constant_path_write_node(&mut self, node: &ruby_prism::ConstantPathWriteNode<'pr>) {
+            if node.target().parent().is_some() {
+                self.found = true;
+            }
+            ruby_prism::visit_constant_path_write_node(self, node);
+        }
+        fn visit_constant_path_operator_write_node(&mut self, _: &ruby_prism::ConstantPathOperatorWriteNode<'pr>) {
+            self.found = true;
+        }
+        fn visit_constant_path_or_write_node(&mut self, _: &ruby_prism::ConstantPathOrWriteNode<'pr>) {
+            self.found = true;
+        }
+        fn visit_constant_operator_write_node(&mut self, _: &ruby_prism::ConstantOperatorWriteNode<'pr>) {
+            self.found = true;
+        }
+        fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+            let name = super::util::constant_id_str(&node.name());
+            let on_constant = node.receiver().is_some_and(|r| match r.as_constant_read_node() {
+                Some(c) => !self.defined.contains(super::util::constant_id_str(&c.name()).as_ref() as &str),
+                None => r.as_constant_path_node().is_some(),
+            });
+            if REFLECTION.contains(&name.as_ref()) || (on_constant && MUTATORS.contains(&name.as_ref())) {
+                self.found = true;
+            }
+            ruby_prism::visit_call_node(self, node);
+        }
+    }
+    let mut finder = Finder { found: false, defined };
+    ruby_prism::Visit::visit(&mut finder, node);
+    finder.found
 }
 
 /// A boot hook call (`Rails.application.config.after_initialize do … end`):
