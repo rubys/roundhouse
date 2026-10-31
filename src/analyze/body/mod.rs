@@ -4691,8 +4691,9 @@ pub(crate) fn union_of(a: Ty, b: Ty) -> Ty {
 const UNION_INDEX_MIN: usize = 24;
 
 /// True when `a` is a large union already in canonical form and every
-/// variant of `b` is one it holds, so joining them returns `a` unchanged
-/// (`union_of`'s flatten/dedup/sort would rebuild the same list).
+/// variant of `b` is one it holds with the same inference reasons, so
+/// joining them returns `a` unchanged. Public equality alone would miss
+/// a reason-only upgrade (`union_of`'s canonicalization must join it).
 fn union_contains_all(a: &Ty, b: &Ty) -> bool {
     let Ty::Union { variants: av } = a else { return false };
     if av.len() < UNION_INDEX_MIN {
@@ -4703,7 +4704,8 @@ fn union_contains_all(a: &Ty, b: &Ty) -> bool {
         other => std::slice::from_ref(other),
     };
     bs.iter().all(|v| {
-        !matches!(v, Ty::Union { .. }) && !v.holds_record() && Ty::find_in_sorted_variants(av, v).is_some()
+        !matches!(v, Ty::Union { .. }) && !v.holds_record()
+            && Ty::find_in_sorted_variants(av, v).is_some_and(|i| av[i].inference_eq(v))
     }) && Ty::is_canonical_union_without_records(av)
 }
 
@@ -4854,6 +4856,44 @@ mod tests {
     use crate::expr::ExprNode;
     use crate::ident::VarId;
     use crate::span::Span;
+
+    fn wide_reason_union(known: usize, unknown: Ty) -> Ty {
+        (0..known)
+            .map(|i| Ty::Class {
+                id: ClassId(Symbol::from(format!("Member{i:02}"))),
+                args: vec![].into(),
+            })
+            .fold(unknown, union_of)
+    }
+
+    fn assert_union_reason_upgrade(known: usize, wrap: impl Fn(Ty) -> Ty) {
+        let pending = wide_reason_union(known, wrap(Ty::pending_untyped()));
+        let incoming = wrap(Ty::gradual_untyped());
+        let expected = wide_reason_union(known, incoming.clone());
+        let joined = union_of(pending.clone(), incoming.clone());
+        assert!(joined.inference_eq(&expected), "runtime unknown reason was lost");
+        assert!(
+            joined.inference_eq(&union_of(incoming, pending)),
+            "operand order changed reasons"
+        );
+    }
+
+    #[test]
+    fn small_union_reason_upgrade() {
+        // 23 arms: the control immediately below the indexed shortcut.
+        assert_union_reason_upgrade(22, |ty| ty);
+    }
+
+    #[test]
+    fn large_union_reason_upgrade() {
+        // 24 arms: public containment alone cannot prove inference equality.
+        assert_union_reason_upgrade(23, |ty| ty);
+    }
+
+    #[test]
+    fn large_union_nested_reason_upgrade() {
+        assert_union_reason_upgrade(23, |elem| Ty::Array { elem: elem.into() });
+    }
 
     fn synth(node: ExprNode) -> Expr {
         Expr::new(Span::synthetic(), node)
