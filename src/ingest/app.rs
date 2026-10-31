@@ -2730,6 +2730,9 @@ end
         .chain(app.controllers.iter().map(|c| c.name.0.as_str()))
         .map(|n| n.split("::").next().unwrap_or(n).to_string())
         .collect();
+    let gem_lock = app.gem_lock.clone();
+    let boot_taken = super::boot_program::build(vfs, dir, &mut app, gem_lock.as_ref(), &app_namespaces, &rate_limit_store_values)?;
+    super::boot_program::apply_call_sites(&mut app);
     super::initializer_ledger::record(
         vfs,
         dir,
@@ -2738,6 +2741,7 @@ end
         app.gem_lock.as_ref(),
         &app_namespaces,
         &rate_limit_store_values,
+        &boot_taken,
     );
     // Carrier provenance must not depend on where a module lives:
     // models, services, helpers and lib all use the same splice.

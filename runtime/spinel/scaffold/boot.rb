@@ -82,6 +82,7 @@ require_relative "runtime/active_support_cache"
 # formatter subclasses (a LOAD-time reference, so this must precede
 # app/models.rb below).
 require_relative "runtime/logger"
+require_relative "runtime/logger_spinel"
 # `GlobalID::Locator` — the READ side of the gid `runtime/rails.rb` mints
 # one line up. A channel authorizing a subscribe turns the stream name
 # back into a record through it; the two halves live apart because only

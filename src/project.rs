@@ -1965,6 +1965,21 @@ fn report_uri_reader_sends(app: &App, target: BuildTarget) {
     crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, app, target));
 }
 
+/// The initializers' own boot code (`ingest::boot_program`) runs only on
+/// the trees that load `config/initializers.rb`; elsewhere what it
+/// defines is missing, so each statement is refused there.
+fn report_boot_program(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel) {
+        return;
+    }
+    for stmt in &app.boot_program {
+        emit::diagnostics::report_unsupported(
+            stmt.span, target.as_str(), "initializer boot code",
+            "only the Ruby targets run an initializer's own statements at boot",
+        );
+    }
+}
+
 fn report_ruby_only_sends(app: &App, target: BuildTarget) {
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby
         | BuildTarget::Spinel | BuildTarget::Roda) {
@@ -2846,6 +2861,7 @@ fn target_files_inner(
     report_native_ruby_syntax(app, target);
     report_self_bindings(app, target);
     report_ruby_only_sends(app, target);
+    report_boot_program(app, target);
     report_uri_reader_sends(app, target);
     report_descendant_ivar_reads(app, target);
     report_url_helpers_includes(app, target);
@@ -4654,6 +4670,7 @@ fn ruby_family_runtime_files(
     // gets the block exactly once; this is the ruby family's turn, and
     // the ruby family is the one that can run the lines.
     apply_module_mixins(&mut files, app, MixinForm::ExplicitReceiver);
+    apply_boot_program(&mut files, app);
     // Overlay boot replaced the spinel boot, so the flags written into
     // that file in `spinel_files` are gone. Write them again here.
     apply_environment_flags(&mut files, app);
@@ -6926,6 +6943,31 @@ fn apply_environment_flags(files: &mut [(String, String)], app: &App) {
 /// emitted — it is landed, tested by `overlay_cable_dispatch`, and
 /// CRuby has no quarrel with it. One form each, each the one its target
 /// accepts.
+/// The app's own initializer statements (`ingest::boot_program`), as
+/// top-level Ruby in `config/initializers.rb`, loaded last by `boot.rb`:
+/// Rails runs an initializer once the app's classes are loadable.
+fn apply_boot_program(files: &mut Vec<(String, String)>, app: &App) {
+    if app.boot_program.is_empty() {
+        return;
+    }
+    let mut src = String::from(
+        "# frozen_string_literal: true\n\
+         # The app's own statements from config/initializers/ (generated — see\n\
+         # ingest::boot_program), in Rails' load order.\n",
+    );
+    for stmt in &app.boot_program {
+        src.push_str(&crate::emit::ruby::expr::emit_expr(stmt));
+        src.push('\n');
+    }
+    files.retain(|(p, _)| p != "config/initializers.rb");
+    files.push(("config/initializers.rb".to_string(), src));
+    for (path, content) in files.iter_mut() {
+        if path == "boot.rb" && !content.contains("require_relative \"config/initializers\"") {
+            content.push_str("\nrequire_relative \"config/initializers\"\n");
+        }
+    }
+}
+
 fn apply_module_mixins(files: &mut Vec<(String, String)>, app: &App, form: MixinForm) {
     use std::fmt::Write;
 
@@ -9288,6 +9330,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     apply_models_aggregator(&mut files);
     apply_route_helpers_demand(&mut files);
     apply_module_mixins(&mut files, app, MixinForm::Reopen);
+    apply_boot_program(&mut files, app);
     apply_environment_flags(&mut files, app);
     apply_app_requires(&mut files, app, RequireTarget::Spinel);
     apply_rails_version(&mut files, app);

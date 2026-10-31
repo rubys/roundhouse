@@ -2183,6 +2183,10 @@ impl Analyzer {
                 }
             }
         }
+        // An initializer's top-level constant (`ingest::boot_program`), assigned once at boot.
+        for stmt in &app.boot_program {
+            push_const(Ty::Class { id: ClassId(Symbol::from("Object")), args: vec![].into() }, stmt);
+        }
         // Library classes carry theirs on a FIELD rather than as an
         // `Unknown` body item, so they need their own arm — and without it
         // every constant a CONCERN or a HELPER declares was invisible here.
@@ -4677,6 +4681,12 @@ impl Analyzer {
             let mut ctx = Ctx::default();
             ctx.constants = global_constants.clone();
             self.body_typer().analyze_expr(expr, &ctx);
+        }
+        // The initializers' top-level statements, typed the same way: top-level Ruby at boot.
+        for stmt in app.boot_program.iter_mut() {
+            let mut ctx = Ctx::default();
+            ctx.constants = global_constants.clone();
+            self.body_typer().analyze_expr(stmt, &ctx);
         }
         drop(_typing_tests);
     }

@@ -564,7 +564,7 @@ end
             ("orm :active_record", "gem:doorkeeper:unknown"),
             ("Rack::Attack.throttle", "gem:rack-attack:unknown"),
             ("OmniAuth.config.logger =", "gem:omniauth:unknown"),
-            ("Audit.record_boot", "app"),
+            // Not listed: an app-owned top-level call is no longer dropped, it runs at boot (`ingest::boot_program`).
             ("Rails.application.config.after_initialize", "app"),
             ("if ENV[\"SLOW\"]", "rails"),
             ("Unheard::Of.start", "unknown"),
