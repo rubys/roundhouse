@@ -1836,3 +1836,32 @@ mod rooted_constants {
         assert_eq!(report.specialized.len(), 1, "{:?}", report.residue);
     }
 }
+
+/// A concern's method is analyzed once for each class that includes it, but
+/// its source is one text: copies that specialize alike are spliced once,
+/// not reported as overlapping.
+mod shared_concern_sites {
+    use std::path::PathBuf;
+
+    use roundhouse::analyze::Analyzer;
+    use roundhouse::emit::futamura::specialize;
+    use roundhouse::ingest::ingest_app_from_tree;
+
+    #[test]
+    fn one_site_in_a_concern_included_twice_is_specialized_once() {
+        let files: Vec<(&str, &str)> = vec![
+            ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"things\", force: :cascade do |t|\n    t.string \"name\"\n  end\n  create_table \"others\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n"),
+            ("app/models/concerns/findable.rb", "module Findable\n  extend ActiveSupport::Concern\n  def same_named\n    Thing.where(name: name).to_a\n  end\nend\n"),
+            ("app/models/thing.rb", "class Thing < ApplicationRecord\n  include Findable\nend\n"),
+            ("app/models/other.rb", "class Other < ApplicationRecord\n  include Findable\nend\n"),
+        ];
+        let tree: std::collections::HashMap<PathBuf, Vec<u8>> =
+            files.iter().map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec())).collect();
+        let mut app = ingest_app_from_tree(tree).expect("ingest");
+        Analyzer::new(&app).analyze(&mut app);
+        let mut tree_files: Vec<(String, String)> = files.iter().map(|(p, c)| (p.to_string(), c.to_string())).collect();
+        let report = specialize(&app, &mut tree_files).unwrap();
+        assert_eq!(report.specialized.len(), 1, "{:?}", report.residue);
+        assert!(report.residue.is_empty(), "{:?}", report.residue);
+    }
+}

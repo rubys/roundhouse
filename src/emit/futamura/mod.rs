@@ -77,6 +77,21 @@ pub fn specialize(app: &App, files: &mut Vec<(String, String)>) -> Result<Report
             report.residue.extend(sites.iter().map(|s| format!("{}: source text differs from the file", location(s.span))));
             continue;
         }
+        // A concern's method body is analyzed once per class that includes
+        // it, so one source site can arrive several times. When every copy
+        // specializes the same way it is spliced once; copies that differ
+        // cannot share the one text, so none is.
+        let mut copies: BTreeMap<(u32, u32), Vec<query::Site>> = BTreeMap::new();
+        for site in sites.drain(..) {
+            copies.entry((site.span.start, site.span.end)).or_default().push(site);
+        }
+        for (_, mut group) in copies {
+            if group.iter().all(|s| s.call == group[0].call && s.define == group[0].define) {
+                sites.push(group.swap_remove(0));
+            } else {
+                report.residue.push(format!("{}: specializes differently for the classes sharing its source", location(group[0].span)));
+            }
+        }
         sites.sort_by_key(|s| std::cmp::Reverse(s.span.start));
         let mut last_start = u32::MAX;
         for site in sites {
