@@ -102,6 +102,13 @@ module Tep
         out << k + ": " + v + "\r\n"
       end
     end
+    res.header_fields.each do |field|
+      k = field[0]
+      v = field[1]
+      if HttpHeaders.key_ok?(k) && HttpHeaders.value_ok?(v)
+        out << k + ": " + v + "\r\n"
+      end
+    end
     res.set_cookies.each do |line|
       out << "Set-Cookie: " + line + "\r\n" if HttpHeaders.value_ok?(line)
     end

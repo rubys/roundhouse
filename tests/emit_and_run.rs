@@ -13,6 +13,8 @@ mod time_change_usec_contract;
 mod time_change_usec;
 #[path = "emit_and_run/rate_limits.rs"]
 mod rate_limits;
+#[path = "emit_and_run/rack_mounts.rs"]
+mod rack_mounts;
 #[path = "support/i18n_locales_app.rs"]
 #[allow(dead_code)]
 mod i18n_locales_app;

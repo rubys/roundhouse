@@ -511,6 +511,9 @@ fn singular_resource_actions() -> &'static [(&'static str, HttpMethod, &'static 
 
 fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
     match spec {
+        // Rack mounts use the ordered prefix dispatcher, not controller rows
+        // or `(.:format)` URL helpers.
+        RouteSpec::RackMount { .. } => {}
         RouteSpec::Explicit {
             method,
             path,

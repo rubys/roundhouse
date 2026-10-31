@@ -42,6 +42,7 @@ pub mod jbuilder_to_library;
 pub mod library_extras;
 pub mod model_to_library;
 pub mod routes;
+pub(crate) mod rack_mounts;
 pub mod routes_to_library;
 pub mod segment_pattern;
 pub mod scope_chain;

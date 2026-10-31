@@ -34,6 +34,8 @@ use crate::ingest::ingest_app;
 
 pub use crate::build_target::{BuildTarget, ParamBindCapability};
 
+mod rack_mounts;
+
 /// Quick-start README for a transpile target. Injected into every
 /// file set by `target_files` (so both `--target` output and the
 /// `--site` archives carry it), unless the set already contains a
@@ -2594,6 +2596,7 @@ pub fn target_files(
     if target == BuildTarget::Futamura {
         return futamura_target_files(app, fixture, None);
     }
+    rack_mounts::check_target(app, target)?;
     let refusals = crate::gems::extension_gem_refusals(app, Some(target.as_str()));
     if !refusals.is_empty() {
         let message = refusals.iter().map(|diagnostic| diagnostic.message.as_str()).collect::<Vec<_>>().join("\n");
@@ -4627,6 +4630,7 @@ fn ruby_family_runtime_files(
     apply_controller_dispatch(&mut files, app, true);
     apply_cruby_test_support(&mut files);
     apply_route_table_root(&mut files, app);
+    rack_mounts::apply(&mut files, app, true)?;
     apply_cable_strip(&mut files, app)?;
     apply_makefile_test_list_stems(&mut files, &test_stems);
     apply_runtime_gem_wiring(&mut files, app)?;
@@ -9242,6 +9246,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     // ruby_overlay main.rb that supersedes this one.
     apply_controller_dispatch(&mut files, app, false);
     apply_route_table_root(&mut files, app);
+    rack_mounts::apply(&mut files, app, false)?;
     // Identity for the `/cable` handshake, in the shared base like the
     // dispatch above. Only the SPINEL tree runs the result: the
     // CRuby/JRuby trees carry this `runtime/cable.rb` too but never
