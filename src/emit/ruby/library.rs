@@ -3588,6 +3588,7 @@ fn rewrite_helper_ivars(e: &mut Expr, names: &std::collections::BTreeSet<Symbol>
         _ => return,
     };
     let span = e.span;
+    let shadows_object = ivar_reader_shadows_object_method(name.as_str());
     let controller = Expr::new(
         span,
         ExprNode::Send {
@@ -3603,13 +3604,61 @@ fn rewrite_helper_ivars(e: &mut Expr, names: &std::collections::BTreeSet<Symbol>
             parenthesized: false,
         },
     );
+    // A reader named like an Object/Kernel method is not synthesized
+    // (`push_helper_ivar_readers`), so the read goes by the ivar itself.
+    let (method, args) = if shadows_object {
+        let ivar = Symbol::from(format!("@{}", name.as_str()));
+        (
+            Symbol::from("instance_variable_get"),
+            vec![Expr::new(span, ExprNode::Lit { value: crate::expr::Literal::Sym { value: ivar } })],
+        )
+    } else {
+        (name, vec![])
+    };
     *e.node = ExprNode::Send {
         recv: Some(controller),
-        method: name,
-        args: vec![],
+        method,
+        args,
         block: None,
         parenthesized: false,
     };
+}
+
+/// Would `def <name>; @<name>; end` on a controller replace a method
+/// every Object already has? A reader like that breaks the framework
+/// that calls the original: `def method` takes `request.method`-style
+/// callers' `method(:x)` lookups with it, `def format` the string
+/// formatter, `def display`, `def hash`, `def class`, `def send` and so
+/// on. Rails never defines readers for assigns: the view context reads
+/// the ivar itself, so the name is simply left alone here.
+///
+/// Object's public instance methods plus Kernel's private ones, as
+/// `Object.instance_methods + Object.private_instance_methods` lists
+/// them (interpreter- and toolchain-specific additions such as
+/// `gem_original_require` left out).
+fn ivar_reader_shadows_object_method(name: &str) -> bool {
+    matches!(
+        name,
+        "!" | "Array" | "Complex" | "Float" | "Hash" | "Integer" | "Rational" | "String"
+            | "__callee__" | "__dir__" | "__id__" | "__method__" | "__send__" | "abort"
+            | "at_exit" | "autoload" | "autoload?" | "binding" | "block_given?" | "caller"
+            | "caller_locations" | "catch" | "class" | "clone" | "define_singleton_method"
+            | "display" | "dup" | "enum_for" | "eql?" | "equal?" | "eval" | "exec" | "exit"
+            | "exit!" | "extend" | "fail" | "fork" | "format" | "freeze" | "frozen?" | "gets"
+            | "global_variables" | "hash" | "initialize" | "initialize_clone"
+            | "initialize_copy" | "initialize_dup" | "inspect" | "instance_eval"
+            | "instance_exec" | "instance_of?" | "instance_variable_defined?"
+            | "instance_variable_get" | "instance_variable_set" | "instance_variables"
+            | "is_a?" | "itself" | "kind_of?" | "lambda" | "load" | "local_variables" | "loop"
+            | "method" | "method_missing" | "methods" | "nil?" | "object_id" | "open" | "p"
+            | "pp" | "print" | "printf" | "private_methods" | "proc" | "protected_methods"
+            | "public_method" | "public_methods" | "public_send" | "putc" | "puts" | "raise"
+            | "rand" | "readline" | "readlines" | "remove_instance_variable" | "require"
+            | "require_relative" | "respond_to?" | "respond_to_missing?" | "select" | "send"
+            | "singleton_class" | "singleton_method" | "singleton_methods" | "sleep" | "spawn"
+            | "sprintf" | "srand" | "syscall" | "system" | "tap" | "test" | "then" | "throw"
+            | "to_enum" | "to_s" | "trap" | "warn" | "yield_self"
+    )
 }
 
 /// The ivars a `Views::` module ASSIGNS.
@@ -3733,7 +3782,7 @@ fn push_helper_ivar_readers(
     class_name: &ClassId,
 ) {
     for name in names {
-        if methods.iter().any(|m| &m.name == name) {
+        if methods.iter().any(|m| &m.name == name) || ivar_reader_shadows_object_method(name.as_str()) {
             continue;
         }
         methods.push(MethodDef {
