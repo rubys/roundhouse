@@ -734,12 +734,10 @@ fn exception_class(app: &App, owner: &LibraryClass, e: &Expr) -> Option<String> 
     let name = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
     let rooted = name.starts_with("::");
     let name = name.trim_start_matches("::").to_string();
-    if RUNTIME_EXCEPTIONS.contains(&name.as_str()) {
-        return Some(name);
-    }
     // Ruby's lexical lookup: the job's own namespace first (a class
     // declared inside the job), then each enclosing one, then the top;
-    // a rooted `::Name` names the top-level class only.
+    // a rooted `::Name` names the top-level class only. An app class
+    // shadows a runtime one of the same name, so those come last.
     let mut scope: Vec<&str> =
         if rooted { Vec::new() } else { owner.name.0.as_str().split("::").collect() };
     loop {
@@ -749,7 +747,7 @@ fn exception_class(app: &App, owner: &LibraryClass, e: &Expr) -> Option<String> 
             return Some(candidate);
         }
         if scope.is_empty() {
-            return None;
+            return RUNTIME_EXCEPTIONS.contains(&name.as_str()).then_some(name);
         }
         scope.pop();
     }
@@ -792,7 +790,7 @@ fn sidekiq_options(app: &App, lc: &LibraryClass) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     for class in ancestry(app, lc).iter().rev() {
         for call in &class.unknown_calls {
-            for (k, v) in sidekiq_options_literal(call).unwrap_or_default() {
+            for (k, v) in sidekiq_options_literal(call).map(|(pairs, _)| pairs).unwrap_or_default() {
                 match out.iter_mut().find(|(key, _)| *key == k) {
                     Some(slot) => slot.1 = v,
                     None => out.push((k, v)),
@@ -803,9 +801,11 @@ fn sidekiq_options(app: &App, lc: &LibraryClass) -> Vec<(String, String)> {
     out
 }
 
-/// A `sidekiq_options` whose keys are all ones the worker honors, with
-/// literal values: each key and its value as JSON text.
-fn sidekiq_options_literal(call: &Expr) -> Option<Vec<(String, String)>> {
+/// A `sidekiq_options` with literal keys and values: each key the worker
+/// honors and its value as JSON text, and whether those are all its keys.
+/// The honored keys are carried even beside others (`queue:`, `tags:`);
+/// the call then stays on the dropped ledger for the rest.
+fn sidekiq_options_literal(call: &Expr) -> Option<(Vec<(String, String)>, bool)> {
     let ExprNode::Send { recv: None, method, args, block: None, .. } = &*call.node else { return None };
     if method.as_str() != "sidekiq_options" {
         return None;
@@ -813,6 +813,7 @@ fn sidekiq_options_literal(call: &Expr) -> Option<Vec<(String, String)>> {
     let [opts] = args.as_slice() else { return None };
     let ExprNode::Hash { entries, .. } = &*opts.node else { return None };
     let mut out = Vec::new();
+    let mut all = true;
     for (k, v) in entries {
         let key = match &*k.node {
             ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
@@ -820,7 +821,8 @@ fn sidekiq_options_literal(call: &Expr) -> Option<Vec<(String, String)>> {
             _ => return None,
         };
         if !SIDEKIQ_OPTION_KEYS.contains(&key.as_str()) {
-            return None;
+            all = false;
+            continue;
         }
         let json = match &*v.node {
             ExprNode::Lit { value: Literal::Bool { value } } => value.to_string(),
@@ -831,7 +833,7 @@ fn sidekiq_options_literal(call: &Expr) -> Option<Vec<(String, String)>> {
         };
         out.push((key, json));
     }
-    Some(out)
+    Some((out, all))
 }
 
 fn json_str(s: &str) -> String {
@@ -850,7 +852,7 @@ pub fn modelled_class_body_call(app: &App, lc: &LibraryClass, call: &Expr) -> bo
     // A handler the runtime can't carry is an error under `:sidekiq`
     // (`handler_diagnostics`), not a dropped call as well.
     let carried_by_sidekiq =
-        sidekiq && (handler_form(app, lc, call).is_some() || sidekiq_options_literal(call).is_some());
+        sidekiq && (handler_form(app, lc, call).is_some() || sidekiq_options_literal(call).is_some_and(|(_, all)| all));
     if !is_literal_queue_as(call)
         && !is_discard_on_deserialization(call)
         && enqueue_after_commit_literal(call).is_none()
@@ -880,7 +882,8 @@ fn ancestry<'a>(app: &'a App, lc: &'a LibraryClass) -> Vec<&'a LibraryClass> {
     let mut out = vec![lc];
     let mut cursor = lc.parent.clone();
     while let Some(p) = cursor {
-        if out.len() > 8 {
+        // A cycle in the ingested parents ends the walk.
+        if out.iter().any(|c| c.name == p) {
             break;
         }
         let Some(parent) = app.library_classes.iter().find(|c| c.name == p) else { break };

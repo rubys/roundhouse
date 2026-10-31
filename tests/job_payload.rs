@@ -353,8 +353,10 @@ fn handlers_are_planned_in_search_order() {
 
 /// An exception class declared inside the job resolves as Ruby resolves
 /// it, `NestedJob::Retryable` first, while `::Retryable` names the
-/// top-level class; and an initializer's `ActiveJob::Base.retry_jitter =`,
-/// written `1e-2`, wins over `load_defaults`' 0.15.
+/// top-level class, and the job's own `RuntimeError` shadows the runtime's;
+/// an initializer's `ActiveJob::Base.retry_jitter =`, written `1e-2`, wins
+/// over `load_defaults`' 0.15; and `sidekiq_options` keeps `retry` beside
+/// a `queue:` the worker leaves to ActiveJob.
 #[test]
 fn a_nested_exception_class_and_the_base_jitter_spelling() {
     let mut app = ingest_app_from_tree(tree(&[
@@ -376,15 +378,17 @@ fn a_nested_exception_class_and_the_base_jitter_spelling() {
         ("app/jobs/application_job.rb", "class ApplicationJob < ActiveJob::Base\nend\n"),
         (
             "app/jobs/nested_job.rb",
-            "class NestedJob < ApplicationJob\n  class Retryable < StandardError\n  end\n\n  retry_on Retryable, wait: 1\n  discard_on ::Retryable\n\n  def perform(name)\n    nil\n  end\nend\n",
+            "class NestedJob < ApplicationJob\n  class Retryable < StandardError\n  end\n\n  class RuntimeError < StandardError\n  end\n\n  sidekiq_options retry: 4, queue: \"other\"\n  retry_on Retryable, wait: 1\n  discard_on ::Retryable\n  discard_on RuntimeError\n\n  def perform(name)\n    nil\n  end\nend\n",
         ),
     ]))
     .expect("ingest nested app");
     roundhouse::session::analyze_and_lower(&mut app);
     let p = plan(&app, "NestedJob");
-    assert_eq!(p.handlers.len(), 2, "{p:#?}");
-    assert_eq!(p.handlers[0].exceptions(), &["Retryable".to_string()][..], "{p:#?}");
-    assert_eq!(p.handlers[1].exceptions(), &["NestedJob::Retryable".to_string()][..], "{p:#?}");
+    assert_eq!(p.handlers.len(), 3, "{p:#?}");
+    assert_eq!(p.handlers[0].exceptions(), &["NestedJob::RuntimeError".to_string()][..], "{p:#?}");
+    assert_eq!(p.handlers[1].exceptions(), &["Retryable".to_string()][..], "{p:#?}");
+    assert_eq!(p.handlers[2].exceptions(), &["NestedJob::Retryable".to_string()][..], "{p:#?}");
+    assert_eq!(p.sidekiq_options, vec![("retry".to_string(), "4".to_string())]);
     assert_eq!(p.retry_jitter, 0.01);
     let diagnostics = roundhouse::lower::job_payload::handler_diagnostics(&app);
     assert!(diagnostics.is_empty(), "{diagnostics:#?}");
