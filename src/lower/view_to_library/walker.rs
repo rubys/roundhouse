@@ -1099,8 +1099,8 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
     // View-helper classifier: `link_to`, `dom_id`, `pluralize`,
     // `truncate`, `turbo_stream_from`, `content_for(:slot)`, …. The
     // classifier matches bare Sends (no recv, no block) only.
-    if let ExprNode::Send { recv: None, method, args: sa, block: None, .. } = &*inner.node {
-        if let Some(kind) = classify_view_helper(method.as_str(), sa) {
+    if let ExprNode::Send { recv: None, method, args: sa, block: None, parenthesized } = &*inner.node {
+        if let Some(kind) = classify_template_helper(method.as_str(), sa, *parenthesized, ctx) {
             if let Some(call) = emit_view_helper_call(&kind, ctx) {
                 return vec![accumulator_append_call(call, ctx)];
             }
@@ -1545,6 +1545,23 @@ fn coerce_to_s(expr: Expr) -> Expr {
     )
 }
 
+/// `classify_view_helper` for a bare Send in a template, except that a
+/// zero-arg Send without parens naming one of the view's locals is a
+/// read of it: a partial handed `csrf_meta_tags:` reads the caller's
+/// value, as Ruby takes the bare name for the lvar, not the helper.
+/// `csrf_meta_tags()` is still the call.
+fn classify_template_helper<'a>(
+    method: &str,
+    args: &'a [Expr],
+    parenthesized: bool,
+    ctx: &ViewCtx,
+) -> Option<ViewHelperKind<'a>> {
+    if args.is_empty() && !parenthesized && ctx.binds_local(method) {
+        return None;
+    }
+    classify_view_helper(method, args)
+}
+
 /// Recursively walk `expr` and rewrite any bare view-helper Send
 /// (`Send { recv: None, method, args, block: None }`) into its
 /// `ViewHelpers.*` form via `classify_view_helper` +
@@ -1592,7 +1609,7 @@ pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
             block: None,
             parenthesized,
         } => {
-            if let Some(kind) = classify_view_helper(method.as_str(), args) {
+            if let Some(kind) = classify_template_helper(method.as_str(), args, *parenthesized, ctx) {
                 if let Some(mut call) = emit_view_helper_call(&kind, ctx) {
                     call.inherit_span(e.span);
                     return call;
@@ -1829,6 +1846,7 @@ mod tests {
     fn test_ctx() -> ViewCtx {
         ViewCtx {
             locals: Vec::new(),
+            ivar_params: Vec::new(),
             arg_name: String::new(),
             resource_dir: String::new(),
             accumulator: "io".to_string(),
@@ -2546,6 +2564,103 @@ mod tests {
             .join("\n");
 
         assert!(!emitted.contains("to_s"), "string literal must not be coerced:\n{emitted}");
+    }
+
+    const ZERO_ARG_HELPERS: [&str; 4] =
+        ["csrf_meta_tags", "csrf_meta_tag", "csp_meta_tag", "javascript_importmap_tags"];
+
+    fn bare(method: &str) -> Expr {
+        bare_call(method, false)
+    }
+
+    fn bare_call(method: &str, parenthesized: bool) -> Expr {
+        Expr::new(
+            Span::default(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from(method),
+                args: Vec::new(),
+                block: None,
+                parenthesized,
+            },
+        )
+    }
+
+    /// `<name> || "dflt"`.
+    fn or_default(left: Expr) -> Expr {
+        Expr::new(
+            Span::default(),
+            ExprNode::BoolOp {
+                op: BoolOpKind::Or,
+                surface: BoolOpSurface::Symbol,
+                left,
+                right: str_lit("dflt"),
+            },
+        )
+    }
+
+    fn emit_output(arg: Expr, ctx: &ViewCtx) -> String {
+        walk_body(&buf_append(send_to_s(arg)), ctx)
+            .iter()
+            .map(crate::emit::ruby::emit_expr)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn calls_a_helper(emitted: &str) -> bool {
+        ["csrf_meta_tags", "csp_meta_tag", "javascript_importmap_tags"]
+            .iter()
+            .any(|h| emitted.contains(&format!("ViewHelpers.{h}")))
+    }
+
+    #[test]
+    fn a_local_named_like_a_zero_arg_helper_is_read_not_called() {
+        for name in ZERO_ARG_HELPERS {
+            let ctx = ViewCtx { locals: vec![name.to_string()], ..test_ctx() };
+            for arg in [bare(name), or_default(bare(name))] {
+                let emitted = emit_output(arg, &ctx);
+                assert!(!calls_a_helper(&emitted), "`{name}` is the partial's local:\n{emitted}");
+                assert!(emitted.contains(&format!("{name}.to_s")) || emitted.contains(&format!("{name} ||")), "the local is still read:\n{emitted}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_zero_arg_helper_without_a_local_is_still_the_helper() {
+        for name in ZERO_ARG_HELPERS {
+            for arg in [bare(name), or_default(bare(name))] {
+                let emitted = emit_output(arg, &test_ctx());
+                assert!(calls_a_helper(&emitted), "`{name}` is the helper:\n{emitted}");
+            }
+        }
+    }
+
+    #[test]
+    fn empty_parens_call_the_helper_past_a_local() {
+        for name in ZERO_ARG_HELPERS {
+            let ctx = ViewCtx { locals: vec![name.to_string()], ..test_ctx() };
+            for arg in [bare_call(name, true), or_default(bare_call(name, true))] {
+                let emitted = emit_output(arg, &ctx);
+                assert!(calls_a_helper(&emitted), "`{name}()` is the helper:\n{emitted}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_closure_ivar_named_like_a_helper_does_not_shadow_it() {
+        for name in ZERO_ARG_HELPERS {
+            let ctx = ViewCtx {
+                locals: vec![name.to_string()],
+                ivar_params: vec![name.to_string()],
+                ..test_ctx()
+            };
+            for arg in [bare(name), or_default(bare(name))] {
+                let emitted = emit_output(arg, &ctx);
+                assert!(calls_a_helper(&emitted), "`@{name}` leaves `{name}` the helper:\n{emitted}");
+            }
+            let emitted = emit_output(bare(name), &ctx.with_locals([name.to_string()]));
+            assert!(!calls_a_helper(&emitted), "a block param `{name}` is a local again:\n{emitted}");
+        }
     }
 }
 
