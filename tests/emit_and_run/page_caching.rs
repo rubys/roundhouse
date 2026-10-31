@@ -124,3 +124,32 @@ end
         .run_test(TEST_PATH)
         .assert_passes();
 }
+
+#[test]
+fn a_page_cached_under_public_is_served_ahead_of_the_routes() {
+    app()
+        .write(
+            TEST_PATH,
+            r#"require "test_helper"
+
+class SitesControllerTest < ActionDispatch::IntegrationTest
+  test "a page written under public/ is what the static lookup answers, until it is expired" do
+    ActionController::Base.perform_caching = true
+    ActionController::Base.page_cache_directory = Rails.public_path.to_s
+    assert_equal "", ActionController::PublicFiles.lookup("/sites/e")
+    get "/sites/e"
+    assert_equal "/sites/e.html", ActionController::PublicFiles.lookup("/sites/e")
+    assert_equal "/sites/e.html", ActionController::PublicFiles.lookup("/sites/e.html")
+    SitesController.expire_page("/sites/e")
+    assert_equal "", ActionController::PublicFiles.lookup("/sites/e")
+    assert_equal false, File.exist?("public/sites/e.html")
+  ensure
+    ActionController::Base.perform_caching = false
+    FileUtils.rm_rf("public/sites")
+  end
+end
+"#,
+        )
+        .run_test(TEST_PATH)
+        .assert_passes();
+}

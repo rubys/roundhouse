@@ -75,12 +75,14 @@ module ActionDispatch
         saved_request = ActionController::Current.request
         saved_controller = ActionController::Current.controller
         saved_slots = Thread.current[:view_slots]
+        saved_broadcasts = Thread.current[:broadcast_log]
         begin
           status, headers, body = answer(verb, path_info, env)
         ensure
           ActionController::Current.request = saved_request
           ActionController::Current.controller = saved_controller
           Thread.current[:view_slots] = saved_slots
+          Thread.current[:broadcast_log] = saved_broadcasts
         end
         keep_cookies(Array(headers["set-cookie"]))
         @response = ActionDispatch::TestResponse.new(status, body.join, headers)
@@ -88,9 +90,9 @@ module ActionDispatch
       end
 
       def answer(verb, path_info, env)
-        file = File.join("public", path_info)
-        if (verb == "GET" || verb == "HEAD") && !path_info.include?("..") && File.file?(file)
-          return Rack::Files.new("public").call(env).then { |s, h, b| [s, h, b.to_a] }
+        file = verb == "GET" || verb == "HEAD" ? ActionController::PublicFiles.lookup(path_info) : ""
+        unless file.empty?
+          return Rack::Files.new("public").call(env.merge("PATH_INFO" => file)).then { |s, h, b| [s, h, b.to_a] }
         end
         Db.with_connection { Main.run_rack(env) }
       end

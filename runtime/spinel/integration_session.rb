@@ -9,7 +9,7 @@
 # the cookies a response sets for the next request.
 #
 # The request runs on the calling thread, so the thread's request state
-# (`ActionController::Current`, the view slots) is put back afterwards: a
+# (`ActionController::Current`, the view slots, the broadcast log) is put back afterwards: a
 # job run inline inside a request goes on rendering that request.
 #
 # NOT HERE: verbs other than GET and HEAD, `params:`/`headers:`/`env:`,
@@ -93,15 +93,19 @@ module ActionDispatch
         saved_request = ActionController::Current.request
         saved_controller = ActionController::Current.controller
         saved_slots = Thread.current[:view_slots]
+        saved_broadcasts = Thread.current[:broadcast_log]
         begin
           Db.with_connection { Main.dispatch(req, res) }
         ensure
           ActionController::Current.request = saved_request
           ActionController::Current.controller = saved_controller
           Thread.current[:view_slots] = saved_slots
+          Thread.current[:broadcast_log] = saved_broadcasts
         end
         keep_cookies(res.set_cookies)
-        @response = ActionDispatch::TestResponse.new(res.status, res.body, res.headers)
+        # Not res.body: a public/ file is left to the server to send, so read it as the response the client would get.
+        body = res.file_path.empty? || verb == "HEAD" ? res.body : File.read(res.file_path)
+        @response = ActionDispatch::TestResponse.new(res.status, body, res.headers)
         res.status
       end
 

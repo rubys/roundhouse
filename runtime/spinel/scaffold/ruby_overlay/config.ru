@@ -71,30 +71,23 @@ STATIC_HEADERS = Rails.application.public_file_server_headers
   .to_h { |name, value| [name.downcase, value] }.freeze
 use Rack::Static, urls: ["/assets", "/icon.png", "/icon.svg"], root: "static",
     header_rules: STATIC_HEADERS.empty? ? [] : [[:all, STATIC_HEADERS]]
-# Rails' ActionDispatch::Static: a GET/HEAD for a file that exists under
-# public/ (robots.txt, the error pages) is served ahead of the routes.
+# Rails' ActionDispatch::Static: a GET/HEAD for a file under public/
+# (robots.txt, the error pages, a page `caches_page` wrote) is served ahead
+# of the routes, by FileHandler's lookup (runtime/public_files.rb: listed
+# once, then kept as the page cache writes and expires).
 # Not `Rack::Static, urls: [""], cascade: true`: Rack::Files answers a
 # POST with 405, which does not cascade, and every form post died there.
-#
-# The files are listed ONCE, at boot, as the hand-ported campfire on Falcon
-# does (its Assets table), rather than stat'ed per request as Rails'
-# FileHandler does: the stat was ~5% of a `/up` request on the bench box,
-# paid by every route. A file put under public/ after boot is not served
-# until a restart, which no deploy of a precompiled public/ does. An exact
-# key lookup also leaves no `..` to guard against.
 PUBLIC_FILES = Rack::Files.new("public", STATIC_HEADERS)
-PUBLIC_PATHS = Dir.glob("**/*", File::FNM_DOTMATCH, base: "public")
-  .select { |rel| File.file?(File.join("public", rel)) }
-  .to_h { |rel| ["/#{rel}", true] }.freeze
 use(Class.new do
   def initialize(app) = @app = app
 
   def call(env)
     method = env["REQUEST_METHOD"]
-    if (method == "GET" || method == "HEAD") && PUBLIC_PATHS.key?(env["PATH_INFO"])
-      PUBLIC_FILES.call(env)
-    else
+    file = method == "GET" || method == "HEAD" ? ActionController::PublicFiles.lookup(env["PATH_INFO"].to_s) : ""
+    if file.empty?
       @app.call(env)
+    else
+      PUBLIC_FILES.call(env.merge("PATH_INFO" => file))
     end
   end
 end)

@@ -64,6 +64,8 @@ module ActionController
       return nil if path.nil?
       File.delete(path) if File.exist?(path)
       File.delete(path + ".gz") if File.exist?(path + ".gz")
+      rel = ActionController::PublicFiles.relative(path)
+      ActionController::PublicFiles.remove(rel) unless rel.empty?
       nil
     end
 
@@ -74,6 +76,8 @@ module ActionController
       unless gzip.nil?
         Zlib::GzipWriter.open(path + ".gz", gzip) { |f| f.write(content) }
       end
+      rel = ActionController::PublicFiles.relative(path)
+      ActionController::PublicFiles.add(rel) unless rel.empty?
       nil
     end
   end
