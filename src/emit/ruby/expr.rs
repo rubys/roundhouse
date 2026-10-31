@@ -348,7 +348,8 @@ fn emit_node(n: &ExprNode) -> String {
             let brace = block.as_ref().is_some_and(|b| {
                 matches!(&*b.node, ExprNode::Lambda { block_style: crate::expr::BlockStyle::Brace, .. })
             });
-            let base = emit_send_base(recv.as_ref(), method, args, *parenthesized || (brace && !args.is_empty()));
+            let forwarded = block.as_ref().is_some_and(|b| b.decisions & crate::expr::FORWARDED_BLOCK != 0);
+            let base = emit_send_base(recv.as_ref(), method, args, *parenthesized || ((brace || forwarded) && !args.is_empty()));
             match block {
                 None => base,
                 Some(b) => emit_do_block(&base, b),
@@ -1730,14 +1731,17 @@ fn lambda_params(params: &[Symbol], extra_params: &[crate::dialect::Param], rest
 /// body; `do … end` spans multiple lines when the body has newlines.
 pub(super) fn emit_do_block(base: &str, block: &Expr) -> String {
     use crate::expr::BlockStyle;
-    let ExprNode::Lambda { params, rest_param, extra_params, body, block_style, .. } = &*block.node else {
+    if !matches!(&*block.node, ExprNode::Lambda { .. })
+        || block.decisions & crate::expr::FORWARDED_BLOCK != 0
+    {
         // A non-Lambda block expression is a Proc FORWARD (`&block` —
         // ingest lowers the block-pass arg to a bare Var in the block
         // slot). Rendering it as a literal `{ block }` block made the
         // callee YIELD THE PROC OBJECT instead of calling it —
         // lobsters' `Rails.cache.fetch(key, &block)` forward returned
         // the Proc, poisoning `@comments` to Proc under spinel and
-        // silently mis-caching on CRuby. Re-attach as a `&` argument.
+        // silently mis-caching on CRuby. A forwarded lambda also keeps
+        // its local returns and strict arity. Re-attach as a `&` argument.
         let fwd = emit_expr(block);
         return if let Some(stripped) = base.strip_suffix(')') {
             if stripped.ends_with('(') {
@@ -1748,6 +1752,9 @@ pub(super) fn emit_do_block(base: &str, block: &Expr) -> String {
         } else {
             format!("{base}(&{fwd})")
         };
+    }
+    let ExprNode::Lambda { params, rest_param, extra_params, body, block_style, .. } = &*block.node else {
+        unreachable!("forwarded expressions were handled above")
     };
     let body_str = emit_expr(body);
     // `|a, b|`, and `|*args|` for a block whose parameter is a REST.

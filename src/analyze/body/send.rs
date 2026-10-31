@@ -1446,9 +1446,10 @@ impl<'a> BodyTyper<'a> {
         // own `call` (a callable app class, an untyped proc).
         if matches!(method.as_str(), "call" | "[]") {
             if let Some(Ty::Fn { ret, .. }) = recv_ty {
-                // Not left a type variable: `call` is known, and what the body answers is the body's own sends' to report.
+                // The function is known, but its body may still await source
+                // harvest. Do not turn that pending result into runtime evidence.
                 return match &**ret {
-                    Ty::Var { .. } => Ty::untyped(),
+                    Ty::Var { .. } => Ty::pending_untyped(),
                     ret => ret.clone(),
                 };
             }
@@ -1551,6 +1552,21 @@ impl<'a> BodyTyper<'a> {
         // The call's arguments, under a name the `Ty::Class { id, args }`
         // pattern below does not shadow.
         let call_args = args;
+        // One-level dig projects the container's values, independently of an
+        // opaque selector or an ignored block. An invalid selector raises;
+        // every normal result is an element/value or nil.
+        if method.as_str() == "dig" && args.len() == 1 {
+            let value = match recv_ty {
+                Some(Ty::Array { elem }) => Some(("Array", &**elem)),
+                Some(Ty::Hash { value, .. }) => Some(("Hash", &**value)),
+                _ => None,
+            };
+            if let Some((class, value)) = value
+                && !self.declares_instance_method(&ClassId(Symbol::from(class)), method)
+            {
+                return union_of(value.clone(), Ty::Nil).computed();
+            }
+        }
         // Universal Ruby methods — available on every object regardless
         // of receiver type. Resolved first so `nil?`, `is_a?`, etc.
         // don't fall through to per-type method tables that would miss.

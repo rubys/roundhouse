@@ -9,6 +9,8 @@
 mod gradual_returns_contract;
 #[path = "emit_and_run/gradual_returns.rs"]
 mod gradual_returns;
+#[path = "emit_and_run/reason_unwinds.rs"]
+mod reason_unwinds;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 #[path = "support/time_change_usec.rs"]

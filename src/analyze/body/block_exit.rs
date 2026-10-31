@@ -6,13 +6,40 @@ use crate::det::HashMap;
 
 #[derive(Clone, PartialEq)]
 enum Exit {
-    Return,
+    Return { may_raise: bool },
     LocalReturn,
     Uncertain,
     Raise(Option<Symbol>),
 }
 
+impl Exit {
+    fn after_possible_raise(self, may_raise: bool) -> Self {
+        if !may_raise { return self; }
+        match self {
+            Exit::Return { .. } => Exit::Return { may_raise: true },
+            Exit::Raise(_) => Exit::Raise(None),
+            other => other,
+        }
+    }
+}
+
 type Callbacks = HashMap<Symbol, Option<Exit>>;
+
+/// A return first evaluates its operand. A surrounding rescue can turn
+/// an exception there into normal completion of the yielding block.
+fn operand_may_raise(expr: &Expr) -> bool {
+    match &*expr.node {
+        ExprNode::Lit { .. } | ExprNode::Var { .. } | ExprNode::Ivar { .. }
+        | ExprNode::SelfRef | ExprNode::Lambda { .. } => false,
+        ExprNode::Array { .. } | ExprNode::Hash { .. } | ExprNode::Seq { .. } => {
+            let mut may_raise = false;
+            expr.node.for_each_child(&mut |e| may_raise |= operand_may_raise(e));
+            may_raise
+        }
+        ExprNode::Assign { target: LValue::Var { .. }, value } => operand_may_raise(value),
+        _ => true,
+    }
+}
 
 impl BodyTyper<'_> {
     pub(super) fn kernel_callback_constructor(
@@ -72,11 +99,11 @@ impl BodyTyper<'_> {
             | ExprNode::Const { .. }
             | ExprNode::Lit { .. }
             | ExprNode::SelfRef => None,
-            ExprNode::Return { .. } => Some(if returns_escape {
-                Exit::Return
+            ExprNode::Return { value } => flow(value, env).or_else(|| Some(if returns_escape {
+                Exit::Return { may_raise: operand_may_raise(value) }
             } else {
                 Exit::LocalReturn
-            }),
+            })),
             ExprNode::Raise { value } => Some(Exit::Raise(match &*value.node {
                 ExprNode::Lit {
                     value: Literal::Str { .. },
@@ -85,10 +112,12 @@ impl BodyTyper<'_> {
             })),
             ExprNode::Break { .. } | ExprNode::Next { .. } => Some(Exit::LocalReturn),
             ExprNode::Seq { exprs } => {
+                let mut may_raise = false;
                 for e in exprs {
                     if let Some(exit) = flow(e, env) {
-                        return Some(exit);
+                        return Some(exit.after_possible_raise(may_raise));
                     }
+                    may_raise |= operand_may_raise(e);
                 }
                 None
             }
@@ -117,11 +146,14 @@ impl BodyTyper<'_> {
                 let yes = flow(then_branch, &mut env.clone());
                 let no = flow(else_branch, &mut env.clone());
                 env.clear();
-                if yes == no {
+                let result = if let (Some(Exit::Return { may_raise: a }), Some(Exit::Return { may_raise: b })) = (&yes, &no) {
+                    Some(Exit::Return { may_raise: *a || *b })
+                } else if yes == no {
                     yes
                 } else {
                     Some(Exit::Uncertain)
-                }
+                };
+                result.map(|exit| exit.after_possible_raise(operand_may_raise(cond)))
             }
             ExprNode::BoolOp { left, .. } | ExprNode::While { cond: left, .. } => {
                 let exit = flow(left, env);
@@ -134,10 +166,16 @@ impl BodyTyper<'_> {
                 ensure,
                 ..
             } => {
-                if let Some(exit) = ensure.as_ref().and_then(|e| flow(e, &mut env.clone())) {
+                let protected = flow(body, &mut env.clone());
+                // The protected body can rebind a callback before a handler
+                // or ensure runs. Pre-body aliases cannot certify those exits.
+                if let Some(exit) = ensure.as_ref().and_then(|e| flow(e, &mut Callbacks::default())) {
                     return Some(exit);
                 }
-                let result = match flow(body, &mut env.clone()) {
+                let protected = protected.map(|exit| exit.after_possible_raise(
+                    ensure.as_ref().is_some_and(operand_may_raise)));
+                let result = match protected {
+                    Some(Exit::Return { may_raise: true }) if !rescues.is_empty() => None,
                     Some(Exit::Raise(Some(class))) => {
                         let mut caught = None;
                         for rescue in rescues {
@@ -160,7 +198,7 @@ impl BodyTyper<'_> {
                                     || matches!(id.0.as_str(), "Exception" | "StandardError");
                             }
                             if catches {
-                                caught = Some(flow(&rescue.body, &mut env.clone()));
+                                caught = Some(flow(&rescue.body, &mut Callbacks::default()));
                                 break;
                             }
                         }
@@ -174,7 +212,8 @@ impl BodyTyper<'_> {
             }
             ExprNode::RescueModifier { expr, fallback } => {
                 let result = match flow(expr, env) {
-                    Some(Exit::Raise(_)) => flow(fallback, &mut env.clone()),
+                    Some(Exit::Raise(_)) => flow(fallback, &mut Callbacks::default()),
+                    Some(Exit::Return { may_raise: true }) => None,
                     other => other,
                 };
                 env.clear();
@@ -187,18 +226,22 @@ impl BodyTyper<'_> {
                 block,
                 ..
             } => {
+                let mut may_raise = recv.as_ref().is_some_and(operand_may_raise)
+                    && !self.kernel_receiver(recv.as_ref());
                 if let Some(exit) = recv.as_ref().and_then(|r| flow(r, env)) {
                     return Some(exit);
                 }
                 for arg in args {
                     if let Some(exit) = flow(arg, env) {
-                        return Some(exit);
+                        return Some(exit.after_possible_raise(may_raise));
                     }
+                    may_raise |= operand_may_raise(arg);
                 }
                 if matches!(method.as_str(), "call" | "[]") {
                     if let Some(callback) = recv.as_ref().and_then(|r| self.callback_exit(r, env)) {
                         env.clear();
-                        return callback.filter(|e| !matches!(e, Exit::LocalReturn));
+                        return callback.filter(|e| !matches!(e, Exit::LocalReturn))
+                            .map(|exit| exit.after_possible_raise(may_raise));
                     }
                     env.clear();
                     return None;
@@ -216,7 +259,7 @@ impl BodyTyper<'_> {
                         })),
                         _ => None,
                     };
-                    return Some(Exit::Raise(class));
+                    return Some(Exit::Raise(class).after_possible_raise(may_raise));
                 }
                 // An ordinary helper whose inferred return is never has no
                 // normal value. A callback's Bottom is handled above: its
@@ -324,12 +367,15 @@ impl BodyTyper<'_> {
     }
 
     pub(super) fn block_always_unwinds(&self, block: &Expr) -> bool {
+        if block.decisions & crate::expr::FORWARDED_BLOCK != 0 {
+            return false;
+        }
         let ExprNode::Lambda { body, .. } = &*block.node else {
             return false;
         };
         matches!(
             self.exit_from(body, &mut HashMap::default(), true),
-            Some(Exit::Return | Exit::Raise(_))
+            Some(Exit::Return { .. } | Exit::Raise(_))
         )
     }
 }

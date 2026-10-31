@@ -330,3 +330,68 @@ fn mutable_callback_aliases_and_rescue_aliases_are_not_unwind_proofs() {
         assert!(rbs.contains("def self.value: (untyped raw) -> untyped"), "{body}: {rbs}");
     }
 }
+
+fn probe_value_return(source: &str) -> String {
+    let (_, rbs) = declarations_for(source);
+    rbs.lines().map(str::trim)
+        .find(|line| line.starts_with("def self.value:"))
+        .unwrap_or_else(|| panic!("missing value signature: {rbs}"))
+        .rsplit_once(" -> ").unwrap().1.to_owned()
+}
+
+#[test]
+fn callbacks_rebound_before_handlers_and_ensure_do_not_prove_an_unwind() {
+    for body in [
+        r#"p = Kernel.proc { return :escaped }; begin; p = -> { 42 }; ensure; p.call; end"#,
+        r#"p = Kernel.proc { return :escaped }; begin; p = -> { 42 }; Kernel.raise("x"); rescue RuntimeError; p.call; end"#,
+    ] {
+        let source = format!("module Probe\n def self.value(raw); JSON.parse(raw).tap {{ {body} }} rescue :fallback; end\nend\n");
+        assert_eq!(probe_value_return(&source), "untyped", "{body}");
+    }
+}
+
+#[test]
+fn rescued_exceptions_can_leave_the_yielding_block_running() {
+    for body in [
+        r#"begin; return Integer("bad"); rescue ArgumentError; nil; end"#,
+        r#"begin; return Integer("bad"); rescue; nil; end"#,
+        r#"begin; return explode; rescue RuntimeError; nil; end"#,
+        r#"begin; Integer("bad"); return :escaped; rescue ArgumentError; nil; end"#,
+        r#"begin; begin; return :escaped; ensure; Integer("bad"); end; rescue ArgumentError; nil; end"#,
+    ] {
+        let source = format!("module Probe\n def self.explode; raise \"x\"; end\n def self.value(raw); JSON.parse(raw).tap {{ {body} }} rescue :fallback; end\nend\n");
+        assert_eq!(probe_value_return(&source), "untyped", "{body}");
+    }
+}
+
+#[test]
+fn forwarded_lambda_returns_belong_to_the_lambda() {
+    for tail in ["", " rescue :fallback", " || :fallback"] {
+        let source = format!("module Probe\n def self.value(raw); JSON.parse(raw).tap(&->(x) {{ return :local }}){tail}; end\nend\n");
+        assert_eq!(probe_value_return(&source), "untyped", "{tail}");
+    }
+}
+
+#[test]
+fn concrete_dig_keeps_value_precision_through_opaque_selectors_and_ignored_blocks() {
+    for body in [
+        r#"["ok"].dig(JSON.parse("0"))"#,
+        r#"{"k" => "ok"}.dig(JSON.parse('"k"'))"#,
+        r#"["ok"].dig(0) { JSON.parse(raw) }"#,
+    ] {
+        let source = format!("module Probe\n def self.value(raw); forward0(raw) || \"fallback\"; end\n def self.forward0(raw); forward1(raw); end\n def self.forward1(raw); {body}; end\nend\n");
+        assert_eq!(probe_value_return(&source), "String", "{body}");
+    }
+    for (class, value) in [("Array", r#"["ok"]"#), ("Hash", r#"{"k" => "ok"}"#)] {
+        let source = format!("class {class}\n def dig(key); JSON.parse(\"42\"); end\nend\nmodule Probe\n def self.value(raw); {value}.dig(0) || \"fallback\"; end\nend\n");
+        assert_eq!(probe_value_return(&source), "untyped", "source-defined {class}#dig");
+    }
+}
+
+#[test]
+fn a_local_lambda_waits_for_its_helper_without_discarding_runtime_unknowns() {
+    for (body, expected) in [(r#""known""#, "String"), (r#"JSON.parse("42")"#, "untyped")] {
+        let source = format!("module Probe\n def self.value(raw); p = -> {{ source }}; p.call || \"fallback\"; end\n def self.source; {body}; end\nend\n");
+        assert_eq!(probe_value_return(&source), expected, "{body}");
+    }
+}
