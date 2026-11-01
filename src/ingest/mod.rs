@@ -53,6 +53,7 @@ pub mod cable_yml;
 mod public_file_server_config;
 mod action_controller_caching_config;
 mod caches_page;
+mod boot_program;
 pub mod allow_browser;
 pub mod app;
 mod concern_accessors;

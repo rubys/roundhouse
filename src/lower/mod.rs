@@ -1419,6 +1419,9 @@ pub(crate) fn for_each_owned_hook_body(
     if let Some(seeds) = &mut app.seeds {
         f(None, seeds);
     }
+    for stmt in &mut app.boot_program {
+        f(None, stmt);
+    }
 }
 
 /// Read-only twin of [`for_each_hook_body`], for a pass that needs to
@@ -1547,6 +1550,9 @@ pub(crate) fn for_each_hook_body_ref(
     }
     if let Some(seeds) = &app.seeds {
         f(seeds);
+    }
+    for stmt in &app.boot_program {
+        f(stmt);
     }
 }
 

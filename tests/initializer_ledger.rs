@@ -564,7 +564,7 @@ end
             ("orm :active_record", "gem:doorkeeper:unknown"),
             ("Rack::Attack.throttle", "gem:rack-attack:unknown"),
             ("OmniAuth.config.logger =", "gem:omniauth:unknown"),
-            ("Audit.record_boot", "app"),
+            // Not listed: an app-owned top-level call is no longer dropped, it runs at boot (`ingest::boot_program`).
             ("Rails.application.config.after_initialize", "app"),
             ("if ENV[\"SLOW\"]", "rails"),
             ("Unheard::Of.start", "unknown"),
@@ -612,4 +612,45 @@ fn a_filter_parameters_operand_after_a_comment_or_blank_line_is_read() {
          Rails.application.config.filter_parameters += [\n  # secrets\n  :secret,\n]\n",
     )]);
     assert!(ledger.is_empty(), "{:?}", statements(&ledger));
+}
+
+#[test]
+fn a_constant_a_class_body_reads_stays_on_the_ledger_since_initializers_load_after_app() {
+    let (app, ledger) = ingest(&[
+        ("config/initializers/settings.rb", "SETTINGS = { default: 3 }.freeze\nGREETING = \"hi\"\n"),
+        ("app/models/widget.rb", "class Widget < ApplicationRecord\n  DEFAULT = SETTINGS[:default]\n  def greeting = GREETING\nend\n"),
+    ]);
+    assert!(statements(&ledger).iter().any(|s| s.starts_with("SETTINGS")), "{:?}", statements(&ledger));
+    assert!(!statements(&ledger).iter().any(|s| s.starts_with("GREETING")), "{:?}", statements(&ledger));
+    assert_eq!(app.boot_program.len(), 1);
+}
+
+#[test]
+fn a_condition_on_a_rooted_or_quoted_constant_stays_on_the_ledger() {
+    let (app, ledger) = ingest(&[(
+        "config/initializers/guards.rb",
+        "if ::Gizmo.ready?\n  READY = true\nend\nif \"'\" == \"x\" && Widgetry.on?\n  ON = true\nend\nif ENV[\"BOOT\"]\n  BOOTED = true\nend\n",
+    )]);
+    assert_eq!(statements(&ledger), ["if ::Gizmo.ready?", "if \"'\" == \"x\" && Widgetry.on?"]);
+    assert_eq!(app.boot_program.len(), 1);
+}
+
+#[test]
+fn a_constant_a_class_body_reads_stays_on_the_ledger_when_a_conditional_assigns_it() {
+    let (app, ledger) = ingest(&[
+        ("config/initializers/settings.rb", "if ENV[\"BOOT\"]\n  SETTINGS = {}\nend\n"),
+        ("app/models/widget.rb", "class Widget < ApplicationRecord\n  DEFAULT = SETTINGS\nend\n"),
+    ]);
+    assert_eq!(statements(&ledger), ["if ENV[\"BOOT\"]"]);
+    assert!(app.boot_program.is_empty());
+}
+
+#[test]
+fn a_constant_a_conditional_assigns_does_not_admit_a_later_mutation() {
+    let (app, ledger) = ingest(&[(
+        "config/initializers/flags.rb",
+        "if ENV[\"BOOT\"]\n  FLAGS = []\nend\nFLAGS << :late\n",
+    )]);
+    assert_eq!(statements(&ledger), ["FLAGS.<<"]);
+    assert_eq!(app.boot_program.len(), 1);
 }

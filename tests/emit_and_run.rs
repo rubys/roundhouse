@@ -20569,6 +20569,8 @@ mod route_format_lookahead;
 mod page_caching;
 #[path = "emit_and_run/route_requirement_span.rs"]
 mod route_requirement_span;
+#[path = "emit_and_run/boot_program.rs"]
+mod boot_program;
 
 #[path = "emit_and_run/route_dot_span.rs"]
 mod route_dot_span;
