@@ -1818,9 +1818,11 @@ caller omits, and reads back as that default. Two known differences
 from Rails: the keys are written in `perform`'s order, not the call
 site's, and a caller that passes the default explicitly gets no key
 where Rails would write one; `perform` receives the same values either
-way. A non-literal keyword default or a `**` splat at a call site
-keeps the job's Proc (an error under `:sidekiq`), and a `perform` with
-a `**rest` keyword still gets no wrapper.
+way. A `**` splat at a call site keeps the job's Proc (an error under
+`:sidekiq`). A `perform` with a `**rest` keyword, a block, `...`, or a
+keyword default that isn't a literal (which only `perform` can
+evaluate, at run time) gets no wrapper, and each call to its
+`perform_later` or `perform_now` is an error.
 
 **What is still missing.**
 

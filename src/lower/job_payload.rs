@@ -464,7 +464,7 @@ fn plan_params(
 /// A keyword default as Ruby text, when it is a literal the payload
 /// writer can compare a value with and the reader can stand in for an
 /// absent key.
-fn literal_ruby(e: &Expr) -> Option<String> {
+pub(crate) fn literal_ruby(e: &Expr) -> Option<String> {
     let ExprNode::Lit { value } = &*e.node else { return None };
     Some(match value {
         Literal::Nil => "nil".to_string(),

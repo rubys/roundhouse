@@ -153,3 +153,32 @@ fn a_keyword_job_on_sidekiq_is_pushed_as_a_payload() {
         assert!(job.contains("JobRegistry.push_gadget_job(\"default\", 0.0, article, count, label)"), "{job}");
     }
 }
+
+/// A job refused a wrapper (a `**` keyword rest, or a keyword default
+/// that isn't a literal and so must be evaluated by `perform` itself)
+/// gets no `perform_later`, and each call to it is an error, not a call
+/// to nothing.
+#[test]
+fn calls_to_a_job_refused_a_wrapper_are_errors() {
+    use roundhouse::project::BuildTarget;
+    for (perform, why) in [
+        ("def perform(article, **options)", "**options"),
+        ("def perform(article, at: Time.now)", "at: Time.now"),
+    ] {
+        let job = format!("class GadgetJob < ApplicationJob\n  {perform}\n    puts article.title\n  end\nend\n");
+        let (emitted, errors) = emit_and_run::real_blog()
+            .write("app/jobs/gadget_job.rb", &job)
+            .edit(
+                "app/models/article.rb",
+                "  validates :title, presence: true\n",
+                "  validates :title, presence: true\n\n  def enqueue_gadget\n    GadgetJob.perform_later(self)\n  end\n",
+            )
+            .emit(BuildTarget::Ruby);
+        assert!(
+            errors.iter().any(|e| e.contains("`GadgetJob.perform_later`") && e.contains("gets no `perform_later`")),
+            "{why}: {errors:#?}"
+        );
+        let emitted_job = std::fs::read_to_string(emitted.join("app/models/gadget_job.rb")).expect("emitted job");
+        assert!(!emitted_job.contains("def self.perform_later"), "{why}: {emitted_job}");
+    }
+}

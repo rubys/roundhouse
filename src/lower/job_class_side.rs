@@ -17,8 +17,10 @@
 //! Job classes are those whose parent chain (within the ingested set)
 //! reaches ActiveJob::Base. A `perform` with keywords gets a wrapper
 //! with its own parameter list that forwards each keyword by name
-//! (`new.perform(article, count: count)`); a `**rest` keyword, a block
-//! or `...` forwarding stays unwrapped on the residue ledger.
+//! (`new.perform(article, count: count)`). A `**rest` keyword, a block,
+//! `...` forwarding or a keyword default that isn't a literal stays
+//! unwrapped on the residue ledger, and each call to the missing
+//! entry point is an error.
 //!
 //! Structural pass on `app.library_classes` (where `app/jobs/*.rb`
 //! ingest); runs on the post-analyze hook so every target's tree
@@ -158,6 +160,9 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
     // The jobs given a synthesized `perform_later`: the ones
     // `lower::job_payload` can plan a payload for.
     let mut payload_jobs: BTreeSet<String> = BTreeSet::new();
+    // Jobs refused a wrapper: their `perform_later` / `perform_now`
+    // call sites call nothing, so each is an error below.
+    let mut refused: std::collections::BTreeMap<String, BTreeSet<String>> = std::collections::BTreeMap::new();
     for lc in app.library_classes.iter_mut() {
         let is_worker = workers.contains(lc.name.0.as_str());
         if !is_worker && !jobs.contains(lc.name.0.as_str()) {
@@ -227,9 +232,19 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
         else {
             continue;
         };
+        // The entries a refused job is left without (one it defines
+        // itself stays callable).
+        let missing: BTreeSet<String> = entries
+            .iter()
+            .chain(if is_worker { [].iter() } else { ["perform_later_with"].iter() })
+            .filter(|e| !class_side.contains(**e))
+            .map(|e| e.to_string())
+            .collect();
+        let own_name = lc.name.0.as_str().to_string();
         if perform.params.iter().any(|p| p.forwarding) {
             diags.push(Diagnostic::unsupported(perform.name_span, None, "full forwarding job wrapper",
                 "the generated job wrapper cannot preserve a full forwarding packet"));
+            refused.insert(own_name, missing);
             continue;
         }
         // A job's named keywords forward by name (`count: count`), as
@@ -238,10 +253,29 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
         // positionally, so a worker has no keywords to forward.
         if perform.params.iter().any(|p| p.keyword && (p.rest || is_worker)) {
             diags.push(residue(&perform, "keyword parameters do not forward positionally"));
+            if !is_worker {
+                refused.insert(own_name, missing);
+            }
+            continue;
+        }
+        // The wrapper repeats `perform`'s parameter list, defaults
+        // included, so a default is evaluated when the job is enqueued
+        // and on the class: right only for a literal, which reads the
+        // same wherever and whenever it is evaluated. `label: Time.now`
+        // or `label: default_label` would be evaluated at the wrong time
+        // or not resolve at all.
+        if perform.params.iter().any(|p| {
+            p.keyword && p.default.as_ref().is_some_and(|d| super::job_payload::literal_ruby(d).is_none())
+        }) {
+            diags.push(residue(&perform, "a keyword default that isn't a literal is evaluated by perform, not the wrapper"));
+            refused.insert(own_name, missing);
             continue;
         }
         if perform.block_param.is_some() {
             diags.push(residue(&perform, "the wrapper cannot forward a block"));
+            if !is_worker {
+                refused.insert(own_name, missing);
+            }
             continue;
         }
 
@@ -577,7 +611,40 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
         lc.methods.extend(wrappers);
     }
     app.job_plans = super::job_payload::plan_jobs(app, &jobs, &payload_jobs);
+    if !refused.is_empty() {
+        crate::lower::for_each_hook_body_ref(app, &mut |body| refused_call_sites(body, &refused, &mut diags));
+    }
     diags
+}
+
+/// An error at each `Job.perform_later` / `perform_now` (or folded
+/// `perform_later_with`) of a job refused a wrapper: the declaration's
+/// warning says why, and this says the call has nothing to call.
+fn refused_call_sites(
+    e: &Expr,
+    refused: &std::collections::BTreeMap<String, BTreeSet<String>>,
+    diags: &mut Vec<Diagnostic>,
+) {
+    if let ExprNode::Send { recv: Some(r), method, .. } = &*e.node
+        && matches!(method.as_str(), "perform_later" | "perform_now" | "perform_later_with")
+        && let ExprNode::Const { path } = &*r.node
+    {
+        let name = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+        let name = name.trim_start_matches("::");
+        if refused.get(name).is_some_and(|missing| missing.contains(method.as_str())) {
+            diags.push(Diagnostic::unsupported(
+                e.span,
+                None,
+                "call to a job without a generated wrapper",
+                format!(
+                    "`{name}.{}`: `{name}#perform` takes a `**` keyword rest, a block, `...`, or a keyword default that isn't a literal, so `{name}` gets no `{}`",
+                    method.as_str(),
+                    method.as_str()
+                ),
+            ));
+        }
+    }
+    e.node.for_each_child(&mut |c| refused_call_sites(c, refused, diags));
 }
 
 /// What the `:sidekiq` fold did: the jobs a `set(...)` was folded into
