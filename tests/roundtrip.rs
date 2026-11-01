@@ -186,6 +186,7 @@ fn tiny_blog_round_trips() {
         rbs_signatures: roundhouse::det::HashMap::default(),
         gem_lock: None,
         loaded_frameworks: None,
+        database_paths: Vec::new(),
         assume_ssl_envs: Vec::new(),
         gem_boundary: Default::default(),
         extensions: Default::default(),

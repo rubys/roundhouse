@@ -540,10 +540,19 @@ module Main
   # Tests configure `:memory:` explicitly through their own setup, so
   # this server default never reaches them (the `adapter.nil?` guard
   # also short-circuits when a test already configured the adapter).
+  def self.default_db_path
+    db_path = ENV["BLOG_DB"]
+    return db_path if !db_path.nil? && !db_path.empty?
+    # config/database.yml for RAILS_ENV, as Rails picks it (boot.rb's
+    # AppDatabase, generated from the file at transpile time).
+    env = ENV["RAILS_ENV"].to_s
+    configured = AppDatabase.path_for(env.empty? ? "development" : env)
+    configured.nil? ? "storage/development.sqlite3" : configured
+  end
+
   def self.configure_default_adapter!
     return unless ActiveRecord.adapter.nil?
-    db_path = ENV["BLOG_DB"]
-    path = (!db_path.nil? && !db_path.empty?) ? db_path : "storage/development.sqlite3"
+    path = Main.default_db_path
     # SqliteAdapter.configure delegates to Db.configure (single shared
     # connection); both the legacy AR-adapter dispatch path and the
     # Level-3 lowerer-emitted `_adapter_*` path read through one handle.

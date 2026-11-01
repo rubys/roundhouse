@@ -154,7 +154,7 @@ step "starting the emit on :$PORT"
 LOG="$OUT/e2e-server.log"
 (
   cd "$OUT"
-  RAILS_ENV=development \
+  RAILS_ENV=development BLOG_DB="$OUT/storage/development.sqlite3" \
   SECRET_KEY_BASE="$(ruby -e 'print "a" * 64')" \
   exec ruby -S puma -p "$PORT" config.ru
 ) >"$LOG" 2>&1 &

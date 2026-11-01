@@ -194,7 +194,7 @@ start_server() {   # $1 = label
     rm -f "$EMIT/storage/development.sqlite3-wal" "$EMIT/storage/development.sqlite3-shm"
     ( cd "$EMIT" && exec env RAILS_ENV=production RUBY_YJIT_ENABLE=1 \
         RAILS_MAX_THREADS="$THREADS" ${JEMALLOC:+LD_PRELOAD="$JEMALLOC"} \
-        DB_PATH=storage/development.sqlite3 SECRET_KEY_BASE="$SECRET" \
+        BLOG_DB=storage/development.sqlite3 SECRET_KEY_BASE="$SECRET" \
         RAILS_LOG_LEVEL="${RAILS_LOG_LEVEL:-warn}" \
         "${PIN[@]}" bundle exec puma -p "$PORT" -w 1 -t "$THREADS:$THREADS" config.ru \
         > "$OUT/server-$label.log" 2>&1 ) &

@@ -164,7 +164,9 @@ module Main
   # setup).
   #
   # When `BLOG_DB` env var names a path, configure SqliteAdapter
-  # against that file. Otherwise default to the Rails-traditional
+  # against that file. Otherwise the database config/database.yml names
+  # for RAILS_ENV (development when unset), as Rails opens it, and failing
+  # that the Rails-traditional
   # `storage/development.sqlite3` — persisted across requests and
   # consistent with every other target's default. The archive ships
   # `storage/.keep`, so the directory exists for first-run open.
@@ -179,7 +181,12 @@ module Main
   # bans` from a file whose `bans` table is right there on disk.
   def self.default_db_path
     db_path = ENV["BLOG_DB"]
-    (!db_path.nil? && !db_path.empty?) ? db_path : "storage/development.sqlite3"
+    return db_path if !db_path.nil? && !db_path.empty?
+    # config/database.yml for RAILS_ENV, as Rails picks it (boot.rb's
+    # AppDatabase, generated from the file at transpile time).
+    env = ENV["RAILS_ENV"].to_s
+    configured = AppDatabase.path_for(env.empty? ? "development" : env)
+    configured.nil? ? "storage/development.sqlite3" : configured
   end
 
   def self.configure_default_adapter!
@@ -879,7 +886,7 @@ while i < ARGV.length
     puts "  OS workers per process: one per core; SPINEL_WORKERS=N caps it"
     puts "  TEP_SERVER=fiber runs the fiber-per-connection server instead"
     puts "    (HTTP only, one thread; the measurement lane, matz/spinel#4306)"
-    puts "  SQLite file: BLOG_DB env (default storage/development.sqlite3)"
+    puts "  SQLite file: BLOG_DB env, else config/database.yml for RAILS_ENV, else storage/development.sqlite3"
     exit(0)
   elsif (arg == "--port" || arg == "-p") && i + 1 < ARGV.length
     port = ARGV[i + 1].to_i
