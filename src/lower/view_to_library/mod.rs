@@ -2668,6 +2668,10 @@ pub struct PartialCallContract {
     /// already answers to that (see [`PartialStems`]).
     pub method: Symbol,
     pub record: String,
+    /// The ivar the record param stands for, when the partial reads one
+    /// named like it (`@post` in `posts/_summary`). A render that hands
+    /// no record passes the caller's `@<ivar>` there, as Rails shares it.
+    pub record_ivar: Option<String>,
     pub closure: Vec<String>,
     pub extras: Vec<String>,
     /// A strict-locals partial (`<%# locals: (…) -%>`) takes its
@@ -2786,6 +2790,7 @@ pub(crate) fn partial_call_contracts(
                 PartialCallContract {
                     method,
                     record: declared[0].clone(),
+                    record_ivar: None,
                     closure,
                     // The request-context keywords the def adds (`request_context_views`).
                     extras: declared[1..]
@@ -2818,6 +2823,10 @@ pub(crate) fn partial_call_contracts(
             .map(|s| (s.as_str().to_string(), ivar_local(&ivar_locals, s.as_str())))
             .filter(|(_, local)| local != &record)
             .unzip();
+        let record_ivar = closure_raw
+            .iter()
+            .find(|s| ivar_local(&ivar_locals, s.as_str()) == record)
+            .map(|s| s.as_str().to_string());
         if let Some(keys) = keys_map.get(&key) {
             for k in keys {
                 if k != &record && !extras.contains(k) {
@@ -2828,7 +2837,7 @@ pub(crate) fn partial_call_contracts(
         drop_closure_names(&mut extras, &closure_locals);
         out.insert(
             spelled,
-            PartialCallContract { method, record, closure, extras, keyword_extras: false, declared: Vec::new() },
+            PartialCallContract { method, record, record_ivar, closure, extras, keyword_extras: false, declared: Vec::new() },
         );
     }
     out

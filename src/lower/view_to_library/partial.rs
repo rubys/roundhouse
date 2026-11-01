@@ -280,13 +280,14 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
                 // A strict-locals target's record slot is its first
                 // declared local — bind it from the entry's locals by
                 // the DECLARED name (header default when absent). A
-                // convention target gets no record object: nil, then
-                // its closure ivars (threaded as this view's params).
+                // convention target gets no record object: the caller's
+                // same-named ivar or nil, then its closure ivars
+                // (threaded as this view's params).
                 let record = match strict_decl {
                     Some(decl) => lookup(decl[0].name.as_str())
                         .or_else(|| decl[0].default.clone())
                         .unwrap_or_else(nil_lit),
-                    None => nil_lit(),
+                    None => caller_record_ivar(ctx, &module_camel, &method_sym),
                 };
                 let mut call_args = vec![record];
                 call_args.extend(partial_extra_args(ctx, &module_camel, &method_sym));
@@ -542,6 +543,27 @@ fn partial_extra_args(ctx: &ViewCtx, module: &str, method: &str) -> Vec<Expr> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The record a render that hands a convention partial no object passes:
+/// the caller's own `@<record>` when the partial's closure reads it, else
+/// nil. Rails renders a partial in its caller's view context, so `@post`
+/// in `posts/_summary` is the caller's ivar. Here the record param stands
+/// for that ivar (the def side dedups it) and `partial_extra_args` leaves
+/// it out of the threaded set, so without an object it rides in the
+/// record slot. The render graph folds it into the caller's closure, so
+/// the caller holds it as a local.
+fn caller_record_ivar(ctx: &ViewCtx, module: &str, method: &str) -> Expr {
+    let record_name = singularize(&snake_case(last_segment(module)));
+    let reads = ctx
+        .partial_ivars
+        .get(&(module.to_string(), method.to_string()))
+        .is_some_and(|ivars| ivars.iter().any(|n| n.as_str() == record_name));
+    let local = ctx.ivar_local(&record_name);
+    match reads && ctx.is_local(&local) {
+        true => var_ref(Symbol::from(local)),
+        false => nil_lit(),
+    }
 }
 
 /// `render partial: "…", collection: xs, as: :x` — iterate `xs`, calling
@@ -1274,8 +1296,11 @@ pub(super) fn named_partial_call_with_record(
                     .cloned()
                     .or_else(|| decl[0].default.clone())
                     .unwrap_or_else(nil_lit),
-                (None, true) => lookup_local(&record_name).unwrap_or_else(nil_lit),
-                (None, false) => arg.cloned().unwrap_or_else(nil_lit),
+                (None, true) => lookup_local(&record_name)
+                    .unwrap_or_else(|| caller_record_ivar(ctx, &module_camel, &method_sym)),
+                (None, false) => arg
+                    .cloned()
+                    .unwrap_or_else(|| caller_record_ivar(ctx, &module_camel, &method_sym)),
                 },
             };
             let mut call_args = vec![arg_expr];
