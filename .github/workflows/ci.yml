@@ -1795,6 +1795,9 @@ jobs:
     env:
       MAKEFLAGS: "-j4"
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      # run_spinel_slim probes compile alone on PRs and pushes; scheduled
+      # Full validation compiles each inside the whole blog's boot instead.
+      ROUNDHOUSE_SPINEL_SLIM: ${{ inputs.full && '0' || '1' }}
     steps:
       - uses: actions/checkout@v7
       # No setup-rust: the producer archive restores the test binaries.

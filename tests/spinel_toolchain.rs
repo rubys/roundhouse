@@ -238,7 +238,7 @@ fn anonymous_keyword_forwarding_runs_natively() {
             "app/services/keyword_forwarder.rb",
             anonymous_keywords::SOURCE,
         )
-        .run_spinel(anonymous_keywords::ASSERTIONS);
+        .run_spinel_slim(&[], anonymous_keywords::ASSERTIONS);
     run.assert_passes();
     assert!(run.stdout.contains("anonymous keyword forwarding contract passed"));
     let emitted = std::fs::read_to_string(run.emitted.join("app/models/keyword_forwarder.rb"))
@@ -269,7 +269,8 @@ fn active_support_many_block_and_squish_bang_run_natively() {
 end
 "#,
         )
-        .run_spinel(
+        .run_spinel_slim(
+            &["runtime/active_support_ext"],
             r#"raise "many? block zero/one/multiple or short circuit failed" unless ActiveSupportProbe.many_matches == [false, false, true, 3]
 raise "squish! did not match Unicode whitespace semantics" unless ActiveSupportProbe.squish_bang == "foo bar"
 puts "ActiveSupport core extensions native passed"
@@ -714,7 +715,7 @@ fn named_capture_matches_assign_their_locals_natively() {
   end
 end
 "##)
-        .run_spinel(r##"raise "map" unless Matcher.map_name(%(<img usemap="#m1">)) == "m1"
+        .run_spinel_slim(&[], r##"raise "map" unless Matcher.map_name(%(<img usemap="#m1">)) == "m1"
 raise "map none" unless Matcher.map_name("none").nil?
 raise "pair" unless Matcher.pair("1-2") == ["1", "2"]
 raise "pair none" unless Matcher.pair("x") == [nil, nil, :none]

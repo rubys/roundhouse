@@ -221,21 +221,106 @@ impl Overlay {
         let (emitted, errors) = self.emit_tree(BuildTarget::Spinel);
         std::fs::write(emitted.join("contract.rb"), format!("require_relative \"boot\"\n{script}"))
             .expect("write native consumer");
-        let compiler = std::env::var("SPINEL").unwrap_or_else(|_| "spinel".into());
-        let command = std::iter::once(compiler.as_str()).chain(flags.iter().copied())
-            .chain(["contract.rb", "-o", "contract"]).collect::<Vec<_>>().join(" ");
-        let compiled = Command::new(&compiler).args(flags).args(["contract.rb", "-o", "contract"])
-            .current_dir(&emitted).output().expect("spawn spinel");
-        std::fs::write(emitted.join("compile.stdout"), &compiled.stdout).expect("write compile stdout");
-        std::fs::write(emitted.join("compile.stderr"), &compiled.stderr).expect("write compile stderr");
-        if !compiled.status.success() {
-            return Run::new(command, emitted, errors, compiled);
-        }
-        let output = Command::new(emitted.join("contract")).current_dir(&emitted)
-            .output().expect("run native consumer");
-        Run::new(format!("{command} && ./contract"), emitted, errors, output)
+        compile_and_run_contract(emitted, errors, flags)
     }
 
+    /// `run_spinel` for a probe that does not need the app: compile only the
+    /// files this overlay `write`s (as emitted, found by their
+    /// `#<SPINEL_SOURCE>` markers) and the runtime entries named here, each
+    /// relative to the emitted root without `.rb`. Spinel follows their own
+    /// `require_relative`s. The whole blog's `boot` is about 89k lines of C;
+    /// a probe and its closure is a few thousand, so the native build takes
+    /// seconds instead of minutes.
+    ///
+    /// The probe no longer sees the app's other code, which can widen its
+    /// types under whole-program inference. `ROUNDHOUSE_SPINEL_SLIM=0` runs
+    /// the same test inside `boot` instead; scheduled Full validation sets
+    /// it. A missing runtime entry fails the build or the run (spinel refuses
+    /// an undefined method; an undefined constant raises), never passes.
+    pub fn run_spinel_slim(self, runtime: &[&str], script: &str) -> Run {
+        if std::env::var("ROUNDHOUSE_SPINEL_SLIM").is_ok_and(|v| v == "0") {
+            return self.run_spinel(script);
+        }
+        let written: Vec<String> = self
+            .edits
+            .iter()
+            .map(|edit| match edit {
+                Edit::Write { path, .. } => path.clone(),
+                Edit::Replace { path, .. } | Edit::Remove { path } => panic!(
+                    "run_spinel_slim compiles written probe files only; {path} edits the app, so use run_spinel"
+                ),
+            })
+            .collect();
+        assert!(!written.is_empty(), "run_spinel_slim needs a written probe file");
+        let (emitted, errors) = self.emit_tree(BuildTarget::Spinel);
+        let mut requires = Vec::new();
+        for entry in runtime {
+            assert!(
+                emitted.join(format!("{entry}.rb")).is_file(),
+                "run_spinel_slim: {entry}.rb is not in the emitted tree"
+            );
+            requires.push(entry.to_string());
+        }
+        let probes = emitted_from(&emitted, &written);
+        assert!(!probes.is_empty(), "run_spinel_slim: no emitted file comes from {written:?}");
+        requires.extend(probes);
+        let mut contract: String =
+            requires.iter().map(|r| format!("require_relative {r:?}\n")).collect();
+        contract.push_str(script);
+        std::fs::write(emitted.join("contract.rb"), contract).expect("write native consumer");
+        compile_and_run_contract(emitted, errors, &[])
+    }
+}
+
+/// Emitted `.rb` files (relative, without the extension, sorted) whose
+/// `#<SPINEL_SOURCE>` markers name one of the overlay's written sources.
+/// One source can become several files: the emitter writes one class each.
+fn emitted_from(emitted: &Path, written: &[String]) -> Vec<String> {
+    fn walk(root: &Path, dir: &Path, written: &[String], out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(root, &path, written, out);
+            } else if path.extension().is_some_and(|ext| ext == "rb") {
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                let from_probe = text.lines().filter_map(|l| l.trim_start().strip_prefix("#<SPINEL_SOURCE>")).any(|marker| {
+                    let source = marker.rsplit_once(':').map_or(marker, |(file, _line)| file);
+                    written.iter().any(|w| source == w || source.ends_with(&format!("/{w}")))
+                });
+                if from_probe {
+                    let rel = path.strip_prefix(root).unwrap().with_extension("");
+                    out.push(rel.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for top in ["app", "lib"] {
+        walk(emitted, &emitted.join(top), written, &mut out);
+    }
+    out.sort();
+    out
+}
+
+/// Compile `contract.rb` in the emitted tree with spinel and run the binary.
+fn compile_and_run_contract(emitted: PathBuf, errors: Vec<String>, flags: &[&str]) -> Run {
+    let compiler = std::env::var("SPINEL").unwrap_or_else(|_| "spinel".into());
+    let command = std::iter::once(compiler.as_str()).chain(flags.iter().copied())
+        .chain(["contract.rb", "-o", "contract"]).collect::<Vec<_>>().join(" ");
+    let compiled = Command::new(&compiler).args(flags).args(["contract.rb", "-o", "contract"])
+        .current_dir(&emitted).output().expect("spawn spinel");
+    std::fs::write(emitted.join("compile.stdout"), &compiled.stdout).expect("write compile stdout");
+    std::fs::write(emitted.join("compile.stderr"), &compiled.stderr).expect("write compile stderr");
+    if !compiled.status.success() {
+        return Run::new(command, emitted, errors, compiled);
+    }
+    let output = Command::new(emitted.join("contract")).current_dir(&emitted)
+        .output().expect("run native consumer");
+    Run::new(format!("{command} && ./contract"), emitted, errors, output)
+}
+
+impl Overlay {
     /// Copy the fixture, apply the edits, analyze, and write the Ruby
     /// target. Returns the emitted tree, removed with its scratch when
     /// dropped (see `Run`'s `Drop`), and `check`'s error diagnostics.
