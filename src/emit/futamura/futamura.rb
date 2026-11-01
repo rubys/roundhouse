@@ -441,6 +441,12 @@ if ENV["FUTAMURA_STATS"].to_s != ""
         end
 
         def records(key, binds, owner: nil, association: nil, root: nil, &fallback)
+          # A site reached from FUTAMURA_VERIFY's comparison run is part of
+          # Rails' chain being timed, not a call of its own: counting it
+          # would record a nested fallback as a specialized call.
+          if Futamura.verifying?
+            return super(key, binds, owner: owner, association: association, &fallback)
+          end
           site = Stats.site(key)
           site.calls += 1
           fell = nil
