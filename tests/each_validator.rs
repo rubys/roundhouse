@@ -127,7 +127,7 @@ fn a_key_resolves_as_rails_looks_the_constant_up_on_ruby() {
 }
 
 // A key naming no app class (a gem's validator) is reported at ingest, as
-// before, and the whole call dropped, its `presence:` with it.
+// before, and dropped alone: the call keeps its `presence:`.
 #[test]
 fn a_key_naming_no_app_validator_stays_reported() {
     let warnings = emit_and_run::real_blog()
@@ -135,9 +135,74 @@ fn a_key_naming_no_app_validator_stays_reported() {
         .write("app/models/entry.rb", "class Entry < ApplicationRecord\n  validates :slug, presence: true, nowhere: true\nend\n")
         .ingest_warnings();
     assert!(
-        warnings.iter().any(|w| w.contains("validates :slug, nowhere:") && w.contains("validation option not lowered")),
+        warnings.iter().any(|w| w.contains("validates :slug, nowhere:")
+            && w.contains("validation option not lowered")
+            && w.contains("only the `nowhere:` rule is dropped, the call keeps `presence:`")),
         "{warnings:#?}"
     );
+}
+
+// Beside a key naming no app class, the call's built-in rules and its
+// app validator's key still run.
+#[test]
+fn a_key_naming_no_app_validator_leaves_the_other_rules_on_ruby() {
+    let app = || {
+        emit_and_run::real_blog()
+            .edit("db/schema.rb", SCHEMA_ANCHOR, SCHEMA)
+            .write("app/validators/slug_validator.rb", SLUG)
+            .write("app/models/entry.rb", "class Entry < ApplicationRecord\n  validates :slug, presence: true, slug: true, nowhere: true\nend\n")
+    };
+    let warnings = app().ingest_warnings();
+    assert!(
+        warnings.iter().any(|w| w.contains("validates :slug, nowhere:") && w.contains("the call keeps `presence:`, `slug:`")),
+        "{warnings:#?}"
+    );
+    let run = app().run_ruby(
+        "def errs(slug)\n  e = Entry.new(slug: slug)\n  e.valid?\n  e.errors.to_a\nend\ngot = [errs(\"\"), errs(\"Bad Slug\"), errs(\"good\")]\nraise got.inspect unless got == [[\"Slug can't be blank\"], [\"Slug is invalid\"], []]\nputs \"others passed\"\n",
+    );
+    run.assert_passes();
+    assert!(run.stdout.contains("others passed"), "{}", run.stdout);
+}
+
+// An acceptance rule on an undeclared attribute gets an accessor that
+// carries the call's span. The call's validator key is expanded on ruby,
+// and dropped on a strict target, without taking the accessor along.
+const TERMS: &str = "class Entry < ApplicationRecord\n  validates :terms, acceptance: true, slug: true\nend\n";
+
+#[test]
+fn an_acceptance_rule_beside_a_custom_key_keeps_its_accessor_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .edit("db/schema.rb", SCHEMA_ANCHOR, SCHEMA)
+        .write("app/validators/slug_validator.rb", SLUG)
+        .write("app/models/entry.rb", TERMS)
+        .run_ruby(
+            "def errs(terms)\n  e = Entry.new\n  e.terms = terms\n  e.valid?\n  e.errors.to_a\nend\ngot = [errs(nil), errs(\"1\"), errs(\"0\"), errs(\"Bad 1\")]\nraise got.inspect unless got == [[], [], [\"Terms must be accepted\"], [\"Terms must be accepted\", \"Terms is invalid\"]]\nputs \"accessor passed\"\n",
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("accessor passed"), "{}", run.stdout);
+}
+
+#[test]
+fn a_strict_target_keeps_the_accessor_of_an_acceptance_rule() {
+    let root = std::env::temp_dir().join(format!("roundhouse-each-validator-terms-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let source = root.join("app");
+    assert!(std::process::Command::new("cp").args(["-a"]).arg(roundhouse::fixtures::real_blog()).arg(&source).status().unwrap().success());
+    let schema = std::fs::read_to_string(source.join("db/schema.rb")).unwrap().replacen(SCHEMA_ANCHOR, SCHEMA, 1);
+    std::fs::write(source.join("db/schema.rb"), schema).unwrap();
+    std::fs::write(source.join("app/models/entry.rb"), TERMS).unwrap();
+    std::fs::create_dir_all(source.join("app/validators")).unwrap();
+    std::fs::write(source.join("app/validators/slug_validator.rb"), SLUG).unwrap();
+    let (app, _) = roundhouse::ingest::prism::scope(|| roundhouse::ingest::ingest_app(&source));
+    let mut app = app.expect("ingest");
+    let _ = roundhouse::session::analyze_and_lower_for(&mut app, BuildTarget::Typescript);
+    std::fs::remove_dir_all(&root).ok();
+    let entry = app.models.iter().find(|m| m.name.0.as_str() == "Entry").expect("Entry");
+    let items: Vec<String> = entry.body.iter().map(|item| format!("{item:?}")).collect();
+    assert!(items.iter().any(|item| item.contains("attr_accessor")), "{items:#?}");
+    assert!(items.iter().any(|item| item.contains("Acceptance")), "{items:#?}");
+    assert!(!items.iter().any(|item| item.contains("\"validates\"")), "{items:#?}");
 }
 
 /// The `Entry` body after `target`'s lowering, and the warnings it gave.
@@ -165,11 +230,12 @@ fn lowered_entry(target: BuildTarget) -> (Vec<String>, Vec<String>) {
 }
 
 // A strict target keeps the report, for each attribute and key, and
-// drops each call with its built-in rules, as an ingest gap does.
+// drops each call's keys. Its built-in rules run, as beside a rule's gap
+// at ingest: `presence:` on `:slug`.
 #[test]
 fn a_strict_target_reports_the_keys_and_drops_the_calls() {
     let (items, warnings) = lowered_entry(BuildTarget::Typescript);
-    assert!(items.is_empty(), "{items:#?}");
+    assert!(items.len() == 1 && items[0].contains("attribute: Symbol(\"slug\")") && items[0].contains("rules: [Presence]"), "{items:#?}");
     for construct in ["validates :slug, slug:", "validates :body, words:", "validates :title, nil_seen:", "validates :code, prefix:"] {
         assert!(
             warnings.iter().any(|w| w.contains(construct) && w.contains("validation option not lowered")),

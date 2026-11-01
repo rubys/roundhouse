@@ -1666,8 +1666,11 @@ end
     );
 }
 
+// A gap in a rule's own options drops that rule, and the call keeps the
+// others (`presence:` on `:name`). A condition reaches every rule, so its
+// gap drops the call.
 #[test]
-fn unmodeled_validates_options_warn_and_drop_the_whole_call() {
+fn unmodeled_validates_options_warn_and_drop_their_rule_or_call() {
     let (model, warnings, gaps) = ingest_widget(
         r#"
 class Widget < ApplicationRecord
@@ -1685,11 +1688,9 @@ class Widget < ApplicationRecord
 end
 "#,
     );
-    assert!(
-        validation_rules(&model).is_empty(),
-        "a dropped option must not leave the sibling rules running: {:?}",
-        validation_rules(&model).iter().map(|v| v.attribute.as_str()).collect::<Vec<_>>()
-    );
+    let kept: Vec<(String, Vec<roundhouse::dialect::ValidationRule>)> =
+        validation_rules(&model).into_iter().map(|v| (v.attribute.as_str().to_string(), v.rules.clone())).collect();
+    assert_eq!(kept, vec![("name".to_string(), vec![roundhouse::dialect::ValidationRule::Presence])]);
     for needle in [
         "uniqueness",
         "comparison",

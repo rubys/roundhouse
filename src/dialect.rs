@@ -610,7 +610,8 @@ pub struct Validation {
     /// `unless_cond` are set, the rules run only when `if:` holds and
     /// `unless:` does not. Anything else (an arity>0 lambda, a String,
     /// a captured local, a body survey mode had to stub with `nil`) is
-    /// not stored; ingest refuses the whole call instead of checking
+    /// not stored; ingest refuses the whole call (the rule, for a
+    /// condition in the rule's own hash) instead of checking
     /// unconditionally.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub if_cond: Option<Expr>,

@@ -65,14 +65,17 @@ pub struct ConcernGuardedItem {
 /// deliverable — the thing ingesters produce and emitters consume.
 
 /// A `validates` call kept for its custom keys (`ingest::each_validator`):
-/// the model, the call's span and source text, and each key with the app
-/// `EachValidator` class it names.
+/// the model, the call's span and source text, each key with the app
+/// `EachValidator` class it names, and the call's built-in rules.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EachValidatorCall {
     pub model: ClassId,
     pub span: Span,
     pub text: String,
     pub keys: Vec<(String, String)>,
+    /// The call's lowered built-in rules, by key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kept: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

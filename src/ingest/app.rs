@@ -3424,7 +3424,7 @@ fn gap_acceptance_on_undeclared(app: &mut App) {
 }
 
 /// Drop every Validation item of each refused `validates` call, as an
-/// ingest refusal (`ParsedValidates::Gap`) does: every item a call
+/// ingest refusal of the call (`ParsedValidates::Gap`) does: every item a call
 /// produced shares its span (one per attribute, and per-rule `if:` /
 /// `unless:` splits), so a `presence:` beside the refused rule is not kept.
 fn refuse_validates_calls(

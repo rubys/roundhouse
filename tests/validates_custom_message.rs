@@ -8,7 +8,8 @@
 //! interpolation the rule cannot always supply (`%{count}` on
 //! numericality, whose "is not a number" error has no count: Rails raises
 //! `I18n::MissingInterpolationArgument`; an unknown `%{name}`) stay the
-//! gap. `%%` is I18n's literal `%`, so `%%{shape}` names nothing and
+//! gap, and the rule runs with its default message: it accepts and rejects
+//! the records Rails does. `%%` is I18n's literal `%`, so `%%{shape}` names nothing and
 //! lowers. A call-level `message:` is not a Rails option at all (`validates`
 //! raises "Unknown validator: 'MessageValidator'").
 
@@ -62,10 +63,19 @@ fn a_string_message_lowers_on_every_rule_kind() {
 }
 
 #[test]
-fn other_messages_stay_the_gap() {
+fn other_messages_stay_the_gap_with_the_default_message() {
     let (model, warnings) = ingest();
     for attr in ["keyed", "called", "counted", "unknown", "formatted"] {
-        assert!(!lowered(&model, attr), "{attr} stays a gap");
-        assert!(warnings.iter().any(|w| w.contains(&format!("validates :{attr},")) && w.contains("message")), "{attr}: {warnings:?}");
+        assert!(lowered(&model, attr), "{attr} keeps its rule");
+        assert!(
+            !model.body.iter().any(|item| matches!(item,
+                roundhouse::dialect::ModelBodyItem::Validation { validation, .. }
+                    if validation.attribute.as_str() == attr && validation.message.is_some())),
+            "{attr} runs with the default message"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains(&format!("validates :{attr},")) && w.contains("message option not lowered; the rule runs with its default message")),
+            "{attr}: {warnings:?}"
+        );
     }
 }
