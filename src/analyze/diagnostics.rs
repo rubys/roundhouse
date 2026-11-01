@@ -114,6 +114,39 @@ fn unlowered_form_builder_calls(app: &App) -> Vec<Diagnostic> {
     out
 }
 
+/// A `time_tag` that `ingest::time_tag` left as written: no text argument
+/// and no block, whose text Rails makes with `I18n.l(t, format: …)` (not
+/// modeled), or options that are not a literal hash. Nothing else answers
+/// the call, so it is refused rather than reaching the emit.
+fn unlowered_time_tags(app: &App) -> Vec<Diagnostic> {
+    fn visit(expr: &Expr, out: &mut Vec<Diagnostic>) {
+        if let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node
+            && method.as_str() == "time_tag"
+            && !expr.span.is_synthetic()
+        {
+            let reason = if args.len() <= 1 && block.is_none()
+                || (args.len() == 2 && block.is_none() && matches!(&*args[1].node, ExprNode::Hash { .. }))
+            {
+                "with no text argument and no block, Rails' text is `I18n.l(t, format: …)`, which is not modeled; pass the text (`time_tag t, \"…\"`) or a block"
+            } else {
+                "its arguments are not a time, an optional text and a literal options hash"
+            };
+            out.push(Diagnostic::unsupported(expr.span, None, "time_tag", reason));
+        }
+        expr.node.for_each_child(&mut |child| visit(child, out));
+    }
+    let mut out = Vec::new();
+    for view in &app.views {
+        visit(&view.body, &mut out);
+    }
+    for lc in &app.library_classes {
+        for method in &lc.methods {
+            visit(&method.body, &mut out);
+        }
+    }
+    out
+}
+
 /// Builder methods the view lowering serves outside
 /// `classify_form_builder_method`.
 const FORM_BUILDER_HANDLED_ELSEWHERE: &[&str] = &["object"];
@@ -429,6 +462,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     }
     out.extend(attribute_macro_refusals(app));
     out.extend(unlowered_form_builder_calls(app));
+    out.extend(unlowered_time_tags(app));
     out.extend(devise_refusals(app));
     out.extend(overridden_synthesized_accessors(app));
     out.extend(runtime_defined_surfaces(app));

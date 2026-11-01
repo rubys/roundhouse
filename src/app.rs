@@ -371,6 +371,11 @@ pub struct App {
     /// (`ingest::extend_splice`), by name.
     #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
     pub spliced_class_methods: crate::det::HashSet<Symbol>,
+    /// The `time_tag` calls `ingest::time_tag` rewrote to the `tag.time`
+    /// builder, by span: `project::report_time_tag_calls` refuses them on the
+    /// targets whose `iso8601` of a record's time differs from Rails'.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub time_tag_calls: Vec<crate::span::Span>,
     /// Partial → local name → type, harvested by the analyzer from the
     /// RENDER SITES that pass each local (`render partial: "form",
     /// locals: { new_message: @new_message }` with `@new_message` typed
@@ -1221,6 +1226,7 @@ impl App {
             load_hook_class_macros: Vec::new(),
             load_hook_extended_macros: Vec::new(),
             spliced_class_methods: Default::default(),
+            time_tag_calls: Vec::new(),
             partial_local_types: HashMap::default(),
             view_ivar_types: HashMap::default(),
             html_safe_methods: BTreeSet::new(),

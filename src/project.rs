@@ -1267,6 +1267,29 @@ fn is_plain_ruby_class(app: &App, lc: &crate::dialect::LibraryClass) -> bool {
     true
 }
 
+/// `time_tag`'s `datetime` is the time's `iso8601`, which Rails 8.1.4
+/// writes without a fraction and with `Z` for UTC (`2026-11-01T09:30:15Z`).
+/// Measured on a datetime column through each target's own test runner,
+/// TypeScript writes `2026-11-01T09:30:15.500Z` and Python
+/// `2026-11-01T09:30:15.500000+00:00`, and Crystal's, Go's and Rust's emits
+/// of the read don't build, so off the ruby family the call is refused.
+fn report_time_tag_calls(app: &App, target: BuildTarget) {
+    if matches!(
+        target,
+        BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Roda | BuildTarget::Futamura
+    ) {
+        return;
+    }
+    for span in &app.time_tag_calls {
+        emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+            *span,
+            Some(crate::ident::Symbol::from(target.as_str())),
+            "time_tag",
+            "its `datetime` is the time's `iso8601`, which this target writes otherwise than Rails (fraction or zone suffix)",
+        ));
+    }
+}
+
 /// A non-integer primary key (`create_table …, id: :uuid`,
 /// `primary_key: "identifier", id: :string`) is carried end to end by
 /// the ruby-shape emit — CRuby, JRuby and Spinel: the analyzer types
@@ -2894,6 +2917,7 @@ fn target_files_inner(
     reject_unsupported_dates(app, target)?;
     reject_unsupported_forwarded_procs(app, target)?;
     report_unsupported_keys(app, target);
+    report_time_tag_calls(app, target);
     report_unemitted_library_classes(app, target);
     report_relation_class_calls(app, target);
     report_typescript_error_class(app, target);
