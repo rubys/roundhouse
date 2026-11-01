@@ -435,6 +435,32 @@ class ViewHelpersTest < Minitest::Test
     assert_equal "", ViewHelpers.optional_value_attr("")
   end
 
+  # Rails 8.1.4's `path_to_stylesheet` (actionview `asset_path`).
+  def test_stylesheet_href_keeps_a_url_or_blank_as_given
+    assert_equal "https://cdn.example.org/theme.css", ViewHelpers.stylesheet_href("https://cdn.example.org/theme.css")
+    assert_equal "HTTP://cdn.example.org/theme.css", ViewHelpers.stylesheet_href("HTTP://cdn.example.org/theme.css")
+    assert_equal "//cdn.example.org/theme.css", ViewHelpers.stylesheet_href("//cdn.example.org/theme.css")
+    assert_equal "data:text/css,body{}", ViewHelpers.stylesheet_href("data:text/css,body{}")
+    assert_equal "cid:theme", ViewHelpers.stylesheet_href("cid:theme")
+    assert_equal "", ViewHelpers.stylesheet_href("")
+  end
+
+  def test_stylesheet_href_keeps_an_absolute_path_off_the_pipeline
+    assert_equal "/static/theme.css", ViewHelpers.stylesheet_href("/static/theme.css")
+    assert_equal "/static/theme.css", ViewHelpers.stylesheet_href("/static/theme")
+    assert_equal "/static/theme.min.css", ViewHelpers.stylesheet_href("/static/theme.min")
+  end
+
+  def test_stylesheet_href_adds_css_once_and_keeps_a_tail
+    assert_equal ViewHelpers.digested_asset_path("theme.css"), ViewHelpers.stylesheet_href("theme.css")
+    assert_equal ViewHelpers.digested_asset_path("theme.css"), ViewHelpers.stylesheet_href("theme")
+    assert_equal ViewHelpers.digested_asset_path("theme.min.css"), ViewHelpers.stylesheet_href("theme.min")
+    assert_equal ViewHelpers.digested_asset_path("dir.v2/theme.css"), ViewHelpers.stylesheet_href("dir.v2/theme")
+    assert_equal ViewHelpers.digested_asset_path("theme.css") + "?v=2", ViewHelpers.stylesheet_href("theme?v=2")
+    assert_equal ViewHelpers.digested_asset_path("theme.css") + "?v=2", ViewHelpers.stylesheet_href("theme.css?v=2")
+    assert_equal ViewHelpers.digested_asset_path("theme.css") + "#x", ViewHelpers.stylesheet_href("theme#x")
+  end
+
   def test_escape_or_empty_returns_escaped_value
     assert_equal "hello", ViewHelpers.escape_or_empty("hello")
     assert_equal "&lt;b&gt;hi&lt;/b&gt;", ViewHelpers.escape_or_empty("<b>hi</b>")

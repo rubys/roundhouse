@@ -975,9 +975,67 @@ module ActionView
     end
   
     def self.stylesheet_link_tag(name, opts = EMPTY_HTML_OPTS)
-      href = digested_asset_path("#{name}.css")
+      href = stylesheet_href(name.to_s)
       attrs = render_attrs({ rel: "stylesheet", href: href }.merge(opts.to_h))
       "<link#{attrs}>"
+    end
+
+    # Rails 8.1.4's `path_to_stylesheet` (actionview `asset_path`, type
+    # :stylesheet): a URL (`scheme://`, `//`, `cid:`, `data:`) and a blank
+    # source as given; otherwise `.css` unless the name already ends in it,
+    # then the pipeline unless the path is absolute, with a `?…`/`#…` tail
+    # kept at the end. String ops only: no portable Regexp.
+    def self.stylesheet_href(source)
+      return source if source.empty? || asset_url?(source)
+      cut = first_char_index(source, "?")
+      fragment = first_char_index(source, "#")
+      # Two flat statements, not `a && (b || c)` (Crystal's and Go's emits
+      # drop those parentheses) nor a nested modifier `if` (Python's emit
+      # writes it on one line).
+      cut = fragment if fragment >= 0 && cut < 0
+      cut = fragment if fragment >= 0 && fragment < cut
+      # Rails splits a tail of at least one character after the mark.
+      cut = source.length if cut < 0 || cut == source.length - 1
+      path = source[0, cut]
+      tail = source[cut, source.length - cut]
+      path = path + ".css" unless css_extname?(path)
+      path = digested_asset_path(path) unless path.start_with?("/")
+      path + tail
+    end
+
+    # Rails' asset `URI_REGEXP`: `[-a-z]+://` (any case), `cid:`, `data:`, `//`.
+    def self.asset_url?(source)
+      return true if source.start_with?("//")
+      lower = source.downcase
+      return true if lower.start_with?("cid:") || lower.start_with?("data:")
+      i = 0
+      while i < lower.length && "-abcdefghijklmnopqrstuvwxyz".include?(lower[i, 1])
+        i += 1
+      end
+      i > 0 && lower[i, 3] == "://"
+    end
+
+    # `File.extname(path) == ".css"`: the last segment ends in `.css` after
+    # a name (`.css` alone has no extname).
+    def self.css_extname?(path)
+      slash = -1
+      i = 0
+      while i < path.length
+        slash = i if path[i, 1] == "/"
+        i += 1
+      end
+      base = path[slash + 1, path.length - slash - 1]
+      base.length > 4 && base.end_with?(".css")
+    end
+
+    # The index of the first `ch` in `s`, or -1.
+    def self.first_char_index(s, ch)
+      i = 0
+      while i < s.length
+        return i if s[i, 1] == ch
+        i += 1
+      end
+      -1
     end
 
     # `<script src>` include for a JS source. The source resolves through
