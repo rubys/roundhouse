@@ -681,3 +681,13 @@ fn a_hook_name_outside_a_guard_branch_is_not_a_hook() {
         "the def is still taken"
     );
 }
+
+#[test]
+fn a_hook_in_a_case_branch_stays_on_the_ledger() {
+    let (app, ledger) = ingest(&[(
+        "config/initializers/by_env.rb",
+        "case ENV[\"MODE\"]\nwhen \"server\"\n  Rails.application.config.after_initialize do\n    BootProbe.recover_pending!\n  end\nend\n",
+    )]);
+    assert!(!ledger.is_empty(), "the hook is reported");
+    assert!(app.boot_program.is_empty(), "{:?}", app.boot_program);
+}
