@@ -118,8 +118,8 @@ fn with_store(extra: Option<(&str, &str)>) -> String {
 fn an_app_cache_store_rails_cache_is_bound_to_keeps_fetch() {
     // `Rails.cache` is the app's store, which has no `fetch_str`, so the
     // String-block site must stay a plain `fetch`.
-    let application = "require \"rails\"\n\nmodule Probe\n  class Application < Rails::Application\n    config.cache_store = :custom_store\n  end\nend\n";
-    let body = with_store(Some(("config/application.rb", application)));
+    let helper = "Rails.cache = ActiveSupport::Cache::CustomStore.new\n";
+    let body = with_store(Some(("test/test_helper.rb", helper)));
     assert!(!body.contains("fetch_str"), "a bound app store must keep fetch:\n{body}");
 }
 
@@ -132,18 +132,22 @@ fn an_app_cache_store_nothing_binds_keeps_the_lowering() {
 }
 
 #[test]
-fn an_app_cache_store_bound_in_an_environment_file_keeps_fetch() {
-    // `config/environments/production.rb` is where an app usually sets its
-    // store, and it is not an ingested source: the binding is read there too.
-    let production = "Rails.application.configure do\n  config.cache_store = :custom_store\nend\n";
+fn a_configured_cache_store_keeps_the_lowering() {
+    // No target installs `config.cache_store`, in `config/application.rb`
+    // or an environment file: `Rails.cache` stays the runtime's store,
+    // which has `fetch_str`, and standing down would only lose caching.
+    let application = "require \"rails\"\n\nmodule Probe\n  class Application < Rails::Application\n    config.cache_store = :custom_store\n  end\nend\n";
+    let body = with_store(Some(("config/application.rb", application)));
+    assert!(body.contains("fetch_str"), "config.cache_store is not installed:\n{body}");
+    let production = "Rails.application.configure do\n  config.cache_store = [:memory_store, { size: 64.megabytes }]\nend\n";
     let body = with_store(Some(("config/environments/production.rb", production)));
-    assert!(!body.contains("fetch_str"), "a store bound in an environment file must keep fetch:\n{body}");
+    assert!(body.contains("fetch_str"), "config.cache_store is not installed:\n{body}");
 }
 
 #[test]
-fn a_cache_store_whose_value_is_on_the_next_line_keeps_fetch() {
-    let production = "Rails.application.configure do\n  config.cache_store =\n    :custom_store\nend\n";
-    let body = with_store(Some(("config/environments/production.rb", production)));
+fn a_rails_cache_assignment_whose_value_is_on_the_next_line_keeps_fetch() {
+    let helper = "Rails.cache =\n  ActiveSupport::Cache::CustomStore.new\n";
+    let body = with_store(Some(("test/test_helper.rb", helper)));
     assert!(!body.contains("fetch_str"), "a multiline binding must keep fetch:\n{body}");
 }
 
@@ -151,14 +155,14 @@ fn a_cache_store_whose_value_is_on_the_next_line_keeps_fetch() {
 fn rails_cache_bound_to_an_app_object_keeps_fetch() {
     // Not an `ActiveSupport::Cache::*` class: any store object of the
     // app's need not have `fetch_str`.
-    let initializer = "Rails.cache = MyStore.new\n";
-    let body = with_store(Some(("config/initializers/cache.rb", initializer)));
+    let helper = "Rails.cache = MyStore.new\n";
+    let body = with_store(Some(("test/test_helper.rb", helper)));
     assert!(!body.contains("fetch_str"), "an app store object must keep fetch:\n{body}");
 }
 
 #[test]
-fn a_rails_store_symbol_keeps_the_lowering() {
-    let production = "Rails.application.configure do\n  config.cache_store = :memory_store, { size: 64.megabytes }\nend\n";
-    let body = with_store(Some(("config/environments/production.rb", production)));
+fn rails_cache_bound_to_a_rails_store_keeps_the_lowering() {
+    let helper = "Rails.cache = ActiveSupport::Cache::MemoryStore.new\n";
+    let body = with_store(Some(("test/test_helper.rb", helper)));
     assert!(body.contains("fetch_str"), "a Rails store is the runtime's:\n{body}");
 }

@@ -497,13 +497,6 @@ pub struct App {
     /// end of the ruby family's and spinel's `boot.rb`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collection_cache_store: Option<CollectionCacheStore>,
-    /// The `config/environments/*.rb` statements that mention a cache
-    /// store (`config.cache_store = :custom_store`), each on one line even
-    /// when its value continues below. Those files are
-    /// not ingested as sources, so `lower::rails_cache` reads its
-    /// `Rails.cache` binding evidence from here as well as the sources.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub environment_cache_store_lines: Vec<String>,
     /// Standard libraries the app's own files require (`require
     /// "io/console"` at the top of a channel, `require "pty"` in a
     /// service), sorted and deduplicated. The emitted files do not carry
@@ -1219,7 +1212,6 @@ impl App {
             auto_source_gems: Vec::new(),
             initializer_response_headers: Vec::new(),
             collection_cache_store: None,
-            environment_cache_store_lines: Vec::new(),
             app_requires: Vec::new(),
             sql_functions: Vec::new(),
             database_pragmas: Vec::new(),

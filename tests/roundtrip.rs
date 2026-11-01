@@ -163,7 +163,6 @@ fn tiny_blog_round_trips() {
         auto_source_gems: Vec::new(),
         initializer_response_headers: Vec::new(),
         collection_cache_store: None,
-        environment_cache_store_lines: Vec::new(),
         app_requires: Vec::new(),
         sql_functions: Vec::new(),
         database_pragmas: Vec::new(),
