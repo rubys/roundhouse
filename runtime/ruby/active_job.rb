@@ -116,6 +116,9 @@ module ActiveJob
   # and no priority to honour, so every entry runs in arrival order.
   PENDING = []
 
+  # Not a field of the entry: an entry stays a bare `() -> nil` so every target can hold it.
+  PENDING_QUEUES = []
+
   # Whether a drain exists to pick the work up. Empty means no — and
   # then `perform_later` runs inline, exactly as before, because a job
   # put on a queue nobody drains is a job silently dropped, which is
@@ -147,6 +150,11 @@ module ActiveJob
   # Proc is opaque to the analyzer either way -- `work.call` answers
   # gradually under both.
   def self.enqueue(work)
+    enqueue_on("default", work)
+  end
+
+  def self.enqueue_on(queue, work)
+    PENDING_QUEUES << queue
     PENDING << work
     nil
   end
@@ -166,7 +174,11 @@ module ActiveJob
   # entry, so the one FIFO and its locking stay as they are. What the
   # Proc closes over is the serialized text, not the job's objects.
   def self.enqueue_payload(json)
-    enqueue(-> { perform_payload(json)
+    enqueue_payload_on("default", json)
+  end
+
+  def self.enqueue_payload_on(queue, json)
+    enqueue_on(queue, -> { perform_payload(json)
     nil })
   end
 
@@ -174,7 +186,15 @@ module ActiveJob
   # holds nothing; the Ruby-family job registry redefines it to hold the
   # payload while `Model.transaction` is open.
   def self.enqueue_payload_after_commit(json)
-    enqueue_payload(json)
+    enqueue_payload_after_commit_on("default", json)
+  end
+
+  def self.enqueue_payload_after_commit_on(queue, json)
+    enqueue_payload_on(queue, json)
+  end
+
+  def self.queue_or(queue, own)
+    queue == "" ? own : queue
   end
 
   def self.pending_count

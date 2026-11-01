@@ -1453,6 +1453,13 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
             })?;
             methods.append(&mut synth);
         }
+        if let Some(adapter) = super::active_job_config::synthesize(vfs, dir)? {
+            let mut synth = crate::runtime_src::parse_methods(&adapter).map_err(|message| IngestError::Unsupported {
+                file: "config/ (config.active_job.queue_adapter)".to_string(),
+                message: format!("the app's queue adapter setting does not parse once synthesized: {message}"),
+            })?;
+            methods.append(&mut synth);
+        }
         // Session cookie name: application-derived default plus any
         // `config.session_store` declarations (see `session_config`).
         // Spliced like the cable / public-file-server settings. The

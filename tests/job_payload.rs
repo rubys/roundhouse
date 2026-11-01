@@ -197,7 +197,7 @@ fn a_job_without_typed_arguments_keeps_its_proc() {
     assert!(fallback.reason.contains("no call site"), "{fallback:?}");
 
     let src = emitted(&app, "untyped_job.rb");
-    assert!(src.contains("ActiveJob.enqueue(-> {"), "the Proc stays:\n{src}");
+    assert!(src.contains("ActiveJob.enqueue_on(\"default\", -> {"), "the Proc stays:\n{src}");
     assert!(!src.contains("enqueue_payload"), "{src}");
 }
 
@@ -206,10 +206,10 @@ fn only_the_enqueue_arm_changes() {
     let app = app();
     let src = emitted(&app, "push_job.rb");
     assert!(
-        src.contains("ActiveJob.enqueue_payload(JobRegistry.payload_push_job(room, message))"),
+        src.contains("ActiveJob.enqueue_payload_on(\"default\", JobRegistry.payload_push_job(room, message))"),
         "the enqueue arm writes a payload:\n{src}"
     );
-    assert!(!src.contains("ActiveJob.enqueue(-> {"), "no Proc on the drain path:\n{src}");
+    assert!(!src.contains("ActiveJob.enqueue_on(\"default\", -> {"), "no Proc on the drain path:\n{src}");
     // The `:test` adapter's arm and the inline arm are as before.
     assert!(src.contains(r#"ActiveJob.hold("PushJob", -> {"#), "{src}");
     assert!(src.contains("new.perform(room, message)"), "{src}");

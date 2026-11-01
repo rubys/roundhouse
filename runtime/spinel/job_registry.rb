@@ -126,15 +126,26 @@ module ActiveJob
     held
   end
 
+  def self.__held_queues_until_commit
+    held = Thread.current[:aj_held_queues_until_commit]
+    if held.nil?
+      held = [""]
+      held.clear
+      Thread.current[:aj_held_queues_until_commit] = held
+    end
+    held
+  end
+
   def self.in_transaction
     Thread.current[:aj_in_transaction] == true
   end
 
-  def self.enqueue_payload_after_commit(json)
+  def self.enqueue_payload_after_commit_on(queue, json)
     if in_transaction
+      __held_queues_until_commit << queue
       __held_until_commit << json
     else
-      enqueue_payload(json)
+      enqueue_payload_on(queue, json)
     end
     nil
   end
@@ -147,8 +158,9 @@ module ActiveJob
   def self.transaction_committed
     Thread.current[:aj_in_transaction] = false
     held = __held_until_commit
+    queues = __held_queues_until_commit
     while held.length > 0
-      enqueue_payload(held.shift)
+      enqueue_payload_on(queues.shift.to_s, held.shift.to_s)
     end
     SidekiqPush.flush_held
   end
@@ -156,6 +168,7 @@ module ActiveJob
   def self.transaction_rolled_back
     Thread.current[:aj_in_transaction] = false
     __held_until_commit.clear
+    __held_queues_until_commit.clear
     SidekiqPush.drop_held
   end
 

@@ -20577,6 +20577,8 @@ mod route_requirement_span;
 mod boot_program;
 #[path = "emit_and_run/route_helper_segment_escape.rs"]
 mod route_helper_segment_escape;
+#[path = "emit_and_run/solid_queue_clear.rs"]
+mod solid_queue_clear;
 
 #[path = "emit_and_run/route_dot_span.rs"]
 mod route_dot_span;

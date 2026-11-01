@@ -7739,6 +7739,8 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         | "StringScanner" | "Zlib::GzipWriter"
         // runtime/spinel/integration_session.rb and the ruby tree's twin.
         | "ActionDispatch::Integration::Session" | "ActionDispatch::TestResponse"
+        // runtime/spinel/solid_queue.rb.
+        | "SolidQueue::Queue" | "SolidQueue::Semaphore" | "SolidQueue::Semaphore::Relation"
         // ruby-vips on the ruby family, spinel-ruby-vips on spinel.
         | "Vips::Image"
         | "Rails::HTML5::SafeListSanitizer" | "JSON" | "JSON::ParserError"
