@@ -277,3 +277,30 @@ fn a_color_or_datetime_local_field_is_refused_on_roda() {
         assert!(errors.iter().any(|e| e.contains("form builder field not supported") && e.contains("roda")), "{field}: {errors:?}");
     }
 }
+
+/// Only a form builder's call is refused: a model method that happens to
+/// be named `color_field`, read through a block local, is an ordinary
+/// call Roda keeps.
+#[test]
+fn a_non_builder_color_field_call_is_not_refused_on_roda() {
+    let (_, errors) = emit_and_run::real_blog()
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < ApplicationRecord\n  def color_field\n    \"#336699\"\n  end\n\n  def datetime_local_field\n    \"2026-11-01T09:30\"\n  end\n\n")
+        .edit(
+            "app/views/articles/index.html.erb",
+            "<% content_for :title, \"Articles\" %>\n",
+            "<% content_for :title, \"Articles\" %>\n<% @articles.each do |article| %><p><%= article.color_field %> <%= article.datetime_local_field %></p><% end %>\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Roda);
+    assert!(!errors.iter().any(|e| e.contains("form builder field")), "{errors:?}");
+}
+
+/// A partial handed the form's builder (`render "fields", form: form`)
+/// calls it through that local; its field is refused on Roda too.
+#[test]
+fn a_color_field_in_a_partial_handed_the_builder_is_refused_on_roda() {
+    let (_, errors) = emit_and_run::real_blog()
+        .write("app/views/articles/_fields.html.erb", "<%= form.color_field :title %>\n")
+        .edit("app/views/articles/_form.html.erb", "<%= form.submit", "<%= render \"fields\", form: form %>\n  <%= form.submit")
+        .emit(roundhouse::project::BuildTarget::Roda);
+    assert!(errors.iter().any(|e| e.contains("form builder field not supported") && e.contains("roda")), "{errors:?}");
+}

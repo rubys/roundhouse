@@ -1276,10 +1276,65 @@ fn report_roda_form_fields(app: &App, target: BuildTarget) {
     if target != BuildTarget::Roda {
         return;
     }
-    fn visit(e: &crate::expr::Expr) {
-        if let crate::expr::ExprNode::Send { recv: Some(recv), method, .. } = &*e.node
+    // Only a form builder's call: the block parameter of a form helper, or
+    // the local a partial is handed the builder under (`render "fields",
+    // form: form`). A model or helper method that shares the name
+    // (`article.color_field`) is an ordinary call.
+    use crate::expr::{Expr, ExprNode, Literal};
+    type Handoffs = crate::det::HashMap<String, Vec<String>>;
+    fn form_block<'a>(e: &'a Expr) -> Option<(&'a str, &'a Expr)> {
+        let ExprNode::Send { recv: None, method, block: Some(block), .. } = &*e.node else { return None };
+        if !matches!(method.as_str(), "form_with" | "form_for" | "fields_for" | "fields") {
+            return None;
+        }
+        let ExprNode::Lambda { params, body, .. } = &*block.node else { return None };
+        Some((params.first()?.as_str(), body))
+    }
+    // A partial's view name from a `render` path, as the caller's dir resolves it.
+    fn partial_view(dir: &str, path: &str) -> String {
+        match path.rsplit_once('/') {
+            Some((d, base)) => format!("{d}/_{base}"),
+            None => format!("{dir}/_{path}"),
+        }
+    }
+    fn handoffs(e: &Expr, dir: &str, builders: &mut Vec<String>, out: &mut Handoffs) {
+        if let Some((param, body)) = form_block(e) {
+            builders.push(param.to_string());
+            handoffs(body, dir, builders, out);
+            builders.pop();
+            return;
+        }
+        if let ExprNode::Send { recv: None, method, args, .. } = &*e.node
+            && method.as_str() == "render"
+            && let (Some(first), Some(last)) = (args.first(), args.last())
+            && let ExprNode::Lit { value: Literal::Str { value: path } } = &*first.node
+            && let ExprNode::Hash { entries, .. } = &*last.node
+        {
+            for (k, v) in entries {
+                if let (ExprNode::Lit { value: Literal::Sym { value: local } }, ExprNode::Var { name, .. }) = (&*k.node, &*v.node)
+                    && builders.iter().any(|b| b == name.as_str())
+                {
+                    out.entry(partial_view(dir, path)).or_default().push(local.as_str().to_string());
+                }
+            }
+        }
+        e.node.for_each_child(&mut |c| handoffs(c, dir, builders, out));
+    }
+    fn visit(e: &Expr, builders: &mut Vec<String>) {
+        if let Some((param, body)) = form_block(e) {
+            builders.push(param.to_string());
+            visit(body, builders);
+            builders.pop();
+            return;
+        }
+        if let ExprNode::Send { recv: Some(recv), method, .. } = &*e.node
             && matches!(method.as_str(), "color_field" | "datetime_local_field")
-            && matches!(&*recv.node, crate::expr::ExprNode::Var { .. })
+            // A partial's unbound local reads as a bare call (`form`).
+            && match &*recv.node {
+                ExprNode::Var { name, .. } => builders.iter().any(|b| b == name.as_str()),
+                ExprNode::Send { recv: None, method, args, .. } => args.is_empty() && builders.iter().any(|b| b == method.as_str()),
+                _ => false,
+            }
             && !e.span.is_synthetic()
         {
             emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
@@ -1289,10 +1344,16 @@ fn report_roda_form_fields(app: &App, target: BuildTarget) {
                 format!("`form.{}`: Roda's view translator has no plain-HTML form of it, and the page has no form builder", method.as_str()),
             ));
         }
-        e.node.for_each_child(&mut |c| visit(c));
+        e.node.for_each_child(&mut |c| visit(c, builders));
+    }
+    let mut handed = Handoffs::default();
+    for view in &app.views {
+        let dir = view.name.as_str().rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+        handoffs(&view.body, dir, &mut Vec::new(), &mut handed);
     }
     for view in &app.views {
-        visit(&view.body);
+        let mut builders = handed.get(view.name.as_str()).cloned().unwrap_or_default();
+        visit(&view.body, &mut builders);
     }
 }
 
