@@ -11,8 +11,9 @@
 //! The view map used to keep the FIRST filter's write, so this view got
 //! `Integer` in either declaration order. A filter behind a runtime
 //! `if:`/`unless:` may not run, so its write joins the earlier one, even
-//! when ingest cannot read the guard. Writes the replay cannot place keep
-//! the earlier write, as before.
+//! when ingest cannot read the guard. Options that can hide scope or
+//! ordering, and writes after a possible response, keep the first-writer
+//! fallback. This does not fix the checker's any-arm union dispatch.
 //!
 //! Every case runs with the controllers in both input orders.
 
@@ -144,11 +145,12 @@ fn a_guard_ingest_cannot_read_still_joins() {
     assert_eq!(posts_x(filters, "    nil"), "Integer | String");
 }
 
-/// Pins union dispatch, which this change leaves as it is: the guarded
-/// join types `@x` as `Integer | String`, and a call that one member
-/// answers passes. Rails raises `NoMethodError` on the Integer path.
+/// The joined type retains the Integer path. The existing checker still
+/// accepts `upcase` because String answers it; Rails raises on Integer.
+/// That clean check is a disclosed union-dispatch limitation, not proof
+/// that both runtime paths are valid.
 #[test]
-fn union_dispatch_accepts_a_call_one_guarded_member_answers() {
+fn a_guarded_join_retains_the_union_dispatch_limitation() {
     for guard in [
         "if: :enabled?",
         "if: -> { params[:x] }",
@@ -164,12 +166,72 @@ fn union_dispatch_accepts_a_call_one_guarded_member_answers() {
             "<%= @x.upcase %>\n",
         );
         assert_eq!(view_x(&files, "posts/index"), "Integer | String", "{guard}");
-        let messages = analyze(&files, "posts/index", false).1;
-        assert!(
-            !messages.iter().any(|m| m.contains("upcase")),
-            "{guard}: {messages:?}"
-        );
     }
+}
+
+#[test]
+fn unread_option_containers_mark_a_guard_and_keep_the_placement_fallback() {
+    use roundhouse::dialect::ControllerBodyItem;
+    for options in ["{ if: :enabled? }", "**{ if: :enabled? }", "OPTIONS"] {
+        let filters = format!("  before_action :one\n  before_action :two, {options}");
+        let source = posts(&filters, S);
+        let f = files(&[("posts", &source)], "posts/index", "<%= @x.upcase %>");
+        assert_eq!(view_x(&f, "posts/index"), "Integer", "{options}");
+        let tree = f.iter().map(|(p, c)| (PathBuf::from(p), c.clone().into_bytes())).collect();
+        let app = ingest_app_from_tree(tree).expect("ingest tree");
+        let filter = app.controllers.iter().flat_map(|c| &c.body).find_map(|item| {
+            match item {
+                ControllerBodyItem::Filter { filter, .. } if filter.target.as_str() == "two" => Some(filter),
+                _ => None,
+            }
+        }).expect("two callback");
+        assert!(filter.unread_guard && filter.unread_options, "{options}");
+    }
+}
+
+#[test]
+fn prepend_options_keep_the_same_fallback_in_named_batch_and_block_forms() {
+    for filters in [
+        "  before_action :one\n  before_action :two, prepend: true",
+        "  before_action :one, :two, prepend: true",
+        "  before_action :one\n  before_action(prepend: true) { @x = \"s\" }",
+        "  before_action :one\n  before_action -> { @x = \"s\" }, prepend: true",
+    ] {
+        assert_eq!(posts_x(filters, S), "Integer", "{filters}");
+    }
+}
+
+#[test]
+fn empty_only_and_overlapping_except_do_not_apply_to_the_view() {
+    for options in ["only: []", "only: :index, except: :index", "only: [:index], except: [:index]"] {
+        for filters in [
+            format!("  before_action :one\n  before_action :two, {options}"),
+            format!("  before_action :one\n  before_action({options}) {{ @x = \"s\" }}"),
+        ] {
+            assert_eq!(posts_x(&filters, S), "Integer", "{filters}");
+        }
+    }
+}
+
+#[test]
+fn a_possible_response_keeps_main_for_the_affected_ivar_even_after_more_writes() {
+    for response in ["render :index", "redirect_to '/elsewhere'", "head :ok", "self.render :index"] {
+        for halter in [
+            format!("  before_action :stop\n  def stop; {response}; end"),
+            format!("  before_action {{ {response} }}"),
+        ] {
+            let filters = format!("  before_action :one\n{halter}\n  before_action :two\n  before_action {{ @x = 'last' }}");
+            assert_eq!(posts_x(&filters, S), "Integer", "{response} / {halter}");
+        }
+    }
+    // A response after the final write need not discard that prefix's
+    // result for an ivar the response callback does not write.
+    let filters = "  before_action :one, :two, :stop\n  def stop; render :index; end";
+    assert_eq!(posts_x(filters, S), "String");
+    let source = posts("  before_action :one, :two", S)
+        .replace("def one = (@x = 1)", "def one; @x = 1; render :index; end");
+    let f = files(&[("posts", &source)], "posts/index", "<%= @x.upcase %>");
+    assert_eq!(view_x(&f, "posts/index"), "Integer");
 }
 
 #[test]

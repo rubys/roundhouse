@@ -7690,20 +7690,54 @@ fn view_filter_seed(
     bindings: &HashMap<Symbol, HashMap<Symbol, Ty>>,
     bodies: &HashMap<Symbol, &Expr>,
 ) -> HashMap<Symbol, Ty> {
+    // Scope is deliberately stricter here than the shared action/IDE
+    // helper: an empty `only:` applies nowhere, and `except:` also wins
+    // when an action appears in `only:`.
+    let applies = |f: &Filter| {
+        (!(f.only_present || !f.only.is_empty()) || f.only.contains(action_name))
+            && !f.except.contains(action_name)
+    };
+    let responds = |f: &Filter| {
+        bodies.get(&f.target).is_some_and(|body| callback_may_respond(body))
+            || f.block.as_ref().is_some_and(callback_may_respond)
+    };
+    let mut legacy_first: HashMap<Symbol, Ty> = HashMap::default();
+    for (f, _, _) in chained_filters {
+        if matches!(f.kind, FilterKind::Before | FilterKind::Around)
+            && before_filter_applies(f, action_name)
+            && let Some(ivars) = bindings.get(&f.target)
+        {
+            for (k, v) in ivars {
+                legacy_first.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+    }
+    // A response in a callback whose position is unknown may precede
+    // even the first declaration. Otherwise only its own and later
+    // writes lose their replay: Rails may already have rendered.
+    let mut halted = chained_filters.iter().any(|(f, _, _)| {
+        matches!(f.kind, FilterKind::Before | FilterKind::Around)
+            && applies(f)
+            && (f.prepend || f.unread_options || matches!(f.kind, FilterKind::Around))
+            && responds(f)
+    });
+    let mut blocked = crate::det::HashSet::default();
     let mut first: HashMap<Symbol, Ty> = HashMap::default();
     // `None` once a write the replay does not model has followed it.
     let mut replayed: HashMap<Symbol, Option<Ty>> = HashMap::default();
     for (i, (filter, _, _)) in chained_filters.iter().enumerate() {
         if !matches!(filter.kind, FilterKind::Before | FilterKind::Around)
-            || !before_filter_applies(filter, action_name)
+            || !applies(filter)
         {
             continue;
         }
+        halted |= responds(filter);
         let Some(fivars) = bindings.get(&filter.target) else {
             continue;
         };
         let placed = matches!(filter.kind, FilterKind::Before)
             && !filter.prepend
+            && !filter.unread_options
             && !chained_filters[i + 1..]
                 .iter()
                 .any(|(f, _, _)| f.target == filter.target);
@@ -7717,6 +7751,9 @@ fn view_filter_seed(
             || filter.unless_cond_expr.is_some()
             || filter.unread_guard;
         for (k, v) in fivars {
+            if halted {
+                blocked.insert(k.clone());
+            }
             let modeled = always.contains(k) && !v.is_unknown() && !v.is_open();
             let join = |prev: &Ty| crate::analyze::body::join_ivar_slot(prev.clone(), v.clone());
             let next = match (modeled, guarded, replayed.get(k)) {
@@ -7733,13 +7770,32 @@ fn view_filter_seed(
             }
         }
     }
-    first
+    let mut out: HashMap<Symbol, Ty> = first
         .into_iter()
         .map(|(k, ty)| match replayed.remove(&k) {
             Some(Some(replayed)) => (k, replayed),
             _ => (k, ty),
         })
-        .collect()
+        .collect();
+    for k in blocked {
+        if let Some(ty) = legacy_first.remove(&k) {
+            out.insert(k, ty);
+        }
+    }
+    out
+}
+
+/// Direct response calls only; no inference through callback helpers.
+fn callback_may_respond(body: &Expr) -> bool {
+    if let ExprNode::Send { recv, method, .. } = &*body.node
+        && (recv.is_none() || recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::SelfRef)))
+        && matches!(method.as_str(), "render" | "redirect_to" | "head")
+    {
+        return true;
+    }
+    let mut found = false;
+    body.node.for_each_child(&mut |c| found |= callback_may_respond(c));
+    found
 }
 
 /// The ivars `body` assigns as statements of its own (see
@@ -7858,6 +7914,8 @@ fn build_sourced_filter_chain(
                                 if_cond_expr: None,
                                 unless_cond_expr: None,
                                 unread_guard: false,
+                                unread_options: false,
+                                only_present: false,
                                 block: Some(expr.clone()),
                                 prepend: false,
                             },
@@ -7907,8 +7965,10 @@ fn build_sourced_filter_chain(
                                 if_cond_expr: target_info.if_cond_expr,
                                 unless_cond_expr: target_info.unless_cond_expr,
                                 unread_guard: target_info.unread_guard,
+                                unread_options: target_info.unread_options,
+                                only_present: target_info.only_present,
                                 block: Some(expr.clone()),
-                                prepend: method.as_str() == "prepend_before_action",
+                                prepend: target_info.prepend,
                             },
                             source,
                         ));

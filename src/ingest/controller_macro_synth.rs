@@ -122,6 +122,8 @@ pub(super) fn install_before_filter(
         if_cond_expr,
         unless_cond_expr,
         unread_guard: false,
+        unread_options: false,
+        only_present: false,
         block: None,
         prepend,
     };
@@ -150,6 +152,8 @@ pub(super) fn push_after_filter(controller: &mut Controller, target: &str) {
         if_cond_expr: None,
         unless_cond_expr: None,
         unread_guard: false,
+        unread_options: false,
+        only_present: false,
         block: None,
         prepend: false,
     };

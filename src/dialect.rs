@@ -1738,6 +1738,15 @@ pub struct Filter {
     /// that relies on a filter running treats it as guarded.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unread_guard: bool,
+    /// An options container ingest could not decode completely. It may
+    /// hide scope or ordering as well as a guard, so replay cannot place
+    /// this callback's writes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unread_options: bool,
+    /// Distinguishes `only: []` (no actions) from an absent `only:`.
+    /// Kept separately so existing consumers of `only` retain their contract.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub only_present: bool,
     /// The whole call for a block-form filter — `before_action do … end`
     /// as one `Send` with its block — so a chain entry synthesized for
     /// it can be located (the trace's `file:line`) and named. Never set

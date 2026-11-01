@@ -759,7 +759,7 @@ pub(super) fn parse_filter_call(
     // `prepend_around_action` / `prepend_after_action` are not modeled:
     // no controller in this codebase's fixtures uses either, so they
     // stay unrecognized rather than risk a wrong-order claim.
-    let prepend = macro_name == "prepend_before_action";
+    let mut prepend = macro_name == "prepend_before_action";
 
     let Some(args) = call.arguments() else { return Ok(None) };
 
@@ -773,6 +773,8 @@ pub(super) fn parse_filter_call(
     let mut if_cond_expr: Option<Expr> = None;
     let mut unless_cond_expr: Option<Expr> = None;
     let mut unread_guard = false;
+    let mut unread_options = false;
+    let mut only_present = false;
 
     for arg in args.arguments().iter() {
         if let Some(sym) = symbol_value(&arg) {
@@ -787,13 +789,26 @@ pub(super) fn parse_filter_call(
             ));
             continue;
         }
-        let Some(kh) = arg.as_keyword_hash_node() else { continue };
+        let Some(kh) = arg.as_keyword_hash_node() else {
+            unread_guard = true;
+            unread_options = true;
+            continue;
+        };
         for el in kh.elements().iter() {
-            let Some(assoc) = el.as_assoc_node() else { continue };
-            let Some(key) = symbol_value(&assoc.key()) else { continue };
+            let Some(assoc) = el.as_assoc_node() else {
+                unread_guard = true;
+                unread_options = true;
+                continue;
+            };
+            let Some(key) = symbol_value(&assoc.key()) else {
+                unread_guard = true;
+                unread_options = true;
+                continue;
+            };
             let value = assoc.value();
             match key.as_str() {
                 "only" => {
+                    only_present = true;
                     if !is_recognized_scope_value(&value) {
                         return Err(scope_gap(file, macro_name, "only"));
                     }
@@ -819,6 +834,14 @@ pub(super) fn parse_filter_call(
                     unless_cond = symbol_value(&value).map(|s| Symbol::from(s.as_str()));
                     unless_cond_expr = lambda_body_expr(&value, file);
                     unread_guard |= unless_cond.is_none() && unless_cond_expr.is_none();
+                }
+                "prepend" => {
+                    if value.as_true_node().is_some() {
+                        prepend = true;
+                    } else if value.as_false_node().is_none() && value.as_nil_node().is_none() {
+                        unread_guard = true;
+                        unread_options = true;
+                    }
                 }
                 _ => {}
             }
@@ -846,6 +869,8 @@ pub(super) fn parse_filter_call(
                 if_cond_expr: if_cond_expr.clone(),
                 unless_cond_expr: unless_cond_expr.clone(),
                 unread_guard,
+                unread_options,
+                only_present,
                 block: None,
                 prepend,
             })
@@ -988,6 +1013,8 @@ fn parse_forgery_macro(
         if_cond_expr,
         unless_cond_expr,
         unread_guard: false,
+        unread_options: false,
+        only_present: false,
         block: None,
         prepend: false,
     }]))
@@ -1232,6 +1259,9 @@ pub(crate) struct LambdaFilterTarget {
     pub unless_cond_expr: Option<Expr>,
     /// An `if:`/`unless:` this could not read; see `Filter::unread_guard`.
     pub unread_guard: bool,
+    pub unread_options: bool,
+    pub only_present: bool,
+    pub prepend: bool,
 }
 
 impl LambdaFilterTarget {
@@ -1239,7 +1269,7 @@ impl LambdaFilterTarget {
         self.method.as_str() == "after_action"
     }
     pub fn is_prepend(&self) -> bool {
-        self.method.as_str() == "prepend_before_action"
+        self.prepend
     }
 }
 
@@ -1476,6 +1506,9 @@ pub(crate) fn lambda_filter_target(expr: &Expr) -> Option<LambdaFilterTarget> {
     let mut if_cond_expr: Option<Expr> = None;
     let mut unless_cond_expr: Option<Expr> = None;
     let mut unread_guard = false;
+    let mut unread_options = false;
+    let mut only_present = false;
+    let mut prepend = method.as_str() == "prepend_before_action";
     for a in option_args {
         // A concern macro's `before_action(**kwargs) { ... }` substitutes
         // the call's options Hash under a `**` splat rather than the
@@ -1488,13 +1521,22 @@ pub(crate) fn lambda_filter_target(expr: &Expr) -> Option<LambdaFilterTarget> {
             ExprNode::KeywordSplat { value } => value,
             _ => a,
         };
-        let ExprNode::Hash { entries, .. } = &*a.node else { continue };
+        let ExprNode::Hash { entries, .. } = &*a.node else {
+            unread_guard = true;
+            unread_options = true;
+            continue;
+        };
         for (k, v) in entries {
             let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
+                unread_guard = true;
+                unread_options = true;
                 continue;
             };
             match key.as_str() {
-                "only" => only = ir_symbol_list(v),
+                "only" => {
+                    only_present = true;
+                    only = ir_symbol_list(v);
+                }
                 "except" => except = ir_symbol_list(v),
                 "if" => {
                     if_cond = ir_symbol(v);
@@ -1506,6 +1548,14 @@ pub(crate) fn lambda_filter_target(expr: &Expr) -> Option<LambdaFilterTarget> {
                     unless_cond_expr = ir_lambda_body(v);
                     unread_guard |= unless_cond.is_none() && unless_cond_expr.is_none();
                 }
+                "prepend" => match &*v.node {
+                    ExprNode::Lit { value: Literal::Bool { value: true } } => prepend = true,
+                    ExprNode::Lit { value: Literal::Bool { value: false } | Literal::Nil } => {}
+                    _ => {
+                        unread_guard = true;
+                        unread_options = true;
+                    }
+                },
                 _ => {}
             }
         }
@@ -1520,6 +1570,9 @@ pub(crate) fn lambda_filter_target(expr: &Expr) -> Option<LambdaFilterTarget> {
         if_cond_expr,
         unless_cond_expr,
         unread_guard,
+        unread_options,
+        only_present,
+        prepend,
     })
 }
 
@@ -1736,6 +1789,8 @@ pub(super) fn around_block_filter(
         if_cond_expr,
         unless_cond_expr,
         unread_guard: false,
+        unread_options: false,
+        only_present: false,
         block: None,
         prepend: false,
     };
