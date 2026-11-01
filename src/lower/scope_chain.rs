@@ -4329,7 +4329,7 @@ fn alias_key(name: &Symbol, ivar: bool) -> Symbol {
 /// Query seeding reads the owner for its key and preload cache. Bind an
 /// argument-taking owner once, before the original arguments, so neither
 /// repeated reads nor a trailing relation argument change evaluation order.
-fn memoize_finder_owner(expr: &mut Expr, ctx: &Ctx) -> Option<Option<ClassId>> {
+fn memoize_finder_owner(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Option<ClassId>> {
     let ExprNode::Send { recv: Some(read), method, args, block: None, .. } = &*expr.node else { return None };
     let ExprNode::Send { recv: Some(owner), method: association, args: association_args, block: None, .. } = &*read.node else { return None };
     if !association_args.is_empty() || owner_reads_once(owner) { return None; }
@@ -4354,26 +4354,61 @@ fn memoize_finder_owner(expr: &mut Expr, ctx: &Ctx) -> Option<Option<ClassId>> {
     }
     names(expr, &mut used);
     let mut params = Vec::new();
-    for i in 0..=args.len() {
-        let mut name = Symbol::from(format!("__rh_finder_{}_{}", span.start, i));
+    let mut arguments = Vec::new();
+    fn bind(expr: &mut Expr, span: crate::span::Span, used: &mut HashSet<Symbol>, params: &mut Vec<Symbol>, arguments: &mut Vec<Expr>) {
+        // Keep predicate structure visible to relation lowering. Only value
+        // expressions need temporaries; literals have no evaluation effects.
+        match &mut *expr.node {
+            ExprNode::Hash { entries, .. } => {
+                for (key, value) in entries {
+                    if !matches!(&*key.node, ExprNode::Lit { .. }) { bind(key, span, used, params, arguments); }
+                    bind(value, span, used, params, arguments);
+                }
+                return;
+            }
+            ExprNode::Range { begin, end, .. } => {
+                if let Some(value) = begin { bind(value, span, used, params, arguments); }
+                if let Some(value) = end { bind(value, span, used, params, arguments); }
+                return;
+            }
+            ExprNode::Array { elements, .. } => {
+                for value in elements { bind(value, span, used, params, arguments); }
+                return;
+            }
+            ExprNode::Lit { .. } => return,
+            _ => {}
+        }
+        let mut name = Symbol::from(format!("__rh_finder_{}_{}", span.start, params.len()));
         while used.contains(&name) { name = Symbol::from(format!("{}x", name.as_str())); }
         used.insert(name.clone());
-        params.push(name);
+        params.push(name.clone());
+        arguments.push(expr.clone());
+        let ty = expr.ty.clone();
+        *expr = var_expr(span, &name);
+        expr.ty = ty;
     }
-    let mut arguments = vec![owner.clone()];
-    arguments.extend(args.iter().cloned());
+    let arg_ctx = ctx.at_callsite();
+    let mut lowered_owner = owner.clone();
+    rewrite(&mut lowered_owner, &arg_ctx, locals);
+    // The owner is always one binding, even when its lowered form is a
+    // structured expression: seeding reads the same record repeatedly.
+    let owner_name = Symbol::from(format!("__rh_finder_{}_owner", span.start));
+    let mut owner_name = owner_name;
+    while used.contains(&owner_name) { owner_name = Symbol::from(format!("{}x", owner_name.as_str())); }
+    used.insert(owner_name.clone());
+    params.push(owner_name.clone());
+    arguments.push(lowered_owner);
+    let mut lowered_args = args.clone();
+    for arg in &mut lowered_args { rewrite(arg, &arg_ctx, locals); }
     let mut body = expr.clone();
     if let ExprNode::Send { recv: Some(read), args, .. } = &mut *body.node {
         if let ExprNode::Send { recv: Some(owner), .. } = &mut *read.node {
             let ty = owner.ty.clone();
-            *owner = var_expr(span, &params[0]);
+            *owner = var_expr(span, &owner_name);
             owner.ty = ty;
         }
-        for (i, arg) in args.iter_mut().enumerate() {
-            let ty = arg.ty.clone();
-            *arg = var_expr(span, &params[i + 1]);
-            arg.ty = ty;
-        }
+        for arg in &mut lowered_args { bind(arg, span, &mut used, &mut params, &mut arguments); }
+        *args = lowered_args;
     }
     let result = rewrite(&mut body, ctx, &mut Locals::default());
     let mut lambda = syn(span, ExprNode::Lambda {
@@ -4388,7 +4423,7 @@ fn memoize_finder_owner(expr: &mut Expr, ctx: &Ctx) -> Option<Option<ClassId>> {
 }
 
 pub(crate) fn rewrite(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<ClassId> {
-    if let Some(model) = memoize_finder_owner(expr, ctx) { return model; }
+    if let Some(model) = memoize_finder_owner(expr, ctx, locals) { return model; }
     match &*expr.node {
         // Statement sequence: thread `locals` left-to-right; the Seq's value
         // (and model) is its last statement.
@@ -5312,7 +5347,25 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                             // that does not exist; the Const arm has always
                             // called this and the seed arm never did.
                             let mut args = args;
+                            let filter_terminal = if block.is_none()
+                                && matches!(args.as_slice(), [a] if matches!(&*a.node, ExprNode::Hash { .. }))
+                            {
+                                match method.as_str() {
+                                    "find_by" => Some("first"),
+                                    "find_by!" => Some("first!"),
+                                    _ => None,
+                                }
+                            } else { None };
                             let _ = lower_relation_args(&target, &method, &mut args, ctx);
+                            // SQL fragments carry binds; finder terminals take
+                            // one condition hash, so filter before selecting.
+                            if let Some(terminal) = filter_terminal
+                                && !matches!(args.as_slice(), [a] if matches!(&*a.node, ExprNode::Hash { .. }))
+                            {
+                                let filtered = put(span, Some(seed), Symbol::from("where"), args, None, true);
+                                *expr = put(span, Some(filtered), Symbol::from(terminal), vec![], None, false);
+                                return None;
+                            }
                             let keeps_model = is_chain;
                             let method = counted_terminal(&method, &args, block.as_ref())
                                 .unwrap_or(method);

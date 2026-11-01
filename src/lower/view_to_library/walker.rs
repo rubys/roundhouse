@@ -1861,6 +1861,7 @@ mod tests {
             strict_locals: Default::default(),
             view_name: "messages/_message".to_string(),
             ivar_models: Default::default(),
+            record_classes: Default::default(),
             str_ivars: Default::default(),
             ivar_locals: Default::default(),
             own_flash: Default::default(),

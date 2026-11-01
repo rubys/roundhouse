@@ -1456,6 +1456,7 @@ impl Analyzer {
                     (!known).then_some(name)
                 }).collect();
                 if !missing.is_empty() {
+                    if let Some(info) = self.classes.get_mut(&model.name) { info.unresolved_include = true; }
                     expr.set_diagnostic(Some(crate::diagnostic::DiagnosticKind::Unsupported {
                         target: None, construct: Symbol::from("include"),
                         detail: format!("{} includes unresolved {}", model.name.0, missing.join(", ")),

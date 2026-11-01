@@ -854,6 +854,12 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         strict_locals: lx.strict_locals.clone(),
         view_name: crate::lower::view::fragment_template_path(view.name.as_str(), view.format.as_str()),
         ivar_models: std::rc::Rc::new(view_ivar_models(app, &view.name)),
+        record_classes: std::rc::Rc::new(app.view_ivar_types.get(&view.name).into_iter()
+            .chain(app.partial_local_types.get(&view.name)).flat_map(|types| types.iter())
+            .filter_map(|(name, ty)| match ty.peel_nilable() {
+                crate::ty::Ty::Class { id, .. } => Some((name.as_str().to_owned(), id.0.as_str().to_owned())),
+                _ => None,
+            }).collect()),
         str_ivars: std::rc::Rc::new(view_str_ivars(app, &view.name)),
         ivar_locals: std::rc::Rc::new(ivar_locals),
         own_flash,
@@ -882,6 +888,8 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         ctx.form_records.push(FormBuilderBinding {
             form_param: binding.form_local.clone(),
             model_name: binding.model_name.clone(),
+            model_class: ctx.record_classes.get(&binding.record_local).cloned()
+                .or_else(|| ctx.i18n.model_class(&binding.model_name).map(str::to_owned)),
             record_var: record_var.clone(),
             form_method_var: form_method_var.clone(),
             id_prefix: binding.id_prefix.clone(),
@@ -4676,6 +4684,8 @@ pub(super) struct FormBuilderBinding {
     /// resource dir's singular (or the child class's name for the
     /// polymorphic-array nested-resource form).
     pub(super) model_name: String,
+    /// Full class identity for metadata; independent of the field prefix.
+    pub(super) model_class: Option<String>,
     /// Local Var to dispatch attribute readers on (e.g. `article` →
     /// `article.title` for the value attr). For simple `model: <var>`
     /// shapes this reuses the source local; for complex shapes
@@ -4693,6 +4703,12 @@ pub(super) struct FormBuilderBinding {
     /// on one page don't collide. Field NAMES are untouched. Empty for
     /// the common un-namespaced form.
     pub(super) id_prefix: String,
+}
+
+impl FormBuilderBinding {
+    pub(super) fn metadata_class<'a>(&'a self, ctx: &'a ViewCtx) -> Option<&'a str> {
+        self.model_class.as_deref().or_else(|| ctx.i18n.model_class(&self.model_name))
+    }
 }
 
 /// The `id` Rails generates for a form field: the namespace prefix (when
@@ -4936,6 +4952,8 @@ pub(super) struct ViewCtx {
     pub(super) view_name: String,
     pub(super) ivar_models:
         std::rc::Rc<crate::det::HashMap<String, String>>,
+    /// Full class identities for this view's ivars and partial locals.
+    pub(super) record_classes: std::rc::Rc<crate::det::HashMap<String, String>>,
     /// This view's ivars the analyzer typed `String` — markup a
     /// controller rendered ahead (`@message_html = render_to_string …`).
     /// `turbo_stream.append target, @message_html` sends it as given
@@ -4981,7 +4999,7 @@ fn nilable_scalar_reader_names(app: &App) -> crate::det::HashSet<String> {
     out
 }
 
-/// Per-model bool-reader names (model snake-singular → reader set):
+/// Per-model bool-reader names (full class identity → reader set):
 /// Boolean schema columns plus bool `typed_store` attrs. `f.check_box`
 /// grounds its checked state through these — a bool reader reduces the
 /// runtime `checked_box_attr` seam to a plain ternary on the typed
@@ -5011,8 +5029,9 @@ fn bool_reader_names(
                 set.insert(name.as_str().to_string());
             }
         }
-        out.insert(app.model_param_key(m.name.0.as_str()), set);
+        out.insert(m.name.0.as_str().to_owned(), set);
     }
+    inherit_model_readers(app, &mut out);
     out
 }
 
@@ -5045,9 +5064,28 @@ fn store_reader_names(
                 set.remove(col.name.as_str());
             }
         }
-        out.insert(app.model_param_key(m.name.0.as_str()), set);
+        out.insert(m.name.0.as_str().to_owned(), set);
     }
+    inherit_model_readers(app, &mut out);
     out
+}
+
+fn inherit_model_readers(app: &App, readers: &mut crate::det::HashMap<String, crate::det::HashSet<String>>) {
+    let parents: crate::det::HashMap<_, _> = app.library_classes.iter()
+        .filter_map(|class| class.parent.as_ref().map(|parent| (&class.name, parent))).collect();
+    for class in app.library_classes.iter().filter(|class| !class.is_module) {
+        if readers.contains_key(class.name.0.as_str()) { continue; }
+        let mut parent = class.parent.as_ref();
+        let mut seen = crate::det::HashSet::default();
+        while let Some(id) = parent {
+            if !seen.insert(id) { break; }
+            if let Some(inherited) = readers.get(id.0.as_str()).cloned() {
+                readers.insert(class.name.0.as_str().to_owned(), inherited);
+                break;
+            }
+            parent = parents.get(id).copied();
+        }
+    }
 }
 
 fn reference_reader_names(app: &App) -> crate::det::HashSet<String> {

@@ -314,6 +314,7 @@ pub(super) fn emit_form_with_inline(
     inner_ctx.form_records.push(FormBuilderBinding {
         form_param: form_param_str.to_string(),
         model_name: comps.model_name.clone(),
+        model_class: form_model_class(&comps.model, &comps.model_name, ctx),
         record_var: record_var.clone(),
         form_method_var,
         id_prefix: comps.id_prefix.clone(),
@@ -1090,6 +1091,26 @@ fn classify_form_with_components(
     })
 }
 
+/// The typed record class used for metadata, independent of its field prefix.
+pub(super) fn form_model_class(model: &Expr, parameter: &str, ctx: &ViewCtx) -> Option<String> {
+    if let Some(crate::ty::Ty::Class { id, .. }) = model.ty.as_ref().map(crate::ty::Ty::peel_nilable) {
+        return Some(id.0.as_str().to_owned());
+    }
+    if let ExprNode::Send { recv: Some(recv), method, .. } = &*model.node {
+        if method.as_str() == "new" {
+            if let ExprNode::Const { path } = &*recv.node {
+                return Some(path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::"));
+            }
+        }
+    }
+    let name = match &*model.node {
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => Some(name.as_str()),
+        _ => None,
+    };
+    name.and_then(|name| ctx.record_classes.get(name).cloned())
+        .or_else(|| ctx.i18n.model_class(parameter).map(str::to_owned))
+}
+
 /// The form's object name — what Rails calls `param_key`. Rails names
 /// fields after the RECORD's model (`user[username]` for a User), never
 /// after the view directory; the two agree for a conventional resource
@@ -1573,6 +1594,7 @@ mod tests {
             partial_stems: Default::default(),
             partial_extras: Default::default(),
             strict_locals: Default::default(),
+            record_classes: Default::default(),
             str_ivars: Default::default(),
             ivar_locals: Default::default(),
             own_flash: Default::default(),

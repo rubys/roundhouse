@@ -205,14 +205,16 @@ fn acronym_form_keys_keep_word_boundaries() {
 #[test]
 fn form_keys_respect_registered_acronyms() {
     const INFLECTIONS: &str = "ActiveSupport::Inflector.inflections(:en) { |inflect| inflect.acronym \"OAuth\" }\n";
-    native(&["activerecord"], &format!("require 'active_record'\n{INFLECTIONS}module Admin; class OAuthApplication < ActiveRecord::Base; end; end\nraise 'registered acronym' unless Admin::OAuthApplication.model_name.param_key == 'admin_oauth_application'"));
+    native(&["activerecord"], &format!("require 'active_record'\n{INFLECTIONS}module Admin; class OAuthApplication < ActiveRecord::Base; end; end\nraise 'registered acronym' unless Admin::OAuthApplication.model_name.param_key == 'admin_oauth_application'\nraise 'registered i18n acronym' unless Admin::OAuthApplication.model_name.i18n_key.to_s == 'admin/oauth_application'"));
     let previous = roundhouse::naming::app_inflections();
     roundhouse::naming::install_app_inflections(roundhouse::naming::AppInflections {
         acronym: vec!["OAuth".to_owned()], ..Default::default()
     });
     let key = roundhouse::naming::model_param_key("Admin::OAuthApplication");
+    let i18n_key = roundhouse::i18n::i18n_key("Admin::OAuthApplication");
     roundhouse::naming::install_app_inflections(previous);
     assert_eq!(key, "admin_oauth_application");
+    assert_eq!(i18n_key, "admin/oauth_application");
     paired_form("Admin::OAuthApplication", "ActiveRecord::Schema.define do\ncreate_table(:applications) { |t| t.boolean :published }\nend\n", &[
         ("config/initializers/inflections.rb", INFLECTIONS),
         ("app/models/admin/oauth_application.rb", "module Admin\nclass OAuthApplication < ActiveRecord::Base\nself.table_name = \"applications\"\nattribute :nickname, :string\nattribute :enabled, :boolean\nend\nend\n"),
@@ -394,3 +396,235 @@ fn isolated_model_form_i18n_keeps_labels_submit_and_errors() { isolated_form_i18
 
 #[test]
 fn isolated_subclass_form_i18n_keeps_labels_submit_and_errors() { isolated_form_i18n_case(true); }
+
+#[test]
+fn unresolved_model_includes_keep_finder_ownership_unknown() {
+    use roundhouse::ident::{ClassId, Symbol};
+    let extension = "module ExternalFinders\ndef self.included(base)\nbase.define_singleton_method(:find_by_name) { |value| 'external owner' }\nbase.define_singleton_method(:find_by_name!) { |value| 'external owner' }\nbase.define_singleton_method(:find_by) { |attributes| 'external owner' }\nbase.define_singleton_method(:find_by!) { |attributes| 'external owner' }\nend\nend\n";
+    let model = "class Category < ActiveRecord::Base\ninclude ExternalFinders\nend\n";
+    native(&["activerecord"], &format!("{AR}{CATEGORIES}{extension}{model}\n[:find_by_name, :find_by_name!].each {{ |name| raise 'external dynamic owner' unless Category.public_send(name, 'found') == 'external owner' }}\n[:find_by, :find_by!].each {{ |name| raise 'external ordinary owner' unless Category.public_send(name, name: 'found') == 'external owner' }}\n"));
+    let mut app = roundhouse::ingest::ingest_app_from_tree([
+        ("db/schema.rb", CATEGORIES), ("app/models/category.rb", model),
+        ("app/models/other_category.rb", "class OtherCategory < ActiveRecord::Base\nself.table_name = 'categories'\nend\n"),
+        ("app/controllers/categories_controller.rb", "class CategoriesController < ActionController::Base\ndef dynamic; Category.find_by_name('found'); end\ndef bang; Category.find_by_name!('found'); end\ndef ordinary; Category.find_by(name: 'found'); end\ndef ordinary_bang; Category.find_by!(name: 'found'); end\nend\n"),
+    ].into_iter().map(|(p,s)| (PathBuf::from(p),s.as_bytes().to_vec())).collect()).unwrap();
+    let mut analyzer = Analyzer::new(&app);
+    analyzer.analyze(&mut app);
+    for action in app.controllers[0].actions() {
+        assert!(action.body.ty.as_ref().unwrap().is_unknown(), "{}: {:?}", action.name, action.body.ty);
+    }
+    let registry = analyzer.class_registry();
+    assert!(registry[&ClassId(Symbol::from("Category"))].unresolved_include, "unresolved model include must mark its own ownership");
+    assert!(!registry[&ClassId(Symbol::from("OtherCategory"))].unresolved_include, "unrelated model must remain resolved");
+    let (_, errors) = emit_and_run::empty_app().write("db/schema.rb", CATEGORIES)
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write("app/models/category.rb", model)
+        .write("app/models/finder_probe.rb", "class FinderProbe\ndef self.value; Category.find_by_name('found'); end\nend\n")
+        .emit(BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("include") && e.contains("ExternalFinders")), "{errors:?}");
+}
+
+#[test]
+fn resolved_model_includes_keep_framework_finders() {
+    let extension = "module FinderMarker\ndef marker; 'marker'; end\nend\n";
+    let model = "class Category < ActiveRecord::Base\ninclude FinderMarker\nend\n";
+    let probe = "class FinderProbe\ndef self.value; Category.find_by_name('found'); end\nend\n";
+    let check = "record = Category.create!(name: 'found')\nraise 'resolved marker' unless FinderProbe.value.id == record.id\n";
+    native(&["activerecord"], &format!("{AR}{CATEGORIES}{extension}{model}{probe}{check}"));
+    emit_and_run::empty_app().write("db/schema.rb", CATEGORIES)
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write("app/models/finder_marker.rb", extension).write("app/models/category.rb", model)
+        .write("app/models/finder_probe.rb", probe).run_ruby(check).assert_passes();
+}
+
+#[test]
+fn acronym_i18n_keys_match_rails_model_ancestry() {
+    let schema = "ActiveRecord::Schema.define do\ncreate_table(:entries) { |t| t.string :title }\ncreate_table(:clients) { |t| t.string :title; t.string :type }\nend\n";
+    let entry = "module Blog\nclass APIEntry < ActiveRecord::Base\nself.table_name = 'entries'\nend\nend\n";
+    let record = "module Blog\nclass Record < ActiveRecord::Base\nself.table_name = 'clients'\nend\nend\n";
+    let client = "module Blog\nclass APIClient < Blog::Record\nend\nend\n";
+    let featured = "module Blog\nclass Featured < Blog::APIClient\nend\nend\n";
+    let entries = format!("{entry}{record}{client}{featured}");
+    let locale = "en:\n  activerecord:\n    models:\n      blog/api_entry: Submission\n      blog/api_client: Integration client\n    attributes:\n      blog/api_entry:\n        title: Entry caption\n      blog/api_client:\n        title: Client caption\n";
+    let check = "raise 'model key' unless Blog::APIEntry.model_name.i18n_key.to_s == 'blog/api_entry'\nraise 'subclass key' unless Blog::APIClient.model_name.i18n_key.to_s == 'blog/api_client'\nraise 'inherited attribute' unless Blog::Featured.human_attribute_name('title') == 'Client caption'\n";
+    native(&["activerecord"], &format!("{AR}{schema}{entries}\nrequire 'yaml'\nI18n.backend.eager_load!\nI18n.backend.store_translations(:en, YAML.safe_load({locale:?})['en'])\n{check}"));
+    assert_eq!(roundhouse::i18n::i18n_key("Blog::APIEntry"), "blog/api_entry");
+    assert_eq!(roundhouse::i18n::i18n_key("Blog::APIClient"), "blog/api_client");
+    let sources = [("db/schema.rb",schema),("app/models/blog/api_entry.rb",entry),("app/models/blog/record.rb",record),("app/models/blog/api_client.rb",client),("app/models/blog/featured.rb",featured),("config/locales/en.yml",locale)];
+    let mut app=roundhouse::ingest::ingest_app_from_tree(sources.iter().map(|(p,s)|(PathBuf::from(p),s.as_bytes().to_vec())).collect()).unwrap();
+    Analyzer::new(&app).analyze(&mut app);
+    let i18n=roundhouse::i18n::FormI18n::of(&app);
+    for (class,key,title,model) in [("Blog::APIEntry","blog_api_entry","Entry caption","Submission"),("Blog::APIClient","blog_api_client","Client caption","Integration client"),("Blog::Featured","blog_featured","Client caption","Integration client")] {
+        assert_eq!(i18n.label(key,"title"),title,"{class}");
+        assert_eq!(i18n.submit(key,"create"),format!("Create {model}"),"{class}");
+        let controller=format!("class PagesController < ActionController::Base\ndef form; @entry = {class}.new; end\nend\n");
+        let template="<%= form_with model: @entry, url: '/', method: :post do |form| %><%= form.label :title %><%= form.submit %><% end %>";
+        let ruby=format!("html=Views::Pages.form({class}.new)\nraise 'acronym label' unless html.include?('>{title}</label>')\nraise 'acronym submit' unless html.include?('value=\"Create {model}\"')\n");
+        let mut emitted=emit_and_run::empty_app().write("config/routes.rb","Rails.application.routes.draw do\nend\n").write("app/controllers/pages_controller.rb",&controller).write("app/views/pages/form.html.erb",template);
+        for (path,source) in sources {emitted=emitted.write(path,source);}
+        emitted.run_ruby(&ruby).assert_passes();
+    }
+}
+
+fn memoized_association_condition_case(kind: &str) {
+    let schema="ActiveRecord::Schema.define do\ncreate_table(:users) { |t| t.string :name }\ncreate_table(:rooms) { |t| t.string :name }\ncreate_table(:messages) { |t| t.integer :room_id; t.integer :creator_id; t.string :title; t.integer :score }\nend\n";
+    let user="class User < ActiveRecord::Base\nend\n";
+    let room="class Room < ActiveRecord::Base\nhas_many :messages\nend\n";
+    let message="class Message < ActiveRecord::Base\nbelongs_to :room\nbelongs_to :creator, class_name: 'User'\nend\n";
+    let expression=match kind {
+        "creator"=>"Room.find(id).messages.find_by(creator: creator)",
+        "range"=>"Room.find(id).messages.find_by(score: 2..4)",
+        "range!"=>"Room.find(id).messages.find_by!(score: 2..4)",
+        "nested"=>"Room.find(Room.where(name: 'owner').first.id).messages.find_by_title(Message.where(score: 1).first.title)",
+        _=>unreachable!(),
+    };
+    let probe=format!("class FinderProbe\n#: (Integer, User) -> Message?\ndef self.value(id, creator); {expression}; end\nend\n");
+    let check="creator=User.create!(name: 'writer')\nroom=Room.create!(name: 'owner')\nother=Room.create!(name: 'other')\nMessage.create!(room_id: other.id, creator_id: creator.id, title: 'found', score: 3)\nMessage.create!(room_id: other.id, creator_id: creator.id, title: 'found', score: 1)\nrecord=Message.create!(room_id: room.id, creator_id: creator.id, title: 'found', score: 3)\nresult=FinderProbe.value(room.id, creator)\nraise 'scoped condition' unless result && result.id == record.id\n";
+    native(&["activerecord"],&format!("{AR}{schema}{user}{room}{message}{probe}{check}"));
+    let run = emit_and_run::empty_app().write("db/schema.rb",schema).write("config/routes.rb","Rails.application.routes.draw do\nend\n")
+        .write("app/models/user.rb",user).write("app/models/room.rb",room).write("app/models/message.rb",message)
+        .write("app/models/finder_probe.rb",&probe).run_ruby(check);
+    run.assert_passes();
+    if kind == "nested" {
+        let source = std::fs::read_to_string(run.emitted.join("app/models/finder_probe.rb")).unwrap();
+        assert!(!source.contains("Message.where("), "argument query must receive relation lowering");
+        assert!(!source.contains("Room.where("), "owner query must receive relation lowering");
+    }
+}
+
+#[test]
+fn association_finder_memoization_lowers_nested_queries() { memoized_association_condition_case("nested"); }
+#[test]
+fn association_finder_memoization_keeps_association_conditions() { memoized_association_condition_case("creator"); }
+#[test]
+fn association_finder_memoization_keeps_range_conditions() { memoized_association_condition_case("range"); }
+#[test]
+fn association_finder_memoization_keeps_bang_range_conditions() { memoized_association_condition_case("range!"); }
+
+fn isolated_form_metadata_case(partial: bool) {
+    let schema="ActiveRecord::Schema.define do\ncreate_table(:posts) { |t| t.string :title }\ncreate_table(:blog_posts) { |t| t.string :title }\nend\n";
+    let engine="module Blog\nclass Engine < ::Rails::Engine\nisolate_namespace Blog\nend\nend\n";
+    let post="class Post < ActiveRecord::Base\nattribute :nickname, :string\nattribute :enabled, :boolean\nvalidates :title, presence: true\nend\n";
+    let blog="module Blog\nclass Post < ActiveRecord::Base\nself.table_name = 'blog_posts'\nattribute :tagline, :string\nattribute :featured, :boolean\nvalidates :title, presence: true\nend\nend\n";
+    let locale="en:\n  helpers:\n    submit:\n      create: Publish %{model}\n  activerecord:\n    models:\n      post: Public entry\n      blog/post: Engine entry\n    attributes:\n      post:\n        title: Public caption\n      blog/post:\n        title: Engine caption\n";
+    let root_template="<%= form_with model: @entry, url: '/', method: :post do |form| %><%= form.label :title %><%= form.text_field :nickname %><%= form.check_box :enabled %><%= form.submit %><% end %>";
+    let blog_template="<%= form_with model: @entry, url: '/', method: :post do |form| %><%= form.label :title %><%= form.text_field :tagline %><%= form.check_box :featured %><%= form.submit %><% end %>";
+    let root_fields = "<%= form.label :title %><%= form.text_field :nickname %><%= form.check_box :enabled %><%= form.submit %>";
+    let blog_fields = "<%= form.label :title %><%= form.text_field :tagline %><%= form.check_box :featured %><%= form.submit %>";
+    let root_template = if partial { root_template.replace(root_fields, "<%= render 'pages/root_fields', form: form, post: @entry %>") } else { root_template.to_owned() };
+    let blog_template = if partial { blog_template.replace(blog_fields, "<%= render 'pages/blog_fields', form: form, post: @entry %>") } else { blog_template.to_owned() };
+    let partial_setup = if partial { format!("Dir.mkdir('views')\nDir.mkdir('views/pages')\nFile.write('views/pages/_root_fields.html.erb', {root_fields:?})\nFile.write('views/pages/_blog_fields.html.erb', {blog_fields:?})\n") } else { String::new() };
+    let checks=r##"
+def check_identity_form(html, field, value, boolean, caption, model, invalid)
+  raise 'virtual value' unless html.include?(%Q(value="#{value}"))
+  raise 'parameter key' unless html.include?(%Q(name="post[#{field}]"))
+  checkbox=html.scan(/<input[^>]*>/).find { |tag| tag.include?('type="checkbox"') }
+  raise 'boolean reader' unless checkbox && checkbox.include?('checked="checked"')
+  raise 'class label' unless html.include?(">#{caption}</label>")
+  raise 'class submit' unless html.include?(%Q(value="Publish #{model}"))
+  raise 'class errors' unless html.include?('field_with_errors') == invalid
+end
+"##;
+    let native_program=format!(r#"{AR}
+require 'rails/engine'
+require 'action_view'
+require 'action_controller'
+{engine}{schema}{post}{blog}
+require 'yaml'
+ActionView::Helpers::FormHelper.form_with_generates_ids=true
+{partial_setup}
+view=ActionView::Base.with_empty_template_cache.new(ActionView::LookupContext.new(['views']), {{}}, nil)
+view.define_singleton_method(:protect_against_forgery?) {{ false }}
+I18n.backend.eager_load!
+I18n.backend.store_translations(:en,YAML.safe_load({locale:?})['en'])
+{checks}
+root=Post.new(nickname: 'Root value', enabled: true)
+blog=Blog::Post.new(tagline: 'Blog value', featured: true)
+[false,true].each do |invalid|
+  root.valid? if invalid
+  blog.valid? if invalid
+  view.assign(entry: root)
+  check_identity_form(view.render(inline: {root_template:?}), 'nickname', 'Root value', 'enabled', 'Public caption', 'Public entry', invalid)
+  view.assign(entry: blog)
+  check_identity_form(view.render(inline: {blog_template:?}), 'tagline', 'Blog value', 'featured', 'Engine caption', 'Engine entry', invalid)
+end
+"#);
+    native(&["activerecord","actionview","actionpack","railties"],&native_program);
+    let controller="class PagesController < ActionController::Base\ndef root; @entry=Post.new(nickname: 'Root value', enabled: true); end\ndef blog; @entry=Blog::Post.new(tagline: 'Blog value', featured: true); end\nend\n";
+    let run=format!(r#"{checks}
+root=Post.new(nickname: 'Root value', enabled: true)
+blog=Blog::Post.new(tagline: 'Blog value', featured: true)
+[false,true].each do |invalid|
+  root.valid? if invalid
+  blog.valid? if invalid
+  check_identity_form(Views::Pages.root(root), 'nickname', 'Root value', 'enabled', 'Public caption', 'Public entry', invalid)
+  check_identity_form(Views::Pages.blog(blog), 'tagline', 'Blog value', 'featured', 'Engine caption', 'Engine entry', invalid)
+end
+"#);
+    let mut emitted = emit_and_run::empty_app().write("db/schema.rb",schema).write("config/routes.rb","Rails.application.routes.draw do\nend\n")
+        .write("lib/blog/engine.rb",engine).write("app/models/post.rb",post).write("app/models/blog/post.rb",blog)
+        .write("config/locales/en.yml",locale).write("app/controllers/pages_controller.rb",controller)
+        .write("app/views/pages/root.html.erb",&root_template).write("app/views/pages/blog.html.erb",&blog_template);
+    if partial { emitted = emitted.write("app/views/pages/_root_fields.html.erb",root_fields).write("app/views/pages/_blog_fields.html.erb",blog_fields); }
+    emitted.run_ruby(&run).assert_passes();
+}
+
+#[test]
+fn isolated_form_metadata_uses_class_identity() { isolated_form_metadata_case(false); }
+
+#[test]
+fn isolated_partial_form_metadata_uses_class_identity() { isolated_form_metadata_case(true); }
+
+
+#[test]
+fn aliased_partial_forms_keep_record_metadata() {
+    let schema = "ActiveRecord::Schema.define do\ncreate_table(:users) { |t| t.string :name; t.string :avatar; t.string :webhook_url }\nend\n";
+    let model = "class User < ActiveRecord::Base\nvalidates :name, presence: true\nvalidates :avatar, presence: true\nvalidates :webhook_url, presence: true\nend\n";
+    let locale = "en:\n  activerecord:\n    models:\n      user: Service account\n    attributes:\n      user:\n        name: Account name\n";
+    let template = "<%= form_with model: @bot, scope: :bot, url: '/', method: :post do |form| %><%= render 'pages/fields', form: form, bot: @bot %><% end %>";
+    let fields = "<%= form.label :name %><%= form.text_field :name %><%= form.file_field :avatar %><%= form.url_field :webhook_url %><%= form.submit %>";
+    let checks = r#"
+def check_aliased_form(html, invalid)
+  raise 'aliased parameter key' unless html.include?('name="bot[name]"') && html.include?('id="bot_name"')
+  raise 'record label' unless html.include?('>Account name</label>')
+  raise 'record submit' unless html.include?('value="Create Service account"')
+  raise 'record errors' unless html.include?('field_with_errors') == invalid
+  raise 'file errors' unless html.match?(/<div class="field_with_errors"><input[^>]*type="file"[^>]*>/) == invalid
+  raise 'url errors' unless html.match?(/<div class="field_with_errors"><input[^>]*type="url"[^>]*>/) == invalid
+end
+"#;
+    native(&["activerecord", "actionview", "actionpack"], &format!(r#"{AR}
+require 'action_view'
+require 'action_controller'
+require 'yaml'
+{schema}{model}
+Dir.mkdir('views')
+Dir.mkdir('views/pages')
+File.write('views/pages/_fields.html.erb', {fields:?})
+ActionView::Helpers::FormHelper.form_with_generates_ids=true
+view=ActionView::Base.with_empty_template_cache.new(ActionView::LookupContext.new(['views']), {{}}, nil)
+view.define_singleton_method(:protect_against_forgery?) {{ false }}
+I18n.backend.eager_load!
+I18n.backend.store_translations(:en, YAML.safe_load({locale:?})['en'])
+{checks}
+bot=User.new
+[false,true].each do |invalid|
+  bot.valid? if invalid
+  view.assign(bot: bot)
+  check_aliased_form(view.render(inline: {template:?}), invalid)
+end
+"#));
+    let run = format!(r#"{checks}
+bot=User.new
+[false,true].each do |invalid|
+  bot.valid? if invalid
+  check_aliased_form(Views::Pages.bot(bot), invalid)
+end
+"#);
+    emit_and_run::empty_app().write("db/schema.rb",schema)
+        .write("config/routes.rb","Rails.application.routes.draw do\nend\n")
+        .write("app/models/user.rb",model).write("config/locales/en.yml",locale)
+        .write("app/controllers/pages_controller.rb","class PagesController < ActionController::Base\ndef bot; @bot=User.new; end\nend\n")
+        .write("app/views/pages/bot.html.erb",template).write("app/views/pages/_fields.html.erb",fields)
+        .run_ruby(&run).assert_passes();
+}
