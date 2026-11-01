@@ -262,3 +262,18 @@ fn a_datetime_local_field_on_a_date_column_renders_midnight() {
         .run_test("test/controllers/date_column_fields_controller_test.rb")
         .assert_passes();
 }
+
+/// Roda converts views from their ERB and translates only `label`,
+/// `text_field`, `textarea` and `submit`; a `color_field` or
+/// `datetime_local_field` stays in the page as `form.…`, with no form
+/// builder behind it. Refused on Roda, naming the target.
+#[test]
+fn a_color_or_datetime_local_field_is_refused_on_roda() {
+    for field in [
+        "<%= form.color_field :title %>",
+        "<%= form.datetime_local_field :created_at %>",
+    ] {
+        let (_, errors) = app(&format!("    {field}\n")).emit(roundhouse::project::BuildTarget::Roda);
+        assert!(errors.iter().any(|e| e.contains("form builder field not supported") && e.contains("roda")), "{field}: {errors:?}");
+    }
+}

@@ -1267,6 +1267,35 @@ fn is_plain_ruby_class(app: &App, lc: &crate::dialect::LibraryClass) -> bool {
     true
 }
 
+/// Roda converts views from their ERB, and its translator writes plain
+/// HTML for `form.label`, `text_field`, `textarea` and `submit` only
+/// (`emit::roda::views::translate_form_field`). A `color_field` or
+/// `datetime_local_field` stays in the page as `form.…`, which has no
+/// form builder behind it there, so it is refused on Roda.
+fn report_roda_form_fields(app: &App, target: BuildTarget) {
+    if target != BuildTarget::Roda {
+        return;
+    }
+    fn visit(e: &crate::expr::Expr) {
+        if let crate::expr::ExprNode::Send { recv: Some(recv), method, .. } = &*e.node
+            && matches!(method.as_str(), "color_field" | "datetime_local_field")
+            && matches!(&*recv.node, crate::expr::ExprNode::Var { .. })
+            && !e.span.is_synthetic()
+        {
+            emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+                e.span,
+                Some(crate::ident::Symbol::from(BuildTarget::Roda.as_str())),
+                "form builder field",
+                format!("`form.{}`: Roda's view translator has no plain-HTML form of it, and the page has no form builder", method.as_str()),
+            ));
+        }
+        e.node.for_each_child(&mut |c| visit(c));
+    }
+    for view in &app.views {
+        visit(&view.body);
+    }
+}
+
 /// `form.datetime_local_field` on a datetime or date column formats the
 /// column's text (`ViewHelpers.datetime_local_value_attr`), which starts
 /// `YYYY-MM-DD HH:MM:SS` on the targets measured against Rails 8.1.4:
@@ -2929,6 +2958,7 @@ fn target_files_inner(
     reject_unsupported_forwarded_procs(app, target)?;
     report_unsupported_keys(app, target);
     report_datetime_local_reads(app, target);
+    report_roda_form_fields(app, target);
     report_unemitted_library_classes(app, target);
     report_relation_class_calls(app, target);
     report_typescript_error_class(app, target);
