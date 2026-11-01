@@ -780,21 +780,6 @@ fn diagnose_expr(expr: &Expr, out: &mut Vec<Diagnostic>) {
     diagnose_expr_in(expr, out, true)
 }
 
-/// Preserve the bare-untyped warning and expose newly retained concrete
-/// alternatives. A nil-only alternative, as in Hash[_, untyped]#[], adds no
-/// concrete value information and keeps main's quiet diagnostic boundary.
-fn should_warn_gradual_untyped(ty: &Ty) -> bool {
-    fn has_concrete_non_nil_arm(ty: &Ty) -> bool {
-        match ty {
-            Ty::Union { variants } => variants.iter().any(has_concrete_non_nil_arm),
-            Ty::Untyped { .. } | Ty::Var { .. } | Ty::Nil | Ty::Bottom => false,
-            _ => true,
-        }
-    }
-    matches!(ty, Ty::Untyped { .. })
-        || ty.has_untyped_arm() && has_concrete_non_nil_arm(ty)
-}
-
 /// `value_used`: whether this expression's VALUE flows anywhere. A
 /// statement before the end of a `Seq`, or the tail of a body whose
 /// caller discards the result, contributes nothing downstream, so an
@@ -902,7 +887,7 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
     // A `Seq` has its tail's type; the tail reports itself. ForwardArgs is
     // an argument-packet marker, not a value escaping the type system.
     if value_used
-        && expr.ty.as_ref().is_some_and(should_warn_gradual_untyped)
+        && matches!(expr.ty.as_ref(), Some(Ty::Untyped { .. }))
         && !matches!(
             &*expr.node,
             ExprNode::Seq { .. } | ExprNode::ForwardArgs | ExprNode::ForwardKeywords
@@ -1246,18 +1231,14 @@ mod gradual_warning_tests {
     }
 
     #[test]
-    fn symbol_and_untyped_warns() {
+    fn only_bare_untyped_warns() {
+        assert_eq!(warnings(Ty::untyped()), 1);
         assert_eq!(warnings(Ty::Union {
             variants: vec![Ty::Sym, Ty::untyped()].into(),
-        }), 1);
-    }
-
-    #[test]
-    fn untyped_and_nil_stays_quiet() {
+        }), 0);
         assert_eq!(warnings(Ty::Union {
             variants: vec![Ty::untyped(), Ty::Nil].into(),
         }), 0);
-        assert_eq!(warnings(Ty::untyped()), 1);
     }
 
     #[test]
