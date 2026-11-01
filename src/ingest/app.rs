@@ -6452,7 +6452,7 @@ fn filter_from_send(
         return None;
     };
     let kind = match method.as_str() {
-        "before_action" => FilterKind::Before,
+        "before_action" | "prepend_before_action" => FilterKind::Before,
         "around_action" => FilterKind::Around,
         "after_action" => FilterKind::After,
         "skip_before_action" => FilterKind::Skip,
@@ -6483,6 +6483,8 @@ fn filter_from_send(
     let mut targets: Vec<(crate::ident::Symbol, crate::span::Span)> = Vec::new();
     let mut only: Vec<crate::ident::Symbol> = Vec::new();
     let mut except: Vec<crate::ident::Symbol> = Vec::new();
+    let mut only_present = false;
+    let mut prepend = method.as_str() == "prepend_before_action";
     for arg in args {
         if let Some(sym) = sym_of(arg) {
             targets.push((sym, arg.span));
@@ -6502,8 +6504,16 @@ fn filter_from_send(
         };
         for (key, value) in entries {
             match sym_of(key).as_ref().map(|k| k.as_str().to_string()).as_deref() {
-                Some("only") => only = sym_list(value)?,
+                Some("only") => {
+                    only_present = true;
+                    only = sym_list(value)?;
+                }
                 Some("except") => except = sym_list(value)?,
+                Some("prepend") => match &*value.node {
+                    ExprNode::Lit { value: Literal::Bool { value: true } } => prepend = true,
+                    ExprNode::Lit { value: Literal::Bool { value: false } | Literal::Nil } => {}
+                    _ => return None,
+                },
                 // if:/unless: guards on a macro-expanded filter would
                 // need the predicate to resolve in the INCLUDER; not
                 // modeled, and silently dropping a guard changes when a
@@ -6536,8 +6546,11 @@ fn filter_from_send(
                 unless_cond: None,
                 if_cond_expr: None,
                 unless_cond_expr: None,
+                unread_guard: false,
+                unread_options: false,
+                only_present,
                 block: None,
-                prepend: false,
+                prepend,
             })
             .collect(),
     )
