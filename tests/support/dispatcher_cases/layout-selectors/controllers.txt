@@ -1,0 +1,17 @@
+app/controllers/named_parent_controller.rb
+app/controllers/named_child_controller.rb
+app/controllers/block_parent_controller.rb
+app/controllers/block_child_controller.rb
+app/controllers/guarded_context_controller.rb
+app/controllers/rescued_context_controller.rb
+app/controllers/implicit_context_controller.rb
+app/controllers/string_layout_controller.rb
+app/controllers/symbol_layout_controller.rb
+app/controllers/false_layout_controller.rb
+app/controllers/nil_layout_controller.rb
+app/controllers/application_layout_controller.rb
+app/controllers/dynamic_layout_controller.rb
+app/controllers/rescue_dynamic_layout_controller.rb
+app/controllers/rescue_nil_layout_controller.rb
+app/controllers/rescue_symbol_layout_controller.rb
+app/controllers/true_layout_controller.rb

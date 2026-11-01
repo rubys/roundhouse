@@ -178,6 +178,7 @@ fn tiny_blog_round_trips() {
         test_modules: vec![],
         fixtures: vec![],
         seeds: None,
+        boot_program: Vec::new(),
         importmap: None,
         inertia: None,
         vite_manifest: None,

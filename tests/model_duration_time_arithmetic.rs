@@ -37,8 +37,8 @@ fn active_record_duration_constants_are_unwrapped_for_time_arithmetic() {
     let (emitted, errors) = app().emit(BuildTarget::Spinel);
     assert!(errors.is_empty(), "{errors:#?}");
     let ruby = std::fs::read_to_string(emitted.join("app/models/retry_clock.rb")).unwrap();
-    assert!(ruby.contains("STALE_LEASE.to_i"), "{ruby}");
-    assert!(ruby.contains("SHIFT.to_i"), "{ruby}");
+    assert!(ruby.contains("STALE_LEASE.value"), "{ruby}");
+    assert!(ruby.contains("SHIFT.value"), "{ruby}");
 }
 
 #[test]

@@ -64,6 +64,10 @@ mod framework_exceptions;
 mod active_storage_exceptions;
 #[path = "emit_and_run/rescue_surface.rs"]
 mod rescue_surface;
+#[path = "support/dispatcher_json.rs"]
+mod dispatcher_json_contract;
+#[path = "emit_and_run/dispatcher_json.rs"]
+mod dispatcher_json;
 #[path = "emit_and_run/preloader_runtime.rs"]
 mod preloader_runtime;
 #[path = "emit_and_run/framework_surface_rest.rs"]
@@ -20565,6 +20569,12 @@ mod namespaced_controller_symbol;
 
 #[path = "emit_and_run/route_format_lookahead.rs"]
 mod route_format_lookahead;
+#[path = "emit_and_run/page_caching.rs"]
+mod page_caching;
+#[path = "emit_and_run/route_requirement_span.rs"]
+mod route_requirement_span;
+#[path = "emit_and_run/boot_program.rs"]
+mod boot_program;
 
 #[path = "emit_and_run/route_dot_span.rs"]
 mod route_dot_span;

@@ -119,6 +119,10 @@ pub struct App {
     /// fresh. None when the app has no seeds file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seeds: Option<Expr>,
+    /// The app's own top-level initializer statements, in load order
+    /// (`ingest::boot_program`): run at boot on the ruby family and spinel.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub boot_program: Vec<Expr>,
     /// Pins from `config/importmap.rb`, expanded (each
     /// `pin_all_from` has been resolved into explicit per-file
     /// pins via `app/javascript/**` walking). Consumed by the
@@ -1179,6 +1183,7 @@ impl App {
             test_modules: Vec::new(),
             fixtures: Vec::new(),
             seeds: None,
+            boot_program: Vec::new(),
             importmap: None,
             inertia: None,
             vite_manifest: None,

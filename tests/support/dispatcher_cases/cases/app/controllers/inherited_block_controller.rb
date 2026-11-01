@@ -1,0 +1,2 @@
+class InheritedBlockController < BlockRescuesController
+end

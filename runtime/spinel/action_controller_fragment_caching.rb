@@ -35,13 +35,14 @@
 #
 # `perform_caching` and `cache_store` are class settings inherited
 # through the controller hierarchy, like Rails' class_attribute.
-# Base's `perform_caching` defaults to true; the test harness sets it
-# false, as a generated `config/environments/test.rb` does.
+# Base's `perform_caching` is the app's `config.action_controller.
+# perform_caching` for the environment (true unless assigned); the test
+# harness sets it false, as a generated `config/environments/test.rb` does.
 module ActionController
   class Base
     def self.perform_caching
       return @perform_caching if @perform_caching_assigned
-      return true if self == ActionController::Base
+      return Rails.application.action_controller_perform_caching if self == ActionController::Base
       superclass.perform_caching
     end
 

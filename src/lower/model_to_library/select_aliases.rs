@@ -55,7 +55,7 @@ pub fn reader_names(model: &Model) -> Vec<Symbol> {
 }
 
 // Through the writer rather than the ivar: Rails casts a selected value by the attribute's type.
-fn hydrated_attributes(model: &Model) -> Vec<Symbol> {
+pub(super) fn hydrated_attributes(model: &Model) -> Vec<Symbol> {
     let declared: Vec<Symbol> = super::markers::attribute_api_decls(&model.body).into_iter().map(|(n, _)| n).collect();
     unique_aliases(model)
         .into_iter()
@@ -80,9 +80,6 @@ pub(super) fn push_select_alias_methods(methods: &mut Vec<MethodDef>, model: &Mo
         .into_iter()
         .filter(|n| defined(methods, &Symbol::from(format!("{}=", n.as_str()))))
         .collect();
-    if readers.is_empty() && hydrated.is_empty() {
-        return;
-    }
     let Some(instantiate) = methods
         .iter_mut()
         .find(|m| m.name.as_str() == "instantiate" && m.receiver == MethodReceiver::Class)
@@ -109,8 +106,11 @@ pub(super) fn push_select_alias_methods(methods: &mut Vec<MethodDef>, model: &Mo
 
     let class = model.name.0.as_str();
     let mut src = format!("class {class}\n  def {KEEP}(row)\n");
-    if !readers.is_empty() {
-        let any_key = readers.iter().map(|n| format!("row.key?({:?})", n.as_str())).collect::<Vec<_>>().join(" || ");
+    // A user reader wins for `record.alias`, but [] still reads the row.
+    // Retain every selected alias, including names with an app reader.
+    {
+        let aliases = unique_aliases(model);
+        let any_key = aliases.iter().map(|n| format!("row.key?({:?})", n.as_str())).collect::<Vec<_>>().join(" || ");
         src.push_str(&format!("    @__selected_aliases = row if {any_key}\n"));
     }
     for name in &hydrated {
