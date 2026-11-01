@@ -300,15 +300,15 @@ fn stamp_var_reads(
             // one." Skipping `is_last` looks like a free improvement
             // but exposes a latent issue: peepholes that call
             // `emit_expr` on a recv (e.g. the `.each` / `.iter_mut()`
-            // bridge in `expr/mod.rs::emit_send_inner`) currently
-            // rely on the Var-arm's multi-read clone to produce a
+            // bridge in `expr/mod.rs::emit_send_inner`) were written
+            // against the Var-arm's multi-read clone producing a
             // mutable temporary for non-mut-declared bindings (e.g.
-            // function params `articles: Vec<Article>`). Preserve
-            // the over-clone until a follow-on either routes those
-            // bridges through `emit_send_recv` + a separate
-            // mutable-temp insertion, or promotes params to `mut`
-            // in the method signature when consumed by `iter_mut()`-
-            // shaped peepholes. The `LAST_USE` bit stays available
+            // function params `articles: Vec<Article>`). The `.each`
+            // bridge now has its own answer — a param it borrows
+            // with no clone is declared `mut` in the signature (see
+            // `EmitCtx::iter_mut_params`) — but the other peepholes
+            // haven't been audited, so the over-clone stays until a
+            // follow-on retires it. The `LAST_USE` bit stays available
             // for future consumers (Swift `consume`, etc.); it's
             // informational at Stage 3.
             if count > 1 && non_copy {
