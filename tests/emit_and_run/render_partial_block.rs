@@ -181,3 +181,22 @@ fn a_partial_carries_the_yield_only_when_every_format_does() {
         .map(|e| std::fs::read_to_string(e.path()).unwrap()).collect();
     assert!(!sigs.contains("String article"), "{sigs}");
 }
+
+/// A strict-locals partial that only yields keeps its declared first
+/// local: `check` refuses a block render to it, so it never carries the
+/// yield, and a block-less render passes its record (review, mod.rs:3828).
+#[test]
+fn a_strict_locals_partial_keeps_its_declared_local() {
+    let overlay = || {
+        emit_and_run::real_blog()
+            .write("app/views/articles/_card.html.erb", "<%# locals: (article:) -%>\n<p class=\"card\"><%= yield %></p>\n")
+            .edit("app/views/articles/show.html.erb", "<% content_for :title, \"Showing article\" %>\n", "<% content_for :title, \"Showing article\" %>\n<%= render \"articles/card\", article: @article %>\n")
+    };
+    let (out, errors) = overlay().emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:?}");
+    let show = std::fs::read_to_string(out.join("app/views/articles/show.rb")).unwrap();
+    let call = show.lines().find(|l| l.contains("Articles.card")).unwrap_or_default().to_string();
+    assert!(!call.contains("(io, \"\"") && !call.contains("card(\"\""), "{call}");
+    let test = "require \"test_helper\"\n\nclass StrictCardControllerTest < ActionDispatch::IntegrationTest\n  test \"card\" do\n    get article_url(articles(:one))\n    assert_match(%r{<p class=\"card\"></p>}, response.body)\n  end\nend\n";
+    overlay().write("test/controllers/strict_card_controller_test.rb", test).run_test("test/controllers/strict_card_controller_test.rb").assert_passes();
+}

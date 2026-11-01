@@ -3825,7 +3825,10 @@ fn yielding_partials(
     let mut carries: crate::det::HashMap<ViewKey, bool> = crate::det::HashMap::default();
     for v in views.iter().filter(|v| split_view_name(v.name.as_str()).1.starts_with('_')) {
         let Some(key) = view_key_of(v, &stems) else { continue };
-        let this = carries_yield(&v.body, &effective_record_arg(v, element_locals, known_models, &stems));
+        // A strict-locals partial's first slot is its declared local, which
+        // `check` keeps from carrying a block (it refuses the render).
+        let this = v.strict_locals.is_none()
+            && carries_yield(&v.body, &effective_record_arg(v, element_locals, known_models, &stems));
         let all = carries.entry(key).or_insert(true);
         *all = *all && this;
     }
