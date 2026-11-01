@@ -798,8 +798,8 @@ end
     );
 }
 
-#[test]
-fn a_hidden_concern_super_link_is_refused() {
+/// A controller's `process_action` whose `super` reaches a concern's hook.
+fn hidden_concern_app() -> roundhouse::App {
     let mut files = files("own", true, false);
     let module = format!(
         "module ActionWrapper\n extend ActiveSupport::Concern\n{}\n def unrelated_helper\n \"helper\"\n end\nend\n",
@@ -821,8 +821,30 @@ fn a_hidden_concern_super_link_is_refused() {
         .collect();
     let mut app = ingest_app_from_tree(tree).unwrap();
     roundhouse::session::analyze_and_lower(&mut app);
+    app
+}
+
+#[test]
+fn a_hidden_concern_super_link_is_refused() {
+    let app = hidden_concern_app();
     let (_, diagnostics) = roundhouse::emit::diagnostics::scope(|| {
         roundhouse::emit::ruby::emit_lowered_controllers(&app)
+    });
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Error
+                && d.message.contains("process_action_concern_super")),
+        "{diagnostics:?}"
+    );
+}
+
+/// `lower_app_controllers` is the path Crystal and others take.
+#[test]
+fn a_hidden_concern_super_link_is_refused_through_the_app_wrapper() {
+    let app = hidden_concern_app();
+    let (_, diagnostics) = roundhouse::emit::diagnostics::scope(|| {
+        roundhouse::lower::lower_app_controllers(&app, Vec::new(), &[])
     });
     assert!(
         diagnostics

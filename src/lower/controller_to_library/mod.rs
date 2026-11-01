@@ -243,6 +243,7 @@ pub fn lower_app_controllers(
             sources: &app.sources,
             schema: Some(&app.schema),
             views: &app.views,
+            library_classes: &app.library_classes,
             assocs,
             ..Default::default()
         },
