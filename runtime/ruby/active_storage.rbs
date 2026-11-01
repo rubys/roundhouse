@@ -336,8 +336,8 @@ end
 # onto the app's generated RouteHelpers so a view that writes one
 # compiles on every target.
 module RouteHelpers
-  def self.rails_blob_path: (ActiveStorage::Attached attachment, ?disposition: String?, ?only_path: bool?) -> String
-  def self.rails_blob_url: (ActiveStorage::Attached attachment, ?disposition: String?, ?only_path: bool?) -> String
+  def self.rails_blob_path: (ActiveStorage::Attached | ActiveStorage::Blob model, ?disposition: String?, ?only_path: bool?) -> String
+  def self.rails_blob_url: (ActiveStorage::Attached | ActiveStorage::Blob model, ?disposition: String?, ?only_path: bool?) -> String
   def self.rails_storage_proxy_path: (ActiveStorage::Attached | ActiveStorage::Blob model, ?disposition: String?, ?only_path: bool?) -> String
   def self.rails_storage_proxy_url: (ActiveStorage::Attached | ActiveStorage::Blob model, ?disposition: String?, ?only_path: bool?) -> String
   def self.rails_storage_redirect_path: (ActiveStorage::Attached | ActiveStorage::Blob model, ?disposition: String?, ?only_path: bool?) -> String

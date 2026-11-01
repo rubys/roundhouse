@@ -810,6 +810,16 @@ fn emit_url_arg(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
     if matches!(&*url.node, ExprNode::StringInterp { .. }) {
         return Some(rewrite_helpers_in_expr(url, ctx));
     }
+    // An Active Storage Blob, Attachment or Attached links where Rails'
+    // `resolve("ActiveStorage::Blob")` / `resolve("ActiveStorage::Attachment")`
+    // route it: `rails_blob_path`, the blob's redirect route. Keyed off
+    // the type, ahead of the name convention below, which read a `blob`
+    // local as `blob_path(blob.id)`.
+    if let Some(crate::ty::Ty::Class { id, .. }) = url.ty.as_ref().map(crate::ty::Ty::peel_nilable)
+        && matches!(id.0.as_str(), "ActiveStorage::Blob" | "ActiveStorage::Attachment" | "ActiveStorage::Attached")
+    {
+        return Some(route_helpers_call("rails_blob_path", vec![rewrite_helpers_in_expr(url, ctx)]));
+    }
     // A read `case_class_narrow` pinned to a model (`ma.item` inside
     // `when ModMail`) links through that model's route.
     if let ExprNode::Cast { target_ty: crate::ty::Ty::Class { id, .. }, .. } = &*url.node {

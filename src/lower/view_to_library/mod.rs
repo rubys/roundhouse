@@ -4102,7 +4102,11 @@ pub(crate) fn record_arg_ty(dir: &str, is_layout: bool, known_models: &[String])
         return Ty::Str;
     }
     let model_class = camelize_path(&crate::naming::singularize_last(dir));
-    if known_models.iter().any(|m| m == &model_class) {
+    // Active Storage's own records: an app overrides their partials
+    // (`active_storage/blobs/_blob.html.erb`, which Action Text renders
+    // each attached blob through) without declaring the model.
+    let framework_model = matches!(model_class.as_str(), "ActiveStorage::Blob" | "ActiveStorage::Attachment");
+    if framework_model || known_models.iter().any(|m| m == &model_class) {
         Ty::Class {
             id: crate::ident::ClassId(crate::ident::Symbol::from(model_class.as_str())),
             args: vec![].into(),

@@ -1850,8 +1850,12 @@ end
 # two options an ingested app has written. `_url` is the same string as
 # `_path`: the app's own `_url` helpers are lowered host-less too.
 module RouteHelpers
-  def self.rails_blob_path(attachment, disposition: nil, only_path: nil)
-    b = attachment.blob
+  # Rails' `rails_blob_path` takes a Blob, an Attachment or an Attached
+  # (`resolve("ActiveStorage::Blob")` and `resolve("ActiveStorage::Attachment")`
+  # route each to the blob's redirect route), as `rails_storage_redirect_path`
+  # below does.
+  def self.rails_blob_path(model, disposition: nil, only_path: nil)
+    b = storage_blob(model)
     b.nil? ? "" : b.redirect_url(disposition.to_s)
   end
 
@@ -1865,8 +1869,8 @@ module RouteHelpers
     rails_direct_uploads_path
   end
 
-  def self.rails_blob_url(attachment, disposition: nil, only_path: nil)
-    rails_blob_path(attachment, disposition: disposition, only_path: only_path)
+  def self.rails_blob_url(model, disposition: nil, only_path: nil)
+    rails_blob_path(model, disposition: disposition, only_path: only_path)
   end
 
   # The engine's two `direct` routes over a blob. `rails_storage_redirect`
