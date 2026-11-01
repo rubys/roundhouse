@@ -1100,7 +1100,8 @@ pub(crate) fn emit_spinel_with_param_binds(app: &App, param_binds: bool) -> Vec<
     // per named route. Generated from `app.routes`; supersedes the
     // hand-written `runtime/ruby/action_view/route_helpers.rb` (which
     // is being kept for backward compat until callers migrate).
-    let route_helper_funcs = crate::lower::lower_routes_to_library_functions(app);
+    let mut route_helper_funcs = crate::lower::lower_routes_to_library_functions(app);
+    crate::lower::routes_to_library::guard_required_segments(&mut route_helper_funcs, app);
     // The segment interpolations stay bare. `to_param` used to be
     // applied here, to every segment of every helper — which reads as
     // Rails-faithful but isn't, because our segments are declared

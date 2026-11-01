@@ -24,6 +24,10 @@ module ActionController
     def initialize: (String message, ?Array[String] failures) -> void
     def failures: () -> Array[String]
   end
+
+  class UrlGenerationError < StandardError
+    def self.missing_segments: (String controller, String action, Array[String] names, Array[String?] values) -> UrlGenerationError
+  end
 end
 
 module AbstractController

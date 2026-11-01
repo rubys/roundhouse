@@ -67,6 +67,25 @@ module ActionController
       @failures
     end
   end
+
+  # Raised by a generated path helper when a required segment is nil or
+  # empty, where Rails' router raises it (roundhouse#1475). The message is
+  # Rails': every key the route has, sorted, a given value as its
+  # `to_param`, then the missing keys. The helper passes each value as a
+  # String, or nil.
+  class UrlGenerationError < StandardError
+    def self.missing_segments(controller, action, names, values)
+      pairs = [["action", action.inspect], ["controller", controller.inspect]]
+      missing = []
+      names.each_with_index do |name, i|
+        value = values[i]
+        missing << ":#{name}" if value.to_s.empty?
+        pairs << [name, value.nil? ? "nil" : value.inspect]
+      end
+      shown = pairs.sort_by { |pair| pair[0] }.map { |pair| "#{pair[0]}: #{pair[1]}" }.join(", ")
+      new("No route matches {#{shown}}, missing required keys: [#{missing.sort.join(", ")}]")
+    end
+  end
 end
 
 # Raised by the emitted `process_action` when a route names an action
