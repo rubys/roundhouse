@@ -289,7 +289,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut view_lcs = crate::lower::preliminary_view_classes(&app.views, &vctx);
     let view_extras = library::extras_from_lcs(&view_lcs);
 
-    let route_helper_funcs = crate::lower::lower_routes_to_library_functions(app);
+    let route_helper_funcs = crate::lower::lower_routes_to_library_functions_without_hash_query(app);
     let route_helper_extras = library::extras_from_funcs(&route_helper_funcs);
 
     // Collect controller `permit(...)` declarations once so the model
