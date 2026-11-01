@@ -130,3 +130,12 @@ fn an_app_cache_store_nothing_binds_keeps_the_lowering() {
     let body = with_store(None);
     assert!(body.contains("fetch_str"), "an unbound app store must not disable fetch_str:\n{body}");
 }
+
+#[test]
+fn an_app_cache_store_bound_in_an_environment_file_keeps_fetch() {
+    // `config/environments/production.rb` is where an app usually sets its
+    // store, and it is not an ingested source: the binding is read there too.
+    let production = "Rails.application.configure do\n  config.cache_store = :custom_store\nend\n";
+    let body = with_store(Some(("config/environments/production.rb", production)));
+    assert!(!body.contains("fetch_str"), "a store bound in an environment file must keep fetch:\n{body}");
+}

@@ -42,7 +42,8 @@ pub fn apply_rails_cache_lowering(app: &mut App) {
 /// `fetch_str` (a method of the runtime's store only) would be undefined
 /// on it: the pass stands down and `fetch` runs as written. Defining such
 /// a class is not enough: the app must bind it, with `config.cache_store
-/// = :custom_store` (or the class) or a `Rails.cache =` naming it. An
+/// = :custom_store` (or the class) or a `Rails.cache =` naming it, in a
+/// source or in `config/environments/*.rb`. An
 /// unbound store leaves `Rails.cache` the runtime's, whose plain `fetch`
 /// recomputes every call, so the lowering stays.
 pub(crate) fn app_binds_cache_store(app: &App) -> bool {
@@ -77,7 +78,10 @@ pub(crate) fn app_binds_cache_store(app: &App) -> bool {
                     .any(|sym| crate::naming::camelize(sym) == *store)
         })
     };
+    // `config/environments/*.rb` is where an app usually sets its store,
+    // and those files are not sources: ingest keeps their lines.
     app.sources.iter().any(|source| source.text.lines().any(binds))
+        || app.environment_cache_store_lines.iter().any(|line| binds(line))
 }
 
 fn rewrite(expr: &mut Expr) {

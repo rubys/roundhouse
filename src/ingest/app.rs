@@ -1082,6 +1082,7 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     let (cable_adapter, cable_redis, cable_warnings) = super::cable_yml::read(vfs, dir);
     app.cable_redis = cable_redis;
     sidekiq_warnings.extend(cable_warnings);
+    app.environment_cache_store_lines = environment_cache_store_lines(vfs, dir);
     let app_config_path = dir.join("config/application.rb");
     if let Ok(source) = vfs.read(&app_config_path) {
         app.loaded_frameworks =
@@ -7928,6 +7929,29 @@ fn boot_source_files<V: Vfs + ?Sized>(
     files.sort();
     files.dedup();
     Ok(files)
+}
+
+/// Each `config/environments/*.rb` line that mentions `cache_store`, as
+/// written, in file order. See `App::environment_cache_store_lines`.
+fn environment_cache_store_lines<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<String> {
+    let env_dir = dir.join("config/environments");
+    if !vfs.is_dir(&env_dir) {
+        return Vec::new();
+    }
+    let mut files: Vec<PathBuf> = vfs
+        .read_dir(&env_dir)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "rb"))
+        .collect();
+    files.sort();
+    let mut out = Vec::new();
+    for path in files {
+        let Ok(bytes) = vfs.read(&path) else { continue };
+        let text = String::from_utf8_lossy(&bytes);
+        out.extend(text.lines().filter(|l| l.contains("cache_store")).map(|l| l.to_string()));
+    }
+    out
 }
 
 pub(super) fn read_rb_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Vec<PathBuf>> {
