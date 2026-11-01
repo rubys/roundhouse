@@ -250,6 +250,7 @@ pub struct ViewLowerCtx<'a> {
     model_singulars: std::rc::Rc<crate::det::HashSet<String>>,
     slug_models: std::rc::Rc<crate::det::HashSet<String>>,
     bool_readers: std::rc::Rc<crate::det::HashMap<String, crate::det::HashSet<String>>>,
+    time_columns: std::rc::Rc<crate::det::HashMap<String, crate::det::HashSet<String>>>,
     store_readers:
         std::rc::Rc<crate::det::HashMap<String, crate::det::HashSet<String>>>,
     partial_form_bindings: crate::det::HashMap<ViewKey, PartialFormBinding>,
@@ -339,6 +340,7 @@ impl<'a> ViewLowerCtx<'a> {
                     .collect(),
             ),
             bool_readers: std::rc::Rc::new(bool_reader_names(app)),
+            time_columns: std::rc::Rc::new(time_column_names(app)),
             store_readers: std::rc::Rc::new(store_reader_names(app)),
             partial_form_bindings: partial_form_bindings(&app.views),
             i18n: std::rc::Rc::new(crate::i18n::FormI18n::of(app)),
@@ -827,6 +829,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         model_singulars: lx.model_singulars.clone(),
         slug_models: lx.slug_models.clone(),
         bool_readers: lx.bool_readers.clone(),
+        time_columns: lx.time_columns.clone(),
         store_readers: lx.store_readers.clone(),
         route_helper_names: lx.route_helper_names.clone(),
         i18n: lx.i18n.clone(),
@@ -4810,6 +4813,10 @@ pub(super) struct ViewCtx {
     /// runtime `checked_box_attr` seam).
     pub(super) bool_readers:
         std::rc::Rc<crate::det::HashMap<String, crate::det::HashSet<String>>>,
+    /// Per-model datetime and date columns (`time_column_names`), whose
+    /// stored text `form.datetime_local_field` formats.
+    pub(super) time_columns:
+        std::rc::Rc<crate::det::HashMap<String, crate::det::HashSet<String>>>,
     /// Per-model NON-COLUMN attribute readers (`store_reader_names`):
     /// typed_store + `attribute`-DSL names. A form field's value read
     /// routes through the synthesized reader for these instead of the
@@ -5003,6 +5010,26 @@ fn bool_reader_names(
         for (name, ty) in crate::lower::model_to_library::attribute_api_decls(&m.body) {
             if ty.as_str() == "boolean" {
                 set.insert(name.as_str().to_string());
+            }
+        }
+        out.insert(crate::naming::snake_case(m.name.0.as_str()), set);
+    }
+    out
+}
+
+/// Per-model datetime/timestamp and date columns, keyed like
+/// `bool_reader_names`.
+fn time_column_names(
+    app: &App,
+) -> crate::det::HashMap<String, crate::det::HashSet<String>> {
+    let mut out = crate::det::HashMap::default();
+    for m in &app.models {
+        let mut set = crate::det::HashSet::default();
+        if let Some(table) = app.schema.tables.get(&m.table.0) {
+            for col in &table.columns {
+                if matches!(col.col_type, crate::schema::ColumnType::DateTime | crate::schema::ColumnType::Date) {
+                    set.insert(col.name.as_str().to_string());
+                }
             }
         }
         out.insert(crate::naming::snake_case(m.name.0.as_str()), set);

@@ -1841,6 +1841,7 @@ mod tests {
             model_singulars: Default::default(),
             slug_models: Default::default(),
             bool_readers: Default::default(),
+            time_columns: Default::default(),
             store_readers: Default::default(),
             route_helper_names: Default::default(),
             i18n: Default::default(),

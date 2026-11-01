@@ -1237,6 +1237,38 @@ fn is_plain_ruby_class(app: &App, lc: &crate::dialect::LibraryClass) -> bool {
     true
 }
 
+/// `form.datetime_local_field` on a datetime or date column formats the
+/// column's text (`ViewHelpers.datetime_local_value_attr`), which starts
+/// `YYYY-MM-DD HH:MM:SS` on the targets measured against Rails 8.1.4:
+/// the ruby family, Crystal, Go and Python. TypeScript's record reads the
+/// column as a `Date`, whose text is not that (`Sun Nov 01 2026 …`, in
+/// the host's zone), and the Rust emit of the read does not build; the
+/// rest are unmeasured. Each of those refuses the call rather than
+/// rendering a value Rails wouldn't.
+fn report_datetime_local_reads(app: &App, target: BuildTarget) {
+    if matches!(
+        target,
+        BuildTarget::Blog
+            | BuildTarget::Ruby
+            | BuildTarget::Jruby
+            | BuildTarget::Roda
+            | BuildTarget::Futamura
+            | BuildTarget::Crystal
+            | BuildTarget::Go
+            | BuildTarget::Python
+    ) {
+        return;
+    }
+    for span in crate::analyze::datetime_local_time_reads(app) {
+        emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+            span,
+            Some(crate::ident::Symbol::from(target.as_str())),
+            "form builder field",
+            "`form.datetime_local_field` on a datetime or date column: this target's record doesn't read the column as the text the lowering formats into Rails' value",
+        ));
+    }
+}
+
 /// A non-integer primary key (`create_table …, id: :uuid`,
 /// `primary_key: "identifier", id: :string`) is carried end to end by
 /// the ruby-shape emit — CRuby, JRuby and Spinel: the analyzer types
@@ -2864,6 +2896,7 @@ fn target_files_inner(
     reject_unsupported_dates(app, target)?;
     reject_unsupported_forwarded_procs(app, target)?;
     report_unsupported_keys(app, target);
+    report_datetime_local_reads(app, target);
     report_unemitted_library_classes(app, target);
     report_relation_class_calls(app, target);
     report_typescript_error_class(app, target);

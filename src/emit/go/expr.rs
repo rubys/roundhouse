@@ -4430,7 +4430,7 @@ fn static_is_a(r: &Expr, r_s: &str, class: &str) -> Option<String> {
 /// pointer, so unbox it (nil stays nil). Keyed by name because these
 /// are hand-written runtime functions, not LibraryClass methods with
 /// a param table.
-const UNTYPED_ARG_HELPERS: &[&str] = &["encode_value", "optional_value_attr"];
+const UNTYPED_ARG_HELPERS: &[&str] = &["encode_value", "optional_value_attr", "color_value_attr", "color_field_value_attr", "datetime_local_value_attr"];
 
 /// Unbox a nullable-column argument at an `interface{}` seam, in
 /// place — the call itself still renders through the normal path (its

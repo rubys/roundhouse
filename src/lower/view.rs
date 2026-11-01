@@ -787,6 +787,15 @@ pub enum FormBuilderMethod {
     RangeField,
     SearchField,
     TelephoneField,
+    /// `color_field`: `Tags::ColorField`, whose `render` always writes a
+    /// value — an explicit `value:`, else the record's when it holds a
+    /// `#rrggbb`, else `#000000`.
+    ColorField,
+    /// `datetime_local_field`: `Tags::DatetimeLocalField`, whose `render`
+    /// formats a time as `%Y-%m-%dT%T`. A datetime or date column's value
+    /// is formatted; the calls whose value the lowering can't format are
+    /// refused at analyze (`unlowered_form_builder_calls`).
+    DatetimeLocalField,
     FileField,
     RichTextArea,
     /// `form.fields_for :settings, obj do |nested| … end` — Rails'
@@ -930,6 +939,8 @@ pub fn classify_form_builder_method(method: &str) -> Option<FormBuilderMethod> {
         "range_field" => Some(FormBuilderMethod::RangeField),
         "search_field" => Some(FormBuilderMethod::SearchField),
         "telephone_field" | "phone_field" => Some(FormBuilderMethod::TelephoneField),
+        "color_field" => Some(FormBuilderMethod::ColorField),
+        "datetime_local_field" => Some(FormBuilderMethod::DatetimeLocalField),
         // The INPUT TAG only. Receiving the upload is Active Storage,
         // which is deferred by design — but rendering `<input
         // type="file">` needs none of it, and without this the call
@@ -971,6 +982,8 @@ impl FormBuilderMethod {
                 | FormBuilderMethod::RangeField
                 | FormBuilderMethod::SearchField
                 | FormBuilderMethod::TelephoneField
+                | FormBuilderMethod::ColorField
+                | FormBuilderMethod::DatetimeLocalField
                 | FormBuilderMethod::FileField
         )
     }

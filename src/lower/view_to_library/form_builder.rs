@@ -158,6 +158,12 @@ pub(super) fn emit_form_builder_inline(
             binding,
             ctx,
         ),
+        FormBuilderMethod::ColorField => {
+            emit_color_field(positional.first().copied(), opts.as_slice(), binding, ctx)
+        }
+        FormBuilderMethod::DatetimeLocalField => {
+            emit_datetime_local_field(positional.first().copied(), opts.as_slice(), binding, ctx)
+        }
     };
     wrap_field_errors(out, kind, positional.first().copied(), binding, ctx)
 }
@@ -1348,6 +1354,85 @@ fn emit_typed_input_field(
         expr: view_helpers_call("optional_value_attr", vec![value_read]),
     });
     append_attr_parts(&mut parts, opts);
+    parts.push(InterpPart::Text { value: ">".to_string() });
+    vec![accumulator_append_call(string_interp(parts), ctx)]
+}
+
+/// `<input type="color" …>` — Rails' `Tags::ColorField`, which always
+/// writes a value: an explicit `value:` as given, else the record's
+/// value lowercased when it holds `#` and six hex digits, else
+/// `#000000` (`validate_color_string`). A `value:` that is nil at
+/// render falls back to the record (`options["value"] ||= …`).
+fn emit_color_field(
+    field: Option<&Expr>,
+    opts: &[(Expr, Expr)],
+    binding: &FormBuilderBinding,
+    ctx: &ViewCtx,
+) -> Vec<Expr> {
+    let Some(field_sym) = field_symbol(field) else {
+        return vec![accumulator_append_call(lit_str(String::new()), ctx)];
+    };
+    let field_str = field_sym.as_str();
+    let mut opts = opts.to_vec();
+    let mut parts: Vec<InterpPart> = Vec::new();
+    parts.push(InterpPart::Text {
+        value: format!("<input type=\"color\"{}", name_id_attrs_for(binding, field_str, &opts)),
+    });
+    // A String literal `value:` stays an ordinary attribute; any other is
+    // decided at render.
+    let literal = |v: &Expr| matches!(&*v.node, ExprNode::Lit { value: Literal::Str { .. } });
+    let value_pos = opts.iter().position(|(k, _)| {
+        matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "value")
+    });
+    if !value_pos.is_some_and(|i| literal(&opts[i].1)) {
+        let record = field_value_read(binding, field_sym.clone(), ctx);
+        let attr = match super::attr_parts::take_opt(&mut opts, "value") {
+            Some(v) if !matches!(&*v.node, ExprNode::Lit { value: Literal::Nil }) => {
+                view_helpers_call("color_field_value_attr", vec![v, record])
+            }
+            _ => view_helpers_call("color_value_attr", vec![record]),
+        };
+        parts.push(InterpPart::Expr { expr: attr });
+    }
+    append_attr_parts(&mut parts, &opts);
+    parts.push(InterpPart::Text { value: ">".to_string() });
+    vec![accumulator_append_call(string_interp(parts), ctx)]
+}
+
+/// `<input type="datetime-local" …>` — Rails' `Tags::DatetimeLocalField`.
+/// A String literal `value:` is written as given and `value: nil` writes
+/// none; with no `value:`, a datetime or date column's value is formatted
+/// `%Y-%m-%dT%T` (`datetime_local_value_attr`) and a string column's is
+/// written as given. Analyze refuses the rest (`datetime_local_refusal`).
+fn emit_datetime_local_field(
+    field: Option<&Expr>,
+    opts: &[(Expr, Expr)],
+    binding: &FormBuilderBinding,
+    ctx: &ViewCtx,
+) -> Vec<Expr> {
+    let Some(field_sym) = field_symbol(field) else {
+        return vec![accumulator_append_call(lit_str(String::new()), ctx)];
+    };
+    let field_str = field_sym.as_str();
+    let mut opts = opts.to_vec();
+    let mut parts: Vec<InterpPart> = Vec::new();
+    parts.push(InterpPart::Text {
+        value: format!("<input type=\"datetime-local\"{}", name_id_attrs_for(binding, field_str, &opts)),
+    });
+    match super::attr_parts::take_opt(&mut opts, "value") {
+        Some(v) if matches!(&*v.node, ExprNode::Lit { value: Literal::Nil }) => {}
+        Some(v) => opts.insert(0, (lit_sym(Symbol::from("value")), v)),
+        None => {
+            let is_time = ctx
+                .time_columns
+                .get(binding.model_name.as_str())
+                .is_some_and(|names| names.contains(field_str));
+            let helper = if is_time { "datetime_local_value_attr" } else { "optional_value_attr" };
+            let read = field_value_read(binding, field_sym.clone(), ctx);
+            parts.push(InterpPart::Expr { expr: view_helpers_call(helper, vec![read]) });
+        }
+    }
+    append_attr_parts(&mut parts, &opts);
     parts.push(InterpPart::Text { value: ">".to_string() });
     vec![accumulator_append_call(string_interp(parts), ctx)]
 }
