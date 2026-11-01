@@ -3544,15 +3544,15 @@ pub fn write_to_dir(files: &[(String, String)], dest: &Path) -> Result<(), Strin
 /// token Ruby ignores the comment and warns ("is ignored after any
 /// tokens"), and a tree under a warnings-are-errors policy refuses to
 /// boot. The line has no effect there, so it is
-/// dropped; a leading one is kept. Only an exact column-0 comment counts.
+/// dropped; a leading one is kept. Only an exact column-0 comment counts,
+/// and only a real comment token: the same text on a heredoc line is
+/// string data. `shareable_constant_value` is not touched: Ruby honors it
+/// anywhere in a file, for the constants after it.
 pub fn drop_late_magic_comments(content: &str) -> std::borrow::Cow<'_, str> {
     let is_magic = |line: &str| {
-        let line = line.trim_end();
-        ["frozen_string_literal", "shareable_constant_value"].iter().any(|key| {
-            line.strip_prefix("# ")
-                .and_then(|rest| rest.strip_prefix(key))
-                .is_some_and(|rest| rest.starts_with(": "))
-        })
+        line.trim_end()
+            .strip_prefix("# frozen_string_literal")
+            .is_some_and(|rest| rest.starts_with(": "))
     };
     let mut seen_token = false;
     let mut late = false;
@@ -3570,16 +3570,25 @@ pub fn drop_late_magic_comments(content: &str) -> std::borrow::Cow<'_, str> {
     if !late {
         return std::borrow::Cow::Borrowed(content);
     }
+    let parsed = ruby_prism::parse(content.as_bytes());
+    let comment_starts: std::collections::HashSet<usize> =
+        parsed.comments().map(|c| crate::ingest::prism_api::PrismLocation::start_offset(&c.location())).collect();
     let mut out = String::with_capacity(content.len());
     let mut seen_token = false;
+    let mut offset = 0;
     for line in content.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
         let trimmed = line.trim();
         if !(trimmed.is_empty() || trimmed.starts_with('#')) {
             seen_token = true;
-        } else if seen_token && is_magic(line) {
+        } else if seen_token && is_magic(line) && comment_starts.contains(&start) {
             continue;
         }
         out.push_str(line);
+    }
+    if out.len() == content.len() {
+        return std::borrow::Cow::Borrowed(content);
     }
     std::borrow::Cow::Owned(out)
 }
@@ -12562,6 +12571,15 @@ pub fn build_archives(fixture: &Path, out: &Path, targets: &[BuildTarget]) -> Re
             }
         };
         let name = target.as_str();
+        // The same late-magic-comment filter `write_to_dir` applies, so an
+        // archive holds the bytes the directory output does.
+        let files: Vec<(String, String)> = files
+            .into_iter()
+            .map(|(path, content)| {
+                let content = if path.ends_with(".rb") { drop_late_magic_comments(&content).into_owned() } else { content };
+                (path, content)
+            })
+            .collect();
 
         let json_path = out.join("browse").join(format!("{name}.json"));
         fs::write(&json_path, write_manifest_json(name, &files))

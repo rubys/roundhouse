@@ -32,3 +32,17 @@ fn the_emitted_files_ruby_parses_warn_free() {
     assert!(String::from_utf8_lossy(&res.stderr).contains("is ignored after any tokens"), "the unfixed source should warn");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_late_shareable_constant_value_is_kept() {
+    // Ruby honors this one anywhere in a file, for the constants after it.
+    let src = "require \"a\"\n# shareable_constant_value: literal\nX = [\"x\"]\n";
+    assert!(matches!(drop_late_magic_comments(src), std::borrow::Cow::Borrowed(_)));
+}
+
+#[test]
+fn the_same_text_inside_a_heredoc_is_string_data() {
+    let src = "X = <<~RUBY\n# frozen_string_literal: true\nputs 1\nRUBY\n# frozen_string_literal: true\nY = 1\n";
+    let out = drop_late_magic_comments(src);
+    assert_eq!(out, "X = <<~RUBY\n# frozen_string_literal: true\nputs 1\nRUBY\nY = 1\n");
+}
