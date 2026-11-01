@@ -1640,8 +1640,8 @@ fn report_controller_content_type_writers(app: &App, target: BuildTarget) {
             method.as_str() == "content_type="
                 || matches!(method.as_str(), "send" | "public_send" | "__send__")
                     && args.first().is_some_and(|arg| match &*arg.node {
-                        ExprNode::Literal { value: Literal::Sym { value } } => value.as_str() == "content_type=",
-                        ExprNode::Literal { value: Literal::Str { value } } => value == "content_type=",
+                        ExprNode::Lit { value: Literal::Sym { value } } => value.as_str() == "content_type=",
+                        ExprNode::Lit { value: Literal::Str { value } } => value == "content_type=",
                         _ => false,
                     })
         }
