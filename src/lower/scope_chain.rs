@@ -1272,6 +1272,7 @@ fn relation_return_model(expr: &Expr, models: &HashSet<ClassId>) -> Option<Class
 /// where association knowledge lives).
 #[derive(Default)]
 pub struct AssocRegistry {
+    finder_classes: HashMap<ClassId, crate::analyze::ClassInfo>,
     /// (model, association name) -> `"<target_table> ON <cond>"`; the
     /// rewrite prefixes `INNER JOIN` / `LEFT OUTER JOIN` by call. Direct
     /// `belongs_to`/`has_many`/`has_one`, plus resolvable `has_many
@@ -1474,6 +1475,10 @@ pub enum AssocBuildTarget {
 }
 
 impl AssocRegistry {
+    pub(crate) fn with_finder_classes(mut self, classes: &HashMap<ClassId, crate::analyze::ClassInfo>) -> Self {
+        self.finder_classes.clone_from(classes);
+        self
+    }
     /// Does some model hold what `<name>` builds or is pushed (see the
     /// field)?
     fn is_held_name(&self, name: &Symbol) -> bool {
@@ -1726,6 +1731,7 @@ impl AssocRegistry {
     /// decided here.
     fn forget(&mut self, model: &ClassId, name: &Symbol) {
         let Self {
+            finder_classes: _,
             join_tails,
             belongs_to_fk,
             polymorphic_belongs_to,
@@ -1915,8 +1921,22 @@ pub fn automatic_inverse(models: &[Model], owner: &Model, assoc: &Association) -
     })
 }
 
+pub(crate) fn build_assoc_registry_for_app(app: &crate::App) -> AssocRegistry {
+    let resolver = app.const_resolver.for_sources(&app.sources);
+    build_assoc_registry(&app.models).with_finder_classes(&crate::analyze::source_finder_classes(app, &resolver))
+}
+
 pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
     let mut reg = AssocRegistry::default();
+    for model in models {
+        let mut info = crate::analyze::ClassInfo::default();
+        info.parent = model.parent.clone();
+        info.attributes = model.attributes.clone();
+        info.source_class_methods = model.methods()
+            .filter(|m| m.receiver == crate::dialect::MethodReceiver::Class)
+            .map(|m| m.name.clone()).chain(model.scopes().map(|s| s.name.clone())).collect();
+        reg.finder_classes.insert(model.name.clone(), info);
+    }
     for m in models {
         reg.tables.insert(m.name.clone(), m.table.0.as_str().to_string());
         if let Some(parent) = &m.parent {
@@ -2623,7 +2643,7 @@ pub fn mentions_assoc_lookup(expr: &Expr, assocs: &AssocRegistry) -> bool {
                             | "left_joins" | "includes" | "preload" | "eager_load" | "references" | "group"
                             | "having" | "merge" | "unscope"
                     ));
-            if is_where
+            if is_where || method.as_str().starts_with("find_by_") && block.is_none()
                 || is_relation_terminal(method.as_str(), args, block.as_ref())
                     && matches!(
                         method.as_str(),
@@ -3184,6 +3204,7 @@ const CLASS_ROOT_TERMINALS: &[&str] = &[
 /// also `Enumerable#detect`: the block form and any arity but one are
 /// left on the Array, where they already mean what Ruby means.
 fn is_relation_terminal(name: &str, args: &[Expr], block: Option<&Expr>) -> bool {
+    if name.starts_with("find_by_") { return args.len() == 1 && block.is_none(); }
     match name {
         "find" => args.len() == 1 && block.is_none(),
         "find_by" | "find_by!" | "find_sole_by" => block.is_none(),
@@ -4305,7 +4326,104 @@ fn alias_key(name: &Symbol, ivar: bool) -> Symbol {
 
 /// Rewrite scope chains in `expr` (in place). Returns the relation-model of
 /// the whole expression when it evaluates to a Relation of a known model.
+/// Query seeding reads the owner for its key and preload cache. Bind an
+/// argument-taking owner once, before the original arguments, so neither
+/// repeated reads nor a trailing relation argument change evaluation order.
+fn memoize_finder_owner(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Option<ClassId>> {
+    let ExprNode::Send { recv: Some(read), method, args, block: None, .. } = &*expr.node else { return None };
+    let ExprNode::Send { recv: Some(owner), method: association, args: association_args, block: None, .. } = &*read.node else { return None };
+    if !association_args.is_empty() || owner_reads_once(owner) { return None; }
+    let ExprNode::Send { recv: Some(finder_class), method: finder, args: finder_args, block: None, .. } = &*owner.node else { return None };
+    let Some(crate::ty::Ty::Class { id, .. }) = finder_class.ty.as_ref() else { return None };
+    if finder.as_str() != "find" || finder_args.len() != 1
+        || finder_class.decisions & crate::expr::CLASS_OBJECT_VALUE == 0
+        || !crate::analyze::ClassInfo::active_record_class(&ctx.assocs.finder_classes, id)
+        || crate::analyze::ClassInfo::source_class_method(&ctx.assocs.finder_classes, id, finder)
+    { return None; }
+    let (declaring, target, _) = assoc_read_target(owner, association, ctx.assocs)?;
+    let declaring = declaring?;
+    if ctx.assocs.is_unseedable(Some(&declaring), association)
+        || !matches!(owner.ty.as_ref(), Some(crate::ty::Ty::Class { .. }))
+        || !(matches!(method.as_str(), "find_by" | "find_by!") || method.as_str().starts_with("find_by_")
+            || ctx.assoc_class_method_params(&target, method).is_some()) { return None; }
+    let span = expr.span;
+    let mut used = HashSet::default();
+    fn names(expr: &Expr, used: &mut HashSet<Symbol>) {
+        if let ExprNode::Var { name, .. } = &*expr.node { used.insert(name.clone()); }
+        expr.node.for_each_child(&mut |child| names(child, used));
+    }
+    names(expr, &mut used);
+    let mut params = Vec::new();
+    let mut arguments = Vec::new();
+    fn bind(expr: &mut Expr, span: crate::span::Span, used: &mut HashSet<Symbol>, params: &mut Vec<Symbol>, arguments: &mut Vec<Expr>) {
+        // Keep predicate structure visible to relation lowering. Only value
+        // expressions need temporaries; literals have no evaluation effects.
+        match &mut *expr.node {
+            ExprNode::Hash { entries, .. } => {
+                for (key, value) in entries {
+                    if !matches!(&*key.node, ExprNode::Lit { .. }) { bind(key, span, used, params, arguments); }
+                    bind(value, span, used, params, arguments);
+                }
+                return;
+            }
+            ExprNode::Range { begin, end, .. } => {
+                if let Some(value) = begin { bind(value, span, used, params, arguments); }
+                if let Some(value) = end { bind(value, span, used, params, arguments); }
+                return;
+            }
+            ExprNode::Array { elements, .. } => {
+                for value in elements { bind(value, span, used, params, arguments); }
+                return;
+            }
+            ExprNode::Lit { .. } => return,
+            _ => {}
+        }
+        let mut name = Symbol::from(format!("__rh_finder_{}_{}", span.start, params.len()));
+        while used.contains(&name) { name = Symbol::from(format!("{}x", name.as_str())); }
+        used.insert(name.clone());
+        params.push(name.clone());
+        arguments.push(expr.clone());
+        let ty = expr.ty.clone();
+        *expr = var_expr(span, &name);
+        expr.ty = ty;
+    }
+    let arg_ctx = ctx.at_callsite();
+    let mut lowered_owner = owner.clone();
+    rewrite(&mut lowered_owner, &arg_ctx, locals);
+    // The owner is always one binding, even when its lowered form is a
+    // structured expression: seeding reads the same record repeatedly.
+    let owner_name = Symbol::from(format!("__rh_finder_{}_owner", span.start));
+    let mut owner_name = owner_name;
+    while used.contains(&owner_name) { owner_name = Symbol::from(format!("{}x", owner_name.as_str())); }
+    used.insert(owner_name.clone());
+    params.push(owner_name.clone());
+    arguments.push(lowered_owner);
+    let mut lowered_args = args.clone();
+    for arg in &mut lowered_args { rewrite(arg, &arg_ctx, locals); }
+    let mut body = expr.clone();
+    if let ExprNode::Send { recv: Some(read), args, .. } = &mut *body.node {
+        if let ExprNode::Send { recv: Some(owner), .. } = &mut *read.node {
+            let ty = owner.ty.clone();
+            *owner = var_expr(span, &owner_name);
+            owner.ty = ty;
+        }
+        for arg in &mut lowered_args { bind(arg, span, &mut used, &mut params, &mut arguments); }
+        *args = lowered_args;
+    }
+    let result = rewrite(&mut body, ctx, &mut Locals::default());
+    let mut lambda = syn(span, ExprNode::Lambda {
+        params, rest_param: None, extra_params: vec![], block_param: None,
+        body, block_style: BlockStyle::Brace,
+    });
+    lambda.ty = None;
+    let ty = expr.ty.clone();
+    *expr = syn(span, ExprNode::Apply { fun: lambda, args: arguments, block: None });
+    expr.ty = ty;
+    Some(result)
+}
+
 pub(crate) fn rewrite(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<ClassId> {
+    if let Some(model) = memoize_finder_owner(expr, ctx, locals) { return model; }
     match &*expr.node {
         // Statement sequence: thread `locals` left-to-right; the Seq's value
         // (and model) is its last statement.
@@ -4386,7 +4504,7 @@ pub(crate) fn rewrite(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option
 fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<ClassId> {
     let span = expr.span;
     let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
-    let ExprNode::Send { recv, method, mut args, mut block, parenthesized } = node else {
+    let ExprNode::Send { recv, mut method, mut args, mut block, parenthesized } = node else {
         unreachable!()
     };
 
@@ -4952,6 +5070,24 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                         .cloned()
                     };
                     if let Some((target, fk, owner_id)) = resolved {
+                        // The association has now been proven and will be
+                        // replaced by its relation. Use the same column and
+                        // source-ownership checks as every other finder.
+                        let mut relation = var_expr(span, &Symbol::from("__finder_relation"));
+                        relation.ty = Some(crate::ty::Ty::Relation { of: target.clone() });
+                        let mut finder = syn(span, ExprNode::Send {
+                            recv: Some(relation), method: method.clone(), args: args.clone(),
+                            block: block.clone(), parenthesized,
+                        });
+                        if let Some(diagnostic) = super::arel::dynamic_finder_delegate_refusal(&finder, &ctx.assocs.finder_classes) {
+                            crate::emit::diagnostics::push(diagnostic);
+                        }
+                        if super::arel::normalize_dynamic_finder_send(&mut finder, &ctx.assocs.finder_classes, None, false) {
+                            if let ExprNode::Send { method: normalized, args: normalized_args, .. } = *finder.node {
+                                method = normalized;
+                                args = normalized_args;
+                            }
+                        }
                         let owner_model: Option<ClassId> = match &*ir.node {
                             ExprNode::SelfRef => ctx.instance_self.clone(),
                             _ => assoc_read_target(ir, aname, ctx.assocs).and_then(|(owner, _, _)| owner),
@@ -5211,7 +5347,25 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                             // that does not exist; the Const arm has always
                             // called this and the seed arm never did.
                             let mut args = args;
+                            let filter_terminal = if block.is_none()
+                                && matches!(args.as_slice(), [a] if matches!(&*a.node, ExprNode::Hash { .. }))
+                            {
+                                match method.as_str() {
+                                    "find_by" => Some("first"),
+                                    "find_by!" => Some("first!"),
+                                    _ => None,
+                                }
+                            } else { None };
                             let _ = lower_relation_args(&target, &method, &mut args, ctx);
+                            // SQL fragments carry binds; finder terminals take
+                            // one condition hash, so filter before selecting.
+                            if let Some(terminal) = filter_terminal
+                                && !matches!(args.as_slice(), [a] if matches!(&*a.node, ExprNode::Hash { .. }))
+                            {
+                                let filtered = put(span, Some(seed), Symbol::from("where"), args, None, true);
+                                *expr = put(span, Some(filtered), Symbol::from(terminal), vec![], None, false);
+                                return None;
+                            }
                             let keeps_model = is_chain;
                             let method = counted_terminal(&method, &args, block.as_ref())
                                 .unwrap_or(method);

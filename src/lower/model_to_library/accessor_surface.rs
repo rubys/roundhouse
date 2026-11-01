@@ -253,7 +253,7 @@ mod tests {
         let unfolded = crate::lower::scope_chain::assoc_query_method_names(
             &crate::lower::scope_chain::survey_assoc_class_methods(
                 app,
-                &crate::lower::scope_chain::build_assoc_registry(&app.models),
+                &crate::lower::scope_chain::build_assoc_registry_for_app(app),
                 &crate::lower::scope_chain::build_scope_registry(&app.models),
             )
             .0,

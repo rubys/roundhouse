@@ -759,6 +759,9 @@ pub struct App {
     /// report what got walked without recomputing it from the VFS.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub app_roots: Vec<String>,
+    /// Literal engine namespaces with Rails' relative model naming.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub isolated_namespaces: Vec<String>,
 }
 
 /// One controller's resolved request machinery: the full filter chain
@@ -977,6 +980,14 @@ pub struct ImportmapPin {
 }
 
 impl App {
+    pub(crate) fn model_param_key(&self, name: &str) -> String {
+        let name = name.trim_start_matches("::");
+        let relative = self.isolated_namespaces.iter()
+            .filter_map(|namespace| name.strip_prefix(namespace.as_str()).and_then(|tail| tail.strip_prefix("::")))
+            .min_by_key(|tail| tail.len()).unwrap_or(name);
+        crate::naming::model_param_key(relative)
+    }
+
     /// Module → the one non-module class that includes it, directly or
     /// through another module; absent when none or several do. A
     /// concern's methods run on its includer, and with exactly one
@@ -1258,6 +1269,7 @@ impl App {
             source_index_required: false,
             root: String::new(),
             app_roots: Vec::new(),
+            isolated_namespaces: Vec::new(),
         }
     }
 }
