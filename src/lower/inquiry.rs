@@ -121,6 +121,9 @@ impl Reach {
             if let Some(p) = &model.parent {
                 edge(&mut r, &model.name, p);
             }
+            for i in crate::analyze::model_includes(model) {
+                edge(&mut r, &model.name, &i);
+            }
         }
         for lc in &app.library_classes {
             for m in &lc.methods {

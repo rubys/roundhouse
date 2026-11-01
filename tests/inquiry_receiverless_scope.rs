@@ -19,7 +19,7 @@ fn emitted(file: &str) -> String {
     let files: HashMap<PathBuf, Vec<u8>> = [
         (
             PathBuf::from("db/schema.rb"),
-            b"ActiveRecord::Schema.define do\n  create_table \"clients\", force: :cascade do |t|\n    t.string \"kind\", null: false\n  end\nend\n".to_vec(),
+            b"ActiveRecord::Schema.define do\n  create_table \"clients\", force: :cascade do |t|\n    t.string \"kind\", null: false\n  end\n  create_table \"gadgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n".to_vec(),
         ),
         (
             PathBuf::from("app/models/client.rb"),
@@ -36,6 +36,14 @@ fn emitted(file: &str) -> String {
         (
             PathBuf::from("app/models/typed_member_host.rb"),
             b"class TypedMemberHost < Client\n  def host_internal?\n    kind.internal?\n  end\nend\n".to_vec(),
+        ),
+        (
+            PathBuf::from("app/models/concerns/flavored.rb"),
+            b"module Flavored\n  extend ActiveSupport::Concern\n\n  def flavor\n    @flavor.inquiry\n  end\nend\n".to_vec(),
+        ),
+        (
+            PathBuf::from("app/models/gadget.rb"),
+            b"class Gadget < ApplicationRecord\n  include Flavored\n\n  def sweet?\n    flavor.sweet?\n  end\nend\n".to_vec(),
         ),
     ]
     .into_iter()
@@ -83,4 +91,10 @@ fn an_explicit_receiver_of_unknown_class_is_left_alone() {
 fn an_explicit_receiver_typed_as_the_definer_folds() {
     let src = emitted("client.rb");
     assert!(src.contains("Client.new.kind == \"internal\""), "{src}");
+}
+
+#[test]
+fn a_receiverless_predicate_folds_in_a_model_that_includes_the_definer() {
+    let src = emitted("gadget.rb");
+    assert!(src.contains("flavor == \"sweet\""), "{src}");
 }
