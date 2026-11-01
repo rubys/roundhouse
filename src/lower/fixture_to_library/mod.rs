@@ -366,7 +366,7 @@ fn build_find_call(cls: &ClassId, id: i64) -> Expr {
     let class_const = with_ty(
         Expr::new(
             Span::synthetic(),
-            ExprNode::Const { path: vec![cls.0.clone()] },
+            ExprNode::Const { path: cls.const_path() },
         ),
         Ty::Class { id: cls.clone(), args: vec![].into() },
     );
@@ -428,7 +428,7 @@ fn build_load_method_body(
         let class_const = with_ty(
             Expr::new(
                 Span::synthetic(),
-                ExprNode::Const { path: vec![cls.0.clone()] },
+                ExprNode::Const { path: cls.const_path() },
             ),
             class_ty.clone(),
         );

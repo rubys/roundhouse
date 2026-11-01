@@ -775,7 +775,8 @@ fn emit_v2_test_compat(app: &App) -> EmittedFile {
         if !has_table {
             continue;
         }
-        let model = m.name.0.as_str();
+        // The Go type name (`ActiveStorage::Attachment` → `ActiveStorageAttachment`).
+        let model = library::sanitize_type_name(m.name.0.as_str());
         s.push_str(&format!(
             "func {model}Find(id int64) *{model} {{ return {model}_find(id) }}\n"
         ));
@@ -832,7 +833,8 @@ fn emit_v2_test_compat(app: &App) -> EmittedFile {
         if !has_table {
             continue;
         }
-        let model = m.name.0.as_str();
+        // The Go type name (`ActiveStorage::Attachment` → `ActiveStorageAttachment`).
+        let model = library::sanitize_type_name(m.name.0.as_str());
         s.push_str(&format!(
             "// Test-only Save() override — initializes the embedded\n\
              // *ApplicationRecord and the Modeler back-pointer when a\n\

@@ -394,7 +394,7 @@ fn name_implicit_receiver(expr: &mut Expr, sub: &ClassId) {
 fn class_const(id: &ClassId) -> Expr {
     Expr::new(
         Span::synthetic(),
-        ExprNode::Const { path: id.0.as_str().split("::").map(Symbol::from).collect() },
+        ExprNode::Const { path: id.const_path() },
     )
 }
 

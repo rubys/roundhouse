@@ -94,6 +94,17 @@ pub struct EffectVar(pub u32);
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ClassId(pub Symbol);
 
+impl ClassId {
+    /// The constant path that names this class, one segment per name
+    /// (`ActiveStorage::Attachment` → `[ActiveStorage, Attachment]`), as
+    /// `ExprNode::Const` holds it everywhere else. A path built as
+    /// `vec![id.0.clone()]` keeps the `::` in one segment, which the
+    /// emitters write verbatim.
+    pub fn const_path(&self) -> Vec<Symbol> {
+        self.0.as_str().split("::").map(Symbol::from).collect()
+    }
+}
+
 impl fmt::Display for ClassId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
