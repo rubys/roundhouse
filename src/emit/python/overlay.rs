@@ -619,29 +619,22 @@ fn emit_dispatch(
          \x20   `flash` is the carried-in Flash (from the cookie); the\n\
          \x20   response's `flash` dict is what the action newly set\n\
          \x20   (Flash.to_persisted's diff), for the server to persist.\"\"\"\n\
-         \x20   # Strip a known format extension BEFORE matching, like the\n\
-         \x20   # crystal/ts server glue: an unconstrained `:id` segment\n\
-         \x20   # would otherwise capture \"1.json\" on the exact-match\n\
-         \x20   # pass (Router.match's own ext-retry only runs after an\n\
-         \x20   # exact miss).\n\
+         \x20   # The path as requested, extension included: Router.match\n\
+         \x20   # peels a registered `.ext` first, checks it against the\n\
+         \x20   # route's format requirement, and reports it as\n\
+         \x20   # params[\"format\"], as Rails' `(.:format)` does.\n\
          \x20   qs = \"\"\n\
          \x20   if \"?\" in path:\n\
          \x20       path, qs = path.split(\"?\", 1)\n\
-         \x20   fmt = None\n\
-         \x20   last = path.rsplit(\"/\", 1)[-1]\n\
-         \x20   if \".\" in last:\n\
-         \x20       base, ext = path.rsplit(\".\", 1)\n\
-         \x20       if Router.format_extension(ext):\n\
-         \x20           path, fmt = base, ext\n\
          \x20   m = Router.match(method, path, _route_table())\n\
          \x20   if m is None:\n\
          \x20       return None\n\
          \x20   p = _nest_params(dict(params or {}))\n\
          \x20   p.update(m.path_params)\n\
-         \x20   # Format: the stripped `.ext`; else the route's default\n\
-         \x20   # format; else anything the matcher's own ext-retry put in\n\
-         \x20   # params[\"format\"].\n\
-         \x20   fmt = fmt or m.req_format or p.get(\"format\") or \"html\"\n\
+         \x20   # Format: the path's extension; else the route's default\n\
+         \x20   # format (Rails: `/feeds/1.xml` on `defaults: { format:\n\
+         \x20   # :json }` is xml).\n\
+         \x20   fmt = p.get(\"format\") or m.req_format or \"html\"\n\
          \x20   c = dispatch(m.controller, m.action, params=p, flash=flash,\n\
          \x20                request_method=method, request_path=path,\n\
          \x20                request_format=fmt, query_string=qs)\n\
