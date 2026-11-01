@@ -5116,25 +5116,54 @@ fn reference_reader_names(app: &App) -> crate::det::HashSet<String> {
 /// Full target identity for a nested form; the field name alone is not
 /// evidence of its record class. Polymorphic and external targets stay unknown.
 fn nested_record_classes(app: &App) -> crate::det::HashMap<(String, String), String> {
-    use crate::dialect::Association;
-    let known: crate::det::HashSet<_> = app.models.iter().map(|m| &m.name)
-        .chain(app.library_classes.iter().filter(|c| !c.is_module).map(|c| &c.name))
-        .collect();
-    let mut out = crate::det::HashMap::default();
+    use crate::dialect::{Association, Model};
+    use crate::ident::ClassId;
+    // A unique declaration supplies its own associations and written parent.
+    // Reopenings have no whole-class merge contract, so stay unresolved here.
+    let mut definitions: crate::det::HashMap<
+        &ClassId, Option<(Option<&ClassId>, Option<&Model>)>,
+    > = crate::det::HashMap::default();
     for model in &app.models {
-        for association in model.associations() {
-            let key = (model.name.0.as_str().to_owned(), association.name().as_str().to_owned());
-            let target = match association {
-                Association::HasOne { target, .. }
-                | Association::BelongsTo { target, polymorphic: false, .. }
-                    if known.contains(target) => Some(target),
-                _ => None,
-            };
-            if let Some(target) = target {
-                out.insert(key, target.0.as_str().to_owned());
-            } else {
-                out.remove(&key);
+        match definitions.entry(&model.name) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(Some((model.parent.as_ref(), Some(model))));
             }
+            std::collections::hash_map::Entry::Occupied(mut entry) => { entry.insert(None); }
+        }
+    }
+    for class in app.library_classes.iter().filter(|class| !class.is_module) {
+        match definitions.entry(&class.name) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(Some((class.parent.as_ref(), None)));
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => { entry.insert(None); }
+        }
+    }
+    let mut out = crate::det::HashMap::default();
+    for owner in definitions.keys() {
+        let mut current = Some(*owner);
+        let mut visited = crate::det::HashSet::default();
+        let mut readers = crate::det::HashSet::default();
+        while let Some(id) = current {
+            if !visited.insert(id) { break; }
+            let Some(Some((parent, model))) = definitions.get(id) else { break };
+            if let Some(model) = model {
+                for association in model.associations().collect::<Vec<_>>().into_iter().rev() {
+                    // An unknown or differently shaped local association also
+                    // shadows its parent's declaration of the same reader.
+                    if !readers.insert(association.name()) { continue; }
+                    let target = match association {
+                        Association::HasOne { target, .. }
+                        | Association::BelongsTo { target, polymorphic: false, .. }
+                            if definitions.contains_key(target) => Some(target),
+                        _ => None,
+                    };
+                    if let Some(target) = target {
+                        out.insert((owner.0.as_str().to_owned(), association.name().as_str().to_owned()), target.0.as_str().to_owned());
+                    }
+                }
+            }
+            current = *parent;
         }
     }
     out

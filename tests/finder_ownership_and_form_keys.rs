@@ -761,3 +761,86 @@ fn reopened_finder_ownership_case(library: bool) {
 fn reopened_model_finder_ownership_is_order_independent() { reopened_finder_ownership_case(false); }
 #[test]
 fn reopened_library_finder_ownership_is_order_independent() { reopened_finder_ownership_case(true); }
+
+fn subclass_nested_association_case(kind: &str) {
+    let library = kind.ends_with("library");
+    let belongs_to = kind.starts_with("belongs_to");
+    let overridden = kind == "override";
+    let unknown = kind == "unknown_override";
+    let schema = if unknown {
+        "ActiveRecord::Schema.define do\ncreate_table(:accounts) { |t| t.integer :profile_id; t.string :profile_type }\ncreate_table(:admin_profiles) { |t| t.integer :account_id }\ncreate_table(:admin_vip_profiles) { |t| t.string :nickname; t.boolean :enabled }\nend\n"
+    } else {
+        "ActiveRecord::Schema.define do\ncreate_table(:accounts) { |t| t.integer :profile_id; t.string :profile_type }\ncreate_table(:admin_profiles) { |t| t.integer :account_id }\ncreate_table(:admin_vip_profiles) { |t| t.integer :account_id }\nend\n"
+    };
+    let parent_fields = if overridden { "attribute :unrelated, :string\n" }
+        else { "attribute :nickname, :string\nattribute :enabled, :boolean\n" };
+    let profile = format!("module Admin\nclass Profile < ActiveRecord::Base\nself.table_name='admin_profiles'\n{parent_fields}end\nend\n");
+    let vip_fields = if unknown { "" } else { "attribute :nickname, :string\nattribute :enabled, :boolean\n" };
+    let vip = format!("module Admin\nclass VipProfile < ActiveRecord::Base\nself.table_name='admin_vip_profiles'\n{vip_fields}end\nend\n");
+    let association = if belongs_to {
+        "belongs_to :profile, class_name: 'Admin::Profile', optional: true"
+    } else { "has_one :profile, class_name: 'Admin::Profile', foreign_key: :account_id, autosave: true" };
+    let abstract_parent = if library { "" } else { "self.abstract_class=true\n" };
+    let account = format!("class Account < ActiveRecord::Base\n{abstract_parent}{association}\naccepts_nested_attributes_for :profile\nend\n");
+    let own_association = if unknown { "belongs_to :profile, polymorphic: true, optional: true\n" }
+        else if overridden { "has_one :profile, class_name: 'Admin::VipProfile', foreign_key: :account_id, autosave: true\n" } else { "" };
+    let child = if library {
+        "class StandardAccount < Account\nend\nclass PremiumAccount < StandardAccount\nend\n".to_owned()
+    } else { format!("class PremiumAccount < Account\nself.table_name='accounts'\n{own_association}end\n") };
+    let child_path = if library { "app/services/premium_account.rb" } else { "app/models/premium_account.rb" };
+    let target = if overridden || unknown { "Admin::VipProfile" } else { "Admin::Profile" };
+    let setup = format!("account=PremiumAccount.new\nrecord={target}.new(nickname: 'Inherited value', enabled: true)\naccount.define_singleton_method(:profile) {{ record }}\n");
+    let template = "<%= form_with model: @account, url: '/', method: :post do |form| %><%= form.fields_for :profile do |child| %><%= child.text_field :nickname %><%= child.check_box :enabled %><% end %><% end %>";
+    let checks = r#"
+def check_inherited_nested_values(html)
+  raise 'inherited nested value' unless html.include?('value="Inherited value"')
+  checkbox=html.scan(/<input[^>]*>/).find { |tag| tag.include?('type="checkbox"') }
+  raise 'inherited nested boolean' unless checkbox && checkbox.include?('checked="checked"')
+end
+"#;
+    let reflection = if unknown { "raise 'polymorphic override' unless PremiumAccount.reflect_on_association(:profile).polymorphic?\n".to_owned() }
+        else { format!("raise 'inherited target' unless PremiumAccount.reflect_on_association(:profile).klass == {target}\n") };
+    native(&["activerecord", "actionview", "actionpack"], &format!(r#"{AR}
+require 'action_view'
+require 'action_controller'
+{schema}{profile}{vip}{account}{child}{reflection}
+ActionView::Helpers::FormHelper.form_with_generates_ids=true
+view=ActionView::Base.with_empty_template_cache.new(ActionView::LookupContext.new([]), {{}}, nil)
+view.define_singleton_method(:protect_against_forgery?) {{ false }}
+{setup}
+view.assign(account: account)
+{checks}
+check_inherited_nested_values(view.render(inline: {template:?}))
+"#));
+    let tree: HashMap<PathBuf, Vec<u8>> = [
+        ("db/schema.rb",schema), ("app/models/account.rb",&account),
+        ("app/models/admin/profile.rb",&profile), ("app/models/admin/vip_profile.rb",&vip),
+        (child_path,&child),
+    ].into_iter().map(|(p,s)| (p.into(),s.as_bytes().to_vec())).collect();
+    let app = roundhouse::ingest::ingest_app_from_tree(tree).unwrap();
+    assert_eq!(app.models.iter().any(|m| m.name.0.as_str()=="PremiumAccount"), !library);
+    if library { assert!(app.library_classes.iter().any(|c| c.name.0.as_str()=="PremiumAccount")); }
+    let run = emit_and_run::empty_app().write("db/schema.rb",schema)
+        .write("config/routes.rb","Rails.application.routes.draw do\nend\n")
+        .write("app/models/account.rb",&account).write("app/models/admin/profile.rb",&profile)
+        .write("app/models/admin/vip_profile.rb",&vip).write(child_path,&child)
+        .write("app/controllers/pages_controller.rb","class PagesController < ActionController::Base\ndef form; @account=PremiumAccount.new; end\nend\n")
+        .write("app/views/pages/form.html.erb",template)
+        .run_ruby(&format!("{checks}\n{setup}\ncheck_inherited_nested_values(Views::Pages.form(account))\n"));
+    run.assert_passes();
+    let source = std::fs::read_to_string(run.emitted.join("app/views/pages/form.rb")).unwrap();
+    assert_eq!(source.contains(".nickname"), !unknown, "unknown overrides must block an inherited virtual reader");
+}
+
+#[test]
+fn nested_fields_for_subclass_inherits_has_one_target() { subclass_nested_association_case("has_one"); }
+#[test]
+fn nested_fields_for_subclass_inherits_belongs_to_target() { subclass_nested_association_case("belongs_to"); }
+#[test]
+fn nested_fields_for_subclass_inherits_has_one_through_library_classes() { subclass_nested_association_case("has_one_library"); }
+#[test]
+fn nested_fields_for_subclass_inherits_belongs_to_through_library_classes() { subclass_nested_association_case("belongs_to_library"); }
+#[test]
+fn nested_fields_for_subclass_uses_own_association_target() { subclass_nested_association_case("override"); }
+#[test]
+fn nested_fields_for_subclass_unknown_override_stays_unresolved() { subclass_nested_association_case("unknown_override"); }
