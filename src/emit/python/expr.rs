@@ -691,6 +691,10 @@ fn py_const_path(path: &[crate::ident::Symbol]) -> String {
         Some("ActionDispatch" | "ActionController" | "ActionView") if path.len() >= 2 => {
             path.last().unwrap().to_string()
         }
+        // The models the Active Storage and Action Text tables synthesize
+        // are top-level classes (`class Attachment`, `class RichText`);
+        // Python has no `ActiveStorage` / `ActionText` name to qualify them.
+        Some("ActiveStorage" | "ActionText") if path.len() >= 2 => path.last().unwrap().to_string(),
         // A sibling of `Base` in active_record_base.py, not an attribute of its `ActiveRecord` class
         Some("ActiveRecord") if path.len() == 2 && path[1].as_str() == "ErrorDetail" => "ErrorDetail".to_string(),
         _ => path

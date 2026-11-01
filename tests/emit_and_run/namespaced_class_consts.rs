@@ -72,6 +72,13 @@ fn ruby_spellings(target: BuildTarget, exts: &[&str]) -> Vec<String> {
 fn python_spells_the_synthesized_attachment_model_as_a_python_name() {
     let hits = ruby_spellings(BuildTarget::Python, &["py"]);
     assert!(hits.is_empty(), "{hits:#?}");
+    // Python declares the model as a top-level `class Attachment`; there is
+    // no `ActiveStorage` name for `ActiveStorage.Attachment` to resolve in.
+    let (out, _) = app().emit(BuildTarget::Python);
+    let models = std::fs::read_to_string(out.join("app/v2/models.py")).unwrap();
+    assert!(models.contains("class Attachment("), "no top-level class Attachment");
+    assert!(models.contains("results.append(Attachment.from_stmt(stmt))"), "{}", models.lines().filter(|l| l.contains("from_stmt(stmt)")).collect::<Vec<_>>().join("\n"));
+    assert!(!models.contains("ActiveStorage.Attachment"), "{}", models.lines().filter(|l| l.contains("ActiveStorage.Attachment")).collect::<Vec<_>>().join("\n"));
 }
 
 #[test]
@@ -84,4 +91,29 @@ fn go_spells_the_synthesized_attachment_model_as_a_go_name() {
 fn elixir_spells_the_synthesized_attachment_model_as_an_elixir_name() {
     let hits = ruby_spellings(BuildTarget::Elixir, &["ex", "exs"]);
     assert!(hits.is_empty(), "{hits:#?}");
+}
+
+/// A Go test naming a namespaced model calls the shims by the Go type
+/// name, as `emit_v2_test_compat` declares them (`AdminNoteCount()`): the
+/// constant was joined with `.` (`Admin.NoteCount()`, `undefined: Admin`)
+/// and `assert_difference("Admin::Note.count")` was left as a raw call.
+#[test]
+fn go_tests_call_a_namespaced_model_by_its_go_name() {
+    let schema = std::fs::read_to_string("fixtures/real-blog/db/schema.rb").unwrap();
+    let at = schema.find("  create_table").unwrap();
+    let schema = format!("{}  create_table \"notes\", force: :cascade do |t|\n    t.string \"body\"\n  end\n\n{}", &schema[..at], &schema[at..]);
+    let test = "require \"test_helper\"\n\nclass Admin::NoteTest < ActiveSupport::TestCase\n  test \"count\" do\n    assert_equal 0, Admin::Note.count\n    assert_difference(\"Admin::Note.count\", 1) do\n      Admin::Note.create!(body: \"x\")\n    end\n  end\nend\n";
+    let (out, errors) = emit_and_run::real_blog()
+        .write("db/schema.rb", &schema)
+        .write("app/models/admin/note.rb", "module Admin\n  class Note < ApplicationRecord\n  end\nend\n")
+        .write("test/models/admin/note_test.rb", test)
+        .emit(BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    let compat = std::fs::read_to_string(out.join("app/v2/test_compat_test.go")).unwrap();
+    assert!(compat.contains("func AdminNoteCount() int64"), "{compat}");
+    let spec = std::fs::read_dir(out.join("app/v2")).unwrap().filter_map(|e| e.ok())
+        .find(|e| e.file_name().to_string_lossy().contains("note_test"))
+        .map(|e| std::fs::read_to_string(e.path()).unwrap()).expect("note test");
+    assert!(!spec.contains("Admin.Note") && !spec.contains("assert_difference(\""), "{spec}");
+    assert!(spec.matches("AdminNoteCount()").count() >= 3, "{spec}");
 }
