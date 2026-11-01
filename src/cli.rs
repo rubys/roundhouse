@@ -103,6 +103,9 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
     let mut fixture: Option<String> = None;
     let mut list_unknown_sends = false;
     let mut inventory_path: Option<String> = None;
+    let mut gem_declarations = false;
+    let mut gem_declaration_paths = Vec::new();
+    let mut rbs_declaration_paths = Vec::new();
     // Default on with `--continue`: the punch list alone is not a peel
     // worklist. `--no-hotspots` opts out; `--hotspots` forces it on in
     // strict mode too.
@@ -114,7 +117,7 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
             "-h" | "--help" => {
                 println!(
                     "Usage: roundhouse check [--continue|--strict] [--unknown-sends]\n\
-                     \x20                  [--inventory PATH] [--hotspots|--no-hotspots] [APP]\n\n\
+                     \x20                  [--inventory PATH] [--hotspots|--no-hotspots] [--gem-declarations] [APP]\n\n\
                      Analyze the Rails app at APP (default {default_app}) and print the\n\
                      diagnostics; exit 1 on parse or type errors.\n\n\
                      Options:\n\
@@ -131,7 +134,14 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
                        --hotspots   Print the ranked error/survey hotspot report (default\n\
                                     on with --continue).\n\
                        --no-hotspots\n\
-                                    Suppress the hotspot report."
+                                    Suppress the hotspot report.\n\
+                       --gem-declarations\n\
+                                    Read declarations from exact locked GEM releases on the ruby platform\n\
+                                    for check only; community RBS requires an explicit trusted path.\n\
+                       --gem-declarations-path PATH\n\
+                                    Additional local gem root, for declarations only; repeatable.\n\
+                       --rbs-declarations PATH (explicit trusted signature contract)\n\
+                                    Explicit RBS file/directory of declarations; repeatable."
                 );
                 return ExitCode::SUCCESS;
             }
@@ -140,6 +150,16 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
             "--strict" => continue_on_error = false,
             "--hotspots" => hotspots = Some(true),
             "--no-hotspots" => hotspots = Some(false),
+            "--gem-declarations" => gem_declarations = true,
+            "--gem-declarations-path" | "--rbs-declarations" => {
+                let Some(path) = args.next() else {
+                    eprintln!("roundhouse-check: {arg} requires a PATH argument");
+                    return ExitCode::from(2);
+                };
+                gem_declarations = true;
+                let paths = if arg == "--rbs-declarations" { &mut rbs_declaration_paths } else { &mut gem_declaration_paths };
+                paths.push(std::path::PathBuf::from(path));
+            }
             "--inventory" => {
                 let Some(path) = args.next() else {
                     eprintln!("roundhouse-check: --inventory requires a PATH argument");
@@ -189,8 +209,14 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
     // Ingest inside a parse-diagnostic scope so Prism syntax errors —
     // which the error-recovering parser otherwise drops — are collected
     // and reported alongside the analyze diagnostics.
-    let (ingest_result, parse_diags) =
-        crate::timings::phase("ingest", || crate::ingest::prism::scope(|| ingest_app(path)));
+    let declaration_inputs = crate::ingest::external_declarations::Inputs {
+        gem_paths: gem_declaration_paths, rbs_paths: rbs_declaration_paths,
+        ..Default::default()
+    };
+    let (ingest_result, parse_diags) = crate::timings::phase("ingest", || crate::ingest::prism::scope(|| {
+        if gem_declarations { crate::ingest::app::ingest_app_for_check(path, &declaration_inputs) }
+        else { ingest_app(path) }
+    }));
 
     let mut survey_errors = if continue_on_error { survey::drain() } else { Vec::new() };
 
@@ -222,6 +248,9 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if gem_declarations {
+        eprintln!("gem declarations: {}", serde_json::to_string(&declaration_inputs.report()).unwrap());
+    }
     let mut analyzer = Analyzer::for_source(&app);
     crate::timings::phase("analyze", || analyzer.analyze(&mut app));
     let mut diags = crate::timings::phase("diagnose", || diagnose(&app));
@@ -267,16 +296,6 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
     if ledger_count > 0 && continue_on_error {
         eprint!("{}", crate::ingest::initializer_ledger::render_summary(&parse_diags));
     }
-    for d in &diags {
-        eprintln!("{}", d.render(&app.sources));
-        had_output = true;
-    }
-
-    if !survey_errors.is_empty() {
-        print_survey_report(&survey_errors);
-        had_output = true;
-    }
-
     let inventory = crate::check_report::build(
         &fixture,
         path,
@@ -286,6 +305,23 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
         &survey_errors,
         census.as_ref(),
     );
+    for d in &diags {
+        if matches!(d.kind, DiagnosticKind::ConstantUncertainty { through: Some(_), .. }) {
+            continue;
+        }
+        eprintln!("{}", d.render(&app.sources));
+        had_output = true;
+    }
+    if let Some(named) = &inventory.named_unknowns {
+        eprint!("{}", crate::check_report::render_named_unknowns(named, continue_on_error));
+        had_output = true;
+    }
+
+    if !survey_errors.is_empty() {
+        print_survey_report(&survey_errors);
+        had_output = true;
+    }
+
     if show_hotspots {
         eprint!("{}", crate::check_report::render_hotspots(&inventory));
         had_output = true;

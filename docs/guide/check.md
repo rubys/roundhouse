@@ -177,6 +177,26 @@ the editor, the MCP server and the emitters' typing read; the Spinel
 lane's own `.rbs` sidecar is typed from the lowered code rather than
 from them.
 
+## Opt-in gem declarations
+
+`--gem-declarations` adds an inert declaration input to Rails `check`. It reads named classes, modules, literal ancestry, constant names and aliases from locally installed gems. It runs no Gemfile, gemspec or gem code, and never adds executable gem bodies to the app.
+
+```sh
+roundhouse check --continue --gem-declarations /path/to/app
+roundhouse check --continue --gem-declarations-path /path/to/gem-home /path/to/app
+roundhouse check --continue --rbs-declarations /path/to/trusted/signatures /path/to/app
+```
+
+Only exact `GEM` releases listed in `Gemfile.lock` on the `ruby` platform are eligible. A different version or native platform build is skipped, with no nearby-version fallback. `PATH`, `GIT` and already sourced gems keep their existing source routes. `--gem-declarations-path` adds a local gem home containing `gems/`; it can be repeated and enables the input. Normal installed-gem discovery remains available.
+
+`--rbs-declarations` accepts an explicit trusted RBS file or directory, can be repeated, and also enables the input. It projects runtime names and literal ancestry; it does not import method signatures. Community RBS collections are not admitted automatically. Existing app, RBI and core method/value models retain precedence, and APIs without signatures remain incomplete.
+
+Ruby and RBS files must be UTF-8; Ruby encoding declarations are limited to UTF-8 and US-ASCII. Unsupported encodings, syntax errors and RBS `use` imports reject the whole file, with occurrence counts and the reader's reasons in the declaration report. RBS interface mixins do not become runtime ancestors.
+
+When omitted effects could add or shadow constants, an undeclared name reports `warning[constant_lookup_unknown]`, naming the reference and the incomplete namespace. Lookup stops at that namespace; a later ancestor is not assumed to supply the name. A declared name whose loading is unverified can report `warning[constant_loading_unverified]`. These warnings allow exit zero when there are no other errors. A declaration inventory does not establish runtime availability or emitted support; helper and runtime refusals remain in place.
+
+All declaration options are rejected by emission. The input defaults off, applies only to this `check` invocation, and has no persistent cache.
+
 ## The two modes
 
 `--continue` is the mode you want on a real app. Constructs the
@@ -298,7 +318,7 @@ roundhouse does not model it)* means the receiver comes from a gem the
 census lists as unknown. Skip these on a first read. They exist so the
 error count above means "findings", not "shadows of gaps".
 
-Unresolved source constants keep their error severity even when the
+With the declaration input off, unresolved source constants keep their error severity even when the
 gem census identifies a likely owner: their emitted expression is a
 refusal stub. Gem context is added without certifying runtime support.
 

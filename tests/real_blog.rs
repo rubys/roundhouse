@@ -178,6 +178,10 @@ fn fixtures_ingest_into_app() {
 
 fn diagnostic_signature(d: &roundhouse::analyze::Diagnostic) -> (String, String) {
     match &d.kind {
+        DiagnosticKind::ConstantUncertainty { name, through } => (
+            "ConstantUncertainty".into(),
+            format!("{}:{}", name.as_str(), through.as_ref().map(|s| s.as_str()).unwrap_or("loading")),
+        ),
         DiagnosticKind::IvarUnresolved { name } => {
             ("IvarUnresolved".into(), format!("@{}", name.as_str()))
         }

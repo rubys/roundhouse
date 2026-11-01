@@ -2735,7 +2735,11 @@ impl<'a> BodyTyper<'a> {
             if let Some(ty) = m.class_methods.get(method) {
                 return Some(unwrap_fn_ret(ty));
             }
-            stack.extend(m.includes.iter().cloned());
+            if m.declarations_only {
+                stack.extend(m.includes.iter().rev().cloned());
+            } else {
+                stack.extend(m.includes.iter().cloned());
+            }
         }
         None
     }

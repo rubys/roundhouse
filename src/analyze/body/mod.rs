@@ -62,7 +62,8 @@ mod diagnostic;
 pub(crate) use diagnostic::some_operands_take_it;
 mod const_resolution;
 mod lambda_local;
-pub(crate) use const_resolution::{ConstResolver, ConstResolverTask, definition_index, has_ambiguous_namespace};
+pub(in crate::analyze) use const_resolution::ConstantLookup;
+pub(crate) use const_resolution::{ConstResolver, ConstResolverTask, definition_index, external_definition_names, canonical_external_declarations, has_ambiguous_namespace};
 pub use const_resolution::DefinitionIndex;
 pub use const_resolution::PreparedConstResolver;
 use const_resolution::ResolvedConstant;
@@ -322,6 +323,9 @@ pub struct ClassInfo {
     /// but an APP class that inherits from it also inherits whatever the
     /// gem's macros generate, which no declaration lists.
     pub gem_boundary: bool,
+    /// A check-only static declaration surface with no method inventory.
+    /// A missing ambiguous membership method cannot prove Module protocol.
+    pub declarations_only: bool,
     /// The surface cannot be enumerated (`method_missing`, an unresolved
     /// mixin, an ancestor the RBI could not name): a lookup that misses
     /// is unknown, not wrong.
@@ -1203,7 +1207,7 @@ impl<'a> BodyTyper<'a> {
                             }
                         }
                     }
-                    if self.classes().contains_key(&id) {
+                    if self.classes().get(&id).is_some_and(|info| !info.declarations_only) {
                         Ty::Class { id, args: vec![].into() }
                     } else {
                         unknown()
@@ -1219,10 +1223,52 @@ impl<'a> BodyTyper<'a> {
                     .as_ref()
                     .filter(|_| !generated)
                     .and_then(|resolver| resolver.reference(expr_span, path));
-                let ty = match source_reference {
-                    Some(Some(ResolvedConstant::Namespace { class, runtime })) => {
+                let scope = match ctx.lexical_self.as_ref().or(ctx.self_ty.as_ref()) { Some(Ty::Class {id, ..}) => Some(id), _ => None };
+                let per_name = self.const_resolver.as_ref().and_then(|r| r.constant_lookup(expr_span, path, scope, generated));
+                let source_reference = match &per_name {
+                    Some(const_resolution::ConstantLookup::Known {binding, ..}) => Some(Some(&binding.answer)),
+                    _ => source_reference,
+                };
+                let stronger_name = match &per_name {
+                    Some(const_resolution::ConstantLookup::Known { original_name, external: true, .. }) |
+                    Some(const_resolution::ConstantLookup::ExternalValueNamespace { original_name, .. }) => Some(original_name),
+                    _ => None,
+                };
+                let binding_name = match &per_name {
+                    Some(const_resolution::ConstantLookup::Known { binding, external: true, .. }) => Some(&binding.name),
+                    _ => None,
+                };
+                let stronger = [stronger_name, binding_name].into_iter().flatten().find_map(|name| {
+                    let value = match &per_name {
+                        Some(const_resolution::ConstantLookup::Known { binding, .. }) if binding.name == *name => self.typed_constants.and_then(|values| values.get(&binding.declaration)).cloned(),
+                        _ => None,
+                    };
+                    value.or_else(|| self.const_resolver.as_ref().and_then(|r| r.modeled_value(name)))
+                        .or_else(|| self.classes().get(name).filter(|info| !info.declarations_only)
+                            .map(|_| Ty::Class { id: name.clone(), args: vec![].into() }))
+                        .map(|value| (name, value))
+                });
+                let stronger_name = stronger.as_ref().map(|(name, _)| *name);
+                let stronger_value = stronger.map(|(_, value)| value);
+                let uncertainty = match &per_name {
+                    Some(const_resolution::ConstantLookup::Unknown(through)) => Some(through.clone()),
+                    Some(const_resolution::ConstantLookup::ExternalValueNamespace { .. }) if stronger_value.is_none() => Some(Symbol::new("a dynamic namespace value")),
+                    _ => None,
+                };
+                let loading_unverified = matches!(per_name, Some(const_resolution::ConstantLookup::Known {unverified_loading: true, .. }))
+                    || stronger_value.is_some() && matches!(per_name, Some(const_resolution::ConstantLookup::ExternalValueNamespace { unverified_loading: true, .. }));
+                let ty = if let Some(through) = uncertainty {
+                    expr.decisions &= !crate::expr::RESOLVED_CLASS_REF;
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::ConstantUncertainty { name: written_class_id(path).0.clone(), through: Some(through) }));
+                    Ty::Untyped
+                } else if let Some(value) = stronger_value {
+                    if let Some(name) = stronger_name { qualify_resolved_path(path, name); }
+                    if matches!(value, Ty::Class { .. }) { expr.decisions |= crate::expr::RESOLVED_CLASS_REF; }
+                    value
+                } else { match source_reference {
+                    Some(Some(ResolvedConstant::Namespace { class, runtime, external })) => {
                         let id = class.as_ref().clone();
-                        if self.classes().contains_key(&id) || *runtime {
+                        if self.classes().contains_key(&id) || *runtime || *external {
                             expr.decisions |= crate::expr::RESOLVED_CLASS_REF;
                             qualify_resolved_path(path, &id);
                             Ty::Class { id, args: vec![].into() }
@@ -1230,7 +1276,7 @@ impl<'a> BodyTyper<'a> {
                             unknown()
                         }
                     }
-                    Some(Some(ResolvedConstant::Value { declaration, name, runtime, runtime_decl, singleton })) => {
+                    Some(Some(ResolvedConstant::Value { declaration, name, runtime, runtime_decl, external, singleton })) => {
                         // Concern splices retain the resolved value owner.
                         // Test-helper splice lifts a foreign module's
                         // constant onto the test class as a bare name
@@ -1265,7 +1311,8 @@ impl<'a> BodyTyper<'a> {
                         let value = self.typed_constants
                             .and_then(|values| values.get(declaration))
                             .cloned()
-                            .or_else(|| runtime.as_ref().map(|ty| (**ty).clone()));
+                            .or_else(|| runtime.as_ref().map(|ty| (**ty).clone()))
+                            .or_else(|| external.then_some(Ty::Untyped));
                         let id: crate::ident::ClassId = (**name).clone();
                         match value {
                             Some(ty) => ty,
@@ -1331,7 +1378,10 @@ impl<'a> BodyTyper<'a> {
                         // never guess another class by its suffix.
                         value.unwrap_or_else(|| Ty::Class { id: written_class_id(path), args: vec![].into() })
                     }
-                };
+                } };
+                if loading_unverified {
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::ConstantUncertainty { name: written_class_id(path).0.clone(), through: None }));
+                }
                 // Not a class the emitted program has: the indifferent hash is a plain Hash there, so only its `new` is supported.
                 if matches!(&ty, Ty::Class { id, args } if args.is_empty() && id.0.as_str() == crate::analyze::indifferent::CLASS) {
                     crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
@@ -2676,7 +2726,10 @@ impl<'a> BodyTyper<'a> {
                     // String / Array receivers fall through to membership → Bool, and
                     // so does a value typed `Class` or `Module`, which is a module
                     // object and answers Module#include? itself.
-                    let module_only = send::is_module_protocol(method)
+                    let incomplete_membership = method.as_str() == "include?"
+                        && matches!(&recv_ty, Some(Ty::Class { id, .. })
+                            if self.classes.get(id).is_some_and(|info| info.declarations_only));
+                    let module_only = send::is_module_protocol(method) && !incomplete_membership
                         && (method.as_str() != "include?"
                             || matches!(&recv_ty, Some(Ty::Class { id, .. })
                                 if !matches!(id.0.as_str(), "Class" | "Module") && !self.descends_from_collection(id)));

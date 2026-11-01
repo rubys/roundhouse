@@ -35,7 +35,7 @@ mod class_new;
 pub(crate) use body::{indexed_pluck, string_answers};
 #[cfg(test)]
 pub(crate) use body::counted_first_last;
-pub(crate) use body::{ConstResolver, ConstResolverTask, definition_index, has_ambiguous_namespace};
+pub(crate) use body::{ConstResolver, ConstResolverTask, definition_index, external_definition_names, canonical_external_declarations, has_ambiguous_namespace};
 pub use body::DefinitionIndex;
 pub use body::PreparedConstResolver;
 pub mod async_color;
@@ -210,6 +210,14 @@ impl Analyzer {
     pub fn for_source(app: &App) -> Self {
         let mut analyzer = Self::new(app);
         analyzer.class_factories = class_new::register(app, &analyzer.const_resolver, &mut analyzer.classes);
+        for (id, info) in &mut analyzer.classes {
+            if info.declarations_only {
+                if let Some(order) = analyzer.const_resolver.mixin_order(id) {
+                    info.includes = order.to_vec();
+                }
+            }
+        }
+        analyzer.refresh_declaration_extends();
         analyzer
     }
 
@@ -1403,6 +1411,13 @@ impl Analyzer {
                     // constants bare; emitted, its nested classes open it.
                     || (self.source_indexed && self.includes_source_namespace(included.0.as_str()));
                 if known { continue; }
+                let span = class.include_spans.get(i).copied().unwrap_or_default();
+                let path: Vec<_> = included.0.as_str().split("::").map(Symbol::new).collect();
+                if self.source_indexed && matches!(self.const_resolver.constant_lookup(span, &path, Some(&class.name), false),
+                    Some(body::ConstantLookup::Unknown(_))) {
+                    // The source edge pass reports this name through the selected uncertainty policy.
+                    continue;
+                }
                 let detail = format!("{} includes unresolved {}", class.name.0, included.0);
                 if class.unknown_calls.iter().any(|call| matches!(&call.diagnostic(),
                     Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, detail: old, .. })
@@ -1439,7 +1454,10 @@ impl Analyzer {
                         || segs == ["ActiveModel", "Attributes"]
                         || self.classes.contains_key(&id)
                         || body::RUBY_TOP_LEVEL.contains(&name.as_str());
-                    (!known).then_some(name)
+                    let uncertain = self.source_indexed && matches!(
+                        self.const_resolver.constant_lookup(arg.span, path, Some(&model.name), false),
+                        Some(body::ConstantLookup::Unknown(_)));
+                    (!known && !uncertain).then_some(name)
                 }).collect();
                 if !missing.is_empty() {
                     expr.set_diagnostic(Some(crate::diagnostic::DiagnosticKind::Unsupported {
@@ -5312,6 +5330,7 @@ impl Analyzer {
         self.fold_concern_surfaces(app);
         self.fold_host_surfaces(app);
         self.fold_extended_modules(app);
+        self.refresh_declaration_extends();
         self.fold_current_attribute_forwarders(app);
     }
 
@@ -5413,6 +5432,32 @@ impl Analyzer {
             for (name, ty) in copied {
                 cls.class_methods.insert(name, ty);
             }
+        }
+    }
+
+    // Declaration-only classes have no own method bodies. Resolve their
+    // class-side mixins through the same graph as constant lookup, and refresh
+    // copied answers as source modules refine. First ancestor wins.
+    fn refresh_declaration_extends(&mut self) {
+        let updates: Vec<_> = self
+            .classes
+            .iter()
+            .filter(|(_, info)| info.declarations_only)
+            .filter_map(|(id, _)| {
+                let modules = self.const_resolver.singleton_mixin_order(id)?;
+                let mut methods = HashMap::default();
+                for module in modules {
+                    if let Some(info) = self.classes.get(module) {
+                        for (name, ty) in &info.instance_methods {
+                            methods.entry(name.clone()).or_insert_with(|| ty.clone());
+                        }
+                    }
+                }
+                Some((id.clone(), methods))
+            })
+            .collect();
+        for (id, methods) in updates {
+            self.classes.get_mut(&id).unwrap().class_methods = methods;
         }
     }
 
@@ -5531,7 +5576,7 @@ impl Analyzer {
         let targets: Vec<(ClassId, Vec<ClassId>)> = self
             .classes
             .iter()
-            .filter(|(_, c)| !c.includes.is_empty())
+            .filter(|(_, c)| !c.includes.is_empty() && !c.declarations_only)
             .map(|(id, c)| (id.clone(), c.includes.clone()))
             .collect();
         for (id, includes) in targets {

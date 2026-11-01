@@ -47,6 +47,91 @@ pub struct InventoryItem {
     pub wall: Option<String>,
 }
 
+/// A unique source site, independent of duplicated IR nodes or source IDs.
+#[derive(Debug, Serialize)]
+pub struct NamedUnknownLocation {
+    pub path: String,
+    pub start: u32,
+    pub line: u32,
+    pub column: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NamedUnknownGroup {
+    pub severity: &'static str,
+    pub name: String,
+    pub through: String,
+    pub occurrences: usize,
+    pub diagnostic_occurrences: usize,
+    pub locations: Vec<NamedUnknownLocation>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NamedUnknownInventory {
+    pub group_count: usize,
+    pub source_occurrences: usize,
+    pub diagnostic_occurrences: usize,
+    pub groups: Vec<NamedUnknownGroup>,
+}
+
+/// Group only named uncertainty. Loading-only edges remain ordinary diagnostics.
+fn named_unknowns(
+    diags: &[Diagnostic],
+    sources: &[SourceFile],
+    app_root: &Path,
+) -> Option<NamedUnknownInventory> {
+    let mut groups = BTreeMap::<_, (usize, BTreeMap<_, _>)>::new();
+    for d in diags {
+        let DiagnosticKind::ConstantUncertainty { name, through: Some(through) } = &d.kind else {
+            continue;
+        };
+        let (path, line, column, _) = resolve_location(d, sources, app_root);
+        let (raw_count, locations) = groups
+            .entry((d.severity, name.to_string(), through.to_string()))
+            .or_default();
+        *raw_count += 1;
+        locations.entry((path.clone(), d.span.start)).or_insert(NamedUnknownLocation {
+            path, start: d.span.start, line, column,
+        });
+    }
+    if groups.is_empty() {
+        return None;
+    }
+    let groups: Vec<_> = groups.into_iter().map(|((severity, name, through), (raw_count, locations))| {
+        NamedUnknownGroup {
+            severity: severity_name(severity), name, through,
+            occurrences: locations.len(), diagnostic_occurrences: raw_count,
+            locations: locations.into_values().collect(),
+        }
+    }).collect();
+    Some(NamedUnknownInventory {
+        group_count: groups.len(),
+        source_occurrences: groups.iter().map(|group| group.occurrences).sum(),
+        diagnostic_occurrences: groups.iter().map(|group| group.diagnostic_occurrences).sum(),
+        groups,
+    })
+}
+
+/// Keep the normal console bounded; the inventory always retains every group/site.
+pub fn render_named_unknowns(inventory: &NamedUnknownInventory, detail: bool) -> String {
+    use std::fmt::Write;
+    const CONSOLE_GROUP_LIMIT: usize = 5;
+    let mut out = format!(
+        "named unknowns: {} name/namespace group(s), {} source occurrence(s)\n",
+        inventory.group_count, inventory.source_occurrences,
+    );
+    for group in inventory.groups.iter().take(if detail { usize::MAX } else { CONSOLE_GROUP_LIMIT }) {
+        let first = &group.locations[0];
+        writeln!(out, "{}[constant_lookup_unknown]: unknown constant `{}` through incomplete namespace `{}` — {} source occurrences; first at {}:{}:{}",
+            group.severity, group.name, group.through, group.occurrences,
+            first.path, first.line, first.column).unwrap();
+    }
+    if !detail && inventory.group_count > CONSOLE_GROUP_LIMIT {
+        writeln!(out, "named-unknown listing abbreviated to the first {CONSOLE_GROUP_LIMIT} groups; use --continue for all groups or --inventory for the full inventory").unwrap();
+    }
+    out
+}
+
 /// Ranked peel bucket with enough context to start a fix.
 #[derive(Debug, Serialize)]
 pub struct Hotspot {
@@ -84,6 +169,8 @@ pub struct CheckInventory {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gems: Option<InventoryGems>,
     pub diagnostics: Vec<InventoryItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub named_unknowns: Option<NamedUnknownInventory>,
     pub survey_gaps: Vec<InventoryItem>,
     pub hotspots: Vec<Hotspot>,
 }
@@ -156,6 +243,7 @@ pub fn build(
         summary,
         gems,
         diagnostics,
+        named_unknowns: named_unknowns(diags, sources, app_root),
         survey_gaps,
         hotspots,
     }
@@ -521,6 +609,81 @@ mod tests {
     use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
     use crate::ident::Symbol;
     use crate::span::{FileId, Span};
+
+    fn unknown(name: &str, through: Option<&str>, severity: Severity, file: u32, start: u32) -> Diagnostic {
+        Diagnostic {
+            span: Span { file: FileId(file), start, end: start + 1 },
+            kind: DiagnosticKind::ConstantUncertainty { name: name.into(), through: through.map(Into::into) },
+            severity,
+            // Grouping must use structured fields, never parse this text.
+            message: "deliberately unrelated message".into(),
+        }
+    }
+
+    #[test]
+    fn named_unknown_groups_deduplicate_source_ids_and_ir_copies_without_changing_totals() {
+        let source = SourceFile { path: "/app/a.rb".into(), text: "TOKEN\nTOKEN\n".into() };
+        for severity in [Severity::Warning, Severity::Error] {
+            let diags = vec![unknown("TOKEN", Some("Mix"), severity, 1, 0),
+                unknown("TOKEN", Some("Mix"), severity, 2, 0),
+                unknown("TOKEN", Some("Mix"), severity, 1, 0),
+                unknown("TOKEN", Some("Mix"), severity, 2, 6)];
+            let inv = build("/app", Path::new("/app"), &[source.clone(), source.clone()], &[], &diags, &[], None);
+            assert_eq!(inv.diagnostics.len(), 4);
+            assert_eq!(inv.summary.errors + inv.summary.warnings, 4);
+            let named = inv.named_unknowns.unwrap();
+            assert_eq!((named.group_count, named.source_occurrences, named.diagnostic_occurrences), (1, 2, 4));
+            let group = &named.groups[0];
+            assert_eq!(group.occurrences, 2);
+            assert_eq!((group.locations[0].path.as_str(), group.locations[0].start), ("a.rb", 0));
+            assert_eq!((group.locations[1].line, group.locations[1].column), (2, 1));
+        }
+    }
+
+    #[test]
+    fn named_unknown_groups_keep_names_namespaces_and_severities_separate_in_stable_order() {
+        let mut diags = Vec::new();
+        for severity in [Severity::Error, Severity::Warning] {
+            for (name, through) in [("TOKEN", "Zork::Other"), ("VALUE", "Zork::Mix"), ("TOKEN", "Zork::Mix")] {
+                diags.push(unknown(name, Some(through), severity, 0, 0));
+            }
+        }
+        let first = named_unknowns(&diags, &[], Path::new("/app")).unwrap();
+        assert_eq!(first.group_count, 6);
+        assert_eq!(first.groups.iter().map(|g| (g.severity, g.name.as_str(), g.through.as_str())).collect::<Vec<_>>(),
+            vec![("warning", "TOKEN", "Zork::Mix"), ("warning", "TOKEN", "Zork::Other"), ("warning", "VALUE", "Zork::Mix"),
+                ("error", "TOKEN", "Zork::Mix"), ("error", "TOKEN", "Zork::Other"), ("error", "VALUE", "Zork::Mix")]);
+        diags.reverse();
+        let second = named_unknowns(&diags, &[], Path::new("/app")).unwrap();
+        assert_eq!(serde_json::to_value(first).unwrap(), serde_json::to_value(second).unwrap());
+    }
+
+    #[test]
+    fn named_unknown_groups_exclude_loading_only_edges_and_leave_off_inventory_unchanged() {
+        let loading = unknown("Known", None, Severity::Warning, 0, 0);
+        let inv = build("/app", Path::new("/app"), &[], &[], &[loading], &[], None);
+        assert!(inv.named_unknowns.is_none());
+        assert_eq!(inv.summary.warnings, 1);
+        assert_eq!(inv.diagnostics[0].code, "constant_loading_unverified");
+        assert!(serde_json::to_value(inv).unwrap().get("named_unknowns").is_none());
+    }
+
+    #[test]
+    fn named_unknown_console_is_bounded_and_detail_keeps_all_groups() {
+        for severity in [Severity::Warning, Severity::Error] {
+            let diags: Vec<_> = (0..7).map(|n| unknown(&format!("NAME{n}"), Some("Mix"), severity, 0, n)).collect();
+            let named = named_unknowns(&diags, &[], Path::new("/app")).unwrap();
+            let normal = render_named_unknowns(&named, false);
+            assert!(normal.contains("7 name/namespace group(s), 7 source occurrence(s)"));
+            assert_eq!(normal.matches("source occurrences; first at").count(), 5);
+            assert!(normal.contains("listing abbreviated"));
+            assert!(!normal.contains("`NAME5`"));
+            let detail = render_named_unknowns(&named, true);
+            assert_eq!(detail.matches("source occurrences; first at").count(), 7);
+            assert!(!detail.contains("listing abbreviated"));
+            assert_eq!(named.groups.len(), 7, "presentation must not truncate the inventory");
+        }
+    }
 
     #[test]
     fn billing_ivar_gets_a_stable_wall_slug() {
