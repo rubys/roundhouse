@@ -3088,17 +3088,20 @@ Three gaps remain, all on spinel's side:
 - **`Rails.application.env_config` holds what is set and is consulted
   for nothing**: a forgery failure always renders the 422 that
   `action_dispatch.show_exceptions = :rescuable` asks for.
-- **`save` writes the whole row; only `touch` writes what changed.**
-  Rails' partial writes UPDATE the changed columns; this runtime's
-  `_adapter_update` writes every column the record loaded. A bare
-  `touch` (and so `belongs_to … touch: true`) UPDATEs `updated_at`
-  alone (`_adapter_touch`), which is what keeps campfire's
-  trigger-maintained `rooms.messages_count` correct when a message
-  touches its room. A `save`/`update` of a record loaded before a
-  trigger moved one of its columns still writes the stale value back. The
-  same goes for two jobs the Sidekiq worker runs at once on one
-  record: the later `save` writes back every column it loaded, so the
-  earlier job's change is lost where Rails would keep it.
+- **`save` writes what changed on ruby, jruby and spinel; the other
+  targets write the whole row.** On the ruby-family targets,
+  `_adapter_update` UPDATEs only the columns with a pending change, as
+  Rails' partial writes do, and a save with nothing pending runs no
+  UPDATE and leaves `updated_at` alone. `update_columns` and
+  `update_column` write only the columns they name. So two jobs the
+  Sidekiq worker runs at once on one record each keep their change when
+  they change different columns, and a column a database trigger moved
+  (campfire's `rooms.messages_count`) is written back only when the
+  record changed it too. A record with no Dirty baseline (one the
+  runtime didn't load or save) writes every column. The strict targets
+  track no pending changes, so their `_adapter_update` still writes every
+  column the record loaded; a bare `touch` UPDATEs `updated_at` alone
+  (`_adapter_touch`) everywhere.
 
 ### `HashWithIndifferentAccess` is a String-keyed Hash; a call converts its keys at the site
 

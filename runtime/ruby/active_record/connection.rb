@@ -1349,16 +1349,37 @@ module ActiveRecord
     def update_column(name, value)
       _raise_readonly_record_error if readonly?
       self[name] = value
-      _adapter_update
+      key = name.to_s
+      @__write_only = [key]
+      begin
+        _adapter_update
+      ensure
+        @__write_only = nil
+      end
+      clear_attribute_change(key) unless @__last_saved_attributes.nil?
       true
     end
 
     # `record.update_columns(a: 1, b: 2)` — several attributes at once,
     # the same way: no validations, no callbacks, no timestamps.
+    #
+    # Only the named columns are written, and they stop being pending
+    # changes, as in Rails; other unsaved changes stay pending.
     def update_columns(attributes)
       _raise_readonly_record_error if readonly?
-      attributes.each { |name, value| self[name] = value }
-      _adapter_update
+      names = [""]
+      names.pop
+      attributes.each do |name, value|
+        self[name] = value
+        names.push(name.to_s)
+      end
+      @__write_only = names
+      begin
+        _adapter_update
+      ensure
+        @__write_only = nil
+      end
+      names.each { |name| clear_attribute_change(name) } unless @__last_saved_attributes.nil?
       true
     end
 
@@ -1927,7 +1948,10 @@ module ActiveRecord
           @_save_halted = true
           return false
         end
-        fill_timestamps(false) if stamps_timestamps?
+        # Rails stamps `updated_at` only when the save writes something
+        # (`should_record_timestamps?`), and with nothing pending the
+        # UPDATE itself is skipped.
+        fill_timestamps(false) if stamps_timestamps? && changed?
         _adapter_update
         _enlist_write(1)
         __track_saved_changes(was_new)
@@ -2305,6 +2329,18 @@ module ActiveRecord
         changes[key] = [prev, value] if prev != value
       end
       changes
+    end
+
+    # The columns the emitted `_adapter_update` writes, as Rails' partial
+    # updates choose them: the ones with a pending change. A record with
+    # no Dirty baseline (one this runtime didn't load or save) writes
+    # every column, so nothing it holds is skipped; `update_columns`
+    # names its own.
+    def _columns_to_write
+      only = @__write_only
+      return only unless only.nil?
+      return attributes.keys if @__last_saved_attributes.nil?
+      changes_to_save.keys
     end
 
     # Rails' `<col>_was`: the value before the pending change, or the
