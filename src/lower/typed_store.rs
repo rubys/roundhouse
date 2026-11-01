@@ -152,6 +152,7 @@ pub(crate) fn typed_store_decls(
 pub(crate) fn push_typed_store_methods(methods: &mut Vec<MethodDef>, model: &Model) {
     let stores = typed_store_decls(&model.body);
     for (col, attrs) in &stores {
+        push_store_hash_methods(methods, model, col, attrs);
         for a in attrs {
             let elem_ty = typed_store_ty(a.decl_ty.as_str()).unwrap_or(Ty::Untyped);
             // `array: true` stores a list of the scalar type; `any`
@@ -243,6 +244,115 @@ pub(crate) fn push_typed_store_methods(methods: &mut Vec<MethodDef>, model: &Mod
             );
         }
     }
+}
+
+/// The store column's own reader, as the typed_store gem has it: a Hash
+/// of the declared attributes (each at its default until written) and
+/// any other stored key, that `[]=` writes back into the column. A
+/// `Shop#plan_name` that reads `settings[:plan_name]` and its tests write
+/// `shop.settings[:gift_cards_activated] = true`; the column reader
+/// answered the serialized String, so both raised TypeError (no
+/// implicit conversion of Symbol into Integer). The view is the
+/// runtime's `TypedStore::Accessor` over three generated private
+/// methods: `__rh_<col>_keys`, `__rh_<col>_default(key)` (the
+/// declared default, evaluated when that key is read) and
+/// `__rh_<col>_cast(key, value)` (a boolean attribute's cast). Only a
+/// model whose own body reads the column as a Hash gets it, so a store
+/// read through its accessors alone (lobsters' `User#settings`) keeps
+/// the column reader every target has.
+fn push_store_hash_methods(methods: &mut Vec<MethodDef>, model: &Model, col: &Symbol, attrs: &[TypedStoreAttr]) {
+    if !reads_store_as_hash(model, col) {
+        return;
+    }
+    let Some(reader) = methods
+        .iter_mut()
+        .find(|m| m.receiver == crate::dialect::MethodReceiver::Instance && m.name == *col && m.params.is_empty())
+    else {
+        return;
+    };
+    reader.body = sp_expr(ExprNode::Send {
+        recv: Some(sp_expr(ExprNode::Const { path: vec![Symbol::from("TypedStore"), Symbol::from("Accessor")] })),
+        method: Symbol::from("new"),
+        args: vec![sp_expr(ExprNode::SelfRef), str_lit(col.as_str())],
+        block: None,
+        parenthesized: true,
+    });
+    reader.signature = Some(super::model_to_library::fn_sig(vec![], Ty::Untyped));
+    let key = Symbol::from("key");
+    let value = Symbol::from("value");
+    let key_ref = || sp_expr(ExprNode::Var { id: VarId(0), name: key.clone() });
+    let case = |arms: Vec<crate::expr::Arm>| sp_expr(ExprNode::Case { scrutinee: key_ref(), arms });
+    let arm = |name: &str, body: Expr| crate::expr::Arm {
+        pattern: crate::expr::Pattern::Lit { value: Literal::Str { value: name.to_string() } },
+        guard: None,
+        body,
+    };
+    let otherwise = |body: Expr| crate::expr::Arm { pattern: crate::expr::Pattern::Wildcard, guard: None, body };
+    let nil = || sp_expr(ExprNode::Lit { value: Literal::Nil });
+    let keys = sp_expr(ExprNode::Array {
+        elements: attrs.iter().map(|a| str_lit(a.name.as_str())).collect(),
+        style: Default::default(),
+    });
+    let mut defaults: Vec<crate::expr::Arm> =
+        attrs.iter().map(|a| arm(a.name.as_str(), a.default.clone().unwrap_or_else(nil))).collect();
+    defaults.push(otherwise(nil()));
+    let mut casts: Vec<crate::expr::Arm> = attrs
+        .iter()
+        .filter(|a| a.is_bool)
+        .map(|a| arm(a.name.as_str(), bool_cast(sp_expr(ExprNode::Var { id: VarId(0), name: value.clone() }))))
+        .collect();
+    // No boolean attribute, no cast: a `case` with only an `else` is not
+    // Ruby, so the body is the value itself.
+    let cast_body = if casts.is_empty() {
+        sp_expr(ExprNode::Var { id: VarId(0), name: value.clone() })
+    } else {
+        casts.push(otherwise(sp_expr(ExprNode::Var { id: VarId(0), name: value.clone() })));
+        case(casts)
+    };
+    let private = |m: &mut Vec<MethodDef>, name: String, params: Vec<Param>, body: Expr| {
+        let name = Symbol::from(name);
+        push_synth_instance_method(m, model, name.clone(), params, body, None, AccessorKind::Method, false);
+        if let Some(def) = m.iter_mut().find(|d| d.name == name && d.receiver == crate::dialect::MethodReceiver::Instance) {
+            def.visibility = crate::dialect::MethodVisibility::Private;
+        }
+    };
+    private(methods, format!("__rh_{}_keys", col.as_str()), Vec::new(), keys);
+    private(methods, format!("__rh_{}_default", col.as_str()), vec![Param::positional(key.clone())], case(defaults));
+    private(
+        methods,
+        format!("__rh_{}_cast", col.as_str()),
+        vec![Param::positional(key.clone()), Param::positional(value.clone())],
+        cast_body,
+    );
+}
+
+/// Whether the model's own methods index the store column as a Hash
+/// (`settings[:k]`, `settings[:k] = v`, `self.settings.fetch(:k)`).
+fn reads_store_as_hash(model: &Model, col: &Symbol) -> bool {
+    fn walk(e: &Expr, col: &Symbol) -> bool {
+        if let ExprNode::Send { recv: Some(r), method, .. } = &*e.node {
+            if matches!(method.as_str(), "[]" | "[]=" | "fetch" | "key?" | "dig")
+                && matches!(&*r.node, ExprNode::Send { recv, method, args, block: None, .. }
+                    if method == col
+                        && args.is_empty()
+                        && recv.as_ref().is_none_or(|x| matches!(&*x.node, ExprNode::SelfRef)))
+            {
+                return true;
+            }
+        }
+        let mut found = false;
+        e.node.for_each_child(&mut |c| {
+            if !found && walk(c, col) {
+                found = true;
+            }
+        });
+        found
+    }
+    model.body.iter().any(|item| matches!(item, ModelBodyItem::Method { method, .. } if walk(&method.body, col)))
+}
+
+fn str_lit(value: &str) -> Expr {
+    sp_expr(ExprNode::Lit { value: Literal::Str { value: value.to_string() } })
 }
 
 fn sp_expr(node: ExprNode) -> Expr {
