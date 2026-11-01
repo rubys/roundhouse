@@ -18,12 +18,14 @@ puts ActionView::ViewHelpers.asset_url("/assets/default-app.png", skip_pipeline:
 puts ActionView::ViewHelpers.asset_url("logo.png")
 puts ActionView::ViewHelpers.asset_url("https://cdn.example/x.png")
 puts ActionView::ViewHelpers.asset_url("data:image/png;base64,abc")
+puts ActionView::ViewHelpers.asset_url("DATA:image/png;base64,abc")
+puts ActionView::ViewHelpers.asset_url("Cid:logo")
 "#,
     );
     out.assert_passes();
     assert_eq!(
         out.stdout.lines().collect::<Vec<_>>(),
-        ["/assets/default-app.png", "/assets/logo.png", "https://cdn.example/x.png", "data:image/png;base64,abc"],
+        ["/assets/default-app.png", "/assets/logo.png", "https://cdn.example/x.png", "data:image/png;base64,abc", "DATA:image/png;base64,abc", "Cid:logo"],
         "{}",
         out.stdout
     );

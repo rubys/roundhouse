@@ -1029,7 +1029,9 @@ module ActionView
       return source if skip_pipeline
       return source if source.start_with?("/")
       return source if source.include?("://")
-      return source if source.start_with?("data:") || source.start_with?("cid:")
+      # Rails' URI_REGEXP is case-insensitive: `DATA:` and `CID:` pass too.
+      scheme = source.downcase
+      return source if scheme.start_with?("data:") || scheme.start_with?("cid:")
       url = digested_asset_path(source)
       url
     end
