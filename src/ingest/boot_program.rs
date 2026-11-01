@@ -302,19 +302,22 @@ fn reshapes_the_program(node: &ruby_prism::Node<'_>, defined: &crate::det::HashS
 /// A boot hook call (`Rails.application.config.after_initialize do … end`):
 /// its block runs at a point in boot this program does not reproduce.
 fn is_hook(node: &ruby_prism::Node<'_>) -> bool {
-    // Not the statement's own node alone: a hook under a guard (`if defined?(Rails::Server)`) is the same hook.
-    struct Hooks(bool);
-    impl<'pr> ruby_prism::Visit<'pr> for Hooks {
-        fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
-            if HOOKS.contains(&super::util::constant_id_str(&node.name()).as_ref()) && node.block().is_some() {
-                self.0 = true;
-            }
-            ruby_prism::visit_call_node(self, node);
-        }
+    if let Some(c) = node.as_call_node() {
+        return HOOKS.contains(&super::util::constant_id_str(&c.name()).as_ref()) && c.block().is_some();
     }
-    let mut hooks = Hooks(false);
-    ruby_prism::Visit::visit(&mut hooks, node);
-    hooks.0
+    // Only through a guard's branches: a hook name elsewhere (`X = Builder.configure { … }`, a `def` body) runs when it is reached, not at a later point of boot.
+    let branches: Vec<ruby_prism::Node<'_>> = if let Some(n) = node.as_if_node() {
+        [n.statements().map(|s| s.as_node()), n.subsequent()].into_iter().flatten().collect()
+    } else if let Some(n) = node.as_unless_node() {
+        [n.statements().map(|s| s.as_node()), n.else_clause().map(|e| e.as_node())].into_iter().flatten().collect()
+    } else if let Some(n) = node.as_else_node() {
+        n.statements().map(|s| s.as_node()).into_iter().collect()
+    } else if let Some(n) = node.as_statements_node() {
+        n.body().iter().collect()
+    } else {
+        Vec::new()
+    };
+    branches.iter().any(is_hook)
 }
 
 /// Point each receiverless call to an initializer `def` at [`MODULE`], in

@@ -664,3 +664,20 @@ fn a_hook_under_a_guard_stays_on_the_ledger() {
     assert!(!ledger.is_empty(), "the guarded hook is reported");
     assert!(app.boot_program.is_empty(), "{:?}", app.boot_program);
 }
+
+#[test]
+fn a_hook_name_outside_a_guard_branch_is_not_a_hook() {
+    let (app, _) = ingest(&[
+        (
+            "config/initializers/limits.rb",
+            "LIMITS = Limits.configure { |c| c }\n\ndef reconfigure_limits\n  Limits.configure { |c| c }\nend\n",
+        ),
+        ("app/models/limits.rb", "class Limits\n  def self.configure\n    yield 1\n  end\nend\n"),
+    ]);
+    assert_eq!(app.boot_program.len(), 1, "{:?}", app.boot_program);
+    assert!(
+        app.library_classes.iter().any(|lc| lc.name.0.as_str() == "RoundhouseInitializers"
+            && lc.methods.iter().any(|m| m.name.as_str() == "reconfigure_limits")),
+        "the def is still taken"
+    );
+}
