@@ -1,0 +1,2 @@
+class InheritedRescuesController < WithRescuesController
+end

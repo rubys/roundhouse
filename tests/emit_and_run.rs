@@ -64,6 +64,10 @@ mod framework_exceptions;
 mod active_storage_exceptions;
 #[path = "emit_and_run/rescue_surface.rs"]
 mod rescue_surface;
+#[path = "support/dispatcher_json.rs"]
+mod dispatcher_json_contract;
+#[path = "emit_and_run/dispatcher_json.rs"]
+mod dispatcher_json;
 #[path = "emit_and_run/preloader_runtime.rs"]
 mod preloader_runtime;
 #[path = "emit_and_run/framework_surface_rest.rs"]
