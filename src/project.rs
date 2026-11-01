@@ -1282,9 +1282,27 @@ fn report_roda_form_fields(app: &App, target: BuildTarget) {
     // (`article.color_field`) is an ordinary call.
     use crate::expr::{Expr, ExprNode, Literal};
     type Handoffs = crate::det::HashMap<String, Vec<String>>;
-    fn form_block<'a>(e: &'a Expr) -> Option<(&'a str, &'a Expr)> {
-        let ExprNode::Send { recv: None, method, block: Some(block), .. } = &*e.node else { return None };
-        if !matches!(method.as_str(), "form_with" | "form_for" | "fields_for" | "fields") {
+    // A local read naming a builder: a `Var`, or a partial's unbound local
+    // read as a bare call (`form`).
+    fn names_builder(e: &Expr, builders: &[String]) -> bool {
+        match &*e.node {
+            ExprNode::Var { name, .. } => builders.iter().any(|b| b == name.as_str()),
+            ExprNode::Send { recv: None, method, args, block: None, .. } => {
+                args.is_empty() && builders.iter().any(|b| b == method.as_str())
+            }
+            _ => false,
+        }
+    }
+    // A form helper's block (`form_with … do |form|`), or a builder's own
+    // nested one (`form.fields_for :child do |child|`): its parameter is a
+    // builder.
+    fn form_block<'a>(e: &'a Expr, builders: &[String]) -> Option<(&'a str, &'a Expr)> {
+        let ExprNode::Send { recv, method, block: Some(block), .. } = &*e.node else { return None };
+        let helper = match recv {
+            None => matches!(method.as_str(), "form_with" | "form_for" | "fields_for" | "fields"),
+            Some(r) => matches!(method.as_str(), "fields_for" | "fields") && names_builder(r, builders),
+        };
+        if !helper {
             return None;
         }
         let ExprNode::Lambda { params, body, .. } = &*block.node else { return None };
@@ -1298,7 +1316,7 @@ fn report_roda_form_fields(app: &App, target: BuildTarget) {
         }
     }
     fn handoffs(e: &Expr, dir: &str, builders: &mut Vec<String>, out: &mut Handoffs) {
-        if let Some((param, body)) = form_block(e) {
+        if let Some((param, body)) = form_block(e, builders) {
             builders.push(param.to_string());
             handoffs(body, dir, builders, out);
             builders.pop();
@@ -1311,17 +1329,20 @@ fn report_roda_form_fields(app: &App, target: BuildTarget) {
             && let ExprNode::Hash { entries, .. } = &*last.node
         {
             for (k, v) in entries {
-                if let (ExprNode::Lit { value: Literal::Sym { value: local } }, ExprNode::Var { name, .. }) = (&*k.node, &*v.node)
-                    && builders.iter().any(|b| b == name.as_str())
+                if let ExprNode::Lit { value: Literal::Sym { value: local } } = &*k.node
+                    && names_builder(v, builders)
                 {
-                    out.entry(partial_view(dir, path)).or_default().push(local.as_str().to_string());
+                    let locals = out.entry(partial_view(dir, path)).or_default();
+                    if !locals.iter().any(|l| l == local.as_str()) {
+                        locals.push(local.as_str().to_string());
+                    }
                 }
             }
         }
         e.node.for_each_child(&mut |c| handoffs(c, dir, builders, out));
     }
     fn visit(e: &Expr, builders: &mut Vec<String>) {
-        if let Some((param, body)) = form_block(e) {
+        if let Some((param, body)) = form_block(e, builders) {
             builders.push(param.to_string());
             visit(body, builders);
             builders.pop();
@@ -1329,12 +1350,7 @@ fn report_roda_form_fields(app: &App, target: BuildTarget) {
         }
         if let ExprNode::Send { recv: Some(recv), method, .. } = &*e.node
             && matches!(method.as_str(), "color_field" | "datetime_local_field")
-            // A partial's unbound local reads as a bare call (`form`).
-            && match &*recv.node {
-                ExprNode::Var { name, .. } => builders.iter().any(|b| b == name.as_str()),
-                ExprNode::Send { recv: None, method, args, .. } => args.is_empty() && builders.iter().any(|b| b == method.as_str()),
-                _ => false,
-            }
+            && names_builder(recv, builders)
             && !e.span.is_synthetic()
         {
             emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
@@ -1346,10 +1362,20 @@ fn report_roda_form_fields(app: &App, target: BuildTarget) {
         }
         e.node.for_each_child(&mut |c| visit(c, builders));
     }
+    // To a fixed point: a partial handed the builder can hand it on
+    // (`_form` → `_outer` → `_inner`), so each view is scanned with the
+    // builder locals it was handed so far.
     let mut handed = Handoffs::default();
-    for view in &app.views {
-        let dir = view.name.as_str().rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-        handoffs(&view.body, dir, &mut Vec::new(), &mut handed);
+    loop {
+        let before: usize = handed.values().map(Vec::len).sum();
+        for view in &app.views {
+            let dir = view.name.as_str().rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+            let mut builders = handed.get(view.name.as_str()).cloned().unwrap_or_default();
+            handoffs(&view.body, dir, &mut builders, &mut handed);
+        }
+        if handed.values().map(Vec::len).sum::<usize>() == before {
+            break;
+        }
     }
     for view in &app.views {
         let mut builders = handed.get(view.name.as_str()).cloned().unwrap_or_default();

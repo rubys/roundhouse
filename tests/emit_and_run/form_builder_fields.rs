@@ -304,3 +304,29 @@ fn a_color_field_in_a_partial_handed_the_builder_is_refused_on_roda() {
         .emit(roundhouse::project::BuildTarget::Roda);
     assert!(errors.iter().any(|e| e.contains("form builder field not supported") && e.contains("roda")), "{errors:?}");
 }
+
+/// A builder derived from the form's (`form.fields_for(:child) do |child|`)
+/// is a builder too: its field is refused on Roda.
+#[test]
+fn a_color_field_on_a_nested_fields_for_builder_is_refused_on_roda() {
+    let (_, errors) = emit_and_run::real_blog()
+        .edit(
+            "app/views/articles/_form.html.erb",
+            "<%= form.submit",
+            "<%= form.fields_for :extra do |child| %><%= child.color_field :title %><% end %>\n  <%= form.submit",
+        )
+        .emit(roundhouse::project::BuildTarget::Roda);
+    assert!(errors.iter().any(|e| e.contains("form builder field not supported") && e.contains("roda")), "{errors:?}");
+}
+
+/// A builder handed through two partials (`_form` → `_outer` → `_inner`)
+/// is still a builder in the second: its field is refused on Roda.
+#[test]
+fn a_color_field_two_partials_down_is_refused_on_roda() {
+    let (_, errors) = emit_and_run::real_blog()
+        .write("app/views/articles/_outer.html.erb", "<%= render \"inner\", f: form %>\n")
+        .write("app/views/articles/_inner.html.erb", "<%= f.color_field :title %>\n")
+        .edit("app/views/articles/_form.html.erb", "<%= form.submit", "<%= render \"outer\", form: form %>\n  <%= form.submit")
+        .emit(roundhouse::project::BuildTarget::Roda);
+    assert!(errors.iter().any(|e| e.contains("form builder field not supported") && e.contains("roda")), "{errors:?}");
+}
