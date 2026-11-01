@@ -709,6 +709,13 @@ pub struct App {
     /// Read by `lower::controller_to_library::params_wrapper`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub wrap_parameters_by_default: bool,
+    /// `ActiveJob::Base.retry_jitter`, app-wide: 0.15 when
+    /// `config.load_defaults` is 6.1 or later, else 0.0, unless
+    /// `config.active_job.retry_jitter = <number>` sets it (application,
+    /// production or an initializer). `retry_on`'s delays use it when the
+    /// handler gives no `jitter:` and the job class doesn't set its own.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub active_job_retry_jitter: f64,
     /// The target's runtime defines `ActiveModel::Validator`
     /// (`runtime/ruby/active_model_validator.rb`, the ruby family), so a
     /// `validates_with` class keeps its base instead of being dropped as
@@ -1244,6 +1251,7 @@ impl App {
             controller_resolutions: HashMap::default(),
             sources: Vec::new(),
             wrap_parameters_by_default: false,
+            active_job_retry_jitter: 0.0,
             ports_active_model_validator: false,
             each_validator_calls: Vec::new(),
             const_resolver: Default::default(),
@@ -1404,6 +1412,10 @@ pub enum ProgramItem {
     /// A statement the ingest cannot carry, reported as
     /// `file_statement_unsupported` and named when the file loads.
     NotCarried { span: crate::span::Span, message: String },
+}
+
+fn is_zero_f64(v: &f64) -> bool {
+    *v == 0.0
 }
 
 /// A support file the class ingest left out (`App::ingest_drops`).
