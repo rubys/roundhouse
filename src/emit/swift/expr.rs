@@ -2410,6 +2410,15 @@ pub(super) fn wrap_return(e: &Expr) -> String {
                 indent(&with_nonnull_scope(&else_nn, || wrap_return(else_branch)))
             )
         }
+        // Not the assignment alone: Ruby's assignment answers the value, and a value method must return it
+        ExprNode::Assign { target: target @ (LValue::Var { .. } | LValue::Ivar { .. }), .. } => {
+            let read = match target {
+                LValue::Var { id, name } => ExprNode::Var { id: *id, name: name.clone() },
+                LValue::Ivar { name } => ExprNode::Ivar { name: name.clone() },
+                _ => unreachable!(),
+            };
+            format!("{}\nreturn {}", emit_expr(e), emit_expr(&Expr::new(e.span, read)))
+        }
         ExprNode::Return { .. }
         | ExprNode::Raise { .. }
         | ExprNode::While { .. }

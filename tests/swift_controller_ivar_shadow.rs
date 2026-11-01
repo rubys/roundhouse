@@ -58,3 +58,16 @@ fn an_app_ivar_is_renamed_under_a_synthesized_application_controller() {
     assert!(!probes.contains("self.status ="), "probes still assigns self.status:\n{probes}");
     assert!(probes.contains("self.appStatus = \"app status\""), "{probes}");
 }
+
+/// ApplicationController's `set_location`, a `before_action` that isn't
+/// inlined, is a value method in Swift (`func setLocation() -> Any?`). Its
+/// last statement is an ivar assignment, which in Ruby answers the value,
+/// so the method returns it; with no `return` the Swift doesn't build.
+#[test]
+fn a_method_ending_in_an_ivar_assignment_returns_it() {
+    let (emitted, errors) = ts_controller_ivars::overlay().emit(BuildTarget::Swift);
+    assert!(errors.is_empty(), "{errors:?}");
+    let application =
+        std::fs::read_to_string(emitted.join("Sources/App/app/controllers/ApplicationController.swift")).unwrap();
+    assert!(application.contains("self.appLocation = \"app location\"\n        return appLocation"), "{application}");
+}
