@@ -16,6 +16,43 @@ use super::{
     ty_of_column, var_ref, with_ty,
 };
 
+/// Names alone rule out plain integer query evidence, even when a
+/// declaration's type, normalizer or options are not lowered. An unknown
+/// name rules out the whole list rather than guessing which column it is.
+fn query_decorated_columns(model: &Model) -> Option<crate::det::HashSet<Symbol>> {
+    fn name(expr: &Expr, out: &mut Option<crate::det::HashSet<Symbol>>) {
+        let value = match &*expr.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => value.clone(),
+            ExprNode::Lit { value: Literal::Str { value } } => Symbol::from(value.as_str()),
+            _ => { *out = None; return; }
+        };
+        if let Some(out) = out { out.insert(value); }
+    }
+    fn visit(expr: &Expr, out: &mut Option<crate::det::HashSet<Symbol>>) {
+        if out.is_none() { return; }
+        if let ExprNode::Send { method, args, .. } = &*expr.node {
+            match method.as_str() {
+                "attribute" => match args.first() {
+                    Some(arg) => name(arg, out),
+                    None => *out = None,
+                },
+                "normalizes" => {
+                    for arg in args.iter().take_while(|arg| !matches!(&*arg.node, ExprNode::Hash { .. } | ExprNode::KeywordSplat { .. })) {
+                        name(arg, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        expr.node.for_each_child(&mut |child| visit(child, out));
+    }
+    let mut out = Some(crate::det::HashSet::default());
+    for item in &model.body {
+        if let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item { visit(expr, &mut out); }
+    }
+    out
+}
+
 /// Emit `def self.<name>; [<filtered column symbols>]; end`.
 fn push_schema_symbol_list(
     methods: &mut Vec<MethodDef>,
@@ -562,6 +599,19 @@ pub(super) fn push_schema_methods(
     // apply ISO8601-with-offset vs calendar-only without sniffing values.
     push_schema_symbol_list(methods, owner, "schema_columns", table, |_| true);
     push_schema_column_types(methods, owner, table);
+    if runtime_relation == super::RuntimeRelation::Present {
+        // A decorated attribute can serialize differently from
+        // its integer storage. Keep this evidence specific to plain
+        // scalar columns; the runtime reuses the existing finder range.
+        let decorated = query_decorated_columns(model);
+        push_schema_symbol_list(methods, owner, "schema_integer_query_columns", table, |c| {
+            matches!(c.col_type, crate::schema::ColumnType::Integer
+                | crate::schema::ColumnType::BigInt | crate::schema::ColumnType::Reference { .. })
+                && !c.array
+                && !model.enums.contains_key(&c.name)
+                && decorated.as_ref().is_some_and(|names| !names.contains(&c.name))
+        });
+    }
     push_decode_plucked(methods, owner, table);
     push_schema_symbol_list(methods, owner, "schema_time_columns", table, |c| {
         matches!(c.col_type, crate::schema::ColumnType::DateTime | crate::schema::ColumnType::Time)

@@ -99,6 +99,7 @@ module ActiveRecord
     def saved_changes?: () -> bool
     def attribute_in_database: (Symbol | String name) -> untyped
     def self.schema_column_types: () -> Hash[Symbol, Symbol]
+    def self.schema_integer_query_columns: () -> Array[Symbol]
     def self.type_for_attribute: (String name) -> ActiveRecord::Type::Value
     def self.default_scoped: () -> Relation
     # cache_key / cache_version / cache_key_with_version — see

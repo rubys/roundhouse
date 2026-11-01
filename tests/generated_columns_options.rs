@@ -99,6 +99,8 @@ end
 fn references_type_options_remain_ordinary_schema_and_migration_columns() {
     for association in ["references", "belongs_to"] {
         for options in ["type: :uuid", "{ type: :uuid }"] {
+            let keyword_type = options == "type: :uuid";
+            let column_name = if keyword_type { "account_id" } else { "account" };
             let schema_source = format!(
                 r#"ActiveRecord::Schema[8.1].define(version: 1) do
   create_table "events", force: :cascade do |t|
@@ -112,11 +114,12 @@ end
             let column = schema.tables[&roundhouse::Symbol::from("events")]
                 .columns
                 .iter()
-                .find(|column| column.name.as_str() == "account")
+                .find(|column| column.name.as_str() == column_name)
                 .expect("reference column");
             assert!(
-                matches!(&column.col_type, ColumnType::Reference { .. }),
-                "schema.rb `t.{association}` should keep the existing Reference type, got {:?}",
+                if keyword_type { matches!(&column.col_type, ColumnType::Uuid) }
+                else { matches!(&column.col_type, ColumnType::Reference { .. }) },
+                "schema.rb `t.{association}` must retain the keyword type without treating a positional Hash as options, got {:?}",
                 column.col_type
             );
             assert!(column.generated.is_none());
@@ -141,11 +144,12 @@ end
             let column = migrated.tables[&roundhouse::Symbol::from("events")]
                 .columns
                 .iter()
-                .find(|column| column.name.as_str() == "account")
+                .find(|column| column.name.as_str() == column_name)
                 .expect("migration reference column");
             assert!(
-                matches!(&column.col_type, ColumnType::Reference { .. }),
-                "migration `t.{association}` should keep the existing Reference type, got {:?}",
+                if keyword_type { matches!(&column.col_type, ColumnType::Uuid) }
+                else { matches!(&column.col_type, ColumnType::Reference { .. }) },
+                "migration `t.{association}` must retain the keyword type without treating a positional Hash as options, got {:?}",
                 column.col_type
             );
             assert!(column.generated.is_none());

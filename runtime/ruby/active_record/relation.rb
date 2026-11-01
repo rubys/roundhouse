@@ -2337,7 +2337,7 @@ module ActiveRecord
       sql = if id.is_a?(Hash)
         hash_conditions(id)
       else
-        "#{@table}.#{@model.primary_key} = #{bind_literal(id)}"
+        column_predicate(@model.primary_key, id)
       end
       push_where(sql) unless sql.empty?
       begin
@@ -3175,10 +3175,11 @@ module ActiveRecord
         # predicate (`1=0`): never `IN ()`. Pure — NullRelation is set by
         # `mark_null!` from `none` / lasting positive `where` only.
         ids = val.map { |x| x.is_a?(Base) ? x._primary_key_value : column_bound_value(col, x) }
+        integer_column = integer_query_column?(col)
         if ids.empty?
           "1=0"
-        elsif ids.any? { |x| x.nil? || x.is_a?(Range) || x.is_a?(Bounds) }
-          array_with_ranges_predicate(qcol, ids)
+        elsif ids.any? { |x| x.nil? || x.is_a?(Range) || x.is_a?(Bounds) || (integer_column && x.is_a?(String)) }
+          array_with_ranges_predicate(qcol, ids, integer_column)
         else
           "#{qcol} IN (#{escape_list(ids)})"
         end
@@ -3194,7 +3195,10 @@ module ActiveRecord
         # static `v && v.id` narrowing was dropped in favor of this
         # runtime dispatch: hash values from untyped scope params can
         # be a record OR a collection, and only the runtime knows.
-        "#{qcol} = #{bind_literal(val._primary_key_value)}"
+        column_predicate(col, val._primary_key_value)
+      elsif val.is_a?(String) && integer_query_column?(col)
+        value = integer_query_string(val)
+        value.empty? ? "1=0" : "#{qcol} = \x01#{value}\x02"
       else
         "#{qcol} = #{bind_literal(column_bound_value(col, val))}"
       end
@@ -3215,6 +3219,30 @@ module ActiveRecord
 
     def integer_column?(col)
       !col.include?(".") && @model.schema_column_types[col.to_sym] == :integer
+    end
+
+    # String casts need narrower evidence than column_bound_value's
+    # boolean storage-type check: decorated attributes keep their rules.
+    # Only this model's known integer columns supply cast evidence. A
+    # qualified column on another table and raw SQL retain their own path.
+    def integer_query_column?(col)
+      table_name = @model.table_name
+      prefix = "#{table_name}."
+      name = col.start_with?(prefix) ? col[prefix.length, col.length].to_s : col
+      !name.include?(".") && @model.schema_integer_query_columns.include?(name.to_sym)
+    end
+
+    # Query serialization differs from String#to_i: nonnumeric text is
+    # NULL, never zero. Overflow is a false predicate, distinct from
+    # NULL under NOT. Reuse the finder's signed-64-bit prefix parser;
+    # no overflowing text reaches a native Integer conversion.
+    def integer_query_string(text)
+      cast = ActiveRecord::IntegerKeyCast.parse(text)
+      return cast.value.to_s if cast.valid
+      i = ActiveRecord::IntegerKeyCast.number_start(text)
+      char = text[i, 1].to_s
+      i += 1 if char == "+" || char == "-"
+      ActiveRecord::IntegerKeyCast.digit_value(text[i, 1].to_s) < 0 ? "NULL" : ""
     end
 
     # Rails' Range condition: `where(score: 5..9)` is `>=` and `<=`, an
@@ -3248,11 +3276,11 @@ module ActiveRecord
       bind_literal(bound)
     end
 
-    # Rails' Array value holding a Range or a nil (`where(score: [3,
-    # 6..9])`, `where(user_id: [1, nil])`): the scalars as one IN list, a
-    # `nil` as IS NULL, and each Range as its own comparison, ORed. An
-    # Array of scalars alone keeps the IN list above.
-    def array_with_ranges_predicate(qcol, vals)
+    # Separate literal nil and range arms before choosing the scalar
+    # strategy. Rails serializes one scalar as equality; multiple scalars
+    # use HomogeneousIn, which drops serialized NULL/unboundable values
+    # but retains IN (NULL) when none survive. NOT distinguishes these.
+    def array_with_ranges_predicate(qcol, vals, integer_column)
       scalars = []
       arms = []
       has_nil = false
@@ -3265,12 +3293,21 @@ module ActiveRecord
         elsif x.is_a?(Bounds)
           range_arms << bounds_predicate(qcol, x.lower, x.upper, x.exclusive?)
         else
-          scalars << x
+          value = integer_column && x.is_a?(String) ? integer_query_string(x) : ActiveRecord.adapter.escape_value(x)
+          scalars << value
         end
       end
-      arms << "#{qcol} IN (#{escape_list(scalars)})" unless scalars.empty?
+      if scalars.length == 1
+        value = scalars[0].to_s
+        arms << (value.empty? ? "1=0" : "#{qcol} = #{value}")
+      elsif scalars.length > 1
+        scalars = scalars.reject { |value| integer_column && (value.empty? || value == "NULL") }
+        scalars << "NULL" if scalars.empty?
+        arms << "#{qcol} IN (#{scalars.join(", ")})"
+      end
       arms << "#{qcol} IS NULL" if has_nil
       range_arms.each { |r| arms << r }
+      return "1=0" if arms.empty?
       "(#{arms.join(" OR ")})"
     end
 

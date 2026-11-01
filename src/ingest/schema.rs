@@ -492,7 +492,9 @@ fn apply_migration_verb(
         "add_reference" | "add_belongs_to" => {
             if let (Some(t), Some(name)) = (arg_name(0), arg_name(1)) {
                 if let Some(table) = schema.tables.get_mut(&Symbol::from(t)) {
-                    table.columns.push(reference_column(&name));
+                    let column = typed_reference_column(&name, &args[2..], table.name.as_str(), file)?
+                        .unwrap_or_else(|| reference_column(&name));
+                    table.columns.push(column);
                 }
             }
         }
@@ -1288,6 +1290,24 @@ fn timestamp_columns() -> [Column; 2] {
     [col("created_at"), col("updated_at")]
 }
 
+/// Explicit reference types describe the foreign-key column itself,
+/// not the referenced table's key. Keep the scalar type and Rails' `_id`
+/// name so query serialization does not mistake String/UUID keys for ints.
+fn typed_reference_column(
+    name: &str,
+    args: &[Node<'_>],
+    table: &str,
+    file: &str,
+) -> Result<Option<Column>, IngestError> {
+    let Some(value) = kwarg_value(args.iter(), "type") else { return Ok(None) };
+    let type_name = name_value(&value).ok_or_else(|| IngestError::Unsupported {
+        file: file.into(),
+        message: format!("reference type for {table}.{name} must be a string or symbol literal"),
+    })?;
+    let opts = parse_column_opts(args.iter());
+    column_with_type(&type_name, format!("{name}_id"), &opts, table, file).map(Some)
+}
+
 /// A `references`/`belongs_to` column keeps the logical name (the
 /// Reference type carries the target table) — same convention as the
 /// schema.rb `t.references` path.
@@ -1765,6 +1785,11 @@ fn column_from_call(
         };
         let opts = parse_column_opts(args.iter().skip(2));
         return column_with_type(&type_name, col_name, &opts, table, file).map(Some);
+    }
+    if matches!(col_type_name.as_str(), "references" | "belongs_to")
+        && let Some(column) = typed_reference_column(&col_name, &args[1..], table, file)?
+    {
+        return Ok(Some(column));
     }
     let opts = parse_column_opts(args.iter().skip(1));
     column_with_type(&col_type_name, col_name, &opts, table, file).map(Some)

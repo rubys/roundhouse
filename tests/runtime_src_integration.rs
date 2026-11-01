@@ -1265,12 +1265,19 @@ fn every_runtime_method_body_concretely_typed() {
     // the same counter measures 901 on main and 904 with assignment.
     // Only Base#assign_attributes (+1) and UnknownAttributeError#initialize
     // (+2) differ; every other method's count is unchanged.
+    // MEASURED 905 on d0a3c8e4 with integer query strings: the identical
+    // counter measures 904 on main and 905 here. Only Relation's
+    // array_with_ranges_predicate changes (4 -> 5): its String test
+    // reads an element of the existing Array[untyped]. Other methods
+    // are unchanged; the full-context zero-unresolved gate still passes.
     // MEASURED 893 on 2026-10-30: ActiveSupport::Notifications keeps typed
     // Subscriber records, not `[pattern, listener]` Arrays, so publish and
     // listening? read them typed; only the listener itself stays gradual.
     // MEASURED 899 on 2026-10-30 (CI run 41007832906): 893 was taken while
     // the rbs named Subscriber unqualified, which resolved to a missing
     // ActiveSupport::Subscriber; Subscriber#notify's listener calls count.
+    // After merging main dfd6a874, keep the integer-query String test's
+    // one gradual Array element read on top of upstream's 899 sites.
     // MEASURED 916 on 2026-10-30 (on 904): the bulk writes' rows are
     // attribute Hashes whose values are whatever the app passes, so the
     // String-keyed copy `upsert_all` and the new `insert_all` family make
@@ -1281,19 +1288,24 @@ fn every_runtime_method_body_concretely_typed() {
     // active_record/relation.rb).
     // MEASURED 911 on 2026-10-30 after merging main dfd6a874 (899): the
     // same bulk-write and Relation-bind sites, +12 on main's count.
+    // Combined with main e368e2ae: 911 + (900 - 899) = 912.
+    // Integer query strings retain their one gradual Array element read.
     // MEASURED 918 on 2026-10-30 (on 911): a hash condition's boolean is
     // cast through its column's type (`column_bound_value`), reading the
     // condition's value and the model's column types untyped (+7 in
     // active_record/relation.rb).
+    // Combined with measured main f3eda5be2: 917 + (912 - 911) = 918.
     // MEASURED 919 on 2026-10-31 (on 918): the ruby-family `Base#slice`
     // parses a temporal column's stored text into the Time its reader
     // answers, reading the untyped `[]` value a second time (+1 in
     // active_record/connection.rb), as `_as_json_only` does.
+    // Combined with measured main fe705054f: 919 + (912 - 911) = 920.
     // MEASURED 920 on 2026-10-31 (on 919): Result#map adds one gradual
     // yield result in active_record/connection.rb. Its row is a typed
     // Hash[String, untyped]; the generic block result has no caller in
     // this probe. Existing methods have unchanged per-method counts.
-    const CEILING: usize = 920;
+    // Combined with measured main 0366de59f: 920 + (920 - 919) = 921.
+    const CEILING: usize = 921;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

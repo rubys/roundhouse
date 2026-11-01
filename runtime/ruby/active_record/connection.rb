@@ -530,6 +530,12 @@ module ActiveRecord
       {}
     end
 
+    # Plain scalar integer columns, excluding enum/type declarations.
+    # Query casts need the attribute's type, not only its storage type.
+    def self.schema_integer_query_columns
+      []
+    end
+
     # Rails' `type_for_attribute(name).type`: the column's type name, nil
     # for a name that is no column.
     def self.type_for_attribute(name)
