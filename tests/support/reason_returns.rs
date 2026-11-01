@@ -51,12 +51,11 @@ pub fn check(
         file.path == "app/controllers/probes_controller.rb" && file.line_col(d.span.start) == (3, 3)
     };
     if result == "untyped" {
+        // Warning policy only reports bare untyped. Pin the inferred receiver
+        // directly so a retained concrete | untyped union stays covered too.
         assert!(
-            diagnostics
-                .iter()
-                .filter(at_call)
-                .any(|d| matches!(d.kind, DiagnosticKind::GradualUntyped { .. })),
-            "unknown return lost its boundary warning: {source}\n{diagnostics:?}"
+            unknown_receiver_at_call(app),
+            "unknown return lost its boundary type: {source}\n{diagnostics:?}"
         );
     } else if matches!(result, "String" | "Symbol") {
         let errors = diagnostics
@@ -72,4 +71,33 @@ pub fn check(
             "known invalid call lost its error: {source}\n{diagnostics:?}"
         );
     }
+}
+
+fn unknown_receiver_at_call(app: &roundhouse::App) -> bool {
+    fn visit(app: &roundhouse::App, expr: &roundhouse::expr::Expr, found: &mut bool) {
+        if expr.span.file.0 > 0 {
+            let file = &app.sources[expr.span.file.0 as usize - 1];
+            if file.path == "app/controllers/probes_controller.rb"
+                && file.line_col(expr.span.start) == (3, 3)
+                && let roundhouse::expr::ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node
+                && method.as_str() == "no_such_method"
+                && recv.ty.as_ref().is_some_and(roundhouse::ty::Ty::has_untyped_arm)
+            {
+                *found = true;
+            }
+        }
+        expr.node.for_each_child(&mut |child| visit(app, child, found));
+    }
+    let mut found = false;
+    for controller in &app.controllers {
+        for action in controller.actions() {
+            visit(app, &action.body, &mut found);
+        }
+    }
+    for class in &app.library_classes {
+        for method in &class.methods {
+            visit(app, &method.body, &mut found);
+        }
+    }
+    found
 }
