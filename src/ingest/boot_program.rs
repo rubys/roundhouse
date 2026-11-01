@@ -70,6 +70,7 @@ pub(super) fn build<V: Vfs + ?Sized>(
         class_ivar_initializers: Vec::new(),
     };
     let no_engines = crate::det::HashSet::default();
+    let class_body_reads = class_body_constant_reads(vfs, dir);
     // Top-level constants an earlier boot statement assigned: this program's own, free to fill.
     let mut defined: crate::det::HashSet<String> = crate::det::HashSet::default();
     for file in initializer_ledger::ledger(vfs, dir, &[], &no_engines) {
@@ -103,11 +104,13 @@ pub(super) fn build<V: Vfs + ?Sized>(
             }
             // Not the branches alone, which is all the ledger weighs for a conditional: the condition runs at boot too.
             if let Some(predicate) = predicate_of(&node) {
-                let loc = predicate.location();
-                let text = String::from_utf8_lossy(&bytes[loc.start_offset()..loc.end_offset()]).into_owned();
-                if !constant_roots(&text).iter().all(|root| root == "Rails" || root == "ENV" || app_namespaces.contains(root)) {
+                if !constant_roots(&predicate).iter().all(|root| root == "Rails" || root == "ENV" || app_namespaces.contains(root)) {
                     continue;
                 }
+            }
+            // Rails runs initializers before a class body can autoload, but the emitted boot loads app/ first.
+            if written_constant(&node).is_some_and(|name| class_body_reads.contains(&name)) {
+                continue;
             }
             if let Some(def) = node.as_def_node() {
                 if def.receiver().is_some() {
@@ -127,13 +130,8 @@ pub(super) fn build<V: Vfs + ?Sized>(
                 // Not the ingest error: a statement this cannot read stays on the ledger, as before.
                 let (read, _) = super::prism::scope(|| super::survey::without_recording(|| super::expr::ingest_expr(&node, &file_name)));
                 let Ok(expr) = read else { continue };
-                if let Some(write) = node.as_constant_write_node() {
-                    defined.insert(super::util::constant_id_str(&write.name()).to_string());
-                }
-                if let Some(write) = node.as_constant_path_write_node() {
-                    if let Some(name) = write.target().name() {
-                        defined.insert(super::util::constant_id_str(&name).to_string());
-                    }
+                if let Some(name) = written_constant(&node) {
+                    defined.insert(name);
                 }
                 app.boot_program.push(expr);
             }
@@ -146,45 +144,72 @@ pub(super) fn build<V: Vfs + ?Sized>(
     Ok(taken)
 }
 
-/// The first segment of each constant the source names (`SolidCache` in
-/// `SolidCache.configuration`, `Foo` in `Foo::Bar`), skipping string contents.
-fn constant_roots(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let chars: Vec<char> = text.chars().collect();
-    let mut i = 0;
-    let mut quote: Option<char> = None;
-    while i < chars.len() {
-        let c = chars[i];
-        if let Some(q) = quote {
-            if c == '\\' {
-                i += 2;
-                continue;
-            }
-            if c == q {
-                quote = None;
-            }
-            i += 1;
-            continue;
+/// The first segment of each constant the predicate names (`SolidCache` in
+/// `SolidCache.configuration`, `Foo` in `Foo::Bar`, `File` in `::File`).
+fn constant_roots(node: &ruby_prism::Node<'_>) -> Vec<String> {
+    struct Roots(Vec<String>);
+    impl<'pr> ruby_prism::Visit<'pr> for Roots {
+        fn visit_constant_read_node(&mut self, node: &ruby_prism::ConstantReadNode<'pr>) {
+            self.0.push(super::util::constant_id_str(&node.name()).to_string());
         }
-        if c == '"' || c == '\'' {
-            quote = Some(c);
-            i += 1;
-            continue;
-        }
-        let starts = c.is_ascii_uppercase()
-            && (i == 0 || !(chars[i - 1].is_alphanumeric() || chars[i - 1] == '_' || chars[i - 1] == '.' || chars[i - 1] == ':' || chars[i - 1] == '@' || chars[i - 1] == '$'));
-        if starts {
-            let mut j = i;
-            while j < chars.len() && (chars[j].is_alphanumeric() || chars[j] == '_') {
-                j += 1;
+        fn visit_constant_path_node(&mut self, node: &ruby_prism::ConstantPathNode<'pr>) {
+            match node.parent() {
+                Some(parent) => ruby_prism::Visit::visit(self, &parent),
+                None => {
+                    if let Some(name) = node.name() {
+                        self.0.push(super::util::constant_id_str(&name).to_string());
+                    }
+                }
             }
-            out.push(chars[i..j].iter().collect());
-            i = j;
-            continue;
         }
-        i += 1;
     }
-    out
+    let mut roots = Roots(Vec::new());
+    ruby_prism::Visit::visit(&mut roots, node);
+    roots.0
+}
+
+/// The top-level constant a statement assigns (`X = …`, `::X = …`).
+fn written_constant(node: &ruby_prism::Node<'_>) -> Option<String> {
+    if let Some(write) = node.as_constant_write_node() {
+        return Some(super::util::constant_id_str(&write.name()).to_string());
+    }
+    let write = node.as_constant_path_write_node()?;
+    let target = write.target();
+    if target.parent().is_some() {
+        return None;
+    }
+    target.name().map(|name| super::util::constant_id_str(&name).to_string())
+}
+
+/// The constants app/ and lib/ read while their files load: outside a
+/// method body or a lambda, which run later.
+fn class_body_constant_reads<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> crate::det::HashSet<String> {
+    struct Reads(crate::det::HashSet<String>);
+    impl<'pr> ruby_prism::Visit<'pr> for Reads {
+        fn visit_def_node(&mut self, _: &ruby_prism::DefNode<'pr>) {}
+        fn visit_lambda_node(&mut self, _: &ruby_prism::LambdaNode<'pr>) {}
+        fn visit_constant_read_node(&mut self, node: &ruby_prism::ConstantReadNode<'pr>) {
+            self.0.insert(super::util::constant_id_str(&node.name()).to_string());
+        }
+        fn visit_constant_path_node(&mut self, node: &ruby_prism::ConstantPathNode<'pr>) {
+            if node.parent().is_none() {
+                if let Some(name) = node.name() {
+                    self.0.insert(super::util::constant_id_str(&name).to_string());
+                }
+            }
+            ruby_prism::visit_constant_path_node(self, node);
+        }
+    }
+    let mut reads = Reads(crate::det::HashSet::default());
+    for root in ["app", "lib"] {
+        let Ok(files) = super::app::read_rb_files(vfs, &dir.join(root)) else { continue };
+        for file in files {
+            let Ok(bytes) = vfs.read(&file) else { continue };
+            let parsed = super::prism::parse_silent(&bytes);
+            ruby_prism::Visit::visit(&mut reads, &parsed.node());
+        }
+    }
+    reads.0
 }
 
 fn predicate_of<'a>(node: &ruby_prism::Node<'a>) -> Option<ruby_prism::Node<'a>> {

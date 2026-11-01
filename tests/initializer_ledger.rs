@@ -613,3 +613,24 @@ fn a_filter_parameters_operand_after_a_comment_or_blank_line_is_read() {
     )]);
     assert!(ledger.is_empty(), "{:?}", statements(&ledger));
 }
+
+#[test]
+fn a_constant_a_class_body_reads_stays_on_the_ledger_since_initializers_load_after_app() {
+    let (app, ledger) = ingest(&[
+        ("config/initializers/settings.rb", "SETTINGS = { default: 3 }.freeze\nGREETING = \"hi\"\n"),
+        ("app/models/widget.rb", "class Widget < ApplicationRecord\n  DEFAULT = SETTINGS[:default]\n  def greeting = GREETING\nend\n"),
+    ]);
+    assert!(statements(&ledger).iter().any(|s| s.starts_with("SETTINGS")), "{:?}", statements(&ledger));
+    assert!(!statements(&ledger).iter().any(|s| s.starts_with("GREETING")), "{:?}", statements(&ledger));
+    assert_eq!(app.boot_program.len(), 1);
+}
+
+#[test]
+fn a_condition_on_a_rooted_or_quoted_constant_stays_on_the_ledger() {
+    let (app, ledger) = ingest(&[(
+        "config/initializers/guards.rb",
+        "if ::Gizmo.ready?\n  READY = true\nend\nif \"'\" == \"x\" && Widgetry.on?\n  ON = true\nend\nif ENV[\"BOOT\"]\n  BOOTED = true\nend\n",
+    )]);
+    assert_eq!(statements(&ledger), ["if ::Gizmo.ready?", "if \"'\" == \"x\" && Widgetry.on?"]);
+    assert_eq!(app.boot_program.len(), 1);
+}

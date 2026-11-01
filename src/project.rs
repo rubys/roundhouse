@@ -1969,7 +1969,7 @@ fn report_uri_reader_sends(app: &App, target: BuildTarget) {
 /// the trees that load `config/initializers.rb`; elsewhere what it
 /// defines is missing, so each statement is refused there.
 fn report_boot_program(app: &App, target: BuildTarget) {
-    if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel) {
         return;
     }
     for stmt in &app.boot_program {
