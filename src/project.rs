@@ -1133,6 +1133,38 @@ fn report_replayed_class_bodies(app: &App, target: BuildTarget) {
     }
 }
 
+/// A global variable write in a class or module body (`$loaded = true`),
+/// which the CRuby and JRuby trees write back where the source has it
+/// (`expr::BODY_STATEMENT`): Ruby runs it as the body loads. Every other
+/// target has no class body that runs it so, and refuses each one by
+/// name. (Other body statements, `delegate` among them, reach those
+/// targets through their own lowering.)
+fn report_body_statements(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
+        return;
+    }
+    let global_write = |call: &&crate::expr::Expr| {
+        call.decisions & crate::expr::BODY_STATEMENT != 0
+            && matches!(&*call.node, crate::expr::ExprNode::Assign { target: crate::expr::LValue::Var { name, .. }, .. } if name.as_str().starts_with('$'))
+    };
+    for lc in &app.library_classes {
+        for call in lc.unknown_calls.iter().filter(global_write) {
+            let written = crate::emit::ruby::emit_expr(call);
+            emit::diagnostics::report_unsupported(
+                call.span,
+                target.as_str(),
+                "class body statement",
+                format!(
+                    "`{}` in the body of `{}` runs where it stands when the body loads; the {} emit has no class body that runs it so, and drops it",
+                    written.lines().next().unwrap_or_default().trim(),
+                    lc.name.0.as_str(),
+                    target.as_str()
+                ),
+            );
+        }
+    }
+}
+
 /// A mailer and the `ActionMailer` runtime it delivers through ship on
 /// the Ruby family only; elsewhere `Mailer.action(…)` reached nothing,
 /// or a view of the same name.
@@ -2836,6 +2868,7 @@ fn target_files_inner(
     report_relation_class_calls(app, target);
     report_typescript_error_class(app, target);
     report_replayed_class_bodies(app, target);
+    report_body_statements(app, target);
     report_controller_sibling_classes(app, target);
     // `validates …, uniqueness:` left out of a target with no runtime
     // Relation: reported here, where the CLI and the MCP `wont_lower`

@@ -8939,9 +8939,10 @@ fn emit_library_class_decl_inner(
         let mut replayed = own.clone();
         replayed.retain(|call| !in_body(call));
         for call in &lc.unknown_calls {
-            // A payload job's `queue_as` and `discard_on
-            // ActiveJob::DeserializationError` are not dropped: the plan
-            // carries them (`lower::job_payload`).
+            // A payload job's `queue_as`, `discard_on
+            // ActiveJob::DeserializationError` and, under `:sidekiq`, its
+            // literal handlers and `sidekiq_options` are not dropped: the
+            // plan carries them (`lower::job_payload`).
             if in_body(&call) {
                 continue;
             }

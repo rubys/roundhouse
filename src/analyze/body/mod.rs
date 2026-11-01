@@ -201,6 +201,7 @@ pub struct Ctx {
 /// Rails schema + conventions; the body-typer reads it.
 #[derive(Default, Clone)]
 pub struct ClassInfo {
+    pub upload_array_fields: std::collections::BTreeMap<(Symbol, Vec<Symbol>, Vec<String>), std::collections::BTreeSet<Symbol>>,
     /// Kind of the indexed source declaration; never inferred from its name.
     pub is_module: bool,
     /// `@@name` storage a `cattr_*`/`mattr_*` declares, typed by its default.
@@ -1163,6 +1164,15 @@ impl<'a> BodyTyper<'a> {
 
     fn compute(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
         let expr_span = expr.span;
+        let upload_array_fields = if matches!(&*expr.node, ExprNode::Send { method, .. } if method.as_str() == "expect") {
+            ctx.self_ty.as_ref().and_then(|ty| match ty {
+                Ty::Class { id, .. } => self.classes.get(id),
+                _ => None,
+            }).and_then(|info| {
+                crate::lower::controller_to_library::params::first_permit_in(expr)
+                    .and_then(|key| info.upload_array_fields.get(&key))
+            })
+        } else { None };
         match &mut *expr.node {
             ExprNode::Lit { value } => lit_ty(value),
 
@@ -2346,7 +2356,7 @@ impl<'a> BodyTyper<'a> {
                 if let Some(t) = recv.as_ref().and_then(|r| time_parse_ty(r, method, args)) {
                     return t;
                 }
-                if let Some(t) = expect_hash_arg_ty(recv.as_ref(), recv_ty.as_ref(), method.as_str(), args) {
+                if let Some(t) = expect_hash_arg_ty(recv.as_ref(), recv_ty.as_ref(), method.as_str(), args, upload_array_fields) {
                     return t;
                 }
                 // Not `Integer?`: `nil.to_fs` raises in Rails, so only a number that cannot be nil types.
@@ -6750,7 +6760,7 @@ fn is_time_const(e: &Expr) -> bool {
 }
 
 // The empty scalar-list form stays unmodeled; the double-array form follows the admitted Params.expect_array reader.
-fn expect_hash_arg_ty(recv: Option<&Expr>, recv_ty: Option<&Ty>, method: &str, args: &[crate::expr::Expr]) -> Option<Ty> {
+fn expect_hash_arg_ty(recv: Option<&Expr>, recv_ty: Option<&Ty>, method: &str, args: &[crate::expr::Expr], upload_array_fields: Option<&std::collections::BTreeSet<Symbol>>) -> Option<Ty> {
     use crate::expr::ExprNode;
     if method != "expect" {
         return None;
@@ -6809,7 +6819,12 @@ fn expect_hash_arg_ty(recv: Option<&Expr>, recv_ty: Option<&Ty>, method: &str, a
                         };
                         let ExprNode::Array { elements: filters, .. } = &*filter.node else { return None };
                         let ty = if filters.is_empty() {
-                            Ty::Array { elem: Ty::Str.into() }
+                            let elem = if upload_array_fields.is_some_and(|fields| fields.contains(&name)) {
+                                Ty::Union { variants: vec![Ty::Str,
+                                    Ty::Class { id: crate::lower::controller_to_library::params::uploaded_file_class(), args: vec![].into() }
+                                ].into() }
+                            } else { Ty::Str };
+                            Ty::Array { elem: elem.into() }
                         } else if let [inner] = filters.as_slice()
                             && let ExprNode::Array { elements: nested, .. } = &*inner.node
                             && !nested.is_empty()
