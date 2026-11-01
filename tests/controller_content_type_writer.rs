@@ -147,7 +147,10 @@ fn strict_targets_refuse_the_framework_writer_without_refusing_an_app_override()
     use roundhouse::project::{BuildTarget, target_files};
     for (source, refused) in [
         ("class ProbesController < ActionController::Base\ndef show\nself.content_type = \"video/mp4\"\nself.response_body = \"body\"\nend\nend\n", true),
+        ("class ProbesController < ActionController::Base\ndef show\nself.public_send(:content_type=, params[:value])\nself.response_body = \"body\"\nend\nend\n", true),
+        ("class ProbesController < ActionController::Base\ndef show\nself.send(\"content_type=\", \"video/mp4\")\nself.response_body = \"body\"\nend\nend\n", true),
         ("class ProbesController < ActionController::Base\ndef content_type=(value)\n123\nend\ndef show\nself.content_type = \"video/mp4\"\nself.response_body = \"body\"\nend\nend\n", false),
+        ("class ProbesController < ActionController::Base\ndef content_type=(value)\n123\nend\ndef show\nself.public_send(:content_type=, params[:value])\nself.response_body = \"body\"\nend\nend\n", false),
     ] {
         let tree = [("app/controllers/probes_controller.rb".into(), source.as_bytes().to_vec())].into_iter().collect();
         let mut app = ingest_app_from_tree(tree).expect("ingest");

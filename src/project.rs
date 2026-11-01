@@ -1635,8 +1635,18 @@ fn report_controller_content_type_writers(app: &App, target: BuildTarget) {
                 _ => false,
             }
         }
-        if let crate::expr::ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node
-            && method.as_str() == "content_type="
+        fn writer_call(method: &crate::ident::Symbol, args: &[crate::expr::Expr]) -> bool {
+            use crate::expr::{ExprNode, Literal};
+            method.as_str() == "content_type="
+                || matches!(method.as_str(), "send" | "public_send" | "__send__")
+                    && args.first().is_some_and(|arg| match &*arg.node {
+                        ExprNode::Literal { value: Literal::Sym { value } } => value.as_str() == "content_type=",
+                        ExprNode::Literal { value: Literal::Str { value } } => value == "content_type=",
+                        _ => false,
+                    })
+        }
+        if let crate::expr::ExprNode::Send { recv: Some(recv), method, args, .. } = &*expr.node
+            && writer_call(method, args)
             && !matches!(&*recv.node, crate::expr::ExprNode::Const { .. })
             && recv.ty.as_ref().is_some_and(|ty| uses_framework_writer(app, ty))
         {
