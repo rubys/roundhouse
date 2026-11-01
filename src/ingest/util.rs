@@ -469,6 +469,39 @@ fn module_has_direct_def(m: &ruby_prism::ModuleNode<'_>) -> bool {
         || body_has_route_helpers_include(m.body())
         || body_runs_module_code(m.body())
         || body_includes_into_constant(m.body())
+        || body_registers_autoloads(m.body())
+}
+
+/// A namespace whose body only registers its children's autoloads,
+/// literally (`autoload :Paypal, "payoff/integrations/paypal"`) or by a
+/// `Dir[…].each` loop (`ingest::glob_autoload`): Ruby defines the module
+/// as the body runs, and code reads it (`Integrations.const_get(name)`).
+fn body_registers_autoloads(body: Option<Node<'_>>) -> bool {
+    let Some(body) = body else { return false };
+    let registers = |stmt: &Node<'_>| {
+        stmt.as_call_node().is_some_and(|call| {
+            call.receiver().is_none_or(|r| r.as_self_node().is_some())
+                && constant_id_str(&call.name()) == "autoload"
+                && call.block().is_none()
+        })
+    };
+    flatten_statements(body).iter().any(|stmt| {
+        if registers(stmt) {
+            return true;
+        }
+        let Some(call) = stmt.as_call_node() else { return false };
+        // A `Dir` loop counts only when its block registers an autoload.
+        constant_id_str(&call.name()) == "each"
+            && call.receiver().and_then(|r| r.as_call_node()).is_some_and(|glob| {
+                matches!(constant_id_str(&glob.name()), "[]" | "glob")
+                    && glob.receiver().is_some_and(|r| r.as_constant_read_node().is_some_and(|c| constant_id_str(&c.name()) == "Dir"))
+            })
+            && call
+                .block()
+                .and_then(|b| b.as_block_node())
+                .and_then(|b| b.body())
+                .is_some_and(|body| flatten_statements(body).iter().any(registers))
+    })
 }
 
 /// A namespace whose body includes one constant into another:
@@ -1023,4 +1056,24 @@ pub(crate) fn is_active_model_marker_include(path: &[&str]) -> bool {
 /// `analyze::body_includes`.
 pub(crate) fn is_concern_marker_include(path: &[&str]) -> bool {
     matches!(path, ["ActiveSupport", "Concern"])
+}
+
+#[cfg(test)]
+mod autoload_registration_tests {
+    use super::body_registers_autoloads;
+
+    fn registers(source: &str) -> bool {
+        let parsed = ruby_prism::parse(source.as_bytes());
+        let program = parsed.node();
+        let module = program.as_program_node().unwrap().statements().body().iter().next().unwrap();
+        body_registers_autoloads(module.as_module_node().unwrap().body())
+    }
+
+    #[test]
+    fn a_dir_loop_registers_autoloads_only_when_its_block_calls_autoload() {
+        assert!(registers("module M\n  Dir[\"x/*.rb\"].each { |f| autoload :X, f }\nend\n"));
+        assert!(registers("module M\n  autoload :X, \"m/x\"\nend\n"));
+        assert!(!registers("module M\n  Dir[\"x/*.rb\"].each { |f| require f }\nend\n"));
+        assert!(!registers("module M\n  Dir.glob(\"x/*.rb\").each { |f| puts f }\nend\n"));
+    }
 }
