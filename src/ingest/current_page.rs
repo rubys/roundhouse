@@ -7,20 +7,46 @@
 //! Left as written, and refused by `analyze::diagnostics`: the `url_for`
 //! options form (`current_page?(controller: …)`), `check_parameters:` and
 //! `method:`, and a literal absolute URL, which Rails compares against the
-//! request's protocol and host. A computed path is compared as given.
+//! request's protocol and host. A splat or forwarded arguments are left
+//! too, as is a call in an `app/helpers` module (only views are rewritten).
+//! A computed path is compared as given. An app's own `current_page?` is
+//! neither rewritten nor refused.
 
 use crate::App;
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::Symbol;
 
+/// The app's own `current_page?` (an `app/helpers` method, or a
+/// controller's `helper_method`), which Rails calls ahead of ActionView's.
+pub(crate) fn app_defines_current_page(app: &App) -> bool {
+    let name = Symbol::from("current_page?");
+    app.helper_method_index.contains_key(&name) || app.view_visible_controller_methods.contains(&name)
+}
+
+/// The bodies ActionView's `current_page?` can be called from: the views,
+/// and the `app/helpers` modules (Rails runs a helper method in the view's
+/// context). Other library classes are left alone: their own
+/// `current_page?` is theirs.
+pub(crate) fn for_each_view_context_body(app: &App, f: &mut impl FnMut(&Expr)) {
+    for view in &app.views {
+        f(&view.body);
+    }
+    for lc in app.library_classes.iter().filter(|lc| app.helper_modules.contains(&lc.name)) {
+        for method in &lc.methods {
+            f(&method.body);
+        }
+    }
+}
+
 pub fn lower_current_page(app: &mut App) {
+    if app_defines_current_page(app) {
+        return;
+    }
+    // Views only: in an `app/helpers` module the runtime's
+    // `ActionView::ViewHelpers` is not a constant analysis resolves, so a
+    // helper's `current_page?` is left as written and refused.
     for view in &mut app.views {
         rewrite(&mut view.body);
-    }
-    for lc in &mut app.library_classes {
-        for method in &mut lc.methods {
-            rewrite(&mut method.body);
-        }
     }
 }
 
@@ -38,14 +64,7 @@ pub(crate) fn rewritten_calls(app: &App) -> Vec<crate::span::Span> {
         e.node.for_each_child(&mut |c| visit(c, out));
     }
     let mut out = Vec::new();
-    for view in &app.views {
-        visit(&view.body, &mut out);
-    }
-    for lc in &app.library_classes {
-        for method in &lc.methods {
-            visit(&method.body, &mut out);
-        }
-    }
+    for_each_view_context_body(app, &mut |body| visit(body, &mut out));
     out
 }
 
@@ -69,7 +88,16 @@ fn as_path_check(e: &Expr) -> Option<Expr> {
         return None;
     }
     let [path] = args.as_slice() else { return None };
-    if matches!(&*path.node, ExprNode::Hash { .. }) || is_absolute_url(path) {
+    // A splat or forwarded arguments may be anything, the options form included.
+    let opaque = matches!(
+        &*path.node,
+        ExprNode::Splat { .. }
+            | ExprNode::KeywordSplat { .. }
+            | ExprNode::ForwardArgs
+            | ExprNode::ForwardKeywords
+            | ExprNode::ForwardKeywordsWithPairs { .. }
+    );
+    if opaque || matches!(&*path.node, ExprNode::Hash { .. }) || is_absolute_url(path) {
         return None;
     }
     let span = e.span;

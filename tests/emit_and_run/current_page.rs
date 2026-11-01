@@ -113,3 +113,42 @@ fn current_page_is_refused_where_views_have_no_request() {
         assert!(errors.iter().any(|e| e.contains("current_page? not supported")), "{target:?}: {errors:?}");
     }
 }
+
+/// An app's own `current_page?` (here an `ApplicationHelper` method) is
+/// what Rails calls, ahead of ActionView's: neither rewritten nor refused.
+#[test]
+fn an_app_defined_current_page_is_left_to_the_app() {
+    let errors = emit_and_run::real_blog()
+        .write("app/helpers/application_helper.rb", "module ApplicationHelper\n  def current_page?(path, check_parameters: false)\n    path == \"/articles\"\n  end\nend\n")
+        .edit("app/views/articles/index.html.erb", "<%= turbo_stream_from \"articles\" %>\n", "<%= turbo_stream_from \"articles\" %>\n<%= current_page?(articles_path, check_parameters: true) %>\n")
+        .check_errors();
+    assert!(!errors.iter().any(|e| e.contains("current_page?")), "{errors:?}");
+}
+
+/// A splat may be anything, the options form included: left as written,
+/// and refused.
+#[test]
+fn a_current_page_with_a_splat_is_refused() {
+    let errors = emit_and_run::real_blog()
+        .edit("app/views/articles/index.html.erb", "<%= turbo_stream_from \"articles\" %>\n", "<%= turbo_stream_from \"articles\" %>\n<% args = [articles_path] %><%= current_page?(*args) %>\n")
+        .check_errors();
+    assert!(errors.iter().any(|e| e.contains("current_page? not supported")), "{errors:?}");
+}
+
+/// Only views are rewritten: a helper module's `current_page?` is refused
+/// (its `ActionView::ViewHelpers` call wouldn't resolve there), and a plain
+/// class's own `current_page?` is its own, neither rewritten nor refused.
+#[test]
+fn only_views_are_rewritten() {
+    let helper = emit_and_run::real_blog()
+        .write("app/helpers/nav_helper.rb", "module NavHelper\n  def on_articles?\n    current_page?(\"/articles\")\n  end\nend\n")
+        .check_errors();
+    assert!(helper.iter().any(|e| e.contains("current_page? not supported")), "{helper:?}");
+    let (emitted, errors) = emit_and_run::real_blog()
+        .write("app/models/pager.rb", "class Pager\n  def current_page?(path)\n    path == \"/\"\n  end\n\n  def home?\n    current_page?(\"/\")\n  end\nend\n")
+        .edit("app/views/articles/index.html.erb", "<%= turbo_stream_from \"articles\" %>\n", "<%= turbo_stream_from \"articles\" %>\n<p id=\"pager\"><%= Pager.new.home? %></p>\n")
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:?}");
+    let pager = std::fs::read_to_string(emitted.join("app/models/pager.rb")).unwrap();
+    assert!(pager.contains("current_page?(\"/\")") && !pager.contains("current_page_path?"), "{pager}");
+}
