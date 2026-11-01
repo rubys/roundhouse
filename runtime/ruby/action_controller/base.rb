@@ -923,7 +923,7 @@ module ActionController
         charset = previous[1].to_s if charset.empty?
         charset = "utf-8" if charset.empty?
         @content_type = incoming[0].to_s
-        @content_type += "; charset=" + charset.downcase unless @content_type.empty?
+        @content_type = @content_type + "; charset=" + charset.downcase unless @content_type.empty?
       end
       @location = ActionController.sanitize_location(location) unless location.nil?
       apply_vary_header
@@ -937,16 +937,21 @@ module ActionController
       parts = value.split(";")
       type = parts[0].to_s
       charset = ""
-      parts.drop(1).each do |parameter|
+      index = 1
+      found = false
+      while index < parts.length && !found
+        parameter = parts[index].to_s
         pair = parameter.strip.split("=", 2)
         if pair[0].to_s == "charset"
           charset = pair[1].to_s.strip
           if charset.start_with?("\"") && charset.end_with?("\"")
             charset = charset[1..-2].to_s
           end
-          break
+          found = true
+        else
+          type = type + ";" + parameter
         end
-        type += ";" + parameter
+        index = index + 1
       end
       [type, charset]
     end
