@@ -105,6 +105,58 @@ end
 }
 
 #[test]
+fn conditional_params_with_distinct_filters_keep_upload_method_errors() {
+    for bindings in ["values = prompt_params", r#"values = if params[:mode] == "first"
+      params.expect(prompt: [:body, {attachments: []}])
+    else
+      params.expect(prompt: [:title, {attachments: []}])
+    end"#] {
+        let errors = app().write("app/controllers/prompts_controller.rb", &format!(r#"class PromptsController < ApplicationController
+  def create
+    {bindings}
+    render json: Array(values[:attachments]).map {{ |file| {{name: file.original_filename, type: file.content_type, data: file.read}} }}
+  end
+  private
+  def prompt_params
+    if params[:mode] == "first"
+      params.expect(prompt: [:body, {{attachments: []}}])
+    else
+      params.expect(prompt: [:title, {{attachments: []}}])
+    end
+  end
+end
+"#)).check_errors();
+        for method in ["original_filename", "content_type", "read"] {
+            assert!(errors.iter().any(|error| error.contains(method) && error.contains("String")), "{bindings}: {errors:?}");
+        }
+    }
+}
+
+#[test]
+fn conditional_params_with_the_same_filter_keep_upload_objects() {
+    app().write("app/controllers/prompts_controller.rb", r#"class PromptsController < ApplicationController
+  def create
+    values = prompt_params
+    render json: {uploads: upload_data(values[:attachments]), tags: values[:tags]}
+  end
+  private
+  def prompt_params
+    if params[:body]
+      params.expect(prompt: [:body, {attachments: [], tags: []}])
+    else
+      params.expect(prompt: [:body, {attachments: [], tags: []}])
+    end
+  end
+  def upload_data(uploads)
+    Array(uploads).map do |file|
+      {name: file.original_filename, type: file.content_type, data: file.read}
+    end
+  end
+end
+"#).run_ruby(CONTRACT).assert_passes();
+}
+
+#[test]
 fn ordinary_array_fields_keep_string_methods_in_source_analysis() {
     let errors = app().write("app/controllers/prompts_controller.rb", r#"class PromptsController < ApplicationController
   def create

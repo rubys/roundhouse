@@ -4,9 +4,24 @@ use crate::dialect::Controller;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::Symbol;
 
-use super::{ParamsSpecs, first_permit_in};
+use super::ParamsSpecs;
 
 type SpecKey = (Symbol, Vec<Symbol>, Vec<String>);
+
+fn single_permit_in(expr: &Expr) -> Option<SpecKey> {
+    fn collect(expr: &Expr, keys: &mut BTreeSet<SpecKey>) {
+        if let Some((resource, fields, _)) = super::match_reverse_merge(expr) {
+            keys.insert((resource, fields, super::nested_signature(expr)));
+        } else if let Some((resource, fields)) = super::match_permit_call(expr) {
+            keys.insert((resource, fields, super::nested_signature(expr)));
+        } else {
+            expr.node.for_each_child(&mut |child| collect(child, keys));
+        }
+    }
+    let mut keys = BTreeSet::new();
+    collect(expr, &mut keys);
+    if keys.len() == 1 { keys.pop_first() } else { None }
+}
 
 fn walk(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
     visit(expr);
@@ -91,7 +106,7 @@ fn record_source(
     {
         return Some(spec.clone());
     }
-    first_permit_in(expr)
+    single_permit_in(expr)
 }
 
 pub(super) fn mark(controllers: &[Controller], specs: &mut ParamsSpecs) {
@@ -99,7 +114,7 @@ pub(super) fn mark(controllers: &[Controller], specs: &mut ParamsSpecs) {
         let helpers: BTreeMap<_, _> = controller
             .actions()
             .filter_map(|action| {
-                first_permit_in(&action.body).map(|spec| (action.name.clone(), spec))
+                single_permit_in(&action.body).map(|spec| (action.name.clone(), spec))
             })
             .collect();
         let mut upload_params: BTreeMap<Symbol, BTreeSet<usize>> = BTreeMap::new();
@@ -135,7 +150,7 @@ pub(super) fn mark(controllers: &[Controller], specs: &mut ParamsSpecs) {
                         args.is_empty()
                             .then(|| helpers.get(method).cloned())
                             .flatten()
-                    }).or_else(|| first_permit_in(value));
+                    }).or_else(|| single_permit_in(value));
                     if locals.contains_key(name) {
                         locals.insert(name.clone(), None);
                     } else {
