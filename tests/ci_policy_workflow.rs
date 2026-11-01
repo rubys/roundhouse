@@ -32,14 +32,23 @@ fn speculative_fanout_retains_selection_and_real_prerequisites() {
         "browser-smoke-typescript",
         "compare",
         "compare-extra",
-        "compare-ruby",
-        "compare-ruby-next",
         "compare-jruby",
     ] {
         assert_eq!(
             jobs[name]["needs"],
             serde_yaml_ng::from_str::<serde_yaml_ng::Value>("[generate-fixture, plan]").unwrap(),
             "{name} must not wait for tests, or lose its fixture/selection"
+        );
+    }
+    // The CRuby compare jobs wait for the builds they reuse, never for tests.
+    for (name, needs) in [
+        ("compare-ruby", "[generate-fixture, plan, unit-build, build-roundhouse]"),
+        ("compare-ruby-next", "[generate-fixture, plan, unit-build]"),
+    ] {
+        assert_eq!(
+            jobs[name]["needs"],
+            serde_yaml_ng::from_str::<serde_yaml_ng::Value>(needs).unwrap(),
+            "{name} must wait only for the builds it consumes"
         );
     }
     for name in [
@@ -262,6 +271,75 @@ fn campfire_consumers_require_shared_debug_binary_and_do_not_rebuild() {
             .lines()
             .any(|l| !l.trim().starts_with('#') && l.contains("cargo run"))
     );
+}
+
+/// compare-ruby and compare-ruby-next once spent most of their minutes
+/// compiling Roundhouse twice (the test profile for the CRuby gates, release
+/// for `bin/rh transpile`) to run a few seconds of tests. They now run those
+/// gates from unit-build's archive and emit with build-roundhouse's binary.
+#[test]
+fn cruby_compare_jobs_run_archived_gates_and_do_not_rebuild_roundhouse() {
+    let ci: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    for (job_name, selectors) in [
+        ("compare-ruby", &["framework_tests_ruby", "uuid_key_ruby", "tiny_api:cruby_gate_", "roda_toolchain"][..]),
+        ("compare-ruby-next", &["framework_tests_ruby", "uuid_key_ruby", "tiny_api:cruby_gate_"][..]),
+    ] {
+        let job = &ci["jobs"][job_name];
+        assert_eq!(
+            job["env"]["CARGO_TARGET_DIR"].as_str(),
+            Some("${{ github.workspace }}/target"),
+            "{job_name}: the archive's paths are the producer's"
+        );
+        let steps = job["steps"].as_sequence().unwrap();
+        let bundle = steps
+            .iter()
+            .find(|step| step["name"].as_str() == Some("Download current-run test bundle"))
+            .unwrap_or_else(|| panic!("{job_name}: download the unit-build archive"));
+        assert_eq!(
+            bundle["with"]["artifact-ids"].as_str(),
+            Some("${{ needs.unit-build.outputs.unit-test-artifact-id }}"),
+            "{job_name}"
+        );
+        assert!(
+            steps.iter().any(|step| step["uses"].as_str() == Some("./.github/actions/setup-nextest")),
+            "{job_name}: the pinned Nextest runs the archive"
+        );
+        let gates = steps
+            .iter()
+            .find(|step| step["name"].as_str() == Some("Run the CRuby gates from the unit-build archive"))
+            .and_then(|step| step["run"].as_str())
+            .unwrap_or_else(|| panic!("{job_name}: archived CRuby gates"));
+        assert!(gates.contains("python3 scripts/ci-unit-tests.py select"), "{job_name}");
+        for selector in selectors {
+            assert!(gates.contains(&format!("--select {selector}")), "{job_name}: {selector}");
+        }
+        for run in steps.iter().filter_map(|step| step["run"].as_str()) {
+            for line in run.lines().map(str::trim).filter(|line| !line.starts_with('#')) {
+                assert!(
+                    !line.contains("cargo test") && !line.contains("cargo run") && !line.contains("cargo build"),
+                    "{job_name} must not compile Roundhouse: {line}"
+                );
+            }
+        }
+    }
+    // scripts/compare's `bin/rh transpile ruby` uses the staged compiler.
+    let steps = ci["jobs"]["compare-ruby"]["steps"].as_sequence().unwrap();
+    let stage = steps
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Stage shared debug roundhouse binary"))
+        .and_then(|step| step["run"].as_str())
+        .expect("compare-ruby stages build-roundhouse's binary");
+    assert!(stage.contains("ROUNDHOUSE_BIN=${GITHUB_WORKSPACE}/roundhouse-debug-bin/roundhouse"));
+    let staged = steps
+        .iter()
+        .position(|step| step["name"].as_str() == Some("Stage shared debug roundhouse binary"))
+        .unwrap();
+    let compare = steps
+        .iter()
+        .position(|step| step["run"].as_str() == Some("scripts/compare ruby"))
+        .expect("compare-ruby runs scripts/compare ruby");
+    assert!(staged < compare, "the binary is staged before scripts/compare runs");
 }
 
 /// The strict-emit ceiling counts `error[` lines. An ingest abort prints
