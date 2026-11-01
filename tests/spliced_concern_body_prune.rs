@@ -125,3 +125,108 @@ fn a_non_controller_includer_keeps_the_methods() {
          methods:\n{module}"
     );
 }
+
+#[test]
+fn a_class_body_call_decorating_a_pruned_method_goes_with_it() {
+    // `statsd_count_if(:name, …)` raises "could not find method" when the
+    // module no longer defines `name`. Class-side methods stand in for
+    // `StatsD::Instrument`'s macros here; the module body replays calls of
+    // its own class methods. A call that merely records the name
+    // (`record_policy`) is not a decorator and stays.
+    let instrumented = r#"module Authorization
+  extend ActiveSupport::Concern
+
+  ROLE = "admin"
+
+  def self.statsd_count_if(name, key)
+    raise ArgumentError, "could not find method #{name} for #{self}" unless method_defined?(name)
+  end
+
+  def self.record_policy(name, policy)
+    (@policies ||= []) << [name, policy]
+  end
+
+  def ensure_can_administer
+    head :forbidden unless Current.user.can_administer?
+  end
+
+  statsd_count_if(:ensure_can_administer, "auth.administer")
+  record_policy(:ensure_can_administer, "policy")
+end
+"#;
+    let app = app(&[("app/controllers/concerns/authorization.rb", instrumented)]);
+    let module = emitted(&app, "authorization.rb");
+    assert!(
+        !module.contains("def ensure_can_administer"),
+        "the instance method is pruned:\n{module}"
+    );
+    assert!(
+        !module.contains("statsd_count_if(:ensure_can_administer"),
+        "the decorator naming the pruned method goes with it:\n{module}"
+    );
+    assert!(
+        module.contains("record_policy(:ensure_can_administer"),
+        "a call that only records the name is not a decorator, and stays:\n{module}"
+    );
+    assert!(module.contains("ROLE = \"admin\""), "{module}");
+}
+
+#[test]
+fn memo_wise_and_alias_method_of_a_pruned_method_go_with_it() {
+    // `memo_wise :name` looks the method up; `alias_method :new, :old`
+    // looks up its second argument. Both raise once the module no longer
+    // defines it.
+    let decorated = r#"module Authorization
+  extend ActiveSupport::Concern
+
+  def self.memo_wise(name)
+    raise ArgumentError, "could not find method #{name} for #{self}" unless method_defined?(name)
+  end
+
+  def ensure_can_administer
+    head :forbidden unless Current.user.can_administer?
+  end
+
+  memo_wise :ensure_can_administer
+  alias_method :administer!, :ensure_can_administer
+end
+"#;
+    let app = app(&[("app/controllers/concerns/authorization.rb", decorated)]);
+    let module = emitted(&app, "authorization.rb");
+    assert!(!module.contains("def ensure_can_administer"), "the instance method is pruned:\n{module}");
+    assert!(!module.contains("memo_wise :ensure_can_administer") && !module.contains("memo_wise(:ensure_can_administer"), "{module}");
+    assert!(!module.contains(":ensure_can_administer"), "no call names the pruned method:\n{module}");
+}
+
+#[test]
+fn a_string_name_of_a_pruned_method_goes_with_it() {
+    // Ruby takes a String wherever it takes a Symbol name:
+    // `alias_method "administer!", "ensure_can_administer"` raises once the
+    // method is gone, as the symbol form does. A call that takes the name
+    // as data (`register`) still stays.
+    let decorated = r#"module Authorization
+  extend ActiveSupport::Concern
+
+  def ensure_can_administer
+    head :forbidden unless Current.user.can_administer?
+  end
+
+  alias_method "administer!", "ensure_can_administer"
+  memo_wise "ensure_can_administer"
+  helper_method "ensure_can_administer"
+  register "ensure_can_administer"
+end
+"#;
+    let app = app(&[("app/controllers/concerns/authorization.rb", decorated)]);
+    let module = app
+        .library_classes
+        .iter()
+        .find(|lc| lc.name.0.as_str() == "Authorization")
+        .expect("the module is kept");
+    let calls: Vec<String> = module.unknown_calls.iter().map(ruby::emit_expr).collect();
+    assert!(module.methods.iter().all(|m| m.name.as_str() != "ensure_can_administer"), "the instance method is pruned");
+    for gone in ["alias_method", "memo_wise", "helper_method"] {
+        assert!(!calls.iter().any(|c| c.starts_with(gone)), "{gone} names the pruned method: {calls:?}");
+    }
+    assert!(calls.iter().any(|c| c.starts_with("register")), "a registry call stays: {calls:?}");
+}

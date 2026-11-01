@@ -32,7 +32,78 @@ use crate::ident::Symbol;
 use crate::ty::Ty;
 
 pub fn apply_rails_cache_lowering(app: &mut App) {
+    if app_binds_cache_store(app) {
+        return;
+    }
     super::for_each_hook_body(app, &mut rewrite);
+}
+
+/// Is `Rails.cache` the app's own store? Then `fetch_str` (a method of
+/// the runtime's store only) would be undefined on it: the pass stands
+/// down and `fetch` runs as written. Only an emitted `Rails.cache =`
+/// assignment rebinds it (a test swapping in a double): no target
+/// installs `config.cache_store`, so whatever an app configures there,
+/// `Rails.cache` stays the runtime's store, and standing down for it
+/// would only turn its caching off. The assignment is the app's own
+/// store when it names an `ActiveSupport::Cache::*` class the app
+/// defines, or any value other than a Rails store class
+/// (`Rails.cache = MyStore.new`).
+pub(crate) fn app_binds_cache_store(app: &App) -> bool {
+    let stores: Vec<&str> = app
+        .library_classes
+        .iter()
+        .map(|c| &c.name)
+        .chain(app.models.iter().map(|m| &m.name))
+        .filter_map(|id| id.0.as_str().strip_prefix("ActiveSupport::Cache::"))
+        .collect();
+    let binds = |line: &str| {
+        let line = line.trim();
+        if line.starts_with('#') {
+            return false;
+        }
+        let Some((lhs, rhs)) = line.split_once('=') else { return false };
+        if rhs.starts_with('=') || rhs.starts_with('~') || lhs.ends_with(['!', '<', '>']) {
+            return false;
+        }
+        if lhs.trim().trim_start_matches("::") != "Rails.cache" {
+            return false;
+        }
+        let rhs = rhs.trim();
+        let rails_store = rhs.trim_start_matches("::").starts_with("ActiveSupport::Cache::");
+        !rails_store || stores.iter().any(|store| rhs.contains(store))
+    };
+    app.sources.iter().any(|source| rails_cache_assignments(&source.text).iter().any(|s| binds(s)))
+}
+
+/// Each statement of `text` that mentions `Rails.cache`, as one line: a
+/// line ending in `=`, `,`, `(` or `\` continues onto the next, so
+/// `Rails.cache =` with its value below it is whole.
+fn rails_cache_assignments(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        // A comment or blank line between `Rails.cache =` and its value
+        // is not the value.
+        if !current.is_empty() && (trimmed.is_empty() || trimmed.starts_with('#')) {
+            continue;
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(trimmed.trim_end_matches('\\'));
+        if !trimmed.starts_with('#') && trimmed.ends_with(['=', ',', '(', '\\']) {
+            continue;
+        }
+        let statement = std::mem::take(&mut current);
+        if statement.contains("Rails.cache") {
+            out.push(statement);
+        }
+    }
+    if current.contains("Rails.cache") {
+        out.push(current);
+    }
+    out
 }
 
 fn rewrite(expr: &mut Expr) {

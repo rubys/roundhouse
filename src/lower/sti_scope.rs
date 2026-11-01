@@ -446,6 +446,10 @@ pub(crate) fn sti_bases(app: &App) -> HashMap<ClassId, ClassId> {
     model_subclasses(app).typed
 }
 
+pub(crate) fn plain_subclass_bases(app: &App) -> HashMap<ClassId, ClassId> {
+    model_subclasses(app).untyped
+}
+
 /// Every library class whose `parent` chain reaches a Model with a
 /// table, split on that table's inheritance column: STI subclasses
 /// (with one) and plain subclasses (without one) → their base model.

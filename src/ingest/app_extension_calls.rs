@@ -57,6 +57,19 @@ pub(super) fn mark(app: &mut App) {
             .map(|m| m.name.as_str().to_string())
             .collect();
         for expr in &mut lc.unknown_calls {
+            // `self.mode ||= :live` through the class's own accessor runs
+            // both its reader and its writer as the body loads, as
+            // `self.mode = :live` runs the writer.
+            if let ExprNode::OpAssign { target: crate::expr::LValue::Attr { recv, name }, .. } = &*expr.node {
+                if matches!(&*recv.node, ExprNode::SelfRef)
+                    && own.contains(name.as_str())
+                    && own.contains(&format!("{}=", name.as_str()))
+                    && !expr.span.is_synthetic()
+                {
+                    expr.decisions |= crate::expr::REPLAYED_CLASS_BODY;
+                }
+                continue;
+            }
             let ExprNode::Send { recv, method, block, .. } = &*expr.node else { continue };
             let on_self = recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef));
             // Not a Concern's `included do … end`: the hook's own name, which the concern splice owns.

@@ -255,6 +255,32 @@ module ActionView
       out
     end
 
+    # A path param's value in a URL a route helper writes, as Rails'
+    # `Journey::Router::Utils.escape_segment`: the unreserved bytes, the
+    # sub-delims and `:` `@` as they are, every other byte (`/` too) as
+    # `%XX`, so `site_path("a/b")` is `/sites/a%2Fb`. Here rather than on
+    # the Router, because a route helper already reaches this module on
+    # every target (its query keys go through `url_encode`).
+    def self.escape_segment(s)
+      hex = "0123456789ABCDEF"
+      printable = " !\"\#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+      bytes = s.bytes
+      out = ""
+      i = 0
+      while i < bytes.length
+        b = erb_url_byte(bytes, i)
+        if (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) ||
+           b == 45 || b == 46 || b == 95 || b == 126 || b == 33 || b == 36 ||
+           (b >= 38 && b <= 44) || b == 58 || b == 59 || b == 61 || b == 64
+          out = out + printable[b - 32, 1].to_s
+        else
+          out = out + "%" + hex[b / 16, 1].to_s + hex[b % 16, 1].to_s
+        end
+        i += 1
+      end
+      out
+    end
+
     # Not `bytes[i]` inline, nor `bytes[i] || 0`: the inline read types as Integer | nil, which Elixir refuses arithmetic on, and Rust's Vec<i64> has no `unwrap_or`.
     def self.erb_url_byte(bytes, i)
       raise ArgumentError, "erb_url_byte: index outside the bytes" if i < 0 || i >= bytes.length
@@ -1016,6 +1042,24 @@ module ActionView
       return source if source.start_with?("/")
       return source if source.include?("://")
       digested_asset_path(source)
+    end
+
+    # `asset_url` — `asset_path` with the host Rails prefixes when one is
+    # configured. Neither a request nor `config.asset_host` reaches a
+    # module function, so it answers the same path (the `image_url`
+    # posture), digested where the tree has a Propshaft manifest; apps
+    # that set `skip_pipeline: true` (an icon model's `url`) hand in the
+    # `/assets/...` path themselves. `data:` and `cid:` sources pass
+    # through, as Rails' URI_REGEXP lets them.
+    def self.asset_url(source, skip_pipeline: false)
+      return source if skip_pipeline
+      return source if source.start_with?("/")
+      return source if source.include?("://")
+      # Rails' URI_REGEXP is case-insensitive: `DATA:` and `CID:` pass too.
+      scheme = source.downcase
+      return source if scheme.start_with?("data:") || scheme.start_with?("cid:")
+      url = digested_asset_path(source)
+      url
     end
 
     # `path_to_javascript "application"` → the asset path for a JS source.

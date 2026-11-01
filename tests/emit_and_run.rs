@@ -417,6 +417,8 @@ mod defined_const_fold;
 mod job_payload;
 #[path = "emit_and_run/sidekiq_push.rs"]
 mod sidekiq_adapter;
+#[path = "emit_and_run/sidekiq_retry_on.rs"]
+mod sidekiq_retry_on;
 #[path = "emit_and_run/silent_lowerings.rs"]
 mod silent_lowerings;
 #[path = "emit_and_run/validates_options.rs"]
@@ -9093,12 +9095,12 @@ fn an_app_without_jobs_runs_its_tests() {
 fn the_job_queue_keeps_its_thread_safe_methods() {
     emit_and_run::real_blog()
         .run_ruby(
-            r#"%i[drain pending_count performed enqueue_locked record_performed_for_tests].each do |m|
+            r#"%i[drain pending_count performed enqueue_locked clear_queue record_performed_for_tests].each do |m|
   file = ActiveJob.method(m).source_location[0]
   raise "ActiveJob.#{m} comes from #{file}" unless file.end_with?("runtime/thread_state.rb")
 end
 # The serving drain wraps these two, and calls the locked ones above.
-%i[enqueue record_performed].each do |m|
+%i[enqueue_on record_performed].each do |m|
   file = ActiveJob.method(m).source_location[0]
   raise "ActiveJob.#{m} comes from #{file}" unless file.end_with?("runtime/active_job_cruby.rb")
 end
@@ -20577,6 +20579,10 @@ mod page_caching;
 mod route_requirement_span;
 #[path = "emit_and_run/boot_program.rs"]
 mod boot_program;
+#[path = "emit_and_run/route_helper_segment_escape.rs"]
+mod route_helper_segment_escape;
+#[path = "emit_and_run/solid_queue_clear.rs"]
+mod solid_queue_clear;
 
 #[path = "emit_and_run/route_dot_span.rs"]
 mod route_dot_span;

@@ -78,6 +78,22 @@ module ActionDispatch
         !from_params(sub, key).nil?
       end
 
+      def self.scalar_list(sub, key)
+        out = []
+        return out unless Params.scalar_list_provided(sub, key)
+        value = sub[key]
+        if value.is_a?(Array)
+          value.each do |item|
+            if item.is_a?(ActionDispatch::Http::UploadedFile)
+              out.push(item)
+            else
+              out.push(item.nil? ? "" : item.to_s)
+            end
+          end
+        end
+        out
+      end
+
       # `to_h` on a params record: the uploaded name, or "" for none.
       def self.name_of(file)
         file.nil? ? "" : file.original_filename

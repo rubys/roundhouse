@@ -232,6 +232,7 @@ fn tiny_blog_round_trips() {
         controller_resolutions: roundhouse::det::HashMap::default(),
         sources: vec![],
         wrap_parameters_by_default: false,
+        active_job_retry_jitter: 0.0,
         ports_active_model_validator: false,
         each_validator_calls: Vec::new(),
         // Derived from `sources` and `serde(skip)`, like `binary_assets`.
@@ -239,6 +240,7 @@ fn tiny_blog_round_trips() {
         source_index_required: false,
         root: String::new(),
         app_roots: vec!["app".to_string()],
+        isolated_namespaces: Vec::new(),
         spinel_int_overflow: None,
     };
 

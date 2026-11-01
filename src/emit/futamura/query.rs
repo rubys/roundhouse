@@ -56,6 +56,10 @@ pub struct Site {
 pub struct Residue {
     pub span: Span,
     pub reason: String,
+    /// A terminal-named call this copy of the body did not read as a query
+    /// at all (its receiver is not a relation here). Not reported, but a
+    /// span another copy specialized is then not spliced.
+    pub declined: bool,
 }
 
 #[derive(Clone)]
@@ -158,9 +162,17 @@ impl<'a> Specializer<'a> {
         if let Some(outcome) = self.site(e, cx) {
             match outcome {
                 Ok(site) => sites.push(site),
-                Err(reason) => residue.push(Residue { span: e.span, reason }),
+                Err(reason) => residue.push(Residue { span: e.span, reason, declined: false }),
             }
             return;
+        }
+        // A concern's body is read once for each includer: a terminal this
+        // copy does not read as a query may be one another copy specializes.
+        if let ExprNode::Send { recv: Some(_), method, block: None, .. } = &*e.node
+            && (TERMINALS.contains(&method.as_str()) || self.any_scope_named(method))
+            && !e.span.is_synthetic()
+        {
+            residue.push(Residue { span: e.span, reason: String::new(), declined: true });
         }
         e.node.for_each_child(&mut |c| self.visit(c, cx, sites, residue));
     }
@@ -257,7 +269,10 @@ impl<'a> Specializer<'a> {
                 _ => Err(format!("`{}` is not assigned exactly once", name.as_str())),
             },
             ExprNode::Const { path } => {
-                let name = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+                // `::Shop` is a path with an empty first segment (ingest keeps
+                // the root so qualification passes leave it alone); a model is
+                // named without it.
+                let name = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
                 match self.models.get(name.as_str()) {
                     Some(m) => Ok(Chain::new(m.name.clone(), None)),
                     None => Err(format!("`{name}` is not a model")),
