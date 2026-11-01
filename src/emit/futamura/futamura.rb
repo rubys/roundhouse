@@ -60,8 +60,22 @@ module Futamura
       records.reverse! if statement.reverse
       result = statement.one ? records.first : records
 
-      verify(key, result, fallback.call, compiled.preload) if VERIFY
+      verify(key, result, verifying { fallback.call }, compiled.preload) if VERIFY
       result
+    end
+
+    # True while FUTAMURA_VERIFY runs Rails' chain to compare with a
+    # specialized result.
+    def verifying?
+      Thread.current[:futamura_verifying] == true
+    end
+
+    def verifying
+      was = Thread.current[:futamura_verifying]
+      Thread.current[:futamura_verifying] = true
+      yield
+    ensure
+      Thread.current[:futamura_verifying] = was
     end
 
     private
@@ -367,13 +381,23 @@ if ENV["FUTAMURA_STATS"].to_s != ""
 
         # Why the guards in Futamura.records sent a call to Rails' chain, in the order they are checked.
         def reason(key, binds, root)
-          bad = binds.find { |value| ActiveRecord::StatementCache.unsupported_value?(value) }
-          return "bind_#{kind(bad)}" if bad
+          # The index, not the value: a nil bind is itself the unsupported value.
+          bad = binds.index { |value| ActiveRecord::StatementCache.unsupported_value?(value) }
+          return "bind_#{kind(binds[bad])}" if bad
 
           statement = Futamura.instance_variable_get(:@statements).fetch(key)
           return "root_not_model" if root && !root.equal?(statement.model)
 
           @compile_reasons[key] || "compiled_false"
+        end
+
+        # Whether the site's statement is compiled (not `false`) for the
+        # connection this call will use; the cache is keyed by its
+        # prepared-statement mode.
+        def compiled?(key)
+          statement = Futamura.instance_variable_get(:@statements).fetch(key)
+          compiled = Futamura.instance_variable_get(:@compiled)
+          statement.model.with_connection { |connection| compiled[[key, connection.prepared_statements]] } ? true : false
         end
 
         def kind(value)
@@ -422,22 +446,29 @@ if ENV["FUTAMURA_STATS"].to_s != ""
           fell = nil
           fell_s = 0.0
           timed_fallback = proc do
-            fell = Stats.reason(key, binds, root)
-            t = Stats.now
-            begin
+            # FUTAMURA_VERIFY's comparison run after a specialized call is
+            # not a guard sending the call to Rails.
+            if Futamura.verifying?
               fallback.call
-            ensure
-              fell_s = Stats.now - t
+            else
+              fell = Stats.reason(key, binds, root)
+              t = Stats.now
+              begin
+                fallback.call
+              ensure
+                fell_s = Stats.now - t
+              end
             end
           end
           started = Stats.now
           first = !Stats.instance_variable_get(:@seen_keys).include?(key)
           Stats.instance_variable_get(:@seen_keys) << key
           # The A/B leg runs the original chain first on odd calls, but only
-          # where this call will specialize: a site that has specialized
-          # before, with binds the guards accept. Otherwise Futamura.records
+          # where this call will specialize: a site already compiled for the
+          # current connection's prepared-statement mode, with binds the
+          # guards accept. Otherwise Futamura.records
           # falls back itself and the chain would run twice.
-          orig_first = Stats::AB && site.calls.odd? && site.specialized.positive? &&
+          orig_first = Stats::AB && site.calls.odd? && Stats.compiled?(key) &&
                        binds.none? { |value| ActiveRecord::StatementCache.unsupported_value?(value) }
           if orig_first
             t = Stats.now

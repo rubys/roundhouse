@@ -82,7 +82,8 @@ pub fn specialize(app: &App, files: &mut Vec<(String, String)>) -> Result<Report
         // specializes the same way it is spliced once; copies that differ
         // cannot share the one text, so none is. A copy that did not
         // specialize at all (a residue at the same span: a scoped
-        // association in one includer) is a copy that differs.
+        // association in one includer, or a receiver that is not a relation
+        // there) is a copy that differs.
         let mut copies: BTreeMap<(u32, u32), Vec<query::Site>> = BTreeMap::new();
         for site in sites.drain(..) {
             copies.entry((site.span.start, site.span.end)).or_default().push(site);
@@ -112,7 +113,7 @@ pub fn specialize(app: &App, files: &mut Vec<(String, String)>) -> Result<Report
             defines.push(site.define);
         }
     }
-    report.residue.extend(residue.into_iter().map(|r| format!("{}: {}", location(r.span), r.reason)));
+    report.residue.extend(residue.into_iter().filter(|r| !r.declined).map(|r| format!("{}: {}", location(r.span), r.reason)));
 
     if !defines.is_empty() {
         defines.sort();

@@ -1907,3 +1907,41 @@ mod shared_sites_with_a_residue {
         assert!(!tagged.contains("Futamura.records"), "{tagged}");
     }
 }
+
+/// The same shared site where one owner's receiver is not a relation at
+/// all: that copy is not a query and reports nothing, but the text is one,
+/// so the copy that specializes is not spliced into it either.
+mod shared_sites_with_a_non_relation_copy {
+    use std::path::PathBuf;
+
+    use roundhouse::analyze::Analyzer;
+    use roundhouse::dialect::ModelBodyItem;
+    use roundhouse::emit::futamura::specialize;
+    use roundhouse::ingest::ingest_app_from_tree;
+
+    #[test]
+    fn a_site_another_owner_does_not_read_as_a_query_is_not_spliced() {
+        let files: Vec<(&str, &str)> = vec![
+            ("db/schema.rb", "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"things\", force: :cascade do |t|\n    t.string \"name\"\n  end\n  create_table \"others\", force: :cascade do |t|\n    t.string \"name\"\n  end\n  create_table \"items\", force: :cascade do |t|\n    t.bigint \"thing_id\"\n  end\nend\n"),
+            ("app/models/concerns/picking.rb", "module Picking\n  def picked\n    self.items.first\n  end\nend\n"),
+            ("app/models/thing.rb", "class Thing < ApplicationRecord\n  has_many :items\nend\n"),
+            ("app/models/item.rb", "class Item < ApplicationRecord\n  belongs_to :thing\nend\n"),
+            ("app/models/other.rb", "class Other < ApplicationRecord\n  #: () -> Array[String]\n  def items\n    [\"a\"]\n  end\nend\n"),
+        ];
+        let tree: std::collections::HashMap<PathBuf, Vec<u8>> =
+            files.iter().map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec())).collect();
+        let mut app = ingest_app_from_tree(tree).expect("ingest");
+        Analyzer::new(&app).analyze(&mut app);
+        let method = app.library_classes.iter().find(|l| l.name.0.as_str() == "Picking").unwrap().methods[0].clone();
+        app.library_classes.retain(|l| l.name.0.as_str() != "Picking");
+        for m in app.models.iter_mut().filter(|m| matches!(m.name.0.as_str(), "Thing" | "Other")) {
+            m.body.push(ModelBodyItem::Method { method: method.clone(), leading_comments: vec![], leading_blank_line: false });
+        }
+        Analyzer::new(&app).analyze(&mut app);
+        let mut tree_files: Vec<(String, String)> = files.iter().map(|(p, c)| (p.to_string(), c.to_string())).collect();
+        let report = specialize(&app, &mut tree_files).unwrap();
+        assert!(report.specialized.is_empty(), "{:?} / {:?}", report.specialized, report.residue);
+        let picking = &tree_files.iter().find(|(p, _)| p == "app/models/concerns/picking.rb").unwrap().1;
+        assert!(!picking.contains("Futamura"), "{picking}");
+    }
+}

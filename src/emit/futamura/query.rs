@@ -56,6 +56,10 @@ pub struct Site {
 pub struct Residue {
     pub span: Span,
     pub reason: String,
+    /// A terminal-named call this copy of the body did not read as a query
+    /// at all (its receiver is not a relation here). Not reported, but a
+    /// span another copy specialized is then not spliced.
+    pub declined: bool,
 }
 
 #[derive(Clone)]
@@ -158,9 +162,17 @@ impl<'a> Specializer<'a> {
         if let Some(outcome) = self.site(e, cx) {
             match outcome {
                 Ok(site) => sites.push(site),
-                Err(reason) => residue.push(Residue { span: e.span, reason }),
+                Err(reason) => residue.push(Residue { span: e.span, reason, declined: false }),
             }
             return;
+        }
+        // A concern's body is read once for each includer: a terminal this
+        // copy does not read as a query may be one another copy specializes.
+        if let ExprNode::Send { recv: Some(_), method, block: None, .. } = &*e.node
+            && (TERMINALS.contains(&method.as_str()) || self.any_scope_named(method))
+            && !e.span.is_synthetic()
+        {
+            residue.push(Residue { span: e.span, reason: String::new(), declined: true });
         }
         e.node.for_each_child(&mut |c| self.visit(c, cx, sites, residue));
     }
