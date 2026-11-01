@@ -28,7 +28,7 @@ module Tep
       # Rails/websocket-driver has no closing-handshake deadline. Tep chooses
       # five seconds so a silent peer cannot retain a parked receiver forever.
       CLOSE_TIMEOUT_SECONDS = 5
-      attr_accessor :fd, :max_frame_size, :subprotocol
+      attr_accessor :max_frame_size, :subprotocol
       # Callback slots. Each holds a subclass of Tep::WebSocket::Handler
       # (or the base) that gets `handle_event(event)` called when the
       # corresponding wire event arrives. Defaults to a no-op base
@@ -44,6 +44,7 @@ module Tep
         @close_code     = Tep::WebSocket::CLOSE_GOING_AWAY
         @close_reason   = +""
         @wlock          = Mutex.new
+        @state_lock     = Mutex.new
         @max_frame_size = Tep::WebSocket::DEFAULT_MAX_FRAME
         @subprotocol    = +""
         @h_open    = Tep::WebSocket::Handler.new
@@ -63,15 +64,32 @@ module Tep
       # fd (since the client fd isn't visible at handler-dispatch
       # time), and the write_response branch sets the real fd here
       # right before constructing the Connection.
+      def fd
+        @state_lock.synchronize { @fd }
+      end
+
+      def fd=(new_fd)
+        set_fd(new_fd)
+      end
+
       def set_fd(new_fd)
         @wlock.synchronize do
-          @fd = new_fd
-          if @closing && !@closed
-            Driver.send_frame(@fd, Tep::WebSocket::OPCODE_CLOSE,
-              Driver.encode_close_payload(@close_code, @close_reason))
-            TepSocketControl.shutdown(@fd, 2) if @close_timed_out
+          send_fd = -1
+          body = +""
+          @state_lock.synchronize do
+            unless @closed
+              @fd = new_fd
+              if @close_timed_out
+                TepSocketControl.shutdown(@fd, 2) if @fd >= 0
+              elsif @closing
+                send_fd = @fd
+                body = Driver.encode_close_payload(@close_code, @close_reason)
+              end
+            end
           end
+          Driver.send_frame(send_fd, Tep::WebSocket::OPCODE_CLOSE, body) if send_fd >= 0
         end
+        0
       end
 
       def set_subprotocol(name)
@@ -118,38 +136,44 @@ module Tep
       # only the bounded fallback shuts down the socket to wake its owner.
       def close(code, reason)
         body = Driver.encode_close_payload(code, reason)
-        @wlock.synchronize do
+        started = false
+        # State is never held while waiting for, or performing, a write.
+        @state_lock.synchronize do
           unless @closing || @closed
             @closing = true
             unless @close_complete
               @close_code = code
               @close_reason = code == 0 ? "" : reason.byteslice(0, 123)
             end
-            begin
-              if @fd >= 0
-                Driver.send_frame(@fd, Tep::WebSocket::OPCODE_CLOSE, body)
-              end
-            ensure
-              unless @close_complete
-                Thread.new(self) do |driver|
-                  sleep Driver::CLOSE_TIMEOUT_SECONDS
-                  driver.expire_close
-                end
-              end
+            started = true
+          end
+        end
+        if started
+          # Start before acquiring the writer: an earlier application send,
+          # or the close frame itself, can be parked on a full socket buffer.
+          Thread.new(self) do |driver|
+            sleep Driver::CLOSE_TIMEOUT_SECONDS
+            driver.expire_close
+          end
+          @wlock.synchronize do
+            send_fd = -1
+            @state_lock.synchronize do
+              send_fd = @fd unless @closed || @close_timed_out
             end
+            Driver.send_frame(send_fd, Tep::WebSocket::OPCODE_CLOSE, body) if send_fd >= 0
           end
         end
         0
       end
 
       def closing?
-        @wlock.synchronize { @closing || @closed || @close_complete || @close_timed_out }
+        @state_lock.synchronize { @closing || @closed || @close_complete || @close_timed_out }
       end
 
       # Called by the receiver for the peer's close, or a protocol failure.
       # The close event describes that result, not our outbound request.
       def finish_close(code, reason)
-        @wlock.synchronize do
+        @state_lock.synchronize do
           unless @closed || @close_timed_out
             @close_code = code
             @close_reason = reason
@@ -160,16 +184,18 @@ module Tep
       end
 
       def close_complete?
-        @wlock.synchronize { @close_complete }
+        @state_lock.synchronize { @close_complete }
       end
 
       def close_finished?
-        @wlock.synchronize { @closed || @close_complete || @close_timed_out }
+        @state_lock.synchronize { @closed || @close_complete || @close_timed_out }
       end
 
       def expire_close
-        @wlock.synchronize do
-          unless @closed || @close_complete
+        # Even a received close can be waiting for a parked writer before
+        # retirement. Only retirement makes it safe to ignore this deadline.
+        @state_lock.synchronize do
+          unless @closed
             @close_timed_out = true
             TepSocketControl.shutdown(@fd, 2) if @fd >= 0
           end
@@ -178,13 +204,15 @@ module Tep
       end
 
       def close_code
-        @close_code
+        @state_lock.synchronize { @close_code }
       end
 
       def close_reason
-        @close_reason
+        @state_lock.synchronize { @close_reason }
       end
 
+      # When both locks are needed, acquire @wlock then @state_lock. Never
+      # hold @state_lock across send_frame; expiry needs it to wake the send.
       # ONE WRITER AT A TIME, AND NONE AFTER RETIREMENT. Every frame this
       # driver sends passes through here: the connection's own thread
       # (welcome, confirm_subscription, close), its ping thread, and any
@@ -200,11 +228,22 @@ module Tep
       # a subscribe that never confirms. Returns the write's result, or
       # -1 once closing or retired.
       def write_frame(opcode, payload)
+        allowed = false
+        @state_lock.synchronize do
+          allowed = !@closed && !@close_complete && !@close_timed_out && @fd >= 0 &&
+            (!@closing || opcode == Tep::WebSocket::OPCODE_PONG)
+        end
+        return -1 unless allowed
         r = -1
         @wlock.synchronize do
-          if !@closed && !@closing && !@close_complete && !@close_timed_out && @fd >= 0
-            r = Driver.send_frame(@fd, opcode, payload)
+          send_fd = -1
+          @state_lock.synchronize do
+            if !@closed && !@close_complete && !@close_timed_out && @fd >= 0 &&
+                (!@closing || opcode == Tep::WebSocket::OPCODE_PONG)
+              send_fd = @fd
+            end
           end
+          r = Driver.send_frame(send_fd, opcode, payload) if send_fd >= 0
         end
         r
       end
@@ -216,7 +255,7 @@ module Tep
       # to exit.
       def retire
         @wlock.synchronize do
-          @closed = true
+          @state_lock.synchronize { @closed = true }
         end
         0
       end

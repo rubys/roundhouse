@@ -131,7 +131,8 @@ module Tep
       # Route a parsed frame to the right handler.
       def self.dispatch_frame(driver, frame)
         op = frame.opcode
-        return 0 if driver.closing? && op != Tep::WebSocket::OPCODE_CLOSE
+        return 0 if driver.close_finished?
+        return 0 if driver.closing? && op != Tep::WebSocket::OPCODE_CLOSE && op != Tep::WebSocket::OPCODE_PING
         if op == Tep::WebSocket::OPCODE_TEXT
           Connection.dispatch_message(driver, frame.payload, true)
         elsif op == Tep::WebSocket::OPCODE_BINARY
