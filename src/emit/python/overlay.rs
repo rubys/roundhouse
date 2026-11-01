@@ -631,10 +631,12 @@ fn emit_dispatch(
          \x20       return None\n\
          \x20   p = _nest_params(dict(params or {}))\n\
          \x20   p.update(m.path_params)\n\
-         \x20   # Format: the path's extension; else the route's default\n\
-         \x20   # format (Rails: `/feeds/1.xml` on `defaults: { format:\n\
-         \x20   # :json }` is xml).\n\
-         \x20   fmt = p.get(\"format\") or m.req_format or \"html\"\n\
+         \x20   # Format: the path's extension, then the route's default,\n\
+         \x20   # then a `format` in the request's own params, as Rails'\n\
+         \x20   # path parameters win over request parameters\n\
+         \x20   # (`/feeds/1.xml` on `defaults: { format: :json }` is xml;\n\
+         \x20   # a body `format=html` on `/feeds/1` is json).\n\
+         \x20   fmt = m.path_params.get(\"format\") or m.req_format or p.get(\"format\") or \"html\"\n\
          \x20   c = dispatch(m.controller, m.action, params=p, flash=flash,\n\
          \x20                request_method=method, request_path=path,\n\
          \x20                request_format=fmt, query_string=qs)\n\

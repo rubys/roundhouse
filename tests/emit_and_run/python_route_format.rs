@@ -23,5 +23,8 @@ fn python_dispatch_hands_the_router_the_requested_path() {
     let handle = dispatch_handle();
     assert!(!handle.contains("format_extension"), "the glue strips an extension itself:\n{handle}");
     assert!(handle.contains("m = Router.match(method, path, _route_table())"), "{handle}");
-    assert!(handle.contains("fmt = p.get(\"format\") or m.req_format or \"html\""), "{handle}");
+    // The path's extension, then the route's default, then a `format` in
+    // the request's own params (`cr_oracle.out`: a POST body's
+    // `format=html` loses to a route defaulting to JSON).
+    assert!(handle.contains("fmt = m.path_params.get(\"format\") or m.req_format or p.get(\"format\") or \"html\""), "{handle}");
 }
