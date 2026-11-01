@@ -184,7 +184,9 @@ pub const FORMAT_VARIANT_CALL: u64 = 1 << 37;
 /// An opaque source `&expr` block argument (excluding the modeled symbol
 /// adapter). Lambda shape alone does not prove the
 /// directly attached block ABI (strict arity/nonlocal returns may differ).
-pub const FORWARDED_BLOCK: u64 = 1 << 40;
+/// Bit 51 leaves 40–47 for Rust's future CoerceFamily/PeepholeKind groups
+/// and 48–50 for finder dispatch; indexer flags occupy 38–39.
+pub const FORWARDED_BLOCK: u64 = 1 << 51;
 
 /// Whether `expr` is a [`SELF_BINDING`] cast.
 pub fn is_self_binding(expr: &Expr) -> bool {
