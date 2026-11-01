@@ -197,7 +197,7 @@ fn a_job_without_typed_arguments_keeps_its_proc() {
     assert!(fallback.reason.contains("no call site"), "{fallback:?}");
 
     let src = emitted(&app, "untyped_job.rb");
-    assert!(src.contains("ActiveJob.enqueue(-> {"), "the Proc stays:\n{src}");
+    assert!(src.contains("ActiveJob.enqueue_on(\"default\", -> {"), "the Proc stays:\n{src}");
     assert!(!src.contains("enqueue_payload"), "{src}");
 }
 
@@ -206,10 +206,10 @@ fn only_the_enqueue_arm_changes() {
     let app = app();
     let src = emitted(&app, "push_job.rb");
     assert!(
-        src.contains("ActiveJob.enqueue_payload(JobRegistry.payload_push_job(room, message))"),
+        src.contains("ActiveJob.enqueue_payload_on(\"default\", JobRegistry.payload_push_job(room, message))"),
         "the enqueue arm writes a payload:\n{src}"
     );
-    assert!(!src.contains("ActiveJob.enqueue(-> {"), "no Proc on the drain path:\n{src}");
+    assert!(!src.contains("ActiveJob.enqueue_on(\"default\", -> {"), "no Proc on the drain path:\n{src}");
     // The `:test` adapter's arm and the inline arm are as before.
     assert!(src.contains(r#"ActiveJob.hold("PushJob", -> {"#), "{src}");
     assert!(src.contains("new.perform(room, message)"), "{src}");
@@ -259,8 +259,139 @@ fn an_app_without_jobs_keeps_an_empty_registry() {
     let src = registry_source(&[], false);
     assert_eq!(
         src,
-        "  def self.perform(job_class, args)\n    false\n  end\n\n  def self.discards_deserialization_error(job_class)\n    false\n  end\n"
+        "  def self.perform(job_class, args)\n    false\n  end\n\n  def self.discards_deserialization_error(job_class)\n    false\n  end\n\n  def self.handler_for(job_class, e)\n    0\n  end\n\n  def self.retry_rule(id)\n    ActiveJob::RetryRule.new(\"\", 0.0, false, 0, \"\", false, 0, 0.0)\n  end\n\n  def self.sidekiq_retry(job_class)\n    \"true\"\n  end\n\n  def self.sidekiq_extra(job_class)\n    \"\"\n  end\n"
     );
+}
+
+fn handler_app(adapter: &str) -> App {
+    let mut app = ingest_app_from_tree(tree(&[
+        ("db/schema.rb", SCHEMA),
+        (
+            "config/environments/production.rb",
+            &format!("Rails.application.configure do\n  config.active_job.queue_adapter = :{adapter}\nend\n"),
+        ),
+        ("app/models/flaky.rb", "class Flaky < StandardError\nend\n\nclass Slow < StandardError\nend\n"),
+        (
+            "app/models/user.rb",
+            "class User < ActiveRecord::Base\n  def later\n    HandledJob.perform_later(name.to_s)\n  end\nend\n",
+        ),
+        (
+            "app/jobs/application_job.rb",
+            "class ApplicationJob < ActiveJob::Base\n  discard_on ActiveJob::DeserializationError\n  sidekiq_options retry: 5, retry_queue: \"slow\"\n  self.retry_jitter = 0.25\nend\n",
+        ),
+        (
+            "app/jobs/handled_job.rb",
+            r#"class HandledJob < ApplicationJob
+  sidekiq_options retry: 2
+  retry_on Flaky, Slow, wait: :polynomially_longer, attempts: :unlimited
+  retry_on Unknown, wait: 1
+  retry_on Flaky, wait: ->(n) { n * 2 }
+  retry_on Slow, wait: 2.minutes, attempts: 3, queue: :low, priority: 1, jitter: 0.5
+  discard_on Flaky
+
+  def perform(name)
+    nil
+  end
+end
+"#,
+        ),
+    ]))
+    .expect("ingest handler app");
+    roundhouse::session::analyze_and_lower(&mut app);
+    app
+}
+
+/// Under `:sidekiq` a job's handlers are planned in ActiveJob's search
+/// order: its own, last declared first, then its ancestors'. A handler
+/// naming a class the tree doesn't define, or with a computed option,
+/// isn't carried.
+#[test]
+fn handlers_are_planned_in_search_order() {
+    use roundhouse::lower::job_payload::{JobHandler, RetryWait};
+    let app = handler_app("sidekiq");
+    let p = plan(&app, "HandledJob");
+    assert!(p.is_payload(), "{p:#?}");
+    assert_eq!(
+        p.handlers,
+        vec![
+            JobHandler::Discard { exceptions: vec!["Flaky".into()] },
+            JobHandler::Retry {
+                exceptions: vec!["Slow".into()],
+                wait: RetryWait::Seconds(120.0),
+                attempts: 3,
+                queue: "low".into(),
+                priority: Some(1),
+                jitter: Some(0.5),
+            },
+            JobHandler::Retry {
+                exceptions: vec!["Flaky".into(), "Slow".into()],
+                wait: RetryWait::PolynomiallyLonger,
+                attempts: 0,
+                queue: String::new(),
+                priority: None,
+                jitter: None,
+            },
+            JobHandler::Discard { exceptions: vec!["ActiveJob::DeserializationError".into()] },
+        ]
+    );
+    assert_eq!(p.retry_jitter, 0.25);
+    assert_eq!(
+        p.sidekiq_options,
+        vec![("retry".to_string(), "2".to_string()), ("retry_queue".to_string(), "\"slow\"".to_string())]
+    );
+
+    let src = registry_source(&app.job_plans, true);
+    assert!(src.contains("      return -1 if e.is_a?(Flaky)\n      return 1 if e.is_a?(Slow)\n      return 2 if e.is_a?(Flaky) || e.is_a?(Slow)\n"), "{src}");
+    assert!(src.contains("ActiveJob::RetryRule.new(\"[Flaky, Slow]\", 0.0, true, 0, \"\", false, 0, 0.25)"), "{src}");
+    assert!(src.contains("return \"2\" if job_class == \"HandledJob\""), "{src}");
+    assert!(src.contains(r#"return ",\"retry_queue\":\"slow\"" if job_class == "HandledJob""#), "{src}");
+
+    let off = handler_app("solid_queue");
+    let p = plan(&off, "HandledJob");
+    assert!(p.handlers.is_empty() && p.sidekiq_options.is_empty(), "{p:#?}");
+}
+
+/// An exception class declared inside the job resolves as Ruby resolves
+/// it, `NestedJob::Retryable` first, while `::Retryable` names the
+/// top-level class, and the job's own `RuntimeError` shadows the runtime's;
+/// an initializer's `ActiveJob::Base.retry_jitter =`, written `1e-2`, wins
+/// over `load_defaults`' 0.15; and `sidekiq_options` keeps `retry` beside
+/// a `queue:` the worker leaves to ActiveJob.
+#[test]
+fn a_nested_exception_class_and_the_base_jitter_spelling() {
+    let mut app = ingest_app_from_tree(tree(&[
+        ("db/schema.rb", SCHEMA),
+        (
+            "config/application.rb",
+            "module Blog\n  class Application < Rails::Application\n    config.load_defaults 8.0\n  end\nend\n",
+        ),
+        (
+            "config/environments/production.rb",
+            "Rails.application.configure do\n  config.active_job.queue_adapter = :sidekiq\nend\n",
+        ),
+        ("config/initializers/active_job.rb", "ActiveJob::Base.retry_jitter = 1e-2\n"),
+        ("app/models/retryable.rb", "class Retryable < StandardError\nend\n"),
+        (
+            "app/models/user.rb",
+            "class User < ActiveRecord::Base\n  def later\n    NestedJob.perform_later(name.to_s)\n  end\nend\n",
+        ),
+        ("app/jobs/application_job.rb", "class ApplicationJob < ActiveJob::Base\nend\n"),
+        (
+            "app/jobs/nested_job.rb",
+            "class NestedJob < ApplicationJob\n  class Retryable < StandardError\n  end\n\n  class RuntimeError < StandardError\n  end\n\n  sidekiq_options retry: 4, queue: \"other\"\n  retry_on Retryable, wait: 1\n  discard_on ::Retryable\n  discard_on RuntimeError\n\n  def perform(name)\n    nil\n  end\nend\n",
+        ),
+    ]))
+    .expect("ingest nested app");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let p = plan(&app, "NestedJob");
+    assert_eq!(p.handlers.len(), 3, "{p:#?}");
+    assert_eq!(p.handlers[0].exceptions(), &["NestedJob::RuntimeError".to_string()][..], "{p:#?}");
+    assert_eq!(p.handlers[1].exceptions(), &["Retryable".to_string()][..], "{p:#?}");
+    assert_eq!(p.handlers[2].exceptions(), &["NestedJob::Retryable".to_string()][..], "{p:#?}");
+    assert_eq!(p.sidekiq_options, vec![("retry".to_string(), "4".to_string())]);
+    assert_eq!(p.retry_jitter, 0.01);
+    let diagnostics = roundhouse::lower::job_payload::handler_diagnostics(&app);
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
 }
 
 /// A job that enqueues itself without naming its class, and a job that

@@ -106,7 +106,7 @@ fn program_items(
                 items.push(ProgramItem::Declared(names));
             }
             // What the bodies require and autoload as they load, after them.
-            body_requires(&stmt, &[], &span_of, &mut items);
+            body_requires(&stmt, &[], file, list_dir, &span_of, &mut items);
             continue;
         }
         // A constant rides with the file's classes (`carry_file_constants`).
@@ -376,6 +376,8 @@ fn dir_relative_pattern(node: &ruby_prism::Node<'_>) -> Option<String> {
 fn body_requires(
     decl: &ruby_prism::Node<'_>,
     scope: &[String],
+    file: &str,
+    list_dir: &dyn Fn(&std::path::Path) -> Vec<(String, bool)>,
     span_of: &dyn Fn(&ruby_prism::Node<'_>) -> Span,
     out: &mut Vec<ProgramItem>,
 ) {
@@ -420,14 +422,36 @@ fn body_requires(
             }
         }
     }
+    let mut locals = super::glob_autoload::Locals::default();
     for stmt in &statements {
         if stmt.as_class_node().is_some() || stmt.as_module_node().is_some() {
-            body_requires(stmt, &owner, span_of, out);
+            body_requires(stmt, &owner, file, list_dir, span_of, out);
+            continue;
+        }
+        if locals.record(stmt, file) {
             continue;
         }
         if let Some((name, feature)) = literal_autoload(stmt) {
             out.push(ProgramItem::Autoload { span: span_of(stmt), owner: owner.join("::"), name, feature });
             continue;
+        }
+        // `Dir[…].each { |f| autoload(…) }`: each constant autoloads the
+        // file whose iteration named it, by its feature under the gem's
+        // lib/ (what a literal `autoload` would name).
+        if let Some(found) = super::glob_autoload::glob_autoloads(stmt, file, &locals, list_dir) {
+            let features: Option<Vec<(String, String)>> = found
+                .into_iter()
+                .map(|(name, path)| {
+                    let at = path.rfind("/lib/")?;
+                    Some((name, path[at + 5..].strip_suffix(".rb")?.to_string()))
+                })
+                .collect();
+            if let Some(features) = features {
+                for (name, feature) in features {
+                    out.push(ProgramItem::Autoload { span: span_of(stmt), owner: owner.join("::"), name, feature });
+                }
+                continue;
+            }
         }
         if as_autoload {
             // `autoload :Name`, alone or in `eager_autoload do … end`.

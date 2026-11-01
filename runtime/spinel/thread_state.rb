@@ -220,11 +220,32 @@ module ActiveJob
   # never holds the queue against the requests still enqueueing.
   QUEUE_LOCK = Mutex.new
 
-  def self.enqueue(work)
+  def self.enqueue_on(queue, work)
     QUEUE_LOCK.synchronize do
+      PENDING_QUEUES << queue
       PENDING << work
     end
     nil
+  end
+
+  def self.clear_queue(queue)
+    removed = 0
+    QUEUE_LOCK.synchronize do
+      n = PENDING.length
+      i = 0
+      while i < n
+        work = PENDING.shift
+        name = PENDING_QUEUES.shift
+        if name == queue
+          removed += 1
+        elsif !work.nil?
+          PENDING << work
+          PENDING_QUEUES << name.to_s
+        end
+        i += 1
+      end
+    end
+    removed
   end
 
   def self.pending_count
@@ -240,7 +261,10 @@ module ActiveJob
     while true
       work = nil
       QUEUE_LOCK.synchronize do
-        work = PENDING.shift if PENDING.length > 0
+        if PENDING.length > 0
+          work = PENDING.shift
+          PENDING_QUEUES.shift
+        end
       end
       break if work.nil?
       # A job gets its own broadcast log, as `dispatch` gives a request.
