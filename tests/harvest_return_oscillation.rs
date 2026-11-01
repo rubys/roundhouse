@@ -275,14 +275,22 @@ fn known_block_unwinds_retain_invalid_call_errors() {
 }
 
 #[test]
-fn unknown_bearing_unions_report_the_gradual_boundary() {
-    let (app, _) = declarations_with_caller("module Probe\n def self.value; JSON.parse(\"42\") || :fallback; end\nend\n",
+fn unknown_bearing_unions_keep_the_main_warning_policy() {
+    let (app, rbs) = declarations_with_caller("module Probe\n def self.value; JSON.parse(\"42\") || :fallback; end\nend\n",
         Some("Probe.value.no_such_method"));
+    let value = app.library_classes.iter().find(|c| c.name.0.as_str() == "Probe").unwrap()
+        .methods.iter().find(|m| m.name.as_str() == "value").unwrap();
+    assert!(matches!(value.body.ty.as_ref(), Some(roundhouse::ty::Ty::Union { variants })
+        if variants.len() == 2
+            && variants.iter().any(|ty| matches!(ty, roundhouse::ty::Ty::Sym))
+            && variants.iter().any(|ty| matches!(ty, roundhouse::ty::Ty::Untyped { .. }))),
+        "the inferred return must keep both the Symbol and unknown arms: {:?}", value.body.ty);
+    assert!(rbs.contains("def self.value: () -> untyped"), "{rbs}");
     let diagnostics = roundhouse::analyze::diagnose(&app);
-    assert!(diagnostics.iter().any(|d| matches!(&d.kind,
+    assert!(!diagnostics.iter().any(|d| matches!(&d.kind,
         roundhouse::diagnostic::DiagnosticKind::GradualUntyped { .. })
         && app.sources[d.span.file.0 as usize - 1].text[d.span.start as usize..].starts_with("Probe.value.no_such_method")),
-        "the unknown-bearing call must report its own boundary: {diagnostics:?}");
+        "main's warning policy keeps an unknown-bearing union quiet: {diagnostics:?}");
 }
 
 #[test]
