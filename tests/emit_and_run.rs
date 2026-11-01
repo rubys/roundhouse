@@ -9091,12 +9091,12 @@ fn an_app_without_jobs_runs_its_tests() {
 fn the_job_queue_keeps_its_thread_safe_methods() {
     emit_and_run::real_blog()
         .run_ruby(
-            r#"%i[drain pending_count performed enqueue_locked record_performed_for_tests].each do |m|
+            r#"%i[drain pending_count performed enqueue_locked clear_queue record_performed_for_tests].each do |m|
   file = ActiveJob.method(m).source_location[0]
   raise "ActiveJob.#{m} comes from #{file}" unless file.end_with?("runtime/thread_state.rb")
 end
 # The serving drain wraps these two, and calls the locked ones above.
-%i[enqueue record_performed].each do |m|
+%i[enqueue_on record_performed].each do |m|
   file = ActiveJob.method(m).source_location[0]
   raise "ActiveJob.#{m} comes from #{file}" unless file.end_with?("runtime/active_job_cruby.rb")
 end
