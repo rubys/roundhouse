@@ -208,6 +208,12 @@ module ActionDispatch
       result
     end
 
+    def to_session_value
+      flashes = to_persisted
+      return nil if flashes.empty?
+      { "discard" => [], "flashes" => flashes }
+    end
+
     # `merge(other)` returns a new Flash with `other`'s entries layered
     # on top. `other` may be a Hash or another Flash — either responds
     # to `each` with `(k, v)` pairs.

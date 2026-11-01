@@ -38,6 +38,7 @@ module ActionDispatch
     def each: () { (String, String?) -> void } -> Flash
     def to_h: () -> Hash[String, String]
     def to_persisted: () -> Hash[String, String]
+    def to_session_value: () -> Hash[String, Array[String] | Hash[String, String]]?
     def merge: (Hash[String, String] other) -> Flash
   end
 
