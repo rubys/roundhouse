@@ -1873,8 +1873,12 @@ come from the job's `perform_later` call sites, and
   receives through one `PSUBSCRIBE <channel_prefix>:*` connection
   (`runtime/spinel/sidekiq/redis_cable.rb`). On any other cable
   adapter a job's broadcasts in the worker reach no browser, with a
-  warning. Broadcasts Rails would enqueue (`broadcast_*_later`, and
-  `broadcasts_to`'s create and update) are rendered inline instead.
+  warning. `broadcasts_to`'s create and update broadcasts are pushed
+  as `Turbo::Streams::ActionBroadcastJob` with turbo-rails' arguments,
+  and the worker renders and sends them (`lower::broadcast_job`); the
+  destroy broadcast runs at once, as in Rails. An STI model's
+  `broadcasts_to`, or one whose stream or `target:` isn't a String,
+  stays inline with a `broadcast-later-inline` warning.
 - **Some argument types.** A job whose call sites pass a Hash, a Date,
   an untyped value, or nothing typed at all keeps its closure, with a
   `job-closure-fallback` warning naming the parameter. Lobsters'
