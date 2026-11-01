@@ -1308,6 +1308,15 @@ fn ir_symbol_list(e: &Expr) -> Vec<Symbol> {
     }
 }
 
+/// `ir_symbol_list`, or `None` for a value that isn't all literal symbols:
+/// an unread action list isn't an empty one.
+fn readable_symbol_list(e: &Expr) -> Option<Vec<Symbol>> {
+    match &*e.node {
+        ExprNode::Array { elements, .. } => elements.iter().map(ir_symbol).collect(),
+        _ => ir_symbol(e).map(|symbol| vec![symbol]),
+    }
+}
+
 /// Recognize a `before_action`/`after_action`/`prepend_before_action`
 /// class-body call — already ingested as an `Unknown` body item's
 /// `Expr` (it has no Symbol target, so `parse_filter_call` returned
@@ -1533,11 +1542,23 @@ pub(crate) fn lambda_filter_target(expr: &Expr) -> Option<LambdaFilterTarget> {
                 continue;
             };
             match key.as_str() {
-                "only" => {
-                    only_present = true;
-                    only = ir_symbol_list(v);
-                }
-                "except" => except = ir_symbol_list(v),
+                "only" => match readable_symbol_list(v) {
+                    Some(list) => {
+                        only_present = true;
+                        only = list;
+                    }
+                    None => {
+                        unread_guard = true;
+                        unread_options = true;
+                    }
+                },
+                "except" => match readable_symbol_list(v) {
+                    Some(list) => except = list,
+                    None => {
+                        unread_guard = true;
+                        unread_options = true;
+                    }
+                },
                 "if" => {
                     if_cond = ir_symbol(v);
                     if_cond_expr = ir_lambda_body(v);

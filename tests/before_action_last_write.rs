@@ -201,6 +201,39 @@ fn prepend_options_keep_the_same_fallback_in_named_batch_and_block_forms() {
     }
 }
 
+/// `only: ACTIONS` isn't `only: []`. `--continue` keeps a block filter whose
+/// action list ingest can't read, and its write must still reach the view.
+#[test]
+fn a_block_filter_with_an_unread_action_list_still_writes_for_the_view() {
+    for (name, filter) in [
+        ("only", "before_action(only: ACTIONS) { @x = 1 }"),
+        ("except", "before_action(except: ACTIONS) { @x = 1 }"),
+        ("lambda", "before_action -> { @x = 1 }, only: ACTIONS"),
+    ] {
+        let source = format!(
+            "class PostsController < ApplicationController\n  ACTIONS = [:index].freeze\n  {filter}\n  def index; end\nend\n"
+        );
+        let root = std::env::temp_dir().join(format!("before-action-unread-{}-{name}", std::process::id()));
+        for (path, contents) in files(&[("posts", &source)], "posts/index", "<%= @x.zzz %>") {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        }
+        let routes = root.join("config/routes.rb");
+        std::fs::create_dir_all(routes.parent().unwrap()).unwrap();
+        std::fs::write(routes, "Rails.application.routes.draw do\n  get \"/\", to: \"posts#index\"\nend\n").unwrap();
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+            .args(["check", "--continue", "--no-hotspots"])
+            .arg(&root)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&output.stdout).to_string() + &String::from_utf8_lossy(&output.stderr);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(text.contains("no known method `zzz` on Integer"), "{filter}: {text}");
+        assert!(!text.contains("@x has no known type"), "{filter}: {text}");
+    }
+}
+
 #[test]
 fn empty_only_and_overlapping_except_do_not_apply_to_the_view() {
     for options in ["only: []", "only: :index, except: :index", "only: [:index], except: [:index]"] {
