@@ -165,6 +165,9 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // A property and a method share one Swift namespace, both camelCased:
     // `performed?` is `performedPred`, `save!` is `saveBang`, so an app
     // `@save_bang` (`saveBang`) meets the runtime's `save!`.
+    // Every name is compared as Swift spells it (an ivar's property is its
+    // `camel`), so the app's `@requestPath` meets the runtime's
+    // `@request_path`.
     super::controller_ivars::rename_ivars_shadowing_controller_base(&mut controller_lcs, &runtime_classes, |name| {
         let swift = match name.as_str() {
             "[]" => "get".to_string(),
@@ -172,7 +175,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             other => naming::camel(other),
         };
         vec![name.clone(), crate::ident::Symbol::from(crate::naming::snake_case(&swift))]
-    }, implied);
+    }, |name| crate::ident::Symbol::from(naming::camel(name.as_str())), implied);
     // Synthesize `ApplicationController` when a controller extends it but
     // the app doesn't define one.
     if needs_app_controller {

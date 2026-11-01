@@ -2434,7 +2434,10 @@ pub(super) fn wrap_return(e: &Expr) -> String {
             if matches!(&*value.node, ExprNode::Array { elements, .. } if elements.is_empty())
                 || matches!(&*value.node, ExprNode::Hash { entries, .. } if entries.is_empty())
             {
-                return format!("{}\nreturn {sn}", emit_expr(e));
+                // Read as the store writes it: a parameter of the same
+                // name would answer a bare `return {sn}`.
+                let prop = if IN_MODULE.with(|f| *f.borrow()) { sn.clone() } else { format!("self.{sn}") };
+                return format!("{}\nreturn {prop}", emit_expr(e));
             }
             // A name the value doesn't read: inside the `do` scope a `let` can't
             // read an outer local of its own name.
@@ -2454,8 +2457,13 @@ pub(super) fn wrap_return(e: &Expr) -> String {
             let held = temp_var(n);
             let coerced = coerce_for_prop(&sn, value, assign_value(value));
             let store = if IN_MODULE.with(|f| *f.borrow()) { format!("{sn} = {held}") } else { format!("self.{sn} = {held}") };
+            // An Integer literal held for a Float property: Swift infers the
+            // literal's `let` as `Int`, which a `Double` property won't take.
+            let int_into_float = matches!(&*value.node, ExprNode::Lit { value: crate::expr::Literal::Int { .. } })
+                && matches!(instance_prop_ty(name.as_str()).as_ref().map(crate::ty::Ty::peel_nilable), Some(crate::ty::Ty::Float));
+            let annotation = if int_into_float { ": Double" } else { "" };
             // Its own scope, so an app local of the same name can't collide.
-            format!("do {{\n{}\n}}", indent(&format!("let {held} = {coerced}\n{store}\nreturn {held}")))
+            format!("do {{\n{}\n}}", indent(&format!("let {held}{annotation} = {coerced}\n{store}\nreturn {held}")))
         }
         ExprNode::Return { .. }
         | ExprNode::Raise { .. }

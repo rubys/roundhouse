@@ -112,6 +112,56 @@ fn an_empty_collection_returns_the_property_and_the_held_value_is_scoped() {
         .emit(BuildTarget::Swift);
     assert!(errors.is_empty(), "{errors:?}");
     let widget = std::fs::read_to_string(emitted.join("Sources/App/app/models/Widget.swift")).unwrap();
-    assert!(widget.contains("self.items = []\n        return items"), "{widget}");
+    assert!(widget.contains("self.items = []\n        return self.items"), "{widget}");
     assert!(widget.contains("do {\n            let __rhRet1 = __rhRet + 1\n            self.count = __rhRet1\n            return __rhRet1\n        }"), "{widget}");
+}
+
+/// Swift camelCases an ivar's name for its property, so the app's
+/// `@requestPath` and the runtime base's `@request_path` are one
+/// `requestPath`: the app's takes another name, though the Ruby names
+/// differ.
+#[test]
+fn an_app_ivar_whose_swift_name_is_a_base_ivars_is_renamed() {
+    let (emitted, errors) = ts_controller_ivars::overlay()
+        .write(
+            "app/controllers/probes_controller.rb",
+            &ts_controller_ivars::PROBES_CONTROLLER.replace("    @is_performed = \"app flag\"\n", "    @is_performed = \"app flag\"\n    @requestPath = \"app path\"\n"),
+        )
+        .emit(BuildTarget::Swift);
+    assert!(errors.is_empty(), "{errors:?}");
+    let probes = std::fs::read_to_string(emitted.join("Sources/App/app/controllers/ProbesController.swift")).unwrap();
+    assert!(!probes.contains("self.requestPath ="), "probes still assigns the base's requestPath:\n{probes}");
+    assert!(probes.contains("self.appRequestPath = \"app path\""), "{probes}");
+}
+
+/// The empty-collection return reads the property as the store writes
+/// it, `self.items`: a parameter of the same name would otherwise be
+/// what `return items` answers.
+#[test]
+fn an_empty_collection_return_reads_the_property_past_a_same_named_param() {
+    let (emitted, errors) = emit_and_run::empty_app()
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n")
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\n  def fill\n    @items = [1]\n  end\n\n  def reset(items)\n    @items = []\n  end\nend\n")
+        .emit(BuildTarget::Swift);
+    assert!(errors.is_empty(), "{errors:?}");
+    let widget = std::fs::read_to_string(emitted.join("Sources/App/app/models/Widget.swift")).unwrap();
+    assert!(widget.contains("self.items = []\n        return self.items"), "{widget}");
+}
+
+/// An Integer literal stored in a Float property is held as a `Double`,
+/// so the held value is the property's type and the method returns it.
+#[test]
+fn an_integer_literal_stored_in_a_float_property_is_held_as_double() {
+    let (emitted, errors) = emit_and_run::empty_app()
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n")
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\n  def tune\n    @ratio = 1.5\n  end\n\n  def reset\n    @ratio = 0\n  end\nend\n")
+        .emit(BuildTarget::Swift);
+    assert!(errors.is_empty(), "{errors:?}");
+    let widget = std::fs::read_to_string(emitted.join("Sources/App/app/models/Widget.swift")).unwrap();
+    assert!(widget.contains("let __rhRet: Double = 0\n"), "{widget}");
+    assert!(widget.contains("let __rhRet = 1.5\n"), "{widget}");
 }
