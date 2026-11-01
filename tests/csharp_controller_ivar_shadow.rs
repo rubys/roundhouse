@@ -31,7 +31,7 @@ fn an_app_ivar_shadowing_base_state_is_renamed_in_the_csharp_controller() {
     }
     assert!(probes.contains("this.AppStatus = \"app status\""), "{probes}");
     assert!(probes.contains("this.AppHeaders = \"app headers\""), "{probes}");
-    assert!(application.contains("this.AppLocation = \"app location\""), "{application}");
+    assert!(application.contains("this.AppLocation = "), "{application}");
     assert!(probes.contains("Probes.Show(AppHeaders, AppLocation, AppStatus,"), "{probes}");
 }
 
@@ -62,15 +62,17 @@ fn an_app_ivar_is_renamed_under_a_synthesized_application_controller() {
 
 /// ApplicationController's `set_location`, a `before_action` that isn't
 /// inlined, is a value method in C# (`object? SetLocation()`). Its last
-/// statement is an ivar assignment, which in Ruby answers the value, so
-/// the method returns it; with no `return` the C# doesn't build (CS0161).
+/// statement is an ivar assignment, which in Ruby answers the assigned
+/// value, so the method returns that value (held once, since the ivar's
+/// property can be wider than the method's return type); with no
+/// `return` the C# doesn't build (CS0161).
 #[test]
 fn a_method_ending_in_an_ivar_assignment_returns_it() {
     let (emitted, errors) = ts_controller_ivars::overlay().emit(BuildTarget::CSharp);
     assert!(errors.is_empty(), "{errors:?}");
     let application = std::fs::read_to_string(emitted.join("app/controllers/ApplicationController.cs")).unwrap();
     assert!(
-        application.contains("this.AppLocation = \"app location\";\n        return AppLocation;"),
+        application.contains("var __rhRet = \"app location\";\n        this.AppLocation = __rhRet;\n        return __rhRet;"),
         "{application}"
     );
 }
