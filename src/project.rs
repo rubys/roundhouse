@@ -1267,6 +1267,48 @@ fn is_plain_ruby_class(app: &App, lc: &crate::dialect::LibraryClass) -> bool {
     true
 }
 
+/// `render "x" do … end` and `render layout: "x" do … end`: the view
+/// lowering captures the block into a String and passes it as the
+/// partial's yielded body. Measured through each target's own test
+/// runner, only the ruby family carries that capture: TypeScript
+/// redeclares the capture local (`The symbol "_layout_body" has already
+/// been declared`), Crystal and Go pass the builder where the partial
+/// takes a String, Python passes a list. Refused elsewhere, and on Roda,
+/// which converts views from their ERB with no ActionView; in a template
+/// no request reaches, as a warning.
+fn report_block_render_partials(app: &App, target: BuildTarget) {
+    if matches!(
+        target,
+        BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Futamura
+    ) {
+        return;
+    }
+    fn visit(e: &crate::expr::Expr, unreachable: bool, target: BuildTarget) {
+        if let crate::expr::ExprNode::Send { recv, method, args, block: Some(block), .. } = &*e.node
+            && !e.span.is_synthetic()
+            && matches!(
+                crate::lower::view::classify_render_partial(recv.as_ref(), method.as_str(), args, Some(block), &|_| true, &|_| false),
+                Some(crate::lower::view::RenderPartial::LayoutBlock { .. })
+            )
+        {
+            let mut d = crate::diagnostic::Diagnostic::unsupported(
+                e.span,
+                Some(crate::ident::Symbol::from(target.as_str())),
+                "render with a block",
+                "the block becomes the partial's `yield`, captured into a String, which this target's views don't carry",
+            );
+            if unreachable {
+                d.severity = crate::diagnostic::Severity::Warning;
+            }
+            emit::diagnostics::push(d);
+        }
+        e.node.for_each_child(&mut |c| visit(c, unreachable, target));
+    }
+    for view in &app.views {
+        visit(&view.body, app.unreachable_views.contains(&view.name), target);
+    }
+}
+
 /// A non-integer primary key (`create_table …, id: :uuid`,
 /// `primary_key: "identifier", id: :string`) is carried end to end by
 /// the ruby-shape emit — CRuby, JRuby and Spinel: the analyzer types
@@ -2894,6 +2936,7 @@ fn target_files_inner(
     reject_unsupported_dates(app, target)?;
     reject_unsupported_forwarded_procs(app, target)?;
     report_unsupported_keys(app, target);
+    report_block_render_partials(app, target);
     report_unemitted_library_classes(app, target);
     report_relation_class_calls(app, target);
     report_typescript_error_class(app, target);

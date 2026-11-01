@@ -1278,6 +1278,15 @@ pub(super) fn named_partial_call_with_record(
                 (None, false) => arg.cloned().unwrap_or_else(nil_lit),
                 },
             };
+            // A partial that yields, rendered with no block: Rails' `yield`
+            // is nil there and renders nothing, so its String body is "".
+            let arg_expr = if matches!(&*arg_expr.node, ExprNode::Lit { value: Literal::Nil })
+                && ctx.yielding_partials.contains(&strict_key)
+            {
+                Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Str { value: String::new() } })
+            } else {
+                arg_expr
+            };
             let mut call_args = vec![arg_expr];
             call_args.extend(partial_extra_args(ctx, &module_camel, &method_sym));
             if let Some(decl) = strict_decl {

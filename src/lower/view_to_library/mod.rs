@@ -264,6 +264,8 @@ pub struct ViewLowerCtx<'a> {
     /// record). Render call sites consult it to bind provided locals by
     /// name and to suppress convention closure-threading.
     strict_locals: std::rc::Rc<crate::det::HashMap<ViewKey, Vec<Param>>>,
+    /// Partials whose body has a bare `yield` (`yielding_partials`).
+    yielding_partials: std::rc::Rc<crate::det::HashSet<ViewKey>>,
     /// For a partial rendered as a COLLECTION with an explicit name, the
     /// local its callers bind each element to — `as:` when given, else
     /// the partial's own base name. Rails' rule, read off the call site;
@@ -353,6 +355,7 @@ impl<'a> ViewLowerCtx<'a> {
             ),
             route_helper_arity: std::rc::Rc::new(route_helpers.into_iter().collect()),
             strict_locals: std::rc::Rc::new(strict_locals_by_key(&app.views)),
+            yielding_partials: std::rc::Rc::new(yielding_partials(&app.views)),
             collection_element_locals: std::rc::Rc::new(collection_element_locals(&app.views, app)),
             form_wrappers: std::rc::Rc::new(form_wrapper_helpers(app)),
             form_with_entry: false,
@@ -627,7 +630,10 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         // signature, so the other targets' `Layouts.application(body)`
         // dispatch call sites are arity-stable.
         if !arg_name.is_empty() {
-            typed.push((arg_name.clone(), record_arg_ty(dir, is_layout, &known_models)));
+            // A partial that yields takes the yielded markup in its record
+            // slot (`render "x" do … end`, `render layout: "x" do … end`).
+            let body_arg = is_layout || (is_partial && yields_body(&view.body));
+            typed.push((arg_name.clone(), record_arg_ty(dir, body_arg, &known_models)));
         }
         for iv in &closure_ivars {
             // The record arg already covers a same-named ivar (a `_form`
@@ -855,6 +861,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         multipart_partials: lx.multipart_partials.clone(),
         partial_extras: lx.partial_extras.clone(),
         strict_locals: lx.strict_locals.clone(),
+        yielding_partials: lx.yielding_partials.clone(),
         view_name: crate::lower::view::fragment_template_path(view.name.as_str(), view.format.as_str()),
         ivar_models: std::rc::Rc::new(view_ivar_models(app, &view.name)),
         record_classes: std::rc::Rc::new(app.view_ivar_types.get(&view.name).into_iter()
@@ -3776,6 +3783,28 @@ fn strict_locals_by_key(views: &[View]) -> crate::det::HashMap<ViewKey, Vec<Para
     out
 }
 
+/// Whether a view body has a bare `yield` (no arguments): a partial that
+/// renders its caller's block.
+pub(crate) fn yields_body(e: &Expr) -> bool {
+    if matches!(&*e.node, ExprNode::Yield { args } if args.is_empty()) {
+        return true;
+    }
+    let mut found = false;
+    e.node.for_each_child(&mut |c| found = found || yields_body(c));
+    found
+}
+
+/// The partials whose body has a bare `yield`, keyed like
+/// `strict_locals_by_key`.
+fn yielding_partials(views: &[View]) -> crate::det::HashSet<ViewKey> {
+    let stems = PartialStems::of(views);
+    views
+        .iter()
+        .filter(|v| split_view_name(v.name.as_str()).1.starts_with('_') && yields_body(&v.body))
+        .filter_map(|v| view_key_of(v, &stems))
+        .collect()
+}
+
 fn collect_ivar_str_assigns(
     e: &Expr,
     dir: &str,
@@ -4944,6 +4973,11 @@ pub(super) struct ViewCtx {
     /// bound by name.
     pub(super) strict_locals:
         std::rc::Rc<crate::det::HashMap<ViewKey, Vec<Param>>>,
+    /// Partials whose body has a bare `yield` (`yielding_partials`): their
+    /// record arg is the yielded markup, a String, so a render with no
+    /// block passes "" (Rails' `yield` with no block is nil, rendered as
+    /// nothing).
+    pub(super) yielding_partials: std::rc::Rc<crate::det::HashSet<ViewKey>>,
     /// THIS view's ivar/local name → model snake-singular, from
     /// `App::view_ivar_types` (`edit_user` → `user`). `form_with model:
     /// @edit_user` names its fields after the record's model exactly as
