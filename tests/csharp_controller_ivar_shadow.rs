@@ -133,3 +133,24 @@ fn a_method_returns_the_value_it_assigned_not_the_property() {
     assert!(widget.contains("public string NameTag"), "{widget}");
     assert!(widget.contains("long Renumber() {\n        var __rhRet = 2L;\n        this.NameTag = __rhRet;\n        return __rhRet;\n    }"), "{widget}");
 }
+
+/// A value expression in a `begin` body with an `else` is discarded but
+/// still evaluated (`_ = n + 1L;`, C# takes no bare `n + 1L;`), and a
+/// method ending in a local's assignment returns the assigned value, not
+/// the local, which `x = nil` first makes `long?`.
+#[test]
+fn a_discarded_value_and_a_nil_first_local_compile_as_csharp() {
+    let (emitted, errors) = emit_and_run::empty_app()
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n")
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\n  def plus_else\n    n = 1\n    begin\n      n + 1\n    rescue\n      2\n    else\n      3\n    end\n  end\n\n  def tally\n    x = nil\n    x = 1\n  end\nend\n")
+        .emit(BuildTarget::CSharp);
+    assert!(errors.is_empty(), "{errors:?}");
+    let widget = std::fs::read_to_string(emitted.join("app/models/Widget.cs")).unwrap();
+    assert!(widget.contains("try {\n            _ = n + 1L;\n            return 3L;\n        }"), "{widget}");
+    assert!(
+        widget.contains("long? x = null;\n        var __rhRet = 1L;\n        x = __rhRet;\n        return __rhRet;"),
+        "{widget}"
+    );
+}

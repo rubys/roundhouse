@@ -1195,13 +1195,10 @@ fn wrap_return(e: &Expr) -> String {
             );
         }
         // Not the assignment alone: Ruby's assignment answers the value, and a value method must return it
-        ExprNode::Assign { target: crate::expr::LValue::Var { id, name }, .. } => {
-            let read = ExprNode::Var { id: *id, name: name.clone() };
-            return format!("{}\nreturn {};", emit_stmt(e), emit_expr(&Expr::new(e.span, read)));
-        }
-        // An ivar's property can be wider than the method's return type, so
-        // the assigned value is returned, not the property read back.
-        ExprNode::Assign { target: crate::expr::LValue::Ivar { .. }, value } => {
+        // The assigned value, not the variable read back: a local or an ivar's
+        // property can be typed wider than the method's return (`long? x` after
+        // `x = nil`, `object?`).
+        ExprNode::Assign { target: crate::expr::LValue::Var { .. } | crate::expr::LValue::Ivar { .. }, value } => {
             if matches!(&*value.node, ExprNode::Lit { value: Literal::Nil }) {
                 return format!("{}\nreturn default;", emit_stmt(e));
             }

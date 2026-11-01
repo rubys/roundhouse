@@ -2055,7 +2055,7 @@ pub(super) fn emit_begin_rescue(
     // With an `else`, the else branch's value is the block's: the body
     // runs as statements, or a `return` from it skips the else.
     let try_body = match else_branch {
-        Some(eb) => [emit_stmt(body), arm(eb)].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n"),
+        Some(eb) => [emit_discarded(body), arm(eb)].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n"),
         None => arm(body),
     };
     let mut out = format!("try {{\n{}\n}}", indent(&try_body));
@@ -2090,6 +2090,33 @@ pub(super) fn emit_begin_rescue(
         out.push_str(&format!(" finally {{\n{}\n}}", indent(&emit_stmt(en))));
     }
     out
+}
+
+/// A body whose value is discarded: statements as `emit_stmt` writes them,
+/// except a value expression, which C# doesn't take as a statement
+/// (CS0201), is written as a discard so it still runs (and can raise).
+fn emit_discarded(e: &Expr) -> String {
+    if let ExprNode::Seq { exprs } = &*e.node {
+        return exprs.iter().map(emit_discarded).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n");
+    }
+    let is_value = match &*e.node {
+        ExprNode::Var { .. }
+        | ExprNode::Ivar { .. }
+        | ExprNode::Const { .. }
+        | ExprNode::Array { .. }
+        | ExprNode::Hash { .. }
+        | ExprNode::StringInterp { .. }
+        | ExprNode::BoolOp { .. }
+        | ExprNode::Range { .. } => true,
+        // An operator (`n + 1`, `a == b`, `x[i]`), not a call.
+        ExprNode::Send { method, .. } => !method.as_str().chars().any(|c| c.is_alphanumeric() || c == '_'),
+        _ => false,
+    };
+    if is_value {
+        format!("_ = {};", emit_expr(e))
+    } else {
+        emit_stmt(e)
+    }
 }
 
 pub(super) fn emit_stmt(e: &Expr) -> String {
