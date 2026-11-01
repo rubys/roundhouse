@@ -2769,6 +2769,23 @@ fn walk_decl_body_with_visibility<'pr>(
             out.constants.push((name, value));
             continue;
         }
+        // `APPROVED, DECLINED = 1, "declined"`: one constant per target, in
+        // order, as the single writes above.
+        if let Some(writes) = constant_multi_write(&stmt) {
+            for (name, value) in writes {
+                out.constants.push((name, ingest_expr(&value, file)?));
+            }
+            continue;
+        }
+        // `$loaded = true`: a global write runs where it stands as the
+        // body loads (`ingest::body_statements` marks it for the Ruby
+        // family; every other target refuses it by name).
+        if stmt.as_global_variable_write_node().is_some() {
+            if let Ok(e) = ingest_expr(&stmt, file) {
+                out.unknown_calls.push(e);
+            }
+            continue;
+        }
         // A direct write initializes this class/module object. Inside
         // `class << self` the receiver is its singleton class instead.
         if !mode.is_class_side()
@@ -5902,4 +5919,75 @@ fn requires_files(stmt: &ruby_prism::Node<'_>) -> bool {
     let mut found = Requires(false);
     ruby_prism::Visit::visit(&mut found, stmt);
     found.0
+}
+
+/// `A, B = x, y` in a class or module body: each target a bare constant,
+/// the value a list of as many elements, each one that runs no code
+/// ([`inert_value`]) and reads no target. Ruby evaluates every element
+/// before it assigns any target; with nothing in the elements able to
+/// observe a target, the pairs written one by one, in order, are the
+/// same writes. Anything else (a splat, a nested target, a value array
+/// computed as a whole, an element that calls a method) is not this shape.
+///
+/// Ported from Shopify/roundhouse-1, by Tobi Lütke.
+fn constant_multi_write<'a>(stmt: &ruby_prism::Node<'a>) -> Option<Vec<(Symbol, ruby_prism::Node<'a>)>> {
+    let write = stmt.as_multi_write_node()?;
+    if write.rest().is_some() || !write.rights().is_empty() {
+        return None;
+    }
+    let names: Vec<String> = write
+        .lefts()
+        .iter()
+        .map(|left| left.as_constant_target_node().map(|target| constant_id_str(&target.name()).to_string()))
+        .collect::<Option<_>>()?;
+    let array = write.value().as_array_node()?;
+    let elements: Vec<ruby_prism::Node<'a>> = array.elements().iter().collect();
+    if elements.len() != names.len() || elements.iter().any(|element| element.as_splat_node().is_some()) {
+        return None;
+    }
+    if !elements.iter().all(|element| inert_value(element, &names)) {
+        return None;
+    }
+    Some(names.into_iter().map(Symbol::from).zip(elements).collect())
+}
+
+/// A value whose evaluation runs no method of the app's: a literal, an
+/// array or hash of them, `.freeze` of one, or a constant read naming
+/// none of `targets`. A method call could look at a target
+/// (`const_defined?(:A)`) before Ruby has assigned any.
+fn inert_value(node: &ruby_prism::Node<'_>, targets: &[String]) -> bool {
+    let names_target = |name: &ruby_prism::ConstantId<'_>| targets.iter().any(|t| t == constant_id_str(name));
+    if node.as_integer_node().is_some()
+        || node.as_float_node().is_some()
+        || node.as_rational_node().is_some()
+        || node.as_imaginary_node().is_some()
+        || node.as_string_node().is_some()
+        || node.as_symbol_node().is_some()
+        || node.as_nil_node().is_some()
+        || node.as_true_node().is_some()
+        || node.as_false_node().is_some()
+    {
+        return true;
+    }
+    if let Some(read) = node.as_constant_read_node() {
+        return !names_target(&read.name());
+    }
+    if let Some(path) = node.as_constant_path_node() {
+        return path.name().is_some_and(|name| !names_target(&name))
+            && path.parent().is_none_or(|parent| inert_value(&parent, targets));
+    }
+    if let Some(array) = node.as_array_node() {
+        return array.elements().iter().all(|e| inert_value(&e, targets));
+    }
+    if let Some(hash) = node.as_hash_node() {
+        return hash.elements().iter().all(|e| {
+            e.as_assoc_node().is_some_and(|pair| inert_value(&pair.key(), targets) && inert_value(&pair.value(), targets))
+        });
+    }
+    node.as_call_node().is_some_and(|call| {
+        constant_id_str(&call.name()) == "freeze"
+            && call.arguments().is_none()
+            && call.block().is_none()
+            && call.receiver().is_some_and(|r| inert_value(&r, targets))
+    })
 }

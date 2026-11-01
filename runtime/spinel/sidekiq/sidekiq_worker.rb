@@ -452,9 +452,12 @@ module SidekiqWorker
     # killing the processor thread (and, on Spinel, the process).
     begin
       payload = SidekiqEnvelope.aj_payload(env)
-      outcome = Db.with_connection { ActiveJob.perform_parsed(payload) }
+      jid = SidekiqEnvelope.jid(env)
+      outcome = Db.with_connection { ActiveJob.perform_parsed_from(payload, jid) }
       if outcome == ActiveJob::PERFORM_RAN
         log("INFO", label + " done: " + elapsed(started) + " sec")
+      elsif outcome == ActiveJob::PERFORM_RETRIED
+        log("INFO", label + " retried by retry_on: " + elapsed(started) + " sec")
       elsif outcome == ActiveJob::PERFORM_DISCARDED
         log("INFO", label + " discarded: " + elapsed(started) + " sec")
       elsif outcome == ActiveJob::PERFORM_UNKNOWN_CLASS

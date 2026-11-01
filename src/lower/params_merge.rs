@@ -336,7 +336,7 @@ fn including_models(app: &App) -> HashMap<ClassId, Vec<Symbol>> {
 
 fn scan_bindings(app: &App, specs: &ParamsSpecs) -> HashMap<BindKey, Binding> {
     let mut seen: HashMap<BindKey, SiteShapes> = HashMap::default();
-    let assocs = crate::lower::scope_chain::build_assoc_registry(&app.models);
+    let assocs = crate::lower::scope_chain::build_assoc_registry_for_app(app);
     let assoc = AssocCtx { assocs: &assocs };
 
     // EVERY call site has to be seen, not just the ones that could bind
@@ -913,7 +913,7 @@ fn convert_attrs_call_sites(
     if !bindings.values().any(|b| matches!(b, Binding::Attrs(_))) {
         return;
     }
-    let assocs = crate::lower::scope_chain::build_assoc_registry(&app.models);
+    let assocs = crate::lower::scope_chain::build_assoc_registry_for_app(app);
     let assoc = AssocCtx { assocs: &assocs };
     for controller in &mut app.controllers {
         let actions: Vec<crate::dialect::Action> = controller.actions().cloned().collect();

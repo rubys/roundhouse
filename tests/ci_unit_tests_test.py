@@ -214,5 +214,60 @@ class UnitManifestTests(unittest.TestCase):
                 unit.manifest_cases(manifest)
 
 
+class IgnoredSuiteSelectionTests(unittest.TestCase):
+    """compare-ruby runs CRuby gates from the archive; a selector must name real ignored cases."""
+
+    def setUp(self):
+        self.cases = {
+            ("roundhouse", "registry::native_only"): True,
+            ("roundhouse::all_tests", "real_blog::zero_errors"): False,
+            ("roundhouse::all_tests", "framework_tests_ruby::inflector"): True,
+            ("roundhouse::all_tests", "framework_tests_ruby::router"): True,
+            ("roundhouse::all_tests", "framework_tests_ruby_next::other"): True,
+            ("roundhouse::all_tests", "tiny_api::cruby_gate_models"): True,
+            ("roundhouse::all_tests", "tiny_api::issue_163_open"): True,
+            ("roundhouse::all_tests", "tiny_api::active_listing"): False,
+        }
+
+    def test_selectors_parse_suite_and_optional_substring(self):
+        self.assertEqual(unit.parse_selector("framework_tests_ruby"), ("framework_tests_ruby", None))
+        self.assertEqual(unit.parse_selector("tiny_api:cruby_gate_"), ("tiny_api", "cruby_gate_"))
+        for invalid in ("", "Tiny", "tiny_api:", "a:b:c", "x/y", "tiny api", None):
+            with self.assertRaises(unit.ContractError):
+                unit.parse_selector(invalid)
+
+    def test_selection_is_ignored_cases_of_the_named_module_only(self):
+        chosen = unit.ignored_selection(self.cases, [("framework_tests_ruby", None),
+                                                     ("tiny_api", "cruby_gate_")])
+        self.assertEqual(chosen, {
+            ("roundhouse::all_tests", "framework_tests_ruby::inflector"),
+            ("roundhouse::all_tests", "framework_tests_ruby::router"),
+            ("roundhouse::all_tests", "tiny_api::cruby_gate_models"),
+        })
+
+    def test_a_selector_that_names_nothing_fails_instead_of_running_zero_tests(self):
+        for selector in (("uuid_key_ruby", None), ("tiny_api", "active_"), ("real_blog", None)):
+            with self.assertRaises(unit.ContractError):
+                unit.ignored_selection(self.cases, [("framework_tests_ruby", None), selector])
+
+    def test_filter_expression_matches_the_inventory_selection(self):
+        self.assertEqual(
+            unit.selection_filter([("framework_tests_ruby", None), ("tiny_api", "cruby_gate_")]),
+            "binary_id(roundhouse::all_tests) & ((test(/^framework_tests_ruby::/)) | "
+            "(test(/^tiny_api::/) & test(cruby_gate_)))")
+
+    def test_listed_matches_reads_only_selected_cases(self):
+        listed = inventory()
+        listed["rust-suites"]["roundhouse::all_tests"]["testcases"]["spinel_toolchain::native"][
+            "filter-match"] = {"status": "matches"}
+        self.assertEqual(unit.listed_matches(listed),
+                         {("roundhouse", "registry::resolves"),
+                          ("roundhouse::all_tests", "real_blog::zero_errors"),
+                          ("roundhouse::all_tests", "emit_and_run::ruby_executes"),
+                          ("roundhouse::all_tests", "spinel_toolchain::native")})
+        with self.assertRaises(unit.ContractError):
+            unit.listed_matches({})
+
+
 if __name__ == "__main__":
     unittest.main()

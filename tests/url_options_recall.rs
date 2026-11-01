@@ -87,6 +87,7 @@ fn the_resolver_recalls_a_segment_as_rails_does() {
     }
     let out = tree();
     let script = r#"
+require File.expand_path("runtime/action_view/view_helpers", Dir.pwd)
 require File.expand_path("app/route_helpers", Dir.pwd)
 r = RouteHelpers
 puts r.path_for_controller_action_page("home", "top", "2", { "length" => "1y" })
