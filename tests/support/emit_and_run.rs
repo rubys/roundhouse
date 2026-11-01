@@ -42,6 +42,7 @@
 
 #![allow(dead_code)]
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -245,6 +246,9 @@ impl Overlay {
             .edits
             .iter()
             .map(|edit| match edit {
+                Edit::Write { path, .. } if self.base.join(path).exists() => panic!(
+                    "run_spinel_slim compiles new probe files only; {path} already exists in the app, so use run_spinel"
+                ),
                 Edit::Write { path, .. } => path.clone(),
                 Edit::Replace { path, .. } | Edit::Remove { path } => panic!(
                     "run_spinel_slim compiles written probe files only; {path} edits the app, so use run_spinel"
@@ -261,8 +265,9 @@ impl Overlay {
             );
             requires.push(entry.to_string());
         }
-        let probes = emitted_from(&emitted, &written);
-        assert!(!probes.is_empty(), "run_spinel_slim: no emitted file comes from {written:?}");
+        let (probes, matched) = emitted_from(&emitted, &written);
+        let missing: Vec<&String> = written.iter().filter(|w| !matched.contains(*w)).collect();
+        assert!(missing.is_empty(), "run_spinel_slim: no emitted file comes from {missing:?}");
         requires.extend(probes);
         let mut contract: String =
             requires.iter().map(|r| format!("require_relative {r:?}\n")).collect();
@@ -273,21 +278,27 @@ impl Overlay {
 }
 
 /// Emitted `.rb` files (relative, without the extension, sorted) whose
-/// `#<SPINEL_SOURCE>` markers name one of the overlay's written sources.
-/// One source can become several files: the emitter writes one class each.
-fn emitted_from(emitted: &Path, written: &[String]) -> Vec<String> {
-    fn walk(root: &Path, dir: &Path, written: &[String], out: &mut Vec<String>) {
+/// `#<SPINEL_SOURCE>` markers name one of the overlay's written sources,
+/// and the written sources some file named. One source can become several
+/// files: the emitter writes one class each, and a test source lands under
+/// `test/`, so the whole tree is searched.
+fn emitted_from(emitted: &Path, written: &[String]) -> (Vec<String>, HashSet<String>) {
+    fn walk(root: &Path, dir: &Path, written: &[String], out: &mut Vec<String>, matched: &mut HashSet<String>) {
         let Ok(entries) = std::fs::read_dir(dir) else { return };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                walk(root, &path, written, out);
+                walk(root, &path, written, out, matched);
             } else if path.extension().is_some_and(|ext| ext == "rb") {
                 let text = std::fs::read_to_string(&path).unwrap_or_default();
-                let from_probe = text.lines().filter_map(|l| l.trim_start().strip_prefix("#<SPINEL_SOURCE>")).any(|marker| {
+                let mut from_probe = false;
+                for marker in text.lines().filter_map(|l| l.trim_start().strip_prefix("#<SPINEL_SOURCE>")) {
                     let source = marker.rsplit_once(':').map_or(marker, |(file, _line)| file);
-                    written.iter().any(|w| source == w || source.ends_with(&format!("/{w}")))
-                });
+                    for w in written.iter().filter(|w| source == *w || source.ends_with(&format!("/{w}"))) {
+                        matched.insert(w.clone());
+                        from_probe = true;
+                    }
+                }
                 if from_probe {
                     let rel = path.strip_prefix(root).unwrap().with_extension("");
                     out.push(rel.to_string_lossy().into_owned());
@@ -295,12 +306,10 @@ fn emitted_from(emitted: &Path, written: &[String]) -> Vec<String> {
             }
         }
     }
-    let mut out = Vec::new();
-    for top in ["app", "lib"] {
-        walk(emitted, &emitted.join(top), written, &mut out);
-    }
+    let (mut out, mut matched) = (Vec::new(), HashSet::new());
+    walk(emitted, emitted, written, &mut out, &mut matched);
     out.sort();
-    out
+    (out, matched)
 }
 
 /// Compile `contract.rb` in the emitted tree with spinel and run the binary.
