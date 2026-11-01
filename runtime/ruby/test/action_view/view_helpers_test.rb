@@ -436,6 +436,15 @@ class ViewHelpersTest < Minitest::Test
   end
 
   # Rails 8.1.4's `path_to_stylesheet` (actionview `asset_path`).
+  # Rails' `source.blank?`: empty, or only whitespace (`[[:space:]]`), is "".
+  def test_stylesheet_href_answers_empty_for_a_blank_source
+    assert_equal "", ViewHelpers.stylesheet_href(" ")
+    assert_equal "", ViewHelpers.stylesheet_href("\t")
+    assert_equal "", ViewHelpers.stylesheet_href(" \n ")
+    assert_equal "", ViewHelpers.stylesheet_href("\u00a0")
+    assert_equal "", ViewHelpers.stylesheet_href("\u3000")
+  end
+
   def test_stylesheet_href_keeps_a_url_or_blank_as_given
     assert_equal "https://cdn.example.org/theme.css", ViewHelpers.stylesheet_href("https://cdn.example.org/theme.css")
     assert_equal "HTTP://cdn.example.org/theme.css", ViewHelpers.stylesheet_href("HTTP://cdn.example.org/theme.css")

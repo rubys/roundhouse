@@ -981,12 +981,13 @@ module ActionView
     end
 
     # Rails 8.1.4's `path_to_stylesheet` (actionview `asset_path`, type
-    # :stylesheet): a URL (`scheme://`, `//`, `cid:`, `data:`) and a blank
-    # source as given; otherwise `.css` unless the name already ends in it,
+    # :stylesheet): a blank source is ""; a URL (`scheme://`, `//`, `cid:`,
+    # `data:`) as given; otherwise `.css` unless the name already ends in it,
     # then the pipeline unless the path is absolute, with a `?…`/`#…` tail
     # kept at the end. String ops only: no portable Regexp.
     def self.stylesheet_href(source)
-      return source if source.empty? || asset_url?(source)
+      return "" if blank_source?(source)
+      return source if asset_url?(source)
       cut = first_char_index(source, "?")
       fragment = first_char_index(source, "#")
       # Two flat statements, not `a && (b || c)` (Crystal's and Go's emits
@@ -1010,6 +1011,16 @@ module ActionView
       return true if lower.start_with?("cid:") || lower.start_with?("data:")
       i = scheme_letter_count(lower)
       i > 0 && lower[i, 3] == "://"
+    end
+
+    # Rails' `String#blank?`: empty, or every character `[[:space:]]`.
+    def self.blank_source?(s)
+      i = 0
+      while i < s.length
+        return false unless " \t\n\u000b\u000c\r\u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000".include?(s[i, 1])
+        i += 1
+      end
+      true
     end
 
     # How many of `s`'s first characters are `-` or `a`-`z`. Its own
