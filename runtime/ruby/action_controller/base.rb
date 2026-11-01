@@ -909,7 +909,15 @@ module ActionController
       @body   = body
       @status = resolve_status(status)
       @performed = true
-      @content_type = content_type unless content_type.nil?
+      unless content_type.nil?
+        # A render inherits the response's charset, regardless of media type.
+        # An explicit charset wins; head and send_data suppress it themselves.
+        charset = @content_type.to_s.split("charset=", 2)[1].to_s
+        @content_type = content_type
+        if !content_type.include?("charset=") && !charset.empty?
+          @content_type = content_type + "; charset=" + charset
+        end
+      end
       @location = ActionController.sanitize_location(location) unless location.nil?
       apply_vary_header
       nil

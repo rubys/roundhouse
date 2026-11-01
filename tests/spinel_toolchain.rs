@@ -32,6 +32,10 @@ use roundhouse::ingest::ingest_app;
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/response_content_type.rs"]
+mod response_content_type_contract;
+#[path = "spinel_toolchain/response_content_type.rs"]
+mod response_content_type;
 #[path = "spinel_toolchain/rack_mounts.rs"]
 mod rack_mounts;
 #[path = "support/time_change_usec.rs"]

@@ -1,0 +1,82 @@
+[
+  [
+    "json",
+    200,
+    "application/json; charset=utf-8"
+  ],
+  [
+    "plain",
+    200,
+    "text/plain; charset=utf-8"
+  ],
+  [
+    "html",
+    200,
+    "text/html; charset=utf-8"
+  ],
+  [
+    "vendor_json",
+    200,
+    "application/vnd.api+json; charset=utf-8"
+  ],
+  [
+    "json_charset",
+    200,
+    "application/json; charset=iso-8859-1"
+  ],
+  [
+    "head",
+    200,
+    "text/html"
+  ],
+  [
+    "head_csv",
+    200,
+    "text/csv"
+  ],
+  [
+    "send_csv",
+    200,
+    "text/csv"
+  ],
+  [
+    "send_binary",
+    200,
+    "application/octet-stream"
+  ],
+  [
+    "redirect",
+    302,
+    "text/html; charset=utf-8"
+  ],
+  [
+    "plain_csv",
+    200,
+    "text/csv; charset=utf-8"
+  ],
+  [
+    "plain_charset",
+    200,
+    "text/plain; charset=iso-8859-1"
+  ],
+  [
+    "head_json",
+    200,
+    "application/json"
+  ],
+  [
+    "head_no_content",
+    204,
+    null
+  ],
+  [
+    "send_json",
+    200,
+    "application/json"
+  ],
+  [
+    "inherited_charset",
+    200,
+    "text/csv; charset=iso-8859-1"
+  ]
+]
