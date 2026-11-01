@@ -728,3 +728,5 @@ puts "named captures passed"
 
 #[path = "spinel_toolchain/db_binary_literal.rs"]
 mod db_binary_literal;
+#[path = "spinel_toolchain/solid_queue_clear.rs"]
+mod solid_queue_clear;

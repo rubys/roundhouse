@@ -1000,23 +1000,69 @@ fn merge_text(parts: Vec<Part>) -> Vec<Part> {
 }
 
 /// What form helpers translate: the app's catalog, and each model's i18n
-/// by the param key a form names it with (`article`, `admin_user`).
+/// by class identity. Parameter keys only select metadata when unambiguous.
 #[derive(Clone, Debug, Default)]
 pub struct FormI18n {
     catalog: Catalog,
     models: crate::det::HashMap<String, ModelI18n>,
+    classes_by_parameter: crate::det::HashMap<String, Option<String>>,
 }
 
 impl FormI18n {
     pub fn of(app: &crate::app::App) -> Self {
-        FormI18n {
-            catalog: app.i18n.clone(),
-            models: app
-                .models
-                .iter()
-                .map(|m| (crate::naming::underscore(m.name.0.as_str()).replace('/', "_"), m.i18n.clone()))
-                .collect(),
+        let mut models: crate::det::HashMap<_, _> = app.models.iter()
+            .map(|m| (m.name.0.as_str().to_owned(), m.i18n.clone())).collect();
+        let bases: crate::det::HashMap<_, _> = app.models.iter().map(|m| (&m.name, m)).collect();
+        let parents: crate::det::HashMap<_, _> = app.library_classes.iter()
+            .filter_map(|class| class.parent.as_ref().map(|parent| (&class.name, parent))).collect();
+        for class in app.library_classes.iter().filter(|class| !class.is_module) {
+            let key = class.name.0.as_str().to_owned();
+            if models.contains_key(&key) { continue; }
+            let mut keys = vec![i18n_key(class.name.0.as_str())];
+            let mut parent = class.parent.as_ref();
+            let mut seen = crate::det::HashSet::default();
+            while let Some(id) = parent {
+                if !seen.insert(id) { break; }
+                if let Some(base) = bases.get(id) {
+                    let mut metadata = base.i18n.clone();
+                    keys.extend(metadata.keys.iter().cloned());
+                    let scope = metadata.scope().to_owned();
+                    metadata.keys = keys;
+                    metadata.catalog = app.i18n.subset_for(&scope, &metadata.keys);
+                    models.insert(key, metadata);
+                    break;
+                }
+                keys.push(i18n_key(id.0.as_str()));
+                parent = parents.get(id).copied();
+            }
         }
+        let mut classes_by_parameter = crate::det::HashMap::<String, Option<String>>::default();
+        for class in models.keys() {
+            classes_by_parameter.entry(app.model_param_key(class))
+                .and_modify(|known| { if known.as_ref() != Some(class) { *known = None; } })
+                .or_insert_with(|| Some(class.clone()));
+        }
+        FormI18n { catalog: app.i18n.clone(), models, classes_by_parameter }
+    }
+
+    pub(crate) fn model_class(&self, object_name: &str) -> Option<&str> {
+        self.classes_by_parameter.get(object_name.split('[').next().unwrap_or(object_name))?.as_deref()
+    }
+
+    fn model_for_parameter(&self, object_name: &str) -> Option<&ModelI18n> {
+        self.model_class(object_name).and_then(|class| self.models.get(class))
+    }
+
+    pub(crate) fn label_for(&self, class: &str, object_name: &str, method: &str) -> String {
+        self.label_with_model(object_name, method, self.models.get(class))
+    }
+
+    pub(crate) fn submit_for(&self, class: &str, object_name: &str, key: &str) -> String {
+        self.submit_with_model(object_name, key, self.models.get(class))
+    }
+
+    pub(crate) fn has_errors_for(&self, class: &str) -> bool {
+        self.models.contains_key(class)
     }
 
     /// `form.label :method`'s text, as `Tags::Label#translation` finds it:
@@ -1024,8 +1070,11 @@ impl FormI18n {
     /// `helpers.label.<i18n_key>.<method>`, then its `human_attribute_name`,
     /// then `method.humanize`.
     pub fn label(&self, object_name: &str, method: &str) -> String {
+        self.label_with_model(object_name, method, self.model_for_parameter(object_name))
+    }
+
+    fn label_with_model(&self, object_name: &str, method: &str, model: Option<&ModelI18n>) -> String {
         let catalog = self.catalog.or_rails_default();
-        let model = self.models.get(object_name);
         let keys = std::iter::once(format!("helpers.label.{object_name}.{method}"))
             .chain(model.and_then(|m| m.keys.first()).map(|k| format!("helpers.label.{k}.{method}")));
         keys.filter_map(|k| catalog.lookup(&k))
@@ -1038,7 +1087,7 @@ impl FormI18n {
     /// Whether the form's record is one of the app's models, or a record
     /// nested under one, so it answers `errors` as Rails' wrapper requires.
     pub fn has_errors(&self, object_name: &str) -> bool {
-        self.models.contains_key(object_name.split('[').next().unwrap_or(object_name))
+        self.model_for_parameter(object_name).is_some()
     }
 
     /// The app's own `field_error_proc`, which this wrapper does not model.
@@ -1050,11 +1099,12 @@ impl FormI18n {
     /// `submit_default_value` finds it: `helpers.submit.<object_name>.<key>`,
     /// `helpers.submit.<key>`, then "<Key> <model>", over the model's human name.
     pub fn submit(&self, object_name: &str, key: &str) -> String {
+        self.submit_with_model(object_name, key, self.model_for_parameter(object_name))
+    }
+
+    fn submit_with_model(&self, object_name: &str, key: &str, model: Option<&ModelI18n>) -> String {
         let catalog = self.catalog.or_rails_default();
-        let model = self
-            .models
-            .get(object_name)
-            .map(|m| m.model_human_name())
+        let model = model.map(|m| m.model_human_name())
             .unwrap_or_else(|| humanize(object_name));
         [format!("helpers.submit.{object_name}.{key}"), format!("helpers.submit.{key}")]
             .iter()
@@ -1113,7 +1163,8 @@ pub fn stamp_models(app: &mut crate::app::App) {
 
 /// `Admin::User` → `admin/user`, ActiveModel::Name#i18n_key.
 pub fn i18n_key(class_name: &str) -> String {
-    crate::naming::underscore(class_name)
+    class_name.trim_start_matches("::").split("::")
+        .map(crate::naming::model_param_key).collect::<Vec<_>>().join("/")
 }
 
 /// ActiveSupport's `String#humanize` on an attribute name: drop leading

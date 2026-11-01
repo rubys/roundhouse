@@ -302,9 +302,30 @@ fn reshapes_the_program(node: &ruby_prism::Node<'_>, defined: &crate::det::HashS
 /// A boot hook call (`Rails.application.config.after_initialize do … end`):
 /// its block runs at a point in boot this program does not reproduce.
 fn is_hook(node: &ruby_prism::Node<'_>) -> bool {
-    node.as_call_node().is_some_and(|c| {
-        HOOKS.contains(&super::util::constant_id_str(&c.name()).as_ref()) && c.block().is_some()
-    })
+    if let Some(c) = node.as_call_node() {
+        return HOOKS.contains(&super::util::constant_id_str(&c.name()).as_ref()) && c.block().is_some();
+    }
+    // Only through a guard's branches: a hook name elsewhere (`X = Builder.configure { … }`, a `def` body) runs when it is reached, not at a later point of boot.
+    let branches: Vec<ruby_prism::Node<'_>> = if let Some(n) = node.as_if_node() {
+        [n.statements().map(|s| s.as_node()), n.subsequent()].into_iter().flatten().collect()
+    } else if let Some(n) = node.as_unless_node() {
+        [n.statements().map(|s| s.as_node()), n.else_clause().map(|e| e.as_node())].into_iter().flatten().collect()
+    } else if let Some(n) = node.as_else_node() {
+        n.statements().map(|s| s.as_node()).into_iter().collect()
+    } else if let Some(n) = node.as_case_node() {
+        n.conditions().iter().chain(n.else_clause().map(|e| e.as_node())).collect()
+    } else if let Some(n) = node.as_case_match_node() {
+        n.conditions().iter().chain(n.else_clause().map(|e| e.as_node())).collect()
+    } else if let Some(n) = node.as_when_node() {
+        n.statements().map(|s| s.as_node()).into_iter().collect()
+    } else if let Some(n) = node.as_in_node() {
+        n.statements().map(|s| s.as_node()).into_iter().collect()
+    } else if let Some(n) = node.as_statements_node() {
+        n.body().iter().collect()
+    } else {
+        Vec::new()
+    };
+    branches.iter().any(is_hook)
 }
 
 /// Point each receiverless call to an initializer `def` at [`MODULE`], in

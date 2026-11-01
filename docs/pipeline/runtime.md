@@ -1830,9 +1830,9 @@ come from the job's `perform_later` call sites, and
   under `:sidekiq`, and `set(priority:)` is dropped with a warning.
   This holds on ruby, jruby and spinel; the other targets warn
   (`sidekiq-adapter-not-honored`) and run the jobs in process. A pushed
-  job carries `"retry":true`, so Sidekiq retries it with its own
-  defaults; Active Job's `retry_on`, TLS (`rediss://`) and per-job
-  adapters are still missing.
+  job carries `"retry":true`, or the job's literal `sidekiq_options`
+  (`retry`, `retry_queue`, `retry_for`, `dead`), where Sidekiq writes
+  them. TLS (`rediss://`) and per-job adapters are still missing.
 - **The worker role has no heartbeat.** The same build runs the pushed
   jobs as `./app sidekiq` (spinel) or `ruby sidekiq.rb` (ruby, jruby),
   a Sidekiq 8.1 server process with BasicFetch
@@ -1852,8 +1852,20 @@ come from the job's `perform_later` call sites, and
   `schedule`, back onto their queues with Sidekiq's Lua pop (`EVALSHA`,
   so spinel needs spinel-redis with scripting) every
   `:poll_interval_average:` or 5 s per Sidekiq process, randomized as
-  Sidekiq randomizes it. `retry_on` and the heartbeat Sidekiq's Web UI
-  reads (and the process count the scheduler scales by) are still
+  Sidekiq randomizes it. Before Sidekiq's rules, an error goes to the
+  job's `retry_on` and `discard_on` handlers, searched as Active Job
+  searches them (the job's own, last declared first, then its
+  ancestors'): `discard_on` drops the job, and `retry_on` pushes it
+  again with Active Job's counters (`executions`,
+  `exception_executions`, `provider_job_id`) after its wait (a literal
+  number or Duration, or `:polynomially_longer`, plus `jitter:` or the
+  job's `retry_jitter`, which `load_defaults` 6.1 sets to 0.15) to its
+  `queue:` and `priority:`, until its `attempts:` are used up and the
+  error goes on to Sidekiq's rules. A handler with a block, a computed
+  option or an exception class the tree doesn't define is an error
+  (`job-handler-unsupported`) at its call; `after_discard` is dropped
+  with a warning. The heartbeat Sidekiq's Web UI
+  reads (and the process count the scheduler scales by) is still
   missing. Under
   config/cable.yml's `adapter: redis`, every process's broadcasts go
   out as `PUBLISH <channel_prefix>:<stream>`, as Action Cable's Redis

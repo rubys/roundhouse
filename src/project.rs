@@ -1122,12 +1122,74 @@ fn report_replayed_class_bodies(app: &App, target: BuildTarget) {
     }
     for lc in &app.library_classes {
         for expr in lc.unknown_calls.iter().filter(|e| e.decisions & crate::expr::REPLAYED_CLASS_BODY != 0) {
-            let crate::expr::ExprNode::Send { method, .. } = &*expr.node else { continue };
+            // A call by its method's name; any other statement
+            // (`self.mode ||= :live`) as it is written.
+            let written = match &*expr.node {
+                crate::expr::ExprNode::Send { method, .. } => method.as_str().to_string(),
+                _ => crate::emit::ruby::emit_expr(expr).lines().next().unwrap_or_default().trim().to_string(),
+            };
             emit::diagnostics::report_unsupported(
                 expr.span,
                 target.as_str(),
                 "class body",
-                format!("`{}` in the body of `{}` runs its own class method as it loads, which the {} emit does not carry", method.as_str(), lc.name.0.as_str(), target.as_str()),
+                format!("`{written}` in the body of `{}` runs its own class method as it loads, which the {} emit does not carry", lc.name.0.as_str(), target.as_str()),
+            );
+        }
+    }
+}
+
+/// A class or module body statement the CRuby and JRuby trees write
+/// back where the source has it (`expr::BODY_STATEMENT`), which Ruby
+/// runs as the body loads, refused by name where nothing runs it so:
+///
+/// * a global variable write (`$loaded = true`), on every other target;
+/// * a write through a class-side writer (`self.mode = :test`,
+///   `self.mode ||= :live` through an accessor an app ancestor defines),
+///   on a target outside the Ruby library emit. Spinel, Roda and
+///   Futamura ledger such a write as a dropped class-body call
+///   (`emit::ruby::library`); the rest have no class body at all.
+///
+/// Other body statements, `delegate` among them, reach those targets
+/// through their own lowering.
+fn report_body_statements(app: &App, target: BuildTarget) {
+    use crate::expr::{ExprNode, LValue};
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
+        return;
+    }
+    let ruby_library_emit = matches!(target, BuildTarget::Spinel | BuildTarget::Roda | BuildTarget::Futamura);
+    fn class_side_write(expr: &crate::expr::Expr) -> bool {
+        let on_self = |recv: &crate::expr::Expr| matches!(&*recv.node, ExprNode::SelfRef);
+        match &*expr.node {
+            ExprNode::Assign { target: LValue::Attr { recv, .. }, .. }
+            | ExprNode::OpAssign { target: LValue::Attr { recv, .. }, .. } => on_self(recv),
+            ExprNode::Send { recv, method, .. } => {
+                recv.as_ref().is_none_or(|r| on_self(r))
+                    && method.as_str().ends_with('=')
+                    && !matches!(method.as_str(), "==" | "!=" | "===" | "<=" | ">=")
+            }
+            // `self.mode ||= :live` lowered to `self.mode || (self.mode = :live)`.
+            ExprNode::BoolOp { right, .. } => class_side_write(right),
+            _ => false,
+        }
+    }
+    let refused = |call: &&crate::expr::Expr| {
+        call.decisions & crate::expr::BODY_STATEMENT != 0
+            && (matches!(&*call.node, ExprNode::Assign { target: LValue::Var { name, .. }, .. } if name.as_str().starts_with('$'))
+                || (!ruby_library_emit && class_side_write(call)))
+    };
+    for lc in &app.library_classes {
+        for call in lc.unknown_calls.iter().filter(refused) {
+            let written = crate::emit::ruby::emit_expr(call);
+            emit::diagnostics::report_unsupported(
+                call.span,
+                target.as_str(),
+                "class body statement",
+                format!(
+                    "`{}` in the body of `{}` runs where it stands when the body loads; the {} emit has no class body that runs it so, and drops it",
+                    written.lines().next().unwrap_or_default().trim(),
+                    lc.name.0.as_str(),
+                    target.as_str()
+                ),
             );
         }
     }
@@ -2836,6 +2898,7 @@ fn target_files_inner(
     report_relation_class_calls(app, target);
     report_typescript_error_class(app, target);
     report_replayed_class_bodies(app, target);
+    report_body_statements(app, target);
     report_controller_sibling_classes(app, target);
     // `validates …, uniqueness:` left out of a target with no runtime
     // Relation: reported here, where the CLI and the MCP `wont_lower`
@@ -7739,6 +7802,8 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         | "StringScanner" | "Zlib::GzipWriter"
         // runtime/spinel/integration_session.rb and the ruby tree's twin.
         | "ActionDispatch::Integration::Session" | "ActionDispatch::TestResponse"
+        // runtime/spinel/solid_queue.rb.
+        | "SolidQueue::Queue" | "SolidQueue::Semaphore" | "SolidQueue::Semaphore::Relation"
         // ruby-vips on the ruby family, spinel-ruby-vips on spinel.
         | "Vips::Image"
         | "Rails::HTML5::SafeListSanitizer" | "JSON" | "JSON::ParserError"
