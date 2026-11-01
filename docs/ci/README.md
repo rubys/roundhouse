@@ -39,7 +39,12 @@ standing CI job; survey tip only when deliberately bumping that pin.
 `unit-build` compiles one archive of all library, binary, and integration
 tests. Four unit shards partition the active cases; ignored integrations
 still need selected toolchain lanes. Framework and toolchain suites also
-run inside comparison jobs. **Spinel is not part of `BASE`.**
+run inside comparison jobs. compare-ruby and compare-ruby-next run
+their CRuby gates (`framework_tests_ruby`, `uuid_key_ruby`, tiny_api's
+`cruby_gate_` cases, `roda_toolchain`) from that archive with
+`ci-unit-tests.py select`, and compare-ruby emits with build-roundhouse's
+binary, so neither compiles Roundhouse; they wait for those builds, not for
+the unit shards. **Spinel is not part of `BASE`.**
 
 That floor is the merge claim for ordinary analyzer, lowerer, and runtime
 work: the Ruby shape runs, and Campfire still matches Rails. Crystal, Go,
@@ -300,7 +305,7 @@ Read the owner and its executable contract before editing:
 | Concern | Source | Tests |
 |---|---|---|
 | Coverage and execution | [ci.yml](../../.github/workflows/ci.yml), [ci-plan.py](../../scripts/ci-plan.py), [ci-unit-tests.py](../../scripts/ci-unit-tests.py) | `tests/ci_unit_tests_test.py`, `tests/ci_plan_test.py`, `tests/ci_plan_focus_test.py`, `tests/ci_policy_workflow.rs`, `tests/workflow_yaml_parses.rs` |
-| Toolchain selection | [ci.yml](../../.github/workflows/ci.yml), [`.ruby-version`](../../.ruby-version), [bin/rh](../../bin/rh) | `tests/ci_toolchain_workflow.rs`, `tests/rh_verify.rs` |
+| Toolchain selection | [ci.yml](../../.github/workflows/ci.yml), [`.ruby-version`](../../.ruby-version), [bin/rh](../../bin/rh) | `tests/ci_toolchain_workflow.rs`, `tests/rh_verify.rs`, `tests/rh_transpile.rs` |
 | Receipt reuse | [ci-reuse.py](../../scripts/ci-reuse.py) | `tests/ci_reuse_test.py` |
 | Fixture caching | [generate-fixture in ci.yml](../../.github/workflows/ci.yml) | `tests/ci_fixture_workflow.rs` |
 | Archive evidence and Pages | [ci-archive-evidence.py](../../scripts/ci-archive-evidence.py), [ci-site.py](../../scripts/ci-site.py), [full-ci.yml](../../.github/workflows/full-ci.yml), [publish-site.yml](../../.github/workflows/publish-site.yml) | `tests/ci_site_test.py`, `tests/ci_policy_workflow.rs` |

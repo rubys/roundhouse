@@ -1044,6 +1044,24 @@ module ActionView
       digested_asset_path(source)
     end
 
+    # `asset_url` — `asset_path` with the host Rails prefixes when one is
+    # configured. Neither a request nor `config.asset_host` reaches a
+    # module function, so it answers the same path (the `image_url`
+    # posture), digested where the tree has a Propshaft manifest; apps
+    # that set `skip_pipeline: true` (an icon model's `url`) hand in the
+    # `/assets/...` path themselves. `data:` and `cid:` sources pass
+    # through, as Rails' URI_REGEXP lets them.
+    def self.asset_url(source, skip_pipeline: false)
+      return source if skip_pipeline
+      return source if source.start_with?("/")
+      return source if source.include?("://")
+      # Rails' URI_REGEXP is case-insensitive: `DATA:` and `CID:` pass too.
+      scheme = source.downcase
+      return source if scheme.start_with?("data:") || scheme.start_with?("cid:")
+      url = digested_asset_path(source)
+      url
+    end
+
     # `path_to_javascript "application"` → the asset path for a JS source.
     # Rails appends the `.js` extension when the source carries none, then
     # prefixes the asset path (undigested here, per the `image_path` note —
