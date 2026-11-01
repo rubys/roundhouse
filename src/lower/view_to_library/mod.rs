@@ -243,6 +243,8 @@ pub struct ViewLowerCtx<'a> {
     /// See [`request_context_views`].
     request_context: std::rc::Rc<crate::det::HashSet<String>>,
     locals_keys: crate::det::HashMap<(String, String), Vec<String>>,
+    /// See [`ivar_record_partials`].
+    ivar_records: std::rc::Rc<crate::det::HashSet<ViewKey>>,
     reference_reads: std::rc::Rc<crate::det::HashSet<String>>,
     reference_targets: std::rc::Rc<crate::det::HashMap<String, String>>,
     nilable_scalar_reads: std::rc::Rc<crate::det::HashSet<String>>,
@@ -313,6 +315,11 @@ impl<'a> ViewLowerCtx<'a> {
             partial_extras: std::rc::Rc::new(partial_extras_map(app)),
             request_context: std::rc::Rc::new(request_context_views(&app.views)),
             locals_keys: render_locals_keys(&app.views, &app.controllers, &app.library_classes),
+            ivar_records: std::rc::Rc::new(ivar_record_partials(
+                &app.views,
+                &app.controllers,
+                &app.library_classes,
+            )),
             reference_reads: std::rc::Rc::new(reference_reader_names(app)),
             reference_targets: std::rc::Rc::new(reference_target_names(app)),
             nilable_scalar_reads: std::rc::Rc::new(nilable_scalar_reader_names(app)),
@@ -453,7 +460,10 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         .as_ref()
         .and_then(|k| lx.closures.get(k).cloned())
         .unwrap_or_default();
-    let ivar_locals = view_ivar_locals(view, &closure_raw);
+    let record_apart = view_key
+        .as_ref()
+        .and_then(|k| record_apart_from_ivar(view, k, &arg_name, &lx.ivar_records));
+    let ivar_locals = view_ivar_locals(view, &closure_raw, record_apart);
     let keys = view_key.as_ref().and_then(|k| lx.locals_keys.get(k));
     // Flash rename → ivar rewrite → extras collect, one pipeline shared
     // with the call-site contracts (see `extra_params::rewritten_extras`).
@@ -675,6 +685,15 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         }
     }
 
+    // The params that hold the rendering template's ivar of their name
+    // (`ViewCtx::held_ivars`): the closure params, a partial's record
+    // among them when it stands for its ivar (`ivar_record_partials`).
+    let mut held_ivars: Vec<String> = closure_ivars
+        .iter()
+        .filter(|iv| is_action_view || **iv != arg_name || (is_partial && record_apart.is_none()))
+        .cloned()
+        .collect();
+
     // ── Strict-locals override ───────────────────────────────────────
     // A partial with a `<%# locals: (…) -%>` header declares its locals
     // interface EXACTLY. Its signature becomes: the FIRST declared local
@@ -713,6 +732,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
             .filter(|iv| !declared.contains(iv.as_str()))
             .cloned()
             .collect();
+        held_ivars = closure.clone();
 
         let mut new_params: Vec<Param> = Vec::new();
         let mut sig_params: Vec<TyParam> = Vec::new();
@@ -837,6 +857,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         lexxy: app.gem_lock.as_ref().is_some_and(|lock| lock.has("lexxy")),
         lexxy_editor_adapter: app.gem_lock.as_ref().is_some_and(lexxy_uses_editor_adapter),
         partial_ivars: closures.clone(),
+        ivar_records: lx.ivar_records.clone(),
         formats: std::iter::once(view.format.as_str())
             .chain((view.format.as_str() != "html").then_some("html"))
             .map(str::to_string)
@@ -852,6 +873,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         str_ivars: std::rc::Rc::new(view_str_ivars(app, &view.name)),
         ivar_locals: std::rc::Rc::new(ivar_locals),
         own_flash,
+        held_ivars,
     };
 
     // A partial that receives a form builder as a local re-derives the
@@ -2654,6 +2676,112 @@ pub(crate) fn render_locals_keys(
     acc.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect()
 }
 
+/// The convention partials whose record param also stands for the ivar
+/// named like it (`post` for `@post` in `posts/_summary`). Rails keeps
+/// the two apart; here they share one param, which is right only while
+/// every render hands the partial no record, so the param can carry the
+/// caller's ivar (`caller_record_ivar`). Any other site that names the
+/// partial (`render "outer", post: other`, `object:`, `collection:`, a
+/// turbo stream's `partial:`, a controller's or a helper's render) or
+/// an object render (`render @posts` into `posts/_post`) leaves it out,
+/// and such a partial takes the ivar as a param of its own
+/// (`view_ivar_locals`). Sites are matched by the partial's base name,
+/// so a doubtful one only ever leaves a partial out.
+pub(crate) fn ivar_record_partials(
+    views: &[View],
+    controllers: &[crate::dialect::Controller],
+    library_classes: &[crate::dialect::LibraryClass],
+) -> crate::det::HashSet<ViewKey> {
+    use crate::lower::view::RenderPartial;
+
+    fn scan(e: &Expr, own_dir: Option<&str>, out: &mut crate::det::HashSet<String>) {
+        e.node.for_each_child(&mut |c| scan(c, own_dir, out));
+        let ExprNode::Send { recv, method, args, block, .. } = &*e.node else { return };
+        let str_of = |e: &Expr| match &*e.node {
+            ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+            _ => None,
+        };
+        let mut named: Vec<String> = Vec::new();
+        if recv.is_none() && matches!(method.as_str(), "render" | "render_to_string") {
+            named.extend(args.first().and_then(str_of));
+        }
+        for arg in args {
+            if let ExprNode::Hash { entries, .. } = &*arg.node {
+                named.extend(entries.iter().filter_map(|(k, v)| match &*k.node {
+                    ExprNode::Lit { value: Literal::Sym { value } }
+                        if matches!(value.as_str(), "partial" | "layout") =>
+                    {
+                        str_of(v)
+                    }
+                    _ => None,
+                }));
+            }
+        }
+        if named.is_empty() {
+            return;
+        }
+        let hands_no_record = own_dir.is_some_and(|dir| {
+            match crate::lower::view::classify_render_partial(
+                recv.as_ref(),
+                method.as_str(),
+                args,
+                block.as_ref(),
+                &|_| true,
+                &|_| false,
+            ) {
+                // Bound as `named_partial_call_with_record` binds it.
+                Some(RenderPartial::Named { partial, arg, locals }) => {
+                    let target_dir = partial.rsplit_once('/').map_or(dir, |(d, _)| d);
+                    let module_camel = camelize_path(&snake_case(target_dir));
+                    let record = singularize(&snake_case(last_segment(&module_camel)));
+                    match locals {
+                        Some(entries) => !entries.iter().any(|(k, _)| {
+                            matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
+                                if value.as_str() == record)
+                        }),
+                        None => arg.is_none(),
+                    }
+                }
+                _ => false,
+            }
+        });
+        if !hands_no_record {
+            out.extend(named.iter().map(|p| {
+                p.rsplit('/').next().unwrap_or(p).trim_start_matches('_').to_string()
+            }));
+        }
+    }
+
+    let mut bound = crate::det::HashSet::default();
+    for v in views {
+        let (dir, _) = split_view_name(v.name.as_str());
+        scan(&v.body, (!dir.is_empty()).then_some(dir), &mut bound);
+    }
+    for c in controllers {
+        for a in c.actions() {
+            scan(&a.body, None, &mut bound);
+        }
+    }
+    for lc in library_classes {
+        for m in &lc.methods {
+            scan(&m.body, None, &mut bound);
+        }
+    }
+    let stems = PartialStems::of(views);
+    let (collection_locals, _) = collection_element_locals_from_views(views, &stems);
+    views
+        .iter()
+        .filter(|v| v.strict_locals.is_none())
+        .filter_map(|v| {
+            let (dir, base) = split_view_name(v.name.as_str());
+            let name = base.strip_prefix('_').filter(|_| !dir.is_empty())?;
+            let record = effective_record_arg(v, &collection_locals, &[], &stems);
+            let key = stems.key(&camelize_path(&snake_case(dir)), base);
+            (name != record && !bound.contains(name)).then_some(key)
+        })
+        .collect()
+}
+
 /// Per-PARTIAL call contract for CONTROLLER-side partial renders
 /// (`render partial: "commentbox", locals: {comment: c}` inside an
 /// action). Mirrors the partial def-site parameter order exactly:
@@ -2752,6 +2880,7 @@ pub(crate) fn partial_call_contracts(
     // Same record derivation as `build_library_class` / `partial_extras_map`
     // so `flash_locals` sees one handed name across def and callers.
     let (collection_locals, _) = collection_element_locals_from_views(views, &stems);
+    let ivar_records = ivar_record_partials(views, controllers, library_classes);
     let request_context = request_context_views(views);
     let form_bindings = partial_form_bindings(views);
     let mut out = crate::det::HashMap::default();
@@ -2811,7 +2940,8 @@ pub(crate) fn partial_call_contracts(
         }
         let record = effective_record_arg(view, &collection_locals, &[], &stems);
         let closure_raw: Vec<Symbol> = closures.get(&key).cloned().unwrap_or_default();
-        let ivar_locals = view_ivar_locals(view, &closure_raw);
+        let ivar_locals =
+            view_ivar_locals(view, &closure_raw, record_apart_from_ivar(view, &key, &record, &ivar_records));
         let keys = keys_map.get(&key).map(Vec::as_slice);
         let (_rewritten, mut extras) = rewritten_extras(view, &ivar_locals, &record, keys, request_context.contains(view.name.as_str()));
         // The def side names each closure param by `ivar_locals` and
@@ -3197,6 +3327,7 @@ pub(super) fn partial_extras_map(
     let keys_map = render_locals_keys(&app.views, &app.controllers, &app.library_classes);
     let stems = PartialStems::of(&app.views);
     let collection_locals = collection_element_locals(&app.views, app);
+    let ivar_records = ivar_record_partials(&app.views, &app.controllers, &app.library_classes);
     let request_context = request_context_views(&app.views);
     let mut out: crate::det::HashMap<(String, String), Vec<String>> =
         crate::det::HashMap::default();
@@ -3208,7 +3339,8 @@ pub(super) fn partial_extras_map(
         let key = stems.key(&camelize_path(&snake_case(dir)), base);
         let arg_name = effective_record_arg(view, &collection_locals, &known_models, &stems);
         let closure_raw: Vec<Symbol> = closures.get(&key).cloned().unwrap_or_default();
-        let ivar_locals = view_ivar_locals(view, &closure_raw);
+        let ivar_locals =
+            view_ivar_locals(view, &closure_raw, record_apart_from_ivar(view, &key, &arg_name, &ivar_records));
         let keys = keys_map.get(&key).map(Vec::as_slice);
         let (_rewritten, mut extras) = rewritten_extras(view, &ivar_locals, &arg_name, keys, request_context.contains(view.name.as_str()));
         // locals-key params — mirrors the def site's append exactly.
@@ -4220,7 +4352,12 @@ pub(crate) fn ivar_local(locals: &IvarLocals, ivar: &str) -> String {
 
 /// The rename map for `view`: its render-tree closure (the ivars its
 /// parameters carry) plus every ivar its own body reads or writes.
-fn view_ivar_locals(view: &View, closure: &[Symbol]) -> IvarLocals {
+///
+/// `record` is a partial's record param when it does not stand for the
+/// ivar named like it (`record_apart_from_ivar`). That ivar then reads
+/// as a local of its own (`post_` beside the record `post`), which the
+/// partial takes as a closure param like any other.
+fn view_ivar_locals(view: &View, closure: &[Symbol], record: Option<&str>) -> IvarLocals {
     fn collect<'a>(e: &'a Expr, out: &mut Vec<&'a str>) {
         match &*e.node {
             ExprNode::Ivar { name }
@@ -4232,7 +4369,30 @@ fn view_ivar_locals(view: &View, closure: &[Symbol]) -> IvarLocals {
     }
     let mut names: Vec<&str> = closure.iter().map(|s| s.as_str()).collect();
     collect(&view.body, &mut names);
-    ivar_local_names(names)
+    let mut locals = ivar_local_names(names);
+    if let Some(record) = record {
+        let taken: crate::det::HashSet<String> = locals.values().cloned().collect();
+        if let Some(local) = locals.values_mut().find(|l| l.as_str() == record) {
+            local.push('_');
+            while taken.contains(local.as_str()) {
+                local.push('_');
+            }
+        }
+    }
+    locals
+}
+
+/// The record param of `view` that its same-named ivar must not read as
+/// (`view_ivar_locals`): a convention partial's, unless that param
+/// stands for the ivar (`ivar_record_partials`).
+fn record_apart_from_ivar<'a>(
+    view: &View,
+    key: &ViewKey,
+    record: &'a str,
+    ivar_records: &crate::det::HashSet<ViewKey>,
+) -> Option<&'a str> {
+    let is_partial = split_view_name(view.name.as_str()).1.starts_with('_');
+    (is_partial && view.strict_locals.is_none() && !ivar_records.contains(key)).then_some(record)
 }
 
 /// Rewrite every `@ivar` read (and Ivar-LValue assign) under `expr`
@@ -4879,6 +5039,10 @@ pub(super) struct ViewCtx {
     /// needed ivars here and passes them as call-site args (the caller's
     /// own locals — its closure ⊇ the partial's, so it always has them).
     pub(super) partial_ivars: std::rc::Rc<crate::det::HashMap<ViewKey, Vec<Symbol>>>,
+    /// The partials whose record param stands for its ivar
+    /// ([`ivar_record_partials`]): a render passes that ivar in the
+    /// record slot. Every other partial takes it as a closure param.
+    pub(super) ivar_records: std::rc::Rc<crate::det::HashSet<ViewKey>>,
     /// The formats a render here looks a view up in, in order: this
     /// view's own, as Rails prepends the rendering template's format to
     /// the lookup, then html. `formats:` and the `turbo_stream` builder
@@ -4960,6 +5124,13 @@ pub(super) struct ViewCtx {
     /// or an assigned local of the same name clears it in its scope
     /// (`ViewCtx::shadow_flash`).
     pub(super) own_flash: [Option<String>; 2],
+    /// THIS view's locals that hold the rendering template's ivar of the
+    /// same name: its closure params, a partial's record among them when
+    /// it stands for its ivar ([`ivar_record_partials`]), less any a
+    /// block param shadows in its scope (`ViewCtx::with_locals`). Only
+    /// these may stand for the ivar a partial it renders reads
+    /// (`caller_record_ivar`).
+    pub(super) held_ivars: Vec<String>,
 }
 
 /// Every `belongs_to`/`has_one` association name across the app's models
@@ -5127,6 +5298,7 @@ impl ViewCtx {
         let mut next = self.clone();
         for n in more {
             next.shadow_flash(&n);
+            next.held_ivars.retain(|held| held != &n);
             if !next.locals.iter().any(|x| x == &n) {
                 next.locals.push(n);
             }

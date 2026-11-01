@@ -4,7 +4,8 @@
 //! action's, wherever it was set: in the action, a `before_action`, a
 //! memoizing method. The partial's record param stands for that ivar, so
 //! a render that hands it nothing passes the caller's own; it used to
-//! pass nil.
+//! pass nil. A partial some render does hand a record (`post: other`)
+//! keeps the two apart, and passes the ivar on, not the record.
 
 use super::emit_and_run;
 
@@ -34,6 +35,11 @@ const POSTS: &str = r#"class PostsController < ApplicationController
     @post = Post.find_by(title: "Rails tips")
   end
 
+  def rebound
+    @post = Post.find_by(title: "Rails tips")
+    @other = Post.find_by(title: "Go tips")
+  end
+
   private
 
   def set_post
@@ -61,6 +67,7 @@ const ROUTES: &str = r#"Rails.application.routes.draw do
   get "/posts/nested", to: "posts#nested"
   get "/posts/prefixed", to: "posts#prefixed"
   get "/posts/helped", to: "posts#helped"
+  get "/posts/rebound", to: "posts#rebound"
   get "/reports/show", to: "reports#show"
 end
 "#;
@@ -100,6 +107,11 @@ fn app() -> emit_and_run::Overlay {
             "<div><%= render partial: \"prefixed\", locals: { prefix: \"New:\" } %></div>\n",
         )
         .write("app/views/posts/helped.html.erb", "<div><%= summary_html %></div>\n")
+        .write("app/views/posts/_framed.html.erb", "<section><%= post.title %><%= render \"summary\" %></section>\n")
+        .write(
+            "app/views/posts/rebound.html.erb",
+            "<div><%= render \"framed\", post: @other %><%= render partial: \"framed\", locals: { post: @other } %></div>\n",
+        )
         .write("app/views/reports/_box.html.erb", "<u><%= @report.title %></u>\n")
         .write("app/views/reports/show.html.erb", "<div><%= render \"posts/summary\" %><%= render \"box\" %></div>\n")
 }
@@ -133,6 +145,8 @@ missing = []
   body = body_of(PostsController.new, action)
   missing << "posts##{action}: #{body}" unless wants.all? { |want| body.include?(want) }
 end
+rebound = body_of(PostsController.new, :rebound)
+missing << "posts#rebound: #{rebound}" unless rebound.scan("<section>Go tips#{summary}").size == 2
 report = body_of(ReportsController.new, :show)
 missing << "reports#show: #{report}" unless [summary, "<u>Go tips</u>"].all? { |want| report.include?(want) }
 raise missing.join("\n") unless missing.empty?

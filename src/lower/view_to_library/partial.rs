@@ -510,10 +510,12 @@ fn strict_kwargs(
 /// after the record arg to match the partial's generated signature.
 fn partial_extra_args(ctx: &ViewCtx, module: &str, method: &str) -> Vec<Expr> {
     // The partial's record arg (singular of its dir) is passed separately
-    // and covers any same-named ivar, so exclude it from the threaded set —
-    // matching the dedup on the partial's def side (build_library_class).
+    // and, where it stands for the same-named ivar (`ivar_records`),
+    // covers it, so exclude it from the threaded set — matching the dedup
+    // on the partial's def side (build_library_class).
     let record_name = singularize(&snake_case(last_segment(module)));
     let key = (module.to_string(), method.to_string());
+    let record_is_ivar = ctx.ivar_records.contains(&key);
     // A strict-locals partial's record is its FIRST DECLARED local (which
     // is in `declared`), NOT the dir-convention singular. Its def-side
     // closure excludes exactly the declared set, so this side must too —
@@ -532,7 +534,7 @@ fn partial_extra_args(ctx: &ViewCtx, module: &str, method: &str) -> Vec<Expr> {
             ivars
                 .iter()
                 .filter(|n| {
-                    (is_strict || n.as_str() != record_name)
+                    (is_strict || !record_is_ivar || n.as_str() != record_name)
                         && !declared.contains(n.as_str())
                 })
                 // Caller bodies are post-ivar-rewrite: an ivar lives
@@ -548,19 +550,23 @@ fn partial_extra_args(ctx: &ViewCtx, module: &str, method: &str) -> Vec<Expr> {
 /// The record a render that hands a convention partial no object passes:
 /// the caller's own `@<record>` when the partial's closure reads it, else
 /// nil. Rails renders a partial in its caller's view context, so `@post`
-/// in `posts/_summary` is the caller's ivar. Here the record param stands
-/// for that ivar (the def side dedups it) and `partial_extra_args` leaves
-/// it out of the threaded set, so without an object it rides in the
-/// record slot. The render graph folds it into the caller's closure, so
-/// the caller holds it as a local.
+/// in `posts/_summary` is the caller's ivar. Where the record param
+/// stands for that ivar (`ivar_record_partials`), the def side dedups it
+/// and `partial_extra_args` leaves it out of the threaded set, so without
+/// an object it rides in the record slot. The render graph folds it into
+/// the caller's closure, so the caller holds it as a local — unless a
+/// block param of its name shadows it here (`ViewCtx::held_ivars`); then
+/// nil, as Rails' `@post` is out of reach. Any other partial takes the
+/// ivar as a closure param, and its record slot gets nil.
 fn caller_record_ivar(ctx: &ViewCtx, module: &str, method: &str) -> Expr {
     let record_name = singularize(&snake_case(last_segment(module)));
+    let key = (module.to_string(), method.to_string());
     let reads = ctx
         .partial_ivars
-        .get(&(module.to_string(), method.to_string()))
+        .get(&key)
         .is_some_and(|ivars| ivars.iter().any(|n| n.as_str() == record_name));
     let local = ctx.ivar_local(&record_name);
-    match reads && ctx.is_local(&local) {
+    match reads && ctx.ivar_records.contains(&key) && ctx.held_ivars.contains(&local) {
         true => var_ref(Symbol::from(local)),
         false => nil_lit(),
     }
@@ -1109,6 +1115,7 @@ fn partial_extra_named_args(
 ) -> Vec<(String, Expr)> {
     let record_name = singularize(&snake_case(last_segment(module)));
     let key = (module.to_string(), method.to_string());
+    let record_is_ivar = ctx.ivar_records.contains(&key);
     let strict = ctx.strict_locals.get(&key);
     let declared: crate::det::HashSet<&str> = strict
         .map(|ps| ps.iter().map(|p| p.name.as_str()).collect())
@@ -1120,7 +1127,7 @@ fn partial_extra_named_args(
             ivars
                 .iter()
                 .filter(|n| {
-                    (is_strict || n.as_str() != record_name)
+                    (is_strict || !record_is_ivar || n.as_str() != record_name)
                         && !declared.contains(n.as_str())
                 })
                 .map(|n| {

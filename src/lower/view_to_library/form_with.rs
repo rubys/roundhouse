@@ -1572,6 +1572,7 @@ mod tests {
             lexxy: false,
             lexxy_editor_adapter: false,
             partial_ivars: Default::default(),
+            ivar_records: Default::default(),
             formats: vec!["html".to_string()],
             view_formats: Default::default(),
             multipart_partials: Default::default(),
@@ -1582,6 +1583,7 @@ mod tests {
             str_ivars: Default::default(),
             ivar_locals: Default::default(),
             own_flash: Default::default(),
+            held_ivars: Vec::new(),
             ivar_models: Rc::new(
                 ivar_models
                     .iter()
