@@ -1,0 +1,7 @@
+{
+  "other_pages": {
+    "case": "other_pages",
+    "error": "ArgumentError",
+    "message": "wrong number of arguments (given 0, expected 1)"
+  }
+}

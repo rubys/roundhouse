@@ -279,16 +279,25 @@ const THOR_DSL_ANNOTATIONS: &[&str] = &["desc", "long_desc", "option", "method_o
 /// through [`branch_has_unmodeled_call`]'s own recursion, never through
 /// this exemption, so it stays refused too — conditionally annotating a
 /// Thor command isn't a shape its DSL produces either.
+///
+/// When every marker is bare, a call BEFORE the first one is exempt too:
+/// a bare `private` sets the default for the definitions after it, so
+/// what an earlier `validates` or `has_many` generates keeps its own
+/// visibility. A named marker (`has_many :items; private :items`) can
+/// reach back, so with one the whole body still counts.
 fn marker_mixed_with_unmodeled_call(body: &Node<'_>) -> bool {
     let Some(statements) = body.as_statements_node() else { return false };
     let stmts = flatten_statements(statements.as_node());
-    let has_marker = stmts.iter().any(|stmt| {
-        stmt.as_call_node().is_some_and(|c| c.receiver().is_none() && marker(&c))
-    });
-    if !has_marker {
+    let is_marker = |stmt: &Node<'_>| stmt.as_call_node().is_some_and(|c| c.receiver().is_none() && marker(&c));
+    let Some(first_marker) = stmts.iter().position(is_marker) else {
         return false;
-    }
-    stmts.iter().any(|stmt| !is_bare_thor_annotation(stmt) && statement_has_unmodeled_call(stmt))
+    };
+    let all_bare = stmts
+        .iter()
+        .filter(|stmt| is_marker(stmt))
+        .all(|stmt| stmt.as_call_node().is_some_and(|c| c.arguments().is_none()));
+    let from = if all_bare { first_marker } else { 0 };
+    stmts[from..].iter().any(|stmt| !is_bare_thor_annotation(stmt) && statement_has_unmodeled_call(stmt))
 }
 
 /// A direct, receiverless call naming one of [`THOR_DSL_ANNOTATIONS`] —

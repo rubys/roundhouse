@@ -1,0 +1,6 @@
+{"case":"pages","value":[503,"application[action:index; controller:pages\n]\n",{}]}
+{"case":"named_pages","value":[403,"action:index; controller:named_pages\n",{}]}
+{"case":"inherited_pages","value":[403,"action:index; controller:inherited_pages\n",{}]}
+{"case":"rescue_pages","value":[409,"action:index; controller:rescue_pages\n",{}]}
+{"case":"other_pages","value":[403,"other[action:index; controller:other_pages\n]\n",{}]}
+{"case":"encoded","encoded_body":"{\"text\":\"\\u003ctag\\u003e\\u0026\\u2028\\u2029\"}","value":[422,{"text":"<tag>&  "},{}]}

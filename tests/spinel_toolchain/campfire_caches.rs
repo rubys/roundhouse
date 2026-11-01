@@ -92,8 +92,9 @@ fn record_snapshots_and_the_bounded_store_run_natively() {
 }
 
 /// The native half of `emit_and_run::view_fragments_go_through_the_
-/// controllers_caching`, over HTTP: the production server caches (Rails'
-/// default), a commit that does not touch `updated_at` is served stale,
+/// controllers_caching`, over HTTP: the development server caches once
+/// `tmp/caching-dev.txt` exists (`rails dev:cache`, which the generated
+/// `development.rb` reads), a commit that does not touch `updated_at` is served stale,
 /// `?nocache=1` (the app's `perform_caching` override) renders fresh, and
 /// moving the app's epoch (its `combined_fragment_cache_key` override)
 /// misses into the new title.
@@ -105,6 +106,8 @@ fn view_fragments_go_through_the_controllers_caching_natively() {
     let (tree, errors) = contract::fragments_overlay().emit(roundhouse::project::BuildTarget::Spinel);
     assert!(errors.is_empty(), "{errors:?}");
     native_http::build(&tree);
+    std::fs::create_dir_all(tree.join("tmp")).expect("create tmp/");
+    std::fs::write(tree.join("tmp/caching-dev.txt"), "").expect("write tmp/caching-dev.txt");
     let mut server = native_http::Server::start(&tree);
     server.take_session("/articles/new");
     let created = server.post(

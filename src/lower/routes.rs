@@ -158,7 +158,20 @@ fn compile_seg_patterns(
                         suffixes.extend(exts);
                     }
                 }
-                None => return (Vec::new(), Some((name.clone(), rx.clone()))),
+                None => match crate::lower::segment_pattern::spanning(rx) {
+                    // The router spans a run that ends the path, once: a requirement that admits `/` inside it has no split it can find.
+                    Some((pattern, dot))
+                        if last_segment_param(path) == Some(name.as_str())
+                            && !path.contains("/*")
+                            && !out.iter().any(|(k, _)| k.starts_with('*')) =>
+                    {
+                        out.push((crate::lower::segment_pattern::span_key(name), pattern));
+                        if dot {
+                            out.push(("format_suffix".to_string(), crate::lower::segment_pattern::NEVER.to_string()));
+                        }
+                    }
+                    _ => return (Vec::new(), Some((name.clone(), rx.clone()))),
+                },
             },
         }
     }
@@ -511,6 +524,9 @@ fn singular_resource_actions() -> &'static [(&'static str, HttpMethod, &'static 
 
 fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
     match spec {
+        // Rack mounts use the ordered prefix dispatcher, not controller rows
+        // or `(.:format)` URL helpers.
+        RouteSpec::RackMount { .. } => {}
         RouteSpec::Explicit {
             method,
             path,

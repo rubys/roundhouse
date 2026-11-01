@@ -202,6 +202,12 @@ pub(in crate::analyze) fn register(
     // public: true`) — side-effecting header writes.
     app_ctrl.class_methods.insert(Symbol::from("expires_in"), Ty::Nil);
     app_ctrl.class_methods.insert(Symbol::from("expires_now"), Ty::Nil);
+    // actionpack-page_caching's surface, on the class and the instance
+    // alike (runtime/spinel/action_controller_page_caching.rb).
+    app_ctrl.class_methods.insert(Symbol::from("page_cache_directory"), Ty::Str);
+    app_ctrl.class_methods.insert(Symbol::from("cache_page"), Ty::Nil);
+    app_ctrl.class_methods.insert(Symbol::from("expire_page"), Ty::Nil);
+    app_ctrl.class_methods.insert(Symbol::from("caching_allowed?"), Ty::Bool);
     // geared_pagination's controller concern — the gem's engine mixes it
     // into `ActionController::Base`, so the method is on every controller
     // of an app that carries the gem and is named nowhere in its source.

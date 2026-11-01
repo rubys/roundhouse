@@ -1,0 +1,17 @@
+{"case":"block_stops","value":[403,{"origin":"before"},{}]}
+{"case":"head_stops","value":[403,"",{}]}
+{"case":"status_stops","value":[403," ",{}]}
+{"case":"redirect_stops","value":[303,"",{"location":"/landing"}]}
+{"case":"body_reads","value":[202,{"origin":"action"},{"x-observed":"{\"origin\":\"action\"}"}]}
+{"case":"block_rescues","value":[409,{"origin":"block","message":"original"},{}]}
+{"case":"with_rescues","value":[409,{"origin":"named","message":"original"},{}]}
+{"case":"inherited_rescues","value":[409,{"origin":"named","message":"original"},{}]}
+{"case":"override_method","value":[422,{"origin":"override-method","message":"original"},{}]}
+{"case":"override_declaration","value":[400,{"origin":"override-declaration","message":"original"},{}]}
+{"case":"inherited_block","value":[409,{"origin":"block","message":"original"},{}]}
+{"case":"reraises","error":"ArgumentError","message":"original"}
+{"case":"bare_reraises","error":"ArgumentError","message":"original"}
+{"case":"concern_stops","value":[401,{"origin":"concern"},{}]}
+{"case":"html_implicit","value":[200,"<h1>implicit body</h1>\n",{"x-before":"ran","x-observed":"<h1>implicit body</h1>\n"}]}
+{"case":"html_json","value":[403,{"origin":"html-before"},{}]}
+{"case":"html_status","value":[403,"<p>status template</p>\n",{}]}

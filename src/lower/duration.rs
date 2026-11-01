@@ -45,7 +45,7 @@
 //! byte-parity while the AOT tree stops raising:
 //!
 //! - `after?` / `before?` → `>` / `<` (AS's readable comparators).
-//! - `<t> - <dur>` / `+` → seconds via `.to_i`, the overlay's unwrap.
+//! - `<t> - <dur>` / `+` → the Duration's numeric `.value`.
 //! - `<time> <op> <bare dur>` → the ajd-vs-seconds arithmetic Rails
 //!   reaches through `Time#<=>` → `to_datetime <=> other` →
 //!   `Duration#coerce`. That comparison EVALUATES under Rails rather
@@ -161,7 +161,7 @@ fn type_duration_constants(expr: &mut Expr, owner: Option<&ClassId>, constants: 
 /// grounded `ActiveSupport::Duration.<unit>(n)` shape. Predicates next,
 /// so a rewritten `after?` reaches the comparison rules as the `>` it
 /// means. Comparisons BEFORE arithmetic: both read a bare Duration
-/// operand, and the arithmetic rewrite hides one behind `.to_i` — after
+/// operand, and the arithmetic rewrite hides one behind `.value` — after
 /// it runs, `<t> - <dur>` is no longer distinguishable from the numeric
 /// `Time - Time` shape.
 pub(crate) fn apply_duration_rewrites(body: &mut Expr, temporal_predicates: bool, time_operands: bool) {
@@ -330,7 +330,7 @@ fn rewrite_temporal_predicates(expr: &mut Expr) {
 
 /// `<t> - <dur>` / `<t> + <dur>` → the Duration's seconds, which is
 /// what the CRuby overlay's `Time#-` reopen unwraps to before calling
-/// through. `Time ± Integer` is a `Time` on every ruby-family runtime
+/// through. `Time ± Numeric` is a `Time` on every ruby-family runtime
 /// (spinel included), so the outer node keeps its own type and span.
 ///
 /// A Duration RECEIVER is left alone: `1.day - 1.hour` is Duration
@@ -400,13 +400,13 @@ fn rewrite_time_duration_arith(expr: &mut Expr, time_operands: bool) {
         span,
         ExprNode::Send {
             recv: Some(dur),
-            method: Symbol::from("to_i"),
+            method: Symbol::from("value"),
             args: vec![],
             block: None,
             parenthesized: false,
         },
     );
-    args[0].ty = Some(Ty::Int);
+    args[0].ty = Some(Ty::Union { variants: vec![Ty::Int, Ty::Float].into() });
 }
 
 fn is_typed_duration(expr: &Expr) -> bool {

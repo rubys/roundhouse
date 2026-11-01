@@ -15,6 +15,7 @@ use std::path::{Component, Path, PathBuf};
 use ruby_prism::Node;
 
 use crate::App;
+use crate::ClassId;
 use crate::Symbol;
 use crate::dialect::{LibraryClass, MethodReceiver, TestModule};
 use crate::vfs::{FsVfs, MapVfs, Vfs};
@@ -313,6 +314,258 @@ fn keep_initializer_defined(
         }
         app.library_classes.push(lc);
     }
+}
+
+/// Admission is based on the callable retained from app source, not a target's
+/// spelling. Inherited, reopened, macro-defined and instance-only endpoints
+/// cannot establish that the mounted constant itself implements Rack's call.
+fn literal_rack_apps(app: &App, dir: &Path, boot_and_routes: &[Vec<u8>]) -> super::routes::RackAppTargets {
+    use crate::dialect::{MethodReceiver, MethodVisibility};
+    let mut counts: HashMap<ClassId, usize> = HashMap::default();
+    for class in &app.library_classes {
+        *counts.entry(class.name.clone()).or_default() += 1;
+    }
+    let mut candidates: HashSet<String> = app.library_classes.iter().filter_map(|class| {
+        if counts.get(&class.name) != Some(&1)
+            || class.origin.is_some()
+            || class.parent.is_some()
+            || !class.includes.is_empty()
+            || !class.unknown_calls.is_empty()
+            || !class.conditional_definitions.is_empty()
+        {
+            return None;
+        }
+        let calls: Vec<_> = class.methods.iter().filter(|method| {
+            method.name.as_str() == "call" && method.receiver == MethodReceiver::Class
+        }).collect();
+        let [method] = calls.as_slice() else { return None };
+        let [param] = method.params.as_slice() else { return None };
+        if method.visibility != MethodVisibility::Public
+            || method.unsupported_formals.is_some()
+            || method.block_param.is_some()
+            || param.default.is_some()
+            || param.keyword || param.rest || param.forwarding
+            || param.from_keyword || param.from_kwrest
+        {
+            return None;
+        }
+        let file = super::sources::path_of(method.name_span.file)?;
+        let relative = Path::new(&file).strip_prefix(dir).ok()?;
+        if !(relative.starts_with("app") || relative.starts_with("lib")) {
+            return None;
+        }
+        // The general method IR records any explicit receiver as Class. That
+        // alone cannot distinguish `def self.call` from `def Other.call`, or
+        // the class's singleton from another object's singleton.
+        let text = super::sources::text_of(&file)?;
+        if !owns_rack_call(&text, class.name.0.as_str(), method.name_span.start) {
+            return None;
+        }
+        Some(class.name.0.as_str().to_string())
+    }).collect();
+    if candidates.is_empty() {
+        return super::routes::RackAppTargets::default();
+    }
+    // Method ownership is not binding ownership: file-level and qualified
+    // writes can replace the constant after its class declaration. Inspect
+    // the real source, before file-level expressions are attached to classes.
+    let mut writes = RackBindingWrites::default();
+    for file in super::sources::snapshot() {
+        let path = Path::new(&file.path);
+        if path.starts_with(dir) && path.extension().is_some_and(|ext| ext == "rb") {
+            writes.read(file.text.as_bytes());
+        }
+    }
+    for source in boot_and_routes {
+        writes.read(source);
+    }
+    let mut rebound = HashSet::default();
+    candidates.retain(|name| {
+        let binding = super::routes::RackAppTargets::binding_name(name);
+        let reassigned = writes.names.iter().any(|written| {
+            [name.as_str(), binding].iter().any(|name| {
+                *name == written.as_str() || name.strip_prefix(written.as_str()).is_some_and(|rest| rest.starts_with("::"))
+            })
+        });
+        if reassigned { rebound.insert(binding.to_string()); }
+        !writes.unknown && !reassigned
+    });
+    super::routes::RackAppTargets { callable: candidates, rebound }
+}
+
+#[derive(Default)]
+struct RackBindingWrites {
+    namespace: Vec<String>,
+    names: HashSet<String>,
+    unknown: bool,
+}
+
+impl RackBindingWrites {
+    fn literal_path(node: &Node<'_>) -> Option<Vec<String>> {
+        if node.as_constant_path_node().is_some_and(|path| super::util::constant_path_has_value_parent(&path)) {
+            None
+        } else {
+            super::util::constant_path_of(node)
+        }
+    }
+
+    fn read(&mut self, source: &[u8]) {
+        let parsed = ruby_prism::parse(source);
+        self.unknown |= parsed.errors().next().is_some();
+        ruby_prism::Visit::visit(self, &parsed.node());
+    }
+
+    fn record(&mut self, parts: Vec<String>, absolute: bool, qualified: bool) {
+        if absolute {
+            self.record_binding(parts.join("::"));
+        } else if qualified {
+            // The first component of a qualified write can resolve through
+            // any lexical owner. Refuse every possible binding it can replace.
+            for length in 0..=self.namespace.len() {
+                let mut path = self.namespace[..length].to_vec();
+                path.extend(parts.clone());
+                self.record_binding(path.join("::"));
+            }
+        } else {
+            let mut path = self.namespace.clone();
+            path.extend(parts);
+            self.record_binding(path.join("::"));
+        }
+    }
+
+    fn record_binding(&mut self, name: String) {
+        // Retain both possibilities when lexical Object lookup is ambiguous.
+        // The canonical form covers Object::A, ::Object::A and Object::Object::A,
+        // including writes to an ancestor namespace of a mounted constant.
+        self.names.insert(super::routes::RackAppTargets::binding_name(&name).to_string());
+        self.names.insert(name);
+    }
+}
+
+impl RackBindingWrites {
+    fn binding(&mut self, node: &Node<'_>) {
+        let name = node.as_constant_write_node().map(|w| w.name())
+            .or_else(|| node.as_constant_and_write_node().map(|w| w.name()))
+            .or_else(|| node.as_constant_or_write_node().map(|w| w.name()))
+            .or_else(|| node.as_constant_operator_write_node().map(|w| w.name()))
+            .or_else(|| node.as_constant_target_node().map(|w| w.name()));
+        if let Some(name) = name {
+            self.record(vec![super::util::constant_id_str(&name).to_string()], false, false);
+        }
+        let target = node.as_constant_path_write_node().map(|w| w.target())
+            .or_else(|| node.as_constant_path_and_write_node().map(|w| w.target()))
+            .or_else(|| node.as_constant_path_or_write_node().map(|w| w.target()))
+            .or_else(|| node.as_constant_path_operator_write_node().map(|w| w.target()));
+        if let Some(target) = target {
+            if super::util::constant_path_has_value_parent(&target) {
+                self.unknown = true;
+            } else if let Some(parts) = Self::literal_path(&target.as_node()) {
+                self.record(parts, target.location().as_slice().starts_with(b"::"), true);
+            } else {
+                self.unknown = true;
+            }
+        }
+        if let Some(target) = node.as_constant_path_target_node() {
+            let mut parts = match target.parent() {
+                Some(parent) => Self::literal_path(&parent),
+                None => Some(Vec::new()),
+            };
+            if let (Some(parts), Some(name)) = (&mut parts, target.name()) {
+                parts.push(super::util::constant_id_str(&name).to_string());
+                self.record(parts.clone(), target.location().as_slice().starts_with(b"::"), true);
+            } else { self.unknown = true; }
+        }
+        if let Some(call) = node.as_call_node()
+            && matches!(super::util::constant_id_str(&call.name()).as_ref(), "const_set" | "remove_const")
+        {
+            let name = call.arguments().and_then(|args| args.arguments().iter().next())
+                .and_then(|arg| super::util::symbol_value(&arg).or_else(|| super::util::string_value(&arg)));
+            if let Some(name) = name {
+                match call.receiver() {
+                    None => self.record(vec![name], false, false),
+                    Some(receiver) if receiver.as_self_node().is_some() => self.record(vec![name], false, false),
+                    Some(receiver) => {
+                        if let Some(mut owner) = Self::literal_path(&receiver) {
+                            if owner == ["Object"] { owner.clear(); }
+                            owner.push(name);
+                            self.record(owner, receiver.location().as_slice().starts_with(b"::"), true);
+                        } else { self.unknown = true; }
+                    }
+                }
+            } else { self.unknown = true; }
+        }
+    }
+}
+
+impl RackBindingWrites {
+    fn declaration(&mut self, path: Node<'_>, body: Option<Node<'_>>) {
+        let Some(parts) = Self::literal_path(&path) else { self.unknown = true; return };
+        let outer = self.namespace.clone();
+        if path.location().as_slice().starts_with(b"::") { self.namespace.clear(); }
+        self.namespace.extend(parts);
+        if let Some(body) = body { ruby_prism::Visit::visit(self, &body); }
+        self.namespace = outer;
+    }
+}
+
+impl<'pr> ruby_prism::Visit<'pr> for RackBindingWrites {
+    fn visit_branch_node_enter(&mut self, node: Node<'pr>) { self.binding(&node); }
+    fn visit_leaf_node_enter(&mut self, node: Node<'pr>) { self.binding(&node); }
+
+    fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+        // Namespace and superclass expressions execute outside the new body.
+        self.visit(&node.constant_path());
+        if let Some(parent) = node.superclass() { self.visit(&parent); }
+        self.declaration(node.constant_path(), node.body());
+    }
+
+    fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
+        self.visit(&node.constant_path());
+        self.declaration(node.constant_path(), node.body());
+    }
+}
+
+fn owns_rack_call(source: &str, target: &str, start: u32) -> bool {
+    fn visit(node: Node<'_>, namespace: &[String], singleton: bool, target: &str, start: u32) -> bool {
+        if let Some(def) = node.as_def_node() {
+            return namespace.join("::") == target
+                && def.name().as_slice() == b"call"
+                && def.name_loc().start_offset() as u32 == start
+                && match def.receiver() {
+                    Some(receiver) => !singleton && receiver.as_self_node().is_some(),
+                    None => singleton,
+                };
+        }
+        if let Some(class) = node.as_class_node() {
+            if singleton { return false; }
+            let path = class.constant_path();
+            let Some(parts) = super::util::constant_path_of(&path) else { return false };
+            let mut scope = if path.location().as_slice().starts_with(b"::") { Vec::new() } else { namespace.to_vec() };
+            scope.extend(parts);
+            return class.body().is_some_and(|body| visit(body, &scope, false, target, start));
+        }
+        if let Some(module) = node.as_module_node() {
+            if singleton { return false; }
+            let path = module.constant_path();
+            let Some(parts) = super::util::constant_path_of(&path) else { return false };
+            let mut scope = if path.location().as_slice().starts_with(b"::") { Vec::new() } else { namespace.to_vec() };
+            scope.extend(parts);
+            return module.body().is_some_and(|body| visit(body, &scope, false, target, start));
+        }
+        if let Some(class) = node.as_singleton_class_node() {
+            return !singleton && class.expression().as_self_node().is_some()
+                && class.body().is_some_and(|body| visit(body, namespace, true, target, start));
+        }
+        if let Some(program) = node.as_program_node() {
+            return program.statements().body().iter().any(|node| visit(node, namespace, singleton, target, start));
+        }
+        if let Some(statements) = node.as_statements_node() {
+            return statements.body().iter().any(|node| visit(node, namespace, singleton, target, start));
+        }
+        false
+    }
+    let parsed = ruby_prism::parse(source.as_bytes());
+    parsed.errors().next().is_none() && visit(parsed.node(), &[], false, target, start)
 }
 
 pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<App> {
@@ -1190,6 +1443,16 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
             })?;
             methods.append(&mut synth);
         }
+        // `config.action_controller.perform_caching` and
+        // `page_cache_directory` (see `action_controller_caching_config`),
+        // spliced and refused the same way.
+        if let Some(caching) = super::action_controller_caching_config::synthesize(vfs, dir)? {
+            let mut synth = crate::runtime_src::parse_methods(&caching).map_err(|message| IngestError::Unsupported {
+                file: "config/ (config.action_controller caching settings)".to_string(),
+                message: format!("the app's controller caching settings do not parse once synthesized: {message}"),
+            })?;
+            methods.append(&mut synth);
+        }
         // Session cookie name: application-derived default plus any
         // `config.session_store` declarations (see `session_config`).
         // Spliced like the cable / public-file-server settings. The
@@ -1858,12 +2121,18 @@ end
                 route_consts.merge(super::model::ClassConsts::collect(&top, &routes_path.display().to_string()));
             }
             let routes = super::routes::with_route_constants(route_consts, || {
+                let rack_sources: Vec<_> = std::iter::once(source.clone())
+                    .chain(draw_files.values().map(|(text, _)| text.clone()))
+                    .chain(boot_files.iter().filter_map(|file| vfs.read(file).ok()))
+                    .collect();
+                let rack_apps = literal_rack_apps(&app, dir, &rack_sources);
                 ingest_routes_with_engines(
                     &source,
                     &routes_path.display().to_string(),
                     &draw_files,
                     &block_wrappers,
                     &engine_routes,
+                    &rack_apps,
                     &helper_sources,
                     &load_helper_sources,
                 )
@@ -2461,6 +2730,9 @@ end
         .chain(app.controllers.iter().map(|c| c.name.0.as_str()))
         .map(|n| n.split("::").next().unwrap_or(n).to_string())
         .collect();
+    let gem_lock = app.gem_lock.clone();
+    let boot_taken = super::boot_program::build(vfs, dir, &mut app, gem_lock.as_ref(), &app_namespaces, &rate_limit_store_values)?;
+    super::boot_program::apply_call_sites(&mut app);
     super::initializer_ledger::record(
         vfs,
         dir,
@@ -2469,6 +2741,7 @@ end
         app.gem_lock.as_ref(),
         &app_namespaces,
         &rate_limit_store_values,
+        &boot_taken,
     );
     // Carrier provenance must not depend on where a module lives:
     // models, services, helpers and lib all use the same splice.
@@ -2691,6 +2964,8 @@ end
     super::class_configuration::expand(&mut app, &concern_class_method_spans, &framework_shadow_scopes)?;
     super::class_attribute::expand(&mut app, &concern_class_method_spans, &framework_shadow_scopes);
     expand_class_body_macros(&mut app)?;
+    // After the splice: a guard constant may live on an ancestor or arrive with a concern.
+    super::caches_page::expand(&mut app);
     // After the splice and the macros: a concern's action, or one a macro synthesizes, gates its permit too.
     super::conditional_permit::apply(&mut app);
     // The same idea one base over: `const` / `prop` under a class

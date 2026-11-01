@@ -650,8 +650,8 @@ pub(super) fn push_schema_methods(
     // def attributes; { col: @col, ... } excluding id; end
     methods.push(synth_attributes(owner, table, model));
 
-    // def [](name); case name; when :col then @col; ...; end; end
-    methods.push(synth_index_read(owner, table, model));
+    // def [](name): dispatch by public column name, then selected alias.
+    methods.push(synth_index_read(owner, table, model, runtime_relation));
 
     // def []=(name, value); case name; when :col then @col = value; ...; end; end
     methods.push(synth_index_write(owner, table, model));
@@ -3575,22 +3575,34 @@ fn synth_attributes(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
     }
 }
 
-fn synth_index_read(owner: &ClassId, table: &Table, model: &Model) -> MethodDef {
+fn synth_index_read(owner: &ClassId, table: &Table, model: &Model, runtime_relation: super::RuntimeRelation) -> MethodDef {
     let name = Symbol::from("name");
+    let ruby_family = runtime_relation == super::RuntimeRelation::Present;
+    let send = |recv, method, args| Expr::new(Span::synthetic(), ExprNode::Send {
+        recv: Some(recv), method: Symbol::from(method), args, block: None, parenthesized: true,
+    });
 
-    // Patterns match the PUBLIC column symbol; bodies read the storage
+    // Ruby-family entry paths can still carry String keys (reflection and
+    // nilable read_attribute receivers). Canonicalize at this boundary so
+    // a column always reads current storage, never the selected-row snapshot.
+    // Strict targets keep their Symbol dispatch and the same storage reads.
+    // Patterns match the PUBLIC column name; bodies read the storage
     // ivar (`@col_raw` for timestamps). Date instead uses its native
     // reader, matching literal-key analysis and Rails' []/read_attribute.
     // `attributes` and the raw Date reader still expose stored text.
     // JSON columns are another exception: a
     // `has_json` declaration builds its typed Hash from the flat readers; a
     // schema-less column decodes through `RoundhouseJsonColumn.load`.
-    let arms: Vec<crate::expr::Arm> = table
+    let mut arms: Vec<crate::expr::Arm> = table
         .columns
         .iter()
         .map(|c| crate::expr::Arm {
             pattern: crate::expr::Pattern::Lit {
-                value: Literal::Sym { value: c.name.clone() },
+                value: if ruby_family {
+                    Literal::Str { value: c.name.as_str().to_string() }
+                } else {
+                    Literal::Sym { value: c.name.clone() }
+                },
             },
             guard: None,
             // NULLABLE columns only: wrap in `Cast` carrying the slot
@@ -3619,19 +3631,49 @@ fn synth_index_read(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
         })
         .collect();
 
+    if ruby_family {
+        // #1556 hydrates these declared aliases through their casting
+        // writers. Read the generated slot directly: a source reader must
+        // not intercept [] and the raw SQL value may have a different type.
+        for attribute in super::select_aliases::hydrated_attributes(model) {
+            arms.push(crate::expr::Arm {
+                pattern: crate::expr::Pattern::Lit {
+                    value: Literal::Str { value: attribute.as_str().to_string() },
+                },
+                guard: None,
+                body: Expr::new(Span::synthetic(), ExprNode::Ivar { name: attribute }),
+            });
+        }
+    }
+
     // An armless `case` (no columns at all) is a Ruby syntax error.
     // `table.columns` is empty for a degenerate `create_table ..., id:
     // false do |t| end` — the column-list twin of the controller-side
     // `synth_index_read`'s bug when its permit list has no scalar keys
     // (`tests/params_all_non_scalar_keys.rs`). Same `Ty::Untyped`
     // signature either way.
+    // #1556 retains selected aliases during instantiate. Read that same
+    // row for a non-column key; calling the named reader here would let
+    // an application method shadow the selected attribute, unlike Rails.
+    if ruby_family && !model.select_aliases.is_empty() && !arms.is_empty() {
+        let selected = || Expr::new(Span::synthetic(), ExprNode::Ivar { name: Symbol::from("__selected_aliases") });
+        arms.push(crate::expr::Arm {
+            pattern: crate::expr::Pattern::Wildcard,
+            guard: None,
+            body: Expr::new(Span::synthetic(), ExprNode::If {
+                cond: send(selected(), "nil?", vec![]),
+                then_branch: nil_lit(),
+                else_branch: send(selected(), "[]", vec![send(var_ref(name.clone()), "to_s", vec![])]),
+            }),
+        });
+    }
     let body = if arms.is_empty() {
         nil_lit()
     } else {
         Expr::new(
             Span::synthetic(),
             ExprNode::Case {
-                scrutinee: var_ref(name.clone()),
+                scrutinee: if ruby_family { send(var_ref(name.clone()), "to_s", vec![]) } else { var_ref(name.clone()) },
                 arms,
             },
         )

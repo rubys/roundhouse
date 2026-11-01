@@ -43,7 +43,8 @@ use crate::ty::Ty;
 /// dispatch is read at startup by the HTTP router.
 pub fn lower_routes_to_dispatch_functions(app: &App) -> Vec<LibraryFunction> {
     let flat = flatten_routes(app);
-    if flat.is_empty() {
+    let mounts = super::rack_mounts::mounts(app);
+    if flat.is_empty() && mounts.is_empty() {
         return Vec::new();
     }
     let module_path = vec![Symbol::from("RouteTable")];
@@ -114,19 +115,48 @@ pub fn lower_routes_to_dispatch_functions(app: &App) -> Vec<LibraryFunction> {
             is_async: false,
         });
         out.push(LibraryFunction {
-            module_path,
+            module_path: module_path.clone(),
             name: Symbol::from("root"),
             params: Vec::new(),
             unsupported_formals: None,
             has_anonymous_block: false,
             body: root_body,
-            signature: Some(fn_sig(vec![], route_ty)),
+            signature: Some(fn_sig(vec![], route_ty.clone())),
             effects: EffectSet::default(),
             is_async: false,
         });
     }
 
+    if !mounts.is_empty() {
+        for (index, mount) in mounts.iter().enumerate() {
+            out.push(rack_route_array(
+                &format!("rack_routes_before_{index}"), mount.preceding.iter(),
+                &route_class_id, &route_ty,
+            ));
+        }
+        out.push(rack_route_array(
+            "rack_head_routes", flat.iter().filter(|route| route.method == HttpMethod::Head),
+            &route_class_id, &route_ty,
+        ));
+    }
     out
+}
+
+/// Reuse the controller route constructor, including all its requirements.
+fn rack_route_array<'a>(
+    name: &str, routes: impl Iterator<Item = &'a FlatRoute>,
+    class: &ClassId, route_ty: &Ty,
+) -> LibraryFunction {
+    let ty = Ty::Array { elem: std::sync::Arc::new(route_ty.clone()) };
+    LibraryFunction {
+        module_path: vec![Symbol::from("RouteTable")], name: Symbol::from(name),
+        params: Vec::new(), unsupported_formals: None, has_anonymous_block: false,
+        body: with_ty(Expr::new(Span::synthetic(), ExprNode::Array {
+            elements: routes.map(|route| build_route_new(route, class, route_ty)).collect(),
+            style: ArrayStyle::Brackets,
+        }), ty.clone()),
+        signature: Some(fn_sig(vec![], ty)), effects: EffectSet::default(), is_async: false,
+    }
 }
 
 /// Build `ActionDispatch::Router::Route.new("GET", "/x", :articles,

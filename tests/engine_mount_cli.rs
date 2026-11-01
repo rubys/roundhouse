@@ -1,5 +1,5 @@
 //! Literal source-backed isolated engines compose through the ordinary route
-//! scope; Rack, dynamic and helper-bearing mount shapes remain explicit errors.
+//! scope; external Rack, dynamic and helper-bearing mounts remain explicit errors.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -93,6 +93,59 @@ fn strict_transpile_composes_a_literal_isolated_engine_mount() {
     }
 }
 
+/// A proven Rack endpoint has a serving adapter on the Ruby-shaped outputs.
+/// Other outputs must refuse it instead of dropping its route.
+#[test]
+fn in_app_rack_mount_uses_its_adapter_or_refuses_the_target() {
+    let fixture = Fixture::new("in-app-rack");
+    let app = fixture.write_app(false);
+    std::fs::write(app.join("app/controllers/static_files.rb"),
+        "class StaticFiles\n  def self.call(env)\n    [200, {\"content-type\" => \"text/plain\"}, [\"ok\"]]\n  end\nend\n").unwrap();
+    std::fs::write(app.join("config/routes.rb"),
+        "Rails.application.routes.draw do\n  mount StaticFiles, at: \"/files\"\n  get \"/widgets\", to: \"widgets#index\"\nend\n").unwrap();
+    for target in ["ruby", "jruby", "spinel"] {
+        let out = fixture.0.join(target);
+        let result = transpile(&app, target, &out, &[]);
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(result.status.success(), "{target}: {stderr}");
+        assert!(!stderr.contains("route mount"), "{target}: {stderr}");
+        let dispatcher = std::fs::read_to_string(out.join("config/rack_mounts.rb")).unwrap();
+        assert!(dispatcher.contains("StaticFiles.call(env)"), "{dispatcher}");
+    }
+    for target in ["go", "rust", "roda"] {
+        let out = fixture.0.join(target);
+        let result = transpile(&app, target, &out, &[]);
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(!result.status.success(), "{target}: {stderr}");
+        assert!(stderr.contains("does not support in-app Rack mounts"), "{target}: {stderr}");
+        assert!(!out.exists(), "{target} wrote a partial project");
+    }
+}
+
+/// General method IR coarsens explicit receivers to Class. A foreign
+/// definition must not be mistaken for the mounted constant's own call.
+#[test]
+fn continue_check_does_not_admit_a_foreign_singleton_call() {
+    let fixture = Fixture::new("foreign-rack-call");
+    let app = fixture.write_app(false);
+    std::fs::write(app.join("config/routes.rb"),
+        "Rails.application.routes.draw do\n  mount StaticFiles, at: \"/files\"\nend\n").unwrap();
+    for source in [
+        "class Other; end; class StaticFiles; def Other.call(env); [200, {}, []]; end; end",
+        "class StaticFiles; class << Object.new; def call(env); [200, {}, []]; end; end; end",
+        "class StaticFiles; class << self; def self.call(env); [200, {}, []]; end; end; end",
+    ] {
+        std::fs::write(app.join("app/controllers/static_files.rb"), source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+            .args(["check", "--continue"]).arg(&app)
+            .env_remove("ROUNDHOUSE_INGEST_SURVEY").output().unwrap();
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert_eq!(result.status.code(), Some(1), "{stderr}");
+        assert!(stderr.contains("Rack target `StaticFiles`"), "{stderr}");
+        assert!(!stderr.contains("PATH Rails engine"), "{stderr}");
+    }
+}
+
 /// CLI smoke: one authentication guard fails strict emission; survey keeps
 /// the unguarded sibling. Full guard coverage lives in `tests/ingest.rs`.
 #[test]
@@ -177,7 +230,7 @@ fn strict_transpile_composes_a_nested_engine_namespace() {
     assert!(routes.contains("/catalog/admin/products"), "{routes}");
 }
 
-/// The normal diagnostic policy still rejects Rack mounts and preserves siblings.
+/// The normal diagnostic policy rejects unproven Rack mounts and preserves siblings.
 #[test]
 fn allow_unsupported_reports_a_rack_mount_and_keeps_host_routes() {
     let fixture = Fixture::new("allow");
@@ -557,6 +610,8 @@ fn check_reports_rack_mount_and_other_errors_together() {
         assert_eq!(result.status.code(), Some(1), "{stderr}");
         assert!(stderr.contains("config/routes.rb:3:3"), "{stderr}");
         assert!(stderr.contains("error[unsupported]: route mount"), "{stderr}");
+        assert!(stderr.contains("Rack target `ExternalRackApp`"), "{stderr}");
+        assert!(!stderr.contains("PATH Rails engine"), "{stderr}");
         assert!(stderr.contains("no_such_method"), "{stderr}");
         assert!(stderr.contains("app/controllers/widgets_controller.rb"), "{stderr}");
         assert!(!stderr.contains("ingest failed"), "{stderr}");
@@ -631,5 +686,84 @@ fn builtin_active_storage_routes_do_not_require_an_external_mount() {
         let main = std::fs::read_to_string(out.join("main.rb")).unwrap();
         assert!(main.contains("RouteTable.table + ActiveStorage::Routes.table"), "{target}: built-in routes missing");
         assert!(out.join("runtime/active_storage_disk.rb").is_file());
+    }
+}
+
+
+// The unsupported source shapes here need the CLI's continue policy so their
+// located Rack boundary is checked alongside any file-program refusal.
+#[test]
+fn rack_mount_rebound_constants_are_refused_including_qualified_writes() {
+    let fixture = Fixture::new("rebound-rack");
+    let app = fixture.write_app(false);
+    let endpoint = "class StaticFiles\n  def self.call(env)\n    [207, {'content-type' => 'text/plain'}, ['old']]\n  end\nend\n";
+    let instance = "class Replacement; def call(env); [202, {'content-type' => 'text/plain'}, ['replacement']]; end; end\n";
+    for (label, source, target) in [
+        ("lambda", format!("{endpoint}\nStaticFiles = ->(env) {{ [202, {{'content-type' => 'text/plain'}}, ['replacement']] }}\n"), "StaticFiles"),
+        ("instance", format!("{instance}{endpoint}\nStaticFiles = Replacement.new\n"), "StaticFiles"),
+        ("qualified-root", format!("{endpoint}\n::StaticFiles = ->(env) {{ [202, {{}}, ['replacement']] }}\n"), "StaticFiles"),
+        ("object-qualified", format!("{endpoint}\nObject::StaticFiles = ->(env) {{ [202, {{'content-type' => 'text/plain'}}, ['replacement']] }}\n"), "StaticFiles"),
+        ("absolute-object-qualified", format!("{endpoint}\n::Object::StaticFiles = ->(env) {{ [202, {{'content-type' => 'text/plain'}}, ['replacement']] }}\n"), "StaticFiles"),
+        ("object-compound", format!("{endpoint}\nObject::StaticFiles ||= ->(env) {{ [202, {{}}, ['replacement']] }}\n"), "StaticFiles"),
+        ("absolute-object-compound", format!("{endpoint}\n::Object::StaticFiles &&= ->(env) {{ [202, {{}}, ['replacement']] }}\n"), "StaticFiles"),
+        ("object-operator", format!("{endpoint}\nObject::StaticFiles += Replacement\n"), "StaticFiles"),
+        ("object-multiple", format!("{endpoint}\nObject::StaticFiles, Other = [->(env) {{ [202, {{}}, ['replacement']] }}, nil]\n"), "StaticFiles"),
+        ("absolute-object-multiple", format!("{endpoint}\n::Object::StaticFiles, Other = [->(env) {{ [202, {{}}, ['replacement']] }}, nil]\n"), "StaticFiles"),
+        ("qualified-nested", format!("module Assets\n{endpoint}end\nAssets::StaticFiles = ->(env) {{ [202, {{}}, ['replacement']] }}\n"), "Assets::StaticFiles"),
+        ("object-namespace", format!("module Assets\n{endpoint}end\nObject::Assets = Module.new\n"), "Assets::StaticFiles"),
+        ("absolute-object-namespace", format!("module Assets\n{endpoint}end\n::Object::Assets = Module.new\n"), "Assets::StaticFiles"),
+        ("lexical-object", format!("{endpoint}\nmodule Wrapper\n  Object::StaticFiles = ->(env) {{ [202, {{}}, ['replacement']] }}\nend\n"), "StaticFiles"),
+    ] {
+        std::fs::write(app.join("app/controllers/static_files.rb"), source).unwrap();
+        std::fs::write(app.join("config/routes.rb"), format!("Rails.application.routes.draw do\n  mount {target}, at: '/files'\nend\n")).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+            .args(["check", "--continue"]).arg(&app)
+            .env_remove("ROUNDHOUSE_INGEST_SURVEY").output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{label}: {stderr}");
+        assert!(stderr.contains(&format!("Rack target `{target}`")), "{label}: {stderr}");
+        assert!(stderr.contains("may be rebound by a source constant write"), "{label}: {stderr}");
+        assert!(stderr.contains("config/routes.rb:2:3"), "{label}: {stderr}");
+        assert!(!stderr.contains("PATH Rails engine"), "{label}: {stderr}");
+        if matches!(label, "lambda" | "instance" | "object-qualified" | "absolute-object-qualified") {
+            let out = fixture.0.join(format!("strict-{label}"));
+            let strict = transpile(&app, "ruby", &out, &[]);
+            assert!(!strict.status.success(), "{label}: stale target passed strict emission");
+            assert!(String::from_utf8_lossy(&strict.stderr).contains("Rack target `StaticFiles`"), "{}", String::from_utf8_lossy(&strict.stderr));
+            assert!(String::from_utf8_lossy(&strict.stderr).contains("may be rebound by a source constant write"), "{}", String::from_utf8_lossy(&strict.stderr));
+            assert!(String::from_utf8_lossy(&strict.stderr).contains("config/routes.rb:2:3"), "{}", String::from_utf8_lossy(&strict.stderr));
+            assert!(!out.exists(), "{label}: strict refusal wrote an output");
+        }
+    }
+    std::fs::write(app.join("app/controllers/static_files.rb"), endpoint).unwrap();
+    std::fs::write(app.join("config/routes.rb"), "Rails.application.routes.draw do\nmount StaticFiles, at: '/files'\nend\n").unwrap();
+    std::fs::create_dir_all(app.join("config/initializers")).unwrap();
+    std::fs::write(app.join("config/initializers/rebind.rb"), "StaticFiles = ->(env) { [202, {}, ['replacement']] }\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_roundhouse")).args(["check", "--continue"]).arg(&app)
+        .env_remove("ROUNDHOUSE_INGEST_SURVEY").output().unwrap();
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Rack target `StaticFiles`"), "{}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
+fn rack_mount_engine_wording_requires_source_backed_engine_identity() {
+    let fixture = Fixture::new("rack-engine-wording");
+    let app = fixture.write_app(false);
+    for (source, route) in [
+        ("FilesEngine = ->(env) { [200, {}, ['ok']] }", "mount FilesEngine, at: '/files'"),
+        ("class AppInstance; def call(env); [200, {}, ['ok']]; end; end\nFilesEngine = AppInstance.new", "mount FilesEngine, at: '/files'"),
+        ("FilesEngine = Class.new { def self.call(env); [200, {}, ['ok']]; end }", "mount FilesEngine, at: '/files'"),
+        ("class FilesEngine; def self.call(env); [200, {}, ['ok']]; end; end", "scope '/admin' do\nmount FilesEngine, at: '/files'\nend"),
+        ("StaticFiles = proc { |env| [200, {}, ['ok']] }", "mount StaticFiles => '/files'"),
+        ("class StaticFiles; def self.call(env); [200, {}, ['ok']]; end; end", "mount StaticFiles"),
+        ("class StaticFiles; def self.call(env); [200, {}, ['ok']]; end; end", "mount"),
+    ] {
+        std::fs::write(app.join("app/controllers/static_files.rb"), source).unwrap();
+        std::fs::write(app.join("config/routes.rb"), format!("Rails.application.routes.draw do\n{route}\nend\n")).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_roundhouse")).args(["check", "--continue"]).arg(&app)
+            .env_remove("ROUNDHOUSE_INGEST_SURVEY").output().unwrap();
+        let errors = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{errors}");
+        assert!(errors.contains("Rack") && errors.contains("route mount"), "{errors}");
+        assert!(!errors.contains("PATH Rails engine") && !errors.contains("exact engine constant") && !errors.contains("literal engine mounts"), "{errors}");
     }
 }
