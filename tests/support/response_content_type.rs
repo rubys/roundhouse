@@ -37,6 +37,7 @@ const ROUTES: &str = r#"Rails.application.routes.draw do
   get "/new_uppercase_value", to: "content_probes#new_uppercase_value"
   get "/new_uppercase_key", to: "content_probes#new_uppercase_key"
   get "/new_empty_charset", to: "content_probes#new_empty_charset"
+  get "/new_other_parameter", to: "content_probes#new_other_parameter"
 end
 "#;
 

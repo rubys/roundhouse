@@ -65,4 +65,6 @@ status, headers, body = Main.run_rack("REQUEST_METHOD" => "GET", "PATH_INFO" => 
 rows << ["new_uppercase_key", status, headers["content-type"]]
 status, headers, body = Main.run_rack("REQUEST_METHOD" => "GET", "PATH_INFO" => "/new_empty_charset", "QUERY_STRING" => "", "HTTP_HOST" => "example.org", "rack.input" => StringIO.new(""))
 rows << ["new_empty_charset", status, headers["content-type"]]
+status, headers, body = Main.run_rack("REQUEST_METHOD" => "GET", "PATH_INFO" => "/new_other_parameter", "QUERY_STRING" => "", "HTTP_HOST" => "example.org", "rack.input" => StringIO.new(""))
+rows << ["new_other_parameter", status, headers["content-type"]]
 puts JSON.generate(rows)

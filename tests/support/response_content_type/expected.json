@@ -158,5 +158,10 @@
     "new_empty_charset",
     200,
     "text/csv; charset=utf-8"
+  ],
+  [
+    "new_other_parameter",
+    200,
+    "text/csv; x; charset=utf-8"
   ]
 ]

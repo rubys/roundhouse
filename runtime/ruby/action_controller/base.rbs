@@ -192,11 +192,9 @@ module ActionController
     def render: (
       String body,
       ?status: Symbol,
-      ?content_type: (String | Symbol)?,
+      ?content_type: String?,
       ?location: String?
     ) -> void
-
-    def render_content_type_parts: (String value) -> Array[String]
 
     # `redirect_to(path, notice:, alert:, status:)` — sets @location,
     # @status, @flash entries. Ruby/Spinel also accepts Integer status codes.

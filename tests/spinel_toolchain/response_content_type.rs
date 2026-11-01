@@ -99,6 +99,9 @@ raise "new_uppercase_key content type" unless controller.content_type == "text/c
 controller = ContentProbesController.new
 controller.process_action(:new_empty_charset)
 raise "new_empty_charset content type" unless controller.content_type == "text/csv; charset=utf-8"
+controller = ContentProbesController.new
+controller.process_action(:new_other_parameter)
+raise "new_other_parameter content type" unless controller.content_type == "text/csv; x; charset=utf-8"
 puts "response content types passed"
 "#);
     run.assert_passes();

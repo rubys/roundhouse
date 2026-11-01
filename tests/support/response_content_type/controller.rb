@@ -107,4 +107,7 @@ class ContentProbesController < ActionController::API
   def new_empty_charset
     render plain: "ok", content_type: "text/csv; charset="
   end
+  def new_other_parameter
+    render plain: "ok", content_type: "text/csv; xcharset=iso-8859-1"
+  end
 end

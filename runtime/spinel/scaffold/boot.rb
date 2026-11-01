@@ -298,6 +298,7 @@ require_relative "runtime/integration_session"
 # Rails 8.1.4's full ActionController::Head options hash is a Ruby-family
 # feature; strict non-Ruby targets keep the bounded shared implementation.
 require_relative "runtime/action_controller_head"
+require_relative "runtime/action_controller_render"
 # Rails' FlashHash keeps any key; the shared Flash keeps notice/alert, which every target can type.
 require_relative "runtime/flash_any_key"
 # Rails 8.1.4 `send_data(filename:)`: the Content-Disposition escaping
