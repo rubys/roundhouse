@@ -55,7 +55,7 @@ pub fn apply_fused_independent_rewrites(app: &mut App) {
 /// `kwsplat`-expanded) argument lists, and `capture_inline` which
 /// must see `tag_builder`'s synthesized `capture` blocks.
 pub fn apply_fused_late_rewrites(app: &mut App) {
-    let skip_cache = super::rails_cache::app_defines_cache_store(app);
+    let skip_cache = super::rails_cache::app_binds_cache_store(app);
     super::for_each_hook_body(app, &mut |body| {
         walk_postorder(body, &mut |e| rewrite_late_hook_node(e, skip_cache));
     });

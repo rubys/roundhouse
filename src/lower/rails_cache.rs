@@ -32,21 +32,52 @@ use crate::ident::Symbol;
 use crate::ty::Ty;
 
 pub fn apply_rails_cache_lowering(app: &mut App) {
-    if app_defines_cache_store(app) {
+    if app_binds_cache_store(app) {
         return;
     }
     super::for_each_hook_body(app, &mut rewrite);
 }
 
-/// Does the app carry its own `ActiveSupport::Cache::*` store? Then
-/// `Rails.cache` is that app's store, not the shared runtime's, and
-/// `fetch_str` (a method of the runtime's store only) would be
-/// undefined on it: the pass stands down and `fetch` runs as written.
-/// An app's own proxy store and its test double are the case.
-pub(crate) fn app_defines_cache_store(app: &App) -> bool {
-    let is_store = |id: &crate::ident::ClassId| id.0.as_str().starts_with("ActiveSupport::Cache::");
-    app.library_classes.iter().any(|c| is_store(&c.name))
-        || app.models.iter().any(|m| is_store(&m.name))
+/// Is `Rails.cache` the app's own `ActiveSupport::Cache::*` store? Then
+/// `fetch_str` (a method of the runtime's store only) would be undefined
+/// on it: the pass stands down and `fetch` runs as written. Defining such
+/// a class is not enough: the app must bind it, with `config.cache_store
+/// = :custom_store` (or the class) or a `Rails.cache =` naming it. An
+/// unbound store leaves `Rails.cache` the runtime's, whose plain `fetch`
+/// recomputes every call, so the lowering stays.
+pub(crate) fn app_binds_cache_store(app: &App) -> bool {
+    let stores: Vec<&str> = app
+        .library_classes
+        .iter()
+        .map(|c| &c.name)
+        .chain(app.models.iter().map(|m| &m.name))
+        .filter_map(|id| id.0.as_str().strip_prefix("ActiveSupport::Cache::"))
+        .collect();
+    if stores.is_empty() {
+        return false;
+    }
+    let binds = |line: &str| {
+        let line = line.trim();
+        if line.starts_with('#') {
+            return false;
+        }
+        let Some((lhs, rhs)) = line.split_once('=') else { return false };
+        if rhs.starts_with('=') || rhs.starts_with('~') || lhs.ends_with(['!', '<', '>']) {
+            return false;
+        }
+        let lhs = lhs.trim();
+        if !(lhs.ends_with("cache_store") || lhs == "Rails.cache") {
+            return false;
+        }
+        stores.iter().any(|store| {
+            rhs.contains(store)
+                || rhs
+                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':'))
+                    .filter_map(|word| word.strip_prefix(':'))
+                    .any(|sym| crate::naming::camelize(sym) == *store)
+        })
+    };
+    app.sources.iter().any(|source| source.text.lines().any(binds))
 }
 
 fn rewrite(expr: &mut Expr) {
