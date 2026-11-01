@@ -46,7 +46,8 @@
 //!
 //! The exception is a replayed class-body call that DECORATES a pruned
 //! method: `statsd_count_if(:login_from_session, "…")` (and `memoize`,
-//! `helper_method`, …) takes the method's name as its leading symbol
+//! `helper_method`, a visibility change) takes the method's name as its
+//! leading symbol
 //! and raises `ArgumentError: could not find method login_from_session
 //! for SessionLogin` when the module no longer defines it. Those
 //! calls go with the method they name.
@@ -117,10 +118,21 @@ pub fn apply_spliced_concern_body_prune(app: &mut App) {
     }
 }
 
-/// A receiverless class-body call whose leading argument is the symbol
-/// of one of `names`.
+/// A receiverless class-body call that looks up the method its leading
+/// symbol names, and so raises once that method is gone: a visibility
+/// change, `memoize`, `helper_method`, or a StatsD instrumentation macro
+/// (`statsd_count_if`, `statsd_measure`, …). Any other call that happens
+/// to take a pruned name (`register(:ensure_admin, "policy")`, filling a
+/// registry) stays.
 fn decorates(call: &Expr, names: &HashSet<Symbol>) -> bool {
-    let ExprNode::Send { recv: None, args, .. } = &*call.node else { return false };
+    let ExprNode::Send { recv: None, method, args, .. } = &*call.node else { return false };
+    let decorator = matches!(
+        method.as_str(),
+        "private" | "protected" | "public" | "module_function" | "memoize" | "helper_method"
+    ) || method.as_str().starts_with("statsd_");
+    if !decorator {
+        return false;
+    }
     let Some(first) = args.first() else { return false };
     matches!(&*first.node, ExprNode::Lit { value: Literal::Sym { value } } if names.contains(value))
 }
