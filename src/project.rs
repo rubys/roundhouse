@@ -1283,13 +1283,20 @@ fn report_time_tag_calls(app: &App, target: BuildTarget) {
     ) {
         return;
     }
-    // A template no request reaches keeps its errors as warnings, as analysis does.
-    let unreachable: crate::det::HashSet<crate::span::FileId> = app
-        .views
-        .iter()
-        .filter(|v| app.unreachable_views.contains(&v.name))
-        .map(|v| v.body.span.file)
-        .collect();
+    // A template no request reaches keeps its errors as warnings, as analysis
+    // does. By the view's name: a view body's own span can be synthetic (a
+    // Jbuilder template's leading `return if …` guard).
+    fn collect(e: &crate::expr::Expr, calls: &crate::det::HashSet<crate::span::Span>, out: &mut crate::det::HashSet<crate::span::Span>) {
+        if calls.contains(&e.span) {
+            out.insert(e.span);
+        }
+        e.node.for_each_child(&mut |c| collect(c, calls, out));
+    }
+    let calls: crate::det::HashSet<crate::span::Span> = app.time_tag_calls.iter().copied().collect();
+    let mut unreachable = crate::det::HashSet::default();
+    for v in app.views.iter().filter(|v| app.unreachable_views.contains(&v.name)) {
+        collect(&v.body, &calls, &mut unreachable);
+    }
     for span in &app.time_tag_calls {
         let mut d = crate::diagnostic::Diagnostic::unsupported(
             *span,
@@ -1297,7 +1304,7 @@ fn report_time_tag_calls(app: &App, target: BuildTarget) {
             "time_tag",
             "its `datetime` is the time's `iso8601`, which this target writes otherwise than Rails (fraction or zone suffix)",
         );
-        if unreachable.contains(&span.file) {
+        if unreachable.contains(span) {
             d.severity = crate::diagnostic::Severity::Warning;
         }
         emit::diagnostics::push(d);

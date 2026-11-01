@@ -114,34 +114,20 @@ fn unlowered_form_builder_calls(app: &App) -> Vec<Diagnostic> {
     out
 }
 
-/// A `time_tag` that `ingest::time_tag` left as written: no text argument
-/// and no block, whose text Rails makes with `I18n.l(t, format: …)` (not
-/// modeled), or options that are not a literal hash. Nothing else answers
-/// the call, so it is refused rather than reaching the emit.
+/// A `time_tag` that `ingest::time_tag` left as written, with the reason
+/// its `lowering` gives (no text argument and no block, whose text Rails
+/// makes with `I18n.l(t, format: …)`, or a shape it does not model).
+/// Nothing else answers the call, so it is refused rather than reaching
+/// the emit.
 fn unlowered_time_tags(app: &App) -> Vec<Diagnostic> {
     // The app's own `time_tag` is a call like any other.
     if crate::ingest::time_tag::app_defines_time_tag(app) {
         return Vec::new();
     }
     fn visit(expr: &Expr, out: &mut Vec<Diagnostic>) {
-        if let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node
-            && method.as_str() == "time_tag"
-            && !expr.span.is_synthetic()
+        if !expr.span.is_synthetic()
+            && let Some(Err(reason)) = crate::ingest::time_tag::lowering(expr)
         {
-            let gives_datetime = args.last().is_some_and(|a| {
-                matches!(&*a.node, ExprNode::Hash { entries, .. } if entries.iter().any(|(k, _)| {
-                    matches!(&*k.node, ExprNode::Lit { value: crate::expr::Literal::Sym { value } } if value.as_str() == "datetime")
-                }))
-            });
-            let reason = if args.len() <= 1 && block.is_none()
-                || (args.len() == 2 && block.is_none() && matches!(&*args[1].node, ExprNode::Hash { .. }) && !gives_datetime)
-            {
-                "with no text argument and no block, Rails' text is `I18n.l(t, format: …)`, which is not modeled; pass the text (`time_tag t, \"…\"`) or a block"
-            } else if gives_datetime {
-                "a given `datetime:` wins over the time's `iso8601`, which Rails still evaluates first; that order is not modeled"
-            } else {
-                "its arguments are not a time, an optional text and a literal options hash"
-            };
             out.push(Diagnostic::unsupported(expr.span, None, "time_tag", reason));
         }
         expr.node.for_each_child(&mut |child| visit(child, out));

@@ -88,6 +88,23 @@ fn a_time_tag_rails_evaluates_otherwise_is_refused() {
     }
 }
 
+/// Rails' text is `args.first || I18n.l(…)`, so a `nil` or `false` text
+/// falls back to the localized time; a `format:` value is evaluated though
+/// the option is dropped; `content_tag` captures the block with no
+/// arguments. Each is left as written and refused, with its reason.
+#[test]
+fn a_time_tag_whose_text_options_or_block_rails_reads_otherwise_is_refused() {
+    for (markup, reason) in [
+        ("  <%= time_tag @article.created_at, nil %>\n", "`nil` or `false` text"),
+        ("  <%= time_tag @article.created_at, false, class: \"when\" %>\n", "`nil` or `false` text"),
+        ("  <%= time_tag @article.created_at, \"Posted\", format: @article.title.to_sym %>\n", "computed `format:`"),
+        ("  <%= time_tag(@article.created_at) { |x| x.nil? ? \"none\" : \"present\" } %>\n", "block with parameters"),
+    ] {
+        let errors = app(markup).check_errors();
+        assert!(errors.iter().any(|e| e.contains("time_tag not supported") && e.contains(reason)), "{markup}: {errors:?}");
+    }
+}
+
 /// The same page in the spinel binary, where #1593 was found.
 #[test]
 #[ignore = "requires the Spinel toolchain"]
@@ -160,6 +177,20 @@ fn time_tag_in_an_unreachable_template_is_a_warning() {
     assert!(!errors.iter().any(|e| e.contains("time_tag")), "{errors:?}");
     let (_, errors) = overlay()
         .write("app/views/articles/orphan.html.erb", "<%= time_tag Time.now, \"Posted\" %>\n")
+        .edit("config/routes.rb", "Rails.application.routes.draw do\n", "Rails.application.routes.draw do\n  get \"orphan\", to: \"articles#orphan\"\n")
+        .emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.iter().any(|e| e.contains("time_tag not supported")), "a routed template keeps the error: {errors:?}");
+}
+
+/// Jbuilder's included: a leading `return if …` guard gives the template's
+/// body a synthetic span, so reachability goes by the view's name.
+#[test]
+fn time_tag_in_an_unreachable_jbuilder_template_is_a_warning() {
+    let orphan = "return if @skip\njson.posted time_tag(Time.now, \"Posted\")\njson.title \"orphan\"\n";
+    let overlay = || emit_and_run::real_blog().write("app/views/articles/orphan.json.jbuilder", orphan);
+    let (_, errors) = overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(!errors.iter().any(|e| e.contains("time_tag")), "{errors:?}");
+    let (_, errors) = overlay()
         .edit("config/routes.rb", "Rails.application.routes.draw do\n", "Rails.application.routes.draw do\n  get \"orphan\", to: \"articles#orphan\"\n")
         .emit(roundhouse::project::BuildTarget::Typescript);
     assert!(errors.iter().any(|e| e.contains("time_tag not supported")), "a routed template keeps the error: {errors:?}");
