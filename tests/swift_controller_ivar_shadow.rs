@@ -72,7 +72,7 @@ fn a_method_ending_in_an_ivar_assignment_returns_it() {
     let application =
         std::fs::read_to_string(emitted.join("Sources/App/app/controllers/ApplicationController.swift")).unwrap();
     assert!(
-        application.contains("let __rhRet = \"app location\"\n        self.appLocation = __rhRet\n        return __rhRet"),
+        application.contains("do {\n            let __rhRet = \"app location\"\n            self.appLocation = __rhRet\n            return __rhRet\n        }"),
         "{application}"
     );
 }
@@ -93,7 +93,25 @@ fn the_held_value_keeps_the_property_coercion() {
     let probes = std::fs::read_to_string(emitted.join("Sources/App/app/controllers/ProbesController.swift")).unwrap();
     assert!(probes.contains("var count: Int = 0"), "{probes}");
     assert!(
-        probes.contains("let __rhRet = (params[\"count\"] as! Int)\n        self.count = __rhRet\n        return __rhRet"),
+        probes.contains("do {\n            let __rhRet = (params[\"count\"] as! Int)\n            self.count = __rhRet\n            return __rhRet\n        }"),
         "{probes}"
     );
+}
+
+/// An empty collection takes its type from the property it is stored in,
+/// so a method ending in `@items = []` returns the property, not a held
+/// `let` Swift can't type; and the held value sits in its own scope, so
+/// an app local named like it doesn't collide.
+#[test]
+fn an_empty_collection_returns_the_property_and_the_held_value_is_scoped() {
+    let (emitted, errors) = emit_and_run::empty_app()
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n")
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\n  def fill\n    @items = [1]\n  end\n\n  def reset\n    @items = []\n  end\n\n  def bump\n    __rh_ret = 5\n    @count = __rh_ret + 1\n  end\nend\n")
+        .emit(BuildTarget::Swift);
+    assert!(errors.is_empty(), "{errors:?}");
+    let widget = std::fs::read_to_string(emitted.join("Sources/App/app/models/Widget.swift")).unwrap();
+    assert!(widget.contains("self.items = []\n        return items"), "{widget}");
+    assert!(widget.contains("do {\n            let __rhRet1 = __rhRet + 1\n            self.count = __rhRet1\n            return __rhRet1\n        }"), "{widget}");
 }

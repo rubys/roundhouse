@@ -2429,10 +2429,33 @@ pub(super) fn wrap_return(e: &Expr) -> String {
                 return format!("{}\nreturn nil", emit_expr(e));
             }
             let sn = camel(name.as_str());
-            let held = emit_expr(&Expr::new(value.span, ExprNode::Var { id: crate::ident::VarId(0), name: crate::ident::Symbol::from("__rh_ret") }));
+            // `[]`/`[:]` take their type from the property they are stored in; a
+            // held `let` of one has none, so the property itself is returned.
+            if matches!(&*value.node, ExprNode::Array { elements, .. } if elements.is_empty())
+                || matches!(&*value.node, ExprNode::Hash { entries, .. } if entries.is_empty())
+            {
+                return format!("{}\nreturn {sn}", emit_expr(e));
+            }
+            // A name the value doesn't read: inside the `do` scope a `let` can't
+            // read an outer local of its own name.
+            fn reads(e: &Expr, emitted: &str) -> bool {
+                let mut found = matches!(&*e.node, ExprNode::Var { name: n, .. } if camel(n.as_str()) == emitted);
+                e.node.for_each_child(&mut |c| found |= reads(c, emitted));
+                found
+            }
+            let temp_var = |n: usize| {
+                let name = if n == 0 { "__rh_ret".to_string() } else { format!("__rh_ret{n}") };
+                emit_expr(&Expr::new(value.span, ExprNode::Var { id: crate::ident::VarId(0), name: crate::ident::Symbol::from(name.as_str()) }))
+            };
+            let mut n = 0;
+            while reads(value, &temp_var(n)) {
+                n += 1;
+            }
+            let held = temp_var(n);
             let coerced = coerce_for_prop(&sn, value, assign_value(value));
             let store = if IN_MODULE.with(|f| *f.borrow()) { format!("{sn} = {held}") } else { format!("self.{sn} = {held}") };
-            format!("let {held} = {coerced}\n{store}\nreturn {held}")
+            // Its own scope, so an app local of the same name can't collide.
+            format!("do {{\n{}\n}}", indent(&format!("let {held} = {coerced}\n{store}\nreturn {held}")))
         }
         ExprNode::Return { .. }
         | ExprNode::Raise { .. }
