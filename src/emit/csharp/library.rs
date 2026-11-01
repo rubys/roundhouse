@@ -1194,6 +1194,25 @@ fn wrap_return(e: &Expr) -> String {
                 indent4(&els)
             );
         }
+        // Not the assignment alone: Ruby's assignment answers the value, and a value method must return it
+        // The assigned value, not the variable read back: a local or an ivar's
+        // property can be typed wider than the method's return (`long? x` after
+        // `x = nil`, `object?`).
+        ExprNode::Assign { target: crate::expr::LValue::Var { .. } | crate::expr::LValue::Ivar { .. }, value } => {
+            if matches!(&*value.node, ExprNode::Lit { value: Literal::Nil }) {
+                return format!("{}\nreturn default;", emit_stmt(e));
+            }
+            let held = Expr::new(value.span, ExprNode::Var { id: crate::ident::VarId(0), name: crate::ident::Symbol::from("__rh_ret") });
+            let store = Expr::new(e.span, ExprNode::Assign { target: match &*e.node {
+                ExprNode::Assign { target, .. } => target.clone(),
+                _ => unreachable!(),
+            }, value: held });
+            let held = emit_expr(match &*store.node {
+                ExprNode::Assign { value, .. } => value,
+                _ => unreachable!(),
+            });
+            return format!("var {held} = {};\n{}\nreturn {held};", emit_expr(value), emit_stmt(&store));
+        }
         _ => {}
     }
     // Terminal statements take no `return` prefix.

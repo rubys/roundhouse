@@ -2052,11 +2052,12 @@ pub(super) fn emit_begin_rescue(
     ensure: Option<&Expr>,
     arm: &dyn Fn(&Expr) -> String,
 ) -> String {
-    let mut try_body = arm(body);
-    if let Some(eb) = else_branch {
-        try_body.push('\n');
-        try_body.push_str(&arm(eb));
-    }
+    // With an `else`, the else branch's value is the block's: the body
+    // runs as statements, or a `return` from it skips the else.
+    let try_body = match else_branch {
+        Some(eb) => [emit_discarded(body), arm(eb)].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n"),
+        None => arm(body),
+    };
     let mut out = format!("try {{\n{}\n}}", indent(&try_body));
     if !rescues.is_empty() {
         let mut chain = String::new();
@@ -2089,6 +2090,41 @@ pub(super) fn emit_begin_rescue(
         out.push_str(&format!(" finally {{\n{}\n}}", indent(&emit_stmt(en))));
     }
     out
+}
+
+/// A body whose value is discarded: statements as `emit_stmt` writes them,
+/// except a value expression, which C# doesn't take as a statement
+/// (CS0201), is written as a discard so it still runs (and can raise).
+fn emit_discarded(e: &Expr) -> String {
+    if let ExprNode::Seq { exprs } = &*e.node {
+        return exprs.iter().map(emit_discarded).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n");
+    }
+    let is_value = matches!(
+        &*e.node,
+        ExprNode::Var { .. }
+            | ExprNode::Ivar { .. }
+            | ExprNode::Const { .. }
+            | ExprNode::Array { .. }
+            | ExprNode::Hash { .. }
+            | ExprNode::StringInterp { .. }
+            | ExprNode::BoolOp { .. }
+            | ExprNode::Range { .. }
+    );
+    if is_value {
+        return format!("_ = {};", emit_expr(e));
+    }
+    // A send is classified by the C# it emits, not its Ruby name: `n + 1`
+    // and `items.empty?` (`(items.Count == 0)`) are values, while
+    // `items << 1` (`items.Add(1L)`, void) is a call. A call ends in its
+    // argument list and doesn't open with a parenthesis.
+    if let ExprNode::Send { .. } = &*e.node {
+        let emitted = emit_expr(e);
+        let text = emitted.trim();
+        if text.starts_with('(') || !text.ends_with(')') {
+            return format!("_ = {text};");
+        }
+    }
+    emit_stmt(e)
 }
 
 pub(super) fn emit_stmt(e: &Expr) -> String {

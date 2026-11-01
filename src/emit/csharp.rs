@@ -57,6 +57,8 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         classes
     })
     .expect("csharp runtime transpile failed (Ruby source error)");
+    let runtime_classes: Vec<crate::dialect::LibraryClass> =
+        runtime_units.iter().flat_map(|u| u.classes.iter().cloned()).collect();
     for unit in runtime_units {
         files.push(EmittedFile { path: unit.out_path, content: unit.content });
     }
@@ -135,21 +137,39 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut controller_extras = view_lower_extras;
     controller_extras.extend(crate::lower::extras_from_lcs(&view_lcs));
     let assocs = crate::lower::model_associations::compute_association_graph(app);
-    let controller_lcs = crate::lower::lower_controllers_with_arel_views_and_assocs(
+    let mut controller_lcs = crate::lower::lower_controllers_with_arel_views_and_assocs(
         &app.controllers,
         controller_extras,
         Some(&app.schema),
         &app.views,
         &assocs,
     );
-
-    // Synthesize `ApplicationController` when a controller extends it but the
-    // app doesn't define one (Rails scaffolds assume it).
     let needs_app_controller = app
         .controllers
         .iter()
         .any(|c| matches!(c.parent.as_ref(), Some(p) if p.0.as_str() == "ApplicationController"))
         && !app.controllers.iter().any(|c| c.name.0.as_str() == "ApplicationController");
+    // With no app ApplicationController, this emit writes one under
+    // the runtime base (below), which the controllers under it reach.
+    let implied: &[(&str, &str)] = if needs_app_controller {
+        &[("ApplicationController", "ActionController::Base")]
+    } else {
+        &[]
+    };
+    // A property and a method share one C# namespace, both PascalCased:
+    // `performed?` is `PerformedPred`, `save!` is `SaveBang`, so an app
+    // `@save_bang` (`SaveBang`) meets the runtime's `save!`.
+    super::controller_ivars::rename_ivars_shadowing_controller_base(&mut controller_lcs, &runtime_classes, |name| {
+        let csharp = match name.as_str() {
+            "[]" => "get".to_string(),
+            "[]=" => "set".to_string(),
+            other => naming::pascal(other),
+        };
+        vec![name.clone(), crate::ident::Symbol::from(crate::naming::snake_case(&csharp))]
+    }, |name| crate::ident::Symbol::from(naming::pascal(name.as_str())), implied);
+
+    // Synthesize `ApplicationController` when a controller extends it but the
+    // app doesn't define one (Rails scaffolds assume it).
     if needs_app_controller {
         files.push(EmittedFile {
             path: std::path::PathBuf::from("app/controllers/ApplicationController.cs"),
