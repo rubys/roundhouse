@@ -1186,6 +1186,12 @@ pub(super) fn emit_yield(args: &[Expr], ctx: &ViewCtx) -> Expr {
             return view_helpers_call("get_slot", vec![lit_sym(value.clone())]);
         }
     }
+    // A partial whose record slot is its record, not the yielded markup:
+    // only rendered without a block (`check` refuses a block render to
+    // it), where Rails' `yield` is nil and renders nothing.
+    if !ctx.arg_name.is_empty() && !ctx.record_carries_yield {
+        return Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Str { value: String::new() } });
+    }
     let local_name = if ctx.arg_name.is_empty() {
         "body".to_string()
     } else {
@@ -1264,6 +1270,7 @@ pub(super) fn named_partial_call_with_record(
             // name; an omitted record falls to the header default. The
             // dir-convention singular governs only convention-inferred
             // partials.
+            let record_override_given = record_override.is_some();
             let arg_expr = match (record_override, strict_decl, locals.is_some()) {
                 (Some(record), _, _) => record,
                 (None, strict_decl, has_locals) => match (strict_decl, has_locals) {
@@ -1278,11 +1285,11 @@ pub(super) fn named_partial_call_with_record(
                 (None, false) => arg.cloned().unwrap_or_else(nil_lit),
                 },
             };
-            // A partial that yields, rendered with no block: Rails' `yield`
-            // is nil there and renders nothing, so its String body is "".
-            let arg_expr = if matches!(&*arg_expr.node, ExprNode::Lit { value: Literal::Nil })
-                && ctx.yielding_partials.contains(&strict_key)
-            {
+            // A partial carrying its yield in the record slot, rendered with
+            // no block: Rails' `yield` is nil there and renders nothing, so
+            // its String body is "" whatever record the call names (the
+            // partial never reads it).
+            let arg_expr = if !record_override_given && ctx.yielding_partials.contains(&strict_key) {
                 Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Str { value: String::new() } })
             } else {
                 arg_expr

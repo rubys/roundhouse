@@ -107,3 +107,30 @@ fn a_partial_renders_its_block_as_its_yield_on_spinel() {
         ))
         .assert_passes();
 }
+
+/// A partial that yields and also reads its record local (`articles/_card`
+/// reads `article`) keeps the record's model type, and rendered without a
+/// block its `yield` renders nothing (Rails: no block, nil). Only a
+/// partial that never reads its record carries the block's body in that
+/// slot.
+#[test]
+fn a_partial_reading_its_record_keeps_it_and_yields_nothing_without_a_block() {
+    let overlay = || {
+        emit_and_run::real_blog()
+            .write("app/views/articles/_card.html.erb", "<b><%= article.title %></b><%= yield %>\n")
+            .edit(
+                "app/views/articles/show.html.erb",
+                "<% content_for :title, \"Showing article\" %>\n",
+                "<% content_for :title, \"Showing article\" %>\n<p id=\"card\"><%= render \"articles/card\", article: @article %></p>\n",
+            )
+    };
+    let (out, errors) = overlay().emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:?}");
+    let sig = std::fs::read_to_string(out.join("sig/app/views/articles/_card.rbs")).unwrap();
+    assert!(sig.contains("Article article") && !sig.contains("String article"), "{sig}");
+    let test = "require \"test_helper\"\n\nclass CardControllerTest < ActionDispatch::IntegrationTest\n  test \"card\" do\n    get article_url(articles(:one))\n    assert_match(%r{<p id=\"card\"><b>Getting Started with Rails</b>\\n?</p>}, response.body)\n  end\nend\n";
+    overlay()
+        .write("test/controllers/card_controller_test.rb", test)
+        .run_test("test/controllers/card_controller_test.rb")
+        .assert_passes();
+}
