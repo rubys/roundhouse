@@ -15,7 +15,7 @@
 # and loops:
 #
 #   BRPOP queue:a queue:b ... 2       # [] after 2 s, then check QUIET
-#   run the job, writing it to the dead set if it fails
+#   run the job, writing it to the retry or dead set if it fails
 #
 # Strict order (no weights) sends the queues as given. With weights,
 # each fetch shuffles the expanded list (a weight-3 queue three times)
@@ -26,12 +26,20 @@
 # its older alias) can run here; the payload goes to
 # `ActiveJob.perform_parsed`. A job that raises, a job class this binary
 # doesn't have, and a native Sidekiq job all fail the way Sidekiq fails
-# them, and with no retries until the retry set lands, a failed job
-# goes straight to the dead set (`SidekiqEnvelope.with_error`), unless
-# it says `retry: false` or `dead: false`. Malformed JSON goes to the
-# dead set as it is. The dead write is a pipeline of ZADD and the two
-# trims Sidekiq sends (Sidekiq wraps them in MULTI; spinel-redis has no
-# MULTI yet).
+# them, through Sidekiq's retry rules (`fail_job`): `retry: false` drops
+# the job; otherwise the failure is recorded on it
+# (`SidekiqEnvelope.with_error`) and it goes to the retry set, scored
+# `count**4 + 15` seconds plus jitter from now, until its `retry` limit
+# (`max_retries`, 25 by default) or `retry_for` runs out. Then it goes
+# to the dead set, unless it says `dead: false`. Malformed JSON goes to
+# the dead set as it is. The dead write is a pipeline of ZADD and the
+# two trims Sidekiq sends (Sidekiq wraps them in MULTI; spinel-redis has
+# no MULTI yet).
+#
+# THE SCHEDULER. One more thread with its own connection
+# (`SidekiqScheduler`, below) moves due jobs from the `retry` and
+# `schedule` sets back onto their queues, as Sidekiq's Poller does in
+# every server process: Sidekiq's Lua pop, byte for byte, then the push.
 #
 # SIGNALS. TSTP sets QUIET: threads finish their job and stop fetching,
 # and a job popped after that is pushed straight back. TERM or INT also
@@ -51,6 +59,7 @@ module SidekiqWorker
   FETCH_TIMEOUT = 2
   DEAD_TIMEOUT_SECONDS = 15_552_000
   DEAD_MAX_JOBS = 10_000
+  MAX_RETRIES = 25
   POLL_SECONDS = 0.5
   RECONNECT_SECONDS = 1.0
 
@@ -76,8 +85,8 @@ module SidekiqWorker
   RUNNING = [0]
   THREADS = []
 
-  # The control connection (requeue and dead writes), opened lazily and
-  # shared under CONTROL_LOCK.
+  # The control connection (requeue, retry and dead writes), opened
+  # lazily and shared under CONTROL_LOCK.
   CONTROL = []
   CONTROL_LOCK = Mutex.new
 
@@ -210,6 +219,8 @@ module SidekiqWorker
       ", Redis " + SidekiqPush.redacted_url(SidekiqPush.url))
     install_traps
     start(CONCURRENCY[0])
+    SidekiqScheduler.start(JobRegistry.sidekiq_worker_poll_interval_average,
+      JobRegistry.sidekiq_worker_scheduled_poll_interval)
     nil
   end
 
@@ -290,6 +301,10 @@ module SidekiqWorker
     # A job such a thread pops meanwhile it pushes back itself.
     idle_deadline = clock + FETCH_TIMEOUT + 2
     while running > busy && clock < idle_deadline
+      sleep 0.05
+    end
+    # The scheduler stops at QUIET too, after pushing a job it has popped.
+    while SidekiqScheduler.running? && clock < idle_deadline
       sleep 0.05
     end
     queues = []
@@ -453,23 +468,59 @@ module SidekiqWorker
     nil
   end
 
+  # Sidekiq's retry rules for a job that failed (`JobRetry#process_retry`).
   def self.fail_job(env, raw, queue, label, error_class, message, started)
     log("WARN", label + " fail: " + elapsed(started) + " sec: " + error_class + ": " + message)
-    if SidekiqEnvelope.dead?(env)
-      write_dead(SidekiqEnvelope.with_error(raw, queue, error_class, message, now_ms))
-    else
+    unless SidekiqEnvelope.retries?(env)
       log("INFO", label + " dropped: retry is off")
+      return nil
+    end
+    now = now_ms
+    count = SidekiqEnvelope.next_retry_count(env)
+    failed = SidekiqEnvelope.with_error(raw, queue, error_class, message, now)
+    if SidekiqEnvelope.exhausted?(env, count, max_retries, now)
+      if SidekiqEnvelope.discard_when_exhausted?(env)
+        log("INFO", label + " discarded: retries exhausted")
+      else
+        write_dead(failed)
+      end
+    else
+      delay = SidekiqEnvelope.retry_delay(count)
+      write_retry(Time.now.to_f + delay, failed)
     end
     nil
   end
 
-  # ZADD dead now <job>, then Sidekiq's trims by age and by count. A
-  # Redis error loses the job, logged in full, as Sidekiq loses it.
+  # `max_retries` from config/sidekiq.yml, else Sidekiq's 25.
+  def self.max_retries
+    n = JobRegistry.sidekiq_worker_max_retries
+    n >= 0 ? n : MAX_RETRIES
+  end
+
+  # ZADD retry <when> <job>, one command, as Sidekiq writes it. A Redis
+  # error loses the job, logged in full, as Sidekiq loses it.
+  def self.write_retry(at, json)
+    begin
+      with_control { |conn| SidekiqRedis.write_retry(conn, at, json) }
+    rescue StandardError => e
+      log("WARN", "Failed to write a job to the retry set: " + e.message + ": " + json)
+    end
+    nil
+  end
+
+  # ZADD dead now <job>, then Sidekiq's trims by age and by count
+  # (`dead_timeout_in_seconds` and `dead_max_jobs` from
+  # config/sidekiq.yml, else 180 days and 10,000). A Redis error loses
+  # the job, logged in full, as Sidekiq loses it.
   def self.write_dead(json)
     now = Time.now.to_f
+    timeout = JobRegistry.sidekiq_worker_dead_timeout
+    timeout = DEAD_TIMEOUT_SECONDS if timeout < 0
+    keep = JobRegistry.sidekiq_worker_dead_max_jobs
+    keep = DEAD_MAX_JOBS if keep < 0
     begin
       with_control do |conn|
-        SidekiqRedis.write_dead(conn, now, json, (now - DEAD_TIMEOUT_SECONDS).to_s, (0 - DEAD_MAX_JOBS).to_s)
+        SidekiqRedis.write_dead(conn, now, json, (now - timeout).to_s, (0 - keep).to_s)
       end
     rescue StandardError => e
       log("WARN", "Failed to write a job to the dead set: " + e.message + ": " + json)
@@ -526,5 +577,180 @@ module SidekiqWorker
 
   def self.now_ms
     Process.clock_gettime(Process::CLOCK_REALTIME, :millisecond)
+  end
+end
+
+# Sidekiq's Poller (`Sidekiq::Scheduled`): one thread, started by the
+# worker's boot, that moves due jobs from the `retry` set, then the
+# `schedule` set, back onto their queues.
+#
+#   wait 10 + rand * 5 s (rand * 5 when poll_interval_average is set)
+#   until QUIET:
+#     for retry, then schedule:
+#       while EVALSHA <zpopbyscore> 1 <set> <now> answers a job:
+#         SADD queues <q>; LPUSH queue:<q> <job with enqueued_at now>
+#     wait the poll interval, randomized
+#
+# The pop is Sidekiq's Lua script, byte for byte, so its SHA is the one
+# Ruby Sidekiq processes load and they share Redis's script cache. On
+# NOSCRIPT (Redis restarted, or SCRIPT FLUSH) it loads the script again
+# and retries. The pop and the push are two round trips, so a job is
+# lost if the process dies between them, as with Sidekiq.
+#
+# The interval: `poll_interval_average`, else the number of Sidekiq
+# processes (SCARD processes, at least 1) times
+# `average_scheduled_poll_interval` (5 s), both from config/sidekiq.yml.
+# Under 10 processes each wait is uniform within 50% of it either way,
+# else between 0 and twice it. This worker doesn't heartbeat into
+# `processes` yet, so only Ruby Sidekiq processes are counted.
+#
+# Waits are sliced, so QUIET stops it within half a second. A Redis
+# error ends the cycle with a log line (one per outage) and a fresh
+# connection next time. A job whose text isn't a JSON object can't be
+# pushed and goes to the dead set as it is.
+module SidekiqScheduler
+  LUA_ZPOPBYSCORE = "local key, now = KEYS[1], ARGV[1]\n" \
+    "local jobs = redis.call(\"zrange\", key, \"-inf\", now, \"byscore\", \"limit\", 0, 1)\n" \
+    "if jobs[1] then\n" \
+    "  redis.call(\"zrem\", key, jobs[1])\n" \
+    "  return jobs[1]\n" \
+    "end\n"
+  SETS = ["retry", "schedule"]
+  INITIAL_WAIT = 10
+  AVERAGE_SCHEDULED_POLL_INTERVAL = 5.0
+
+  SHA = [""]
+  # [0] poll_interval_average, [1] average_scheduled_poll_interval;
+  # -1.0 when config/sidekiq.yml gives none.
+  INTERVALS = [-1.0, -1.0]
+  RUNNING = [false]
+  THREAD = []
+
+  def self.start(poll_interval_average, scheduled_poll_interval)
+    INTERVALS[0] = poll_interval_average
+    INTERVALS[1] = scheduled_poll_interval
+    RUNNING[0] = true
+    THREAD.clear
+    THREAD.push(Thread.new { run })
+    nil
+  end
+
+  def self.running?
+    RUNNING[0]
+  end
+
+  def self.run
+    conn = []
+    down = [false]
+    pause(initial_wait)
+    while !SidekiqWorker::QUIET[0]
+      begin
+        conn.push(SidekiqRedis.worker_open(SidekiqPush.url)) if conn.length == 0
+        enqueue(conn[0])
+        if down[0]
+          SidekiqWorker.log("INFO", "Scheduler: Redis is back")
+          down[0] = false
+        end
+      rescue StandardError => e
+        SidekiqWorker.log("WARN", "Scheduler: " + e.message) unless down[0]
+        down[0] = true
+        if conn.length > 0
+          SidekiqRedis.close_quietly(conn[0])
+          conn.clear
+        end
+      end
+      pause(down[0] ? SidekiqWorker::RECONNECT_SECONDS : interval(conn))
+    end
+    SidekiqRedis.close_quietly(conn[0]) if conn.length > 0
+    RUNNING[0] = false
+    nil
+  end
+
+  # One cycle: every due job in `retry`, then in `schedule`.
+  def self.enqueue(conn)
+    SETS.each do |set|
+      while !SidekiqWorker::QUIET[0]
+        job = zpop(conn, set)
+        break if job.nil?
+        push(conn, set, job)
+      end
+    end
+    nil
+  end
+
+  # Sidekiq's `zpopbyscore`: the first job due by now, removed, or nil.
+  def self.zpop(conn, set)
+    SHA[0] = SidekiqRedis.script_load(conn, LUA_ZPOPBYSCORE) if SHA[0] == ""
+    now = Time.now.to_f.to_s
+    job = nil
+    begin
+      job = SidekiqRedis.evalsha(conn, SHA[0], set, now)
+    rescue StandardError => e
+      raise e unless e.message.include?("NOSCRIPT")
+      SHA[0] = SidekiqRedis.script_load(conn, LUA_ZPOPBYSCORE)
+      job = SidekiqRedis.evalsha(conn, SHA[0], set, now)
+    end
+    job
+  end
+
+  def self.push(conn, set, job)
+    queue = ""
+    begin
+      env = JSON.parse(job)
+      queue = env["queue"].to_s if env.is_a?(Hash)
+    rescue StandardError
+      queue = ""
+    end
+    if queue == ""
+      SidekiqWorker.log("WARN", "Scheduler: a job in " + set + " has no queue; it goes to the dead set: " + job)
+      SidekiqWorker.write_dead(job)
+      return nil
+    end
+    # The pop already took the job out of the set: if the push fails, the
+    # log keeps its text, and `run` still sees the error as an outage.
+    begin
+      SidekiqRedis.push_on(conn, queue, SidekiqEnvelope.with_enqueued_at(job, SidekiqWorker.now_ms))
+    rescue StandardError => e
+      SidekiqWorker.log("WARN", "Scheduler: failed to push a job from " + set + " to " + queue + ": " + e.message + ": " + job)
+      raise e
+    end
+    nil
+  end
+
+  def self.initial_wait
+    (INTERVALS[0] > 0.0 ? 0.0 : INITIAL_WAIT.to_f) + 5.0 * rand
+  end
+
+  # Sidekiq's `random_poll_interval`.
+  def self.interval(conn)
+    count = 1
+    average = INTERVALS[0]
+    if average <= 0.0
+      count = process_count(conn)
+      per = INTERVALS[1] > 0.0 ? INTERVALS[1] : AVERAGE_SCHEDULED_POLL_INTERVAL
+      average = count * per
+    end
+    count < 10 ? average * rand + average / 2.0 : average * rand * 2.0
+  end
+
+  def self.process_count(conn)
+    return 1 if conn.length == 0
+    begin
+      n = SidekiqRedis.scard(conn[0], "processes")
+      n > 0 ? n : 1
+    rescue StandardError
+      1
+    end
+  end
+
+  # Sleep `seconds` in half-second slices, leaving early on QUIET.
+  def self.pause(seconds)
+    left = seconds
+    while left > 0.0 && !SidekiqWorker::QUIET[0]
+      step = left < SidekiqWorker::POLL_SECONDS ? left : SidekiqWorker::POLL_SECONDS
+      sleep step
+      left -= step
+    end
+    nil
   end
 end

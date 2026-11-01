@@ -58,7 +58,7 @@ world the application now operates in:
   on the original whiteboard.
 
 The cost-economics constraint is the most measurable of the five,
-and the [benchmark results](https://rubys.github.io/roundhouse/bench/)
+and the [benchmark results](https://roundhouse-rb.dev/bench/)
 on the real-blog fixture cover it across Rust, Crystal, Go,
 TypeScript, Ruby, and Rails on a fixed Hetzner box. The standard
 objection — "Rails apps are I/O-bound, the runtime doesn't matter" —

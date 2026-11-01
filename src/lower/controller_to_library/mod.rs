@@ -302,6 +302,12 @@ pub struct LowerControllerOptions<'a> {
     >,
 }
 
+/// The ivars the controller lowering itself writes for the runtime's own
+/// state: bare `params` / `flash` / `session` become `@params` /
+/// `@flash` / `@session`, and the render rewrite passes `@flash[:notice]`
+/// to every view. They are the runtime's, not the app's.
+pub(crate) const FRAMEWORK_IVARS: [&str; 3] = ["params", "flash", "session"];
+
 pub fn lower_controllers_with_arel_views_assocs_and_routes(
     controllers: &[Controller],
     extras: Vec<(ClassId, crate::analyze::ClassInfo)>,
@@ -497,7 +503,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     let mut framework_ivars: crate::det::HashMap<Symbol, Ty> =
         crate::det::HashMap::default();
     framework_ivars.insert(
-        Symbol::from("params"),
+        Symbol::from(FRAMEWORK_IVARS[0]),
         Ty::Hash {
             key: std::sync::Arc::new(Ty::Str),
             value: std::sync::Arc::new(Ty::Untyped),
@@ -511,7 +517,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // + HWIA-shape shims); type `@flash` as Flash so `@flash[:k]`
     // routes through `Flash#[]` for typed targets.
     framework_ivars.insert(
-        Symbol::from("flash"),
+        Symbol::from(FRAMEWORK_IVARS[1]),
         Ty::Class {
             id: ClassId(Symbol::from("ActionDispatch::Flash")),
             args: vec![].into(),
@@ -521,12 +527,14 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // ActionDispatch::Session struct (empty for real-blog, HWIA-shape
     // shims preserved on the class for cross-target tests).
     framework_ivars.insert(
-        Symbol::from("session"),
+        Symbol::from(FRAMEWORK_IVARS[2]),
         Ty::Class {
             id: ClassId(Symbol::from("ActionDispatch::Session")),
             args: vec![].into(),
         },
     );
+
+    debug_assert_eq!(framework_ivars.len(), FRAMEWORK_IVARS.len());
 
     // Every relation-RETURNING class method the app registers — its
     // `scope` declarations plus the class methods whose body tail is a

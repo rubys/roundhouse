@@ -34,6 +34,8 @@ use crate::ingest::ingest_app;
 
 pub use crate::build_target::{BuildTarget, ParamBindCapability};
 
+mod rack_mounts;
+
 /// Quick-start README for a transpile target. Injected into every
 /// file set by `target_files` (so both `--target` output and the
 /// `--site` archives carry it), unless the set already contains a
@@ -426,11 +428,11 @@ pub fn target_readme(target: BuildTarget) -> String {
     let attribution = match target {
         BuildTarget::Blog => {
             "The Rails source app that [Roundhouse]\
-             (https://rubys.github.io/roundhouse/) transpiles."
+             (https://roundhouse-rb.dev/) transpiles."
         }
         _ => {
             "Transpiled from a Rails source app by [Roundhouse]\
-             (https://rubys.github.io/roundhouse/)."
+             (https://roundhouse-rb.dev/)."
         }
     };
     // Archives that ship the Playwright suite (see `ships_e2e`)
@@ -2600,6 +2602,7 @@ pub fn target_files(
     if target == BuildTarget::Futamura {
         return futamura_target_files(app, fixture, None);
     }
+    rack_mounts::check_target(app, target)?;
     let refusals = crate::gems::extension_gem_refusals(app, Some(target.as_str()));
     if !refusals.is_empty() {
         let message = refusals.iter().map(|diagnostic| diagnostic.message.as_str()).collect::<Vec<_>>().join("\n");
@@ -3352,7 +3355,10 @@ fn with_sidekiq_readme(mut files: Vec<(String, String)>, target: BuildTarget, ap
          connection, and the database pool is sized to the threads plus headroom \
          unless `DATABASE_POOL_SIZE` is set. TSTP stops fetching; TERM or INT \
          waits for running jobs up to the timeout and pushes the rest back. A job \
-         that raises goes to the dead set; there are no retries yet.\n\n\
+         that raises is retried with Sidekiq's backoff (up to config/sidekiq.yml's \
+         `:max_retries:`, then 25), then goes to the dead set, and the worker moves \
+         due retries and scheduled jobs back onto their queues, as Sidekiq's \
+         scheduler does.\n\n\
          {cable}\n\n"
     );
     if let Some((_, readme)) = files.iter_mut().find(|(p, _)| p == "README.md") {
@@ -4630,6 +4636,7 @@ fn ruby_family_runtime_files(
     apply_controller_dispatch(&mut files, app, true);
     apply_cruby_test_support(&mut files);
     apply_route_table_root(&mut files, app);
+    rack_mounts::apply(&mut files, app, true)?;
     apply_cable_strip(&mut files, app)?;
     apply_makefile_test_list_stems(&mut files, &test_stems);
     apply_runtime_gem_wiring(&mut files, app)?;
@@ -6317,7 +6324,9 @@ fn redis_setting_source(setting: Option<&crate::app::RedisSetting>) -> String {
 
 /// `JobRegistry`'s `config/sidekiq.yml` defaults for the worker:
 /// concurrency 0 and timeout -1 when the file gives none, and the queues
-/// as one String of `name` or `name,weight` words, `""` for none.
+/// as one String of `name` or `name,weight` words, `""` for none. The
+/// retry limit, the dead set's trims and the poller's intervals are -1
+/// (-1.0) when the file gives none, so the worker keeps Sidekiq's.
 fn worker_defaults_source(defaults: &crate::app::SidekiqWorkerDefaults) -> String {
     use crate::emit::ruby::expr::ruby_str_literal;
     let queues: Vec<String> = defaults
@@ -6325,12 +6334,22 @@ fn worker_defaults_source(defaults: &crate::app::SidekiqWorkerDefaults) -> Strin
         .iter()
         .map(|(name, weight)| if *weight == 0 { name.clone() } else { format!("{name},{weight}") })
         .collect();
-    format!(
-        "\n  def self.sidekiq_worker_concurrency\n    {}\n  end\n\n  def self.sidekiq_worker_timeout\n    {}\n  end\n\n  def self.sidekiq_worker_queues\n    {}\n  end\n",
-        defaults.concurrency.unwrap_or(0),
-        defaults.timeout.unwrap_or(-1),
-        ruby_str_literal(&queues.join(" ")),
-    )
+    let float = |v: Option<f64>| {
+        let v = v.unwrap_or(-1.0);
+        if v.fract() == 0.0 { format!("{v:.1}") } else { format!("{v}") }
+    };
+    let method = |name: &str, body: String| format!("\n  def self.{name}\n    {body}\n  end\n");
+    [
+        method("sidekiq_worker_concurrency", defaults.concurrency.unwrap_or(0).to_string()),
+        method("sidekiq_worker_timeout", defaults.timeout.unwrap_or(-1).to_string()),
+        method("sidekiq_worker_queues", ruby_str_literal(&queues.join(" "))),
+        method("sidekiq_worker_max_retries", defaults.max_retries.unwrap_or(-1).to_string()),
+        method("sidekiq_worker_dead_max_jobs", defaults.dead_max_jobs.unwrap_or(-1).to_string()),
+        method("sidekiq_worker_dead_timeout", defaults.dead_timeout_in_seconds.unwrap_or(-1).to_string()),
+        method("sidekiq_worker_poll_interval_average", float(defaults.poll_interval_average)),
+        method("sidekiq_worker_scheduled_poll_interval", float(defaults.average_scheduled_poll_interval)),
+    ]
+    .concat()
 }
 
 /// Whether the tree sends broadcasts through Redis: on `:sidekiq`
@@ -9235,6 +9254,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     // ruby_overlay main.rb that supersedes this one.
     apply_controller_dispatch(&mut files, app, false);
     apply_route_table_root(&mut files, app);
+    rack_mounts::apply(&mut files, app, false)?;
     // Identity for the `/cable` handshake, in the shared base like the
     // dispatch above. Only the SPINEL tree runs the result: the
     // CRuby/JRuby trees carry this `runtime/cable.rb` too but never
@@ -11894,8 +11914,9 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
              # sp_net. Git form, pinned to a tag because `ref` takes a branch\n\
              # or tag, never a SHA. 0.3.0 adds the connect_timeout: and\n\
              # read_timeout: this push sets to 0.2.0's url:, AUTH, zadd and\n\
-             # pipelined.\n\
-             redis = { git = \"https://github.com/roundhouse-rb/spinel-redis\", ref = \"v0.3.1\" }\n",
+             # pipelined; 0.3.2 adds the script and evalsha the worker's\n\
+             # scheduler runs.\n\
+             redis = { git = \"https://github.com/roundhouse-rb/spinel-redis\", ref = \"v0.3.2\" }\n",
         );
     }
     files.push(("spin.toml".to_string(), manifest));

@@ -90,7 +90,7 @@ cat > "$DIR/README.md" <<README
 
 [ONCE Campfire](https://github.com/basecamp/once-campfire) — Basecamp's
 MIT-licensed chat app — transpiled from its Rails source by
-[Roundhouse](https://rubys.github.io/roundhouse/), compiled ahead-of-time
+[Roundhouse](https://roundhouse-rb.dev/), compiled ahead-of-time
 to C by the [Spinel](https://github.com/matz/spinel) Ruby VM, and packaged
 so that building it needs Docker and nothing else.
 
@@ -205,5 +205,5 @@ delivery, subscribe again before retrying. Image uploads — attachments,
 avatars, the account logo — work, persist under \`/app/storage/files\`,
 and are served as the thumbnails Rails would serve (libvips, through the
 spinel-ruby-vips package). See the
-[project page](https://rubys.github.io/roundhouse/apps/campfire.html).
+[project page](https://roundhouse-rb.dev/apps/campfire.html).
 README

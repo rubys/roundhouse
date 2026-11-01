@@ -20,7 +20,7 @@ require 'etc'
 
 ROUNDHOUSE_ROOT = File.expand_path('..', __dir__)
 TARGETS = %w[spinel ruby jruby crystal csharp elixir go kotlin python rust swift typescript typescript-worker].freeze
-SITE_BASE = 'https://rubys.github.io/roundhouse'
+SITE_BASE = 'https://roundhouse-rb.dev'
 
 def main(argv)
   cmd = argv.shift
@@ -511,7 +511,7 @@ end
 # ---------------------------------------------------------------------
 # Subcommand: fetch
 #
-# Download a pre-transpiled archive from rubys.github.io/roundhouse/
+# Download a pre-transpiled archive from roundhouse-rb.dev/
 # and explode it into ./downloads/<target>/. Pure Ruby stdlib —
 # open-uri (follows redirects, handles HTTPS), Zlib::GzipReader,
 # Gem::Package::TarReader. No curl/wget/tar shell dep.

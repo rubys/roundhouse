@@ -6,7 +6,9 @@
 # requires, writes popped.txt (the oracle's strict-scenario jobs), and
 # runs it under CRuby and, compiled by spinel, as a binary. It prints
 # one `ok`/`FAIL` line per check and the writes, with per-run values
-# masked, then `done`.
+# masked, then a `rule` line for each of the retry oracle's failures
+# (failures.txt), the `sched` lines for the scheduler moving the
+# oracle's due jobs (moves.txt), then `done`.
 require "json"
 require "securerandom"
 require "time"
@@ -126,6 +128,16 @@ module SidekiqRedis
     nil
   end
 
+  # The delay is checked against Sidekiq's backoff for the record's
+  # retry_count, then dropped: it has jitter in it.
+  def self.write_retry(conn, at, json)
+    count = JSON.parse(json)["retry_count"].to_i
+    delay = at - Time.now.to_f
+    ok = delay > count**4 + 14 && delay < count**4 + 16 + 10 * (count + 1)
+    L.synchronize { LOG.push("retry " + (ok ? "delay ok " : "delay " + delay.to_s + " ") + mask(json)) }
+    nil
+  end
+
   def self.write_dead(conn, now, json, oldest, keep)
     age = (now - oldest.to_f).round.to_s
     L.synchronize { LOG.push("dead " + mask(json) + " trim age " + age + " keep " + keep) }
@@ -136,12 +148,59 @@ module SidekiqRedis
     nil
   end
 
+  # The scheduler's side. SETS holds "set<TAB>job" entries; EVALSHA pops
+  # the first entry for its set, as the Lua pop does. SCRIPT_LOADED off
+  # makes the next EVALSHA fail with NOSCRIPT, as after SCRIPT FLUSH.
+  SETS = [""]
+  SCRIPT_LOADED = [false]
+
+  def self.script_load(conn, source)
+    L.synchronize do
+      LOG.push("script load " + (source == SidekiqScheduler::LUA_ZPOPBYSCORE ? "zpopbyscore" : "other"))
+      SCRIPT_LOADED[0] = true
+    end
+    "000a4c2f82df69db1780053377a2c9b0741570e0"
+  end
+
+  def self.evalsha(conn, sha, key, arg)
+    found = []
+    flushed = false
+    L.synchronize do
+      flushed = !SCRIPT_LOADED[0]
+      if flushed
+        LOG.push("noscript")
+      else
+        i = 0
+        while i < SETS.length
+          tab = SETS[i].index("\t")
+          if SETS[i][0, tab] == key
+            found.push(SETS[i][tab + 1, SETS[i].length - tab - 1])
+            SETS.delete_at(i)
+            i = SETS.length
+          end
+          i += 1
+        end
+      end
+    end
+    raise "NOSCRIPT No matching script. Please use EVAL." if flushed
+    found.length == 0 ? nil : found[0]
+  end
+
+  def self.scard(conn, key)
+    0
+  end
+
+  def self.push_on(conn, queue, json)
+    L.synchronize { LOG.push("push " + queue + " " + mask(json)) }
+    nil
+  end
+
   def self.hard_exit(code)
     L.synchronize { LOG.push("exit " + code.to_s) }
     nil
   end
 
-  # A dead record with the time it was written masked.
+  # A record with the times it was written masked.
   def self.mask(json)
     env = nil
     begin
@@ -151,7 +210,7 @@ module SidekiqRedis
     end
     return json unless env.is_a?(Hash)
     now = Process.clock_gettime(Process::CLOCK_REALTIME, :millisecond)
-    ["failed_at", "retried_at"].each do |k|
+    ["failed_at", "retried_at", "enqueued_at"].each do |k|
       v = env[k]
       env[k] = "<now>" if !v.nil? && (now - v.to_i).abs < 60_000
     end
@@ -280,4 +339,81 @@ SidekiqWorker::THREADS.each { |t| t.join }
 SidekiqRedis::QUIET_ON_FETCH[0] = false
 log = SidekiqRedis.take_log
 check("a job popped while quiet is pushed back", log == ["requeue queue:default " + slow], log.join(" / "))
+
+# ---- Sidekiq's retry rules on the jobs Sidekiq failed ------------------------
+# failures.txt: the oracle's failed jobs, one per line, as
+# "queue<TAB>error class<TAB>message<TAB>popped text". Each prints
+# `rule` and what the worker wrote for it, or `rule nothing`.
+File.read("failures.txt").split("\n").each do |line|
+  parts = line.split("\t", 4)
+  raw = parts[3]
+  SidekiqWorker.fail_job(JSON.parse(raw), raw, parts[0], "class=Job", parts[1], parts[2], SidekiqWorker.clock)
+  log = SidekiqRedis.take_log
+  puts "rule " + (log.length == 0 ? "nothing" : log.join(" / "))
+end
+
+# ---- the scheduler on the jobs Sidekiq's poller moved ------------------------
+# moves.txt: the oracle's moves, one per line, as "set<TAB>popped
+# text". One cycle drains retry, then schedule; each push prints as
+# `sched push <queue> <json>`.
+SidekiqRedis::SETS.clear
+File.read("moves.txt").split("\n").each { |line| SidekiqRedis::SETS.push(line) }
+SidekiqRedis::SCRIPT_LOADED[0] = false
+SidekiqWorker::QUIET[0] = false
+SidekiqScheduler.enqueue(1)
+SidekiqRedis.take_log.each { |line| puts "sched " + line }
+check("every due job moved", SidekiqRedis::SETS.length == 0, SidekiqRedis::SETS.length.to_s)
+
+# After SCRIPT FLUSH the pop fails with NOSCRIPT, loads the script
+# again, and goes on.
+SidekiqRedis::SCRIPT_LOADED[0] = false
+SidekiqRedis::SETS.push("retry\t{\"retry\":true,\"queue\":\"low\",\"class\":\"HardWorker\",\"args\":[],\"jid\":\"dddddddddddddddddddddddd\",\"retry_count\":0}")
+SidekiqScheduler.enqueue(1)
+log = SidekiqRedis.take_log
+check("NOSCRIPT reloads the script", log.length == 3 && log[0] == "noscript" && log[1] == "script load zpopbyscore" &&
+  log[2] == "push low {\"retry\":true,\"queue\":\"low\",\"class\":\"HardWorker\",\"args\":[],\"jid\":\"dddddddddddddddddddddddd\",\"retry_count\":0,\"enqueued_at\":\"<now>\"}", log.join(" / "))
+
+# A job that isn't a JSON object can't be pushed: dead as it is.
+SidekiqRedis::SETS.push("schedule\tnot json")
+SidekiqScheduler.enqueue(1)
+log = SidekiqRedis.take_log
+check("an unreadable job goes to dead", log == ["dead not json trim age 15552000 keep -10000"], log.join(" / "))
+
+# QUIET stops a cycle between pops.
+SidekiqRedis::SETS.push("retry\t{\"queue\":\"a\"}")
+SidekiqWorker::QUIET[0] = true
+SidekiqScheduler.enqueue(1)
+check("QUIET stops the cycle", SidekiqRedis::SETS.length == 1 && SidekiqRedis.take_log.length == 0, "")
+SidekiqRedis::SETS.clear
+
+# The waits: poll_interval_average 1 s gives 0.5 to 1.5 s and no 10 s
+# start; none gives 5 s per process (2.5 to 7.5 s) and 10 to 15 s.
+SidekiqScheduler::INTERVALS[0] = 1.0
+waits_ok = true
+k = 0
+while k < 200
+  w = SidekiqScheduler.interval([])
+  waits_ok = false if w < 0.5 || w >= 1.5
+  w = SidekiqScheduler.initial_wait
+  waits_ok = false if w < 0.0 || w >= 5.0
+  k += 1
+end
+check("poll_interval_average waits", waits_ok, "")
+SidekiqScheduler::INTERVALS[0] = -1.0
+SidekiqScheduler::INTERVALS[1] = -1.0
+waits_ok = true
+k = 0
+while k < 200
+  w = SidekiqScheduler.interval([])
+  waits_ok = false if w < 2.5 || w >= 7.5
+  w = SidekiqScheduler.initial_wait
+  waits_ok = false if w < 10.0 || w >= 15.0
+  k += 1
+end
+check("default waits", waits_ok, "")
+
+# Started while QUIET, the thread leaves at once.
+SidekiqScheduler.start(1.0, -1.0)
+SidekiqScheduler::THREAD.each { |t| t.join }
+check("the scheduler stops on QUIET", !SidekiqScheduler.running?, "")
 puts "done"

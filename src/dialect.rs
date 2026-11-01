@@ -2016,6 +2016,13 @@ pub const FORMAT_NONE: &str = "";
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RouteSpec {
+    /// A source-proven in-app Rack endpoint. It has prefix semantics rather
+    /// than a controller action's segment/format matching semantics.
+    RackMount {
+        target: ClassId,
+        path: String,
+        span: Span,
+    },
     /// Direct verb call: `get "/path", to: "controller#action"[, as: :name]`.
     /// The explicit form is the only one that can express arbitrary paths
     /// and custom constraints.

@@ -58,6 +58,23 @@ pub(super) struct EngineRouteSource {
     pub app_root: String,
 }
 
+#[derive(Default)]
+pub(super) struct RackAppTargets {
+    pub callable: HashSet<String>,
+    pub rebound: HashSet<String>,
+}
+
+impl RackAppTargets {
+    /// Object's constants are the top-level Ruby bindings. Keep spelling
+    /// separate from binding identity so qualified writes cannot hide one.
+    pub(super) fn binding_name(mut name: &str) -> &str {
+        while let Some(rest) = name.strip_prefix("Object::") {
+            name = rest;
+        }
+        name
+    }
+}
+
 /// Ruby from host and engine app roots, prepared for the mounted-helper
 /// boundary check. ERB is compiled for AST inspection and keeps its offset map.
 #[derive(Clone, Debug)]
@@ -104,6 +121,7 @@ pub fn ingest_routes_with_dsl(
         draws,
         block_wrappers,
         &HashMap::default(),
+        &RackAppTargets::default(),
         &OnceCell::new(),
         &|| Vec::new(),
     )
@@ -120,6 +138,7 @@ pub(super) fn ingest_routes_with_engines(
     draws: &HashMap<String, (Vec<u8>, String)>,
     block_wrappers: &HashSet<String>,
     engine_routes: &HashMap<String, EngineRouteSource>,
+    rack_apps: &RackAppTargets,
     helper_sources: &OnceCell<Vec<RouteHelperSource>>,
     load_helper_sources: &dyn Fn() -> Vec<RouteHelperSource>,
 ) -> IngestResult<RouteTable> {
@@ -130,6 +149,7 @@ pub(super) fn ingest_routes_with_engines(
         draws,
         wrappers: block_wrappers,
         engine_routes,
+        rack_apps,
         helper_sources,
         load_helper_sources,
         concerns: RefCell::new(HashMap::default()),
@@ -138,6 +158,7 @@ pub(super) fn ingest_routes_with_engines(
         diagnostics: RefCell::new(Vec::new()),
         mount_scope_depth: Cell::new(0),
         mounted_engines: RefCell::new(HashSet::default()),
+        mounted_rack_apps: RefCell::new(HashSet::default()),
     };
 
     // Every `Rails.application.routes.draw do … end` in the file: Rails
@@ -226,6 +247,8 @@ struct Ctx<'a> {
     wrappers: &'a HashSet<String>,
     /// Exact source-backed engine classes with literal isolated namespaces.
     engine_routes: &'a HashMap<String, EngineRouteSource>,
+    /// Literal app constants with a source-defined public singleton call(env).
+    rack_apps: &'a RackAppTargets,
     /// Per-route-ingest snapshot shared by all accepted-mount helper scans.
     helper_sources: &'a OnceCell<Vec<RouteHelperSource>>,
     /// Invoked by the first accepted mount that reaches helper-use diagnosis.
@@ -246,6 +269,7 @@ struct Ctx<'a> {
     /// One route set cannot mount the same engine class more than once
     /// in this supported slice: Rails route helper proxies are mount-specific.
     mounted_engines: RefCell<HashSet<String>>,
+    mounted_rack_apps: RefCell<HashSet<String>>,
 }
 
 impl Ctx<'_> {
@@ -354,10 +378,9 @@ fn route_mount_gap(
     });
 }
 
-/// Supported first slice: a bare top-level `mount Foo::Engine, at: "/prefix"`
-/// whose engine source was found under an in-tree PATH gem and explicitly
-/// declares a literal `isolate_namespace`. Other mount shapes remain errors.
-fn ingest_literal_engine_mount(
+/// Keep isolated PATH engine composition separate from source-proven in-app
+/// Rack singletons. Only a bare top-level constant with literal `at:` is admitted.
+fn ingest_literal_mount(
     call: &ruby_prism::CallNode<'_>,
     file: &str,
     cx: &Ctx<'_>,
@@ -366,21 +389,29 @@ fn ingest_literal_engine_mount(
         route_mount_gap(call, file, cx, detail);
         None
     };
+    let engine_target = call.arguments().and_then(|args| args.arguments().iter().next())
+        .and_then(|node| constant_path_of(&node))
+        .is_some_and(|parts| cx.engine_routes.contains_key(&parts.join("::")));
     if cx.mount_scope_depth.get() != 0 {
-        return unsupported("only top-level literal engine mounts are composed");
+        return unsupported(if engine_target { "only top-level literal engine mounts are composed" }
+            else { "only top-level literal in-app Rack mounts are composed" });
     }
     if call.receiver().is_some() || call.block().is_some() {
         return unsupported("receiver-qualified and block mounts are not composed");
     }
     let Some(args) = call.arguments() else {
-        return unsupported("mount requires an exact engine constant and literal `at:` prefix");
+        return unsupported("Rack mount requires a literal in-app constant with a source-defined public singleton `call(env)` and one literal `at:` prefix");
     };
     let args: Vec<_> = args.arguments().iter().collect();
     if args.len() != 2 {
-        return unsupported("mount supports only an exact engine constant and one literal `at:` option");
+        return unsupported(if engine_target {
+            "mount supports only an exact engine constant and one literal `at:` option"
+        } else {
+            "Rack mount requires a literal in-app constant with a source-defined public singleton `call(env)` and one literal `at:` option; hash syntax and other arities are not composed"
+        });
     }
     let Some(engine_parts) = constant_path_of(&args[0]) else {
-        return unsupported("Rack applications and dynamic mount targets are not composed");
+        return unsupported("Rack mount target must be a literal in-app constant with a source-defined public singleton `call(env)`; dynamic mount targets are not composed");
     };
     let engine_name = engine_parts.join("::");
     let Some(option_hash) = args[1].as_keyword_hash_node() else {
@@ -402,8 +433,31 @@ fn ingest_literal_engine_mount(
     let Some(path) = literal_mount_prefix(&literal_path) else {
         return unsupported("mount path must be one absolute, static, non-root prefix without a trailing slash");
     };
-    let Some(engine) = cx.engine_routes.get(&engine_name) else {
-        return unsupported("engine target is not a unique, readable, in-tree PATH Rails engine with literal `isolate_namespace`");
+    let engine = match cx.engine_routes.get(&engine_name) {
+        Some(engine) => engine,
+        None if cx.rack_apps.rebound.contains(RackAppTargets::binding_name(&engine_name)) => {
+            return unsupported(&format!(
+                "Rack target `{engine_name}` may be rebound by a source constant write; reassigned mount targets are not composed"
+            ));
+        }
+        None if cx.rack_apps.callable.contains(&engine_name) => {
+            if !cx.mounted_rack_apps.borrow_mut().insert(engine_name.clone()) {
+                return unsupported("mounting the same Rack app constant more than once requires distinct `as:` names, which are not composed");
+            }
+            let location = call.location();
+            return Some(RouteSpec::RackMount {
+                target: ClassId(Symbol::from(engine_name.as_str())),
+                path: format!("/{path}"),
+                span: Span {
+                    file: super::sources::file_id(file),
+                    start: location.start_offset() as u32,
+                    end: location.end_offset() as u32,
+                },
+            });
+        }
+        None => return unsupported(&format!(
+            "Rack target `{engine_name}` is not a unique in-app class or module with a source-defined public singleton `call(env)` taking one positional argument"
+        )),
     };
     if !cx.mounted_engines.borrow_mut().insert(engine_name.clone()) {
         return unsupported("mounting the same engine class more than once is not composed");
@@ -428,6 +482,7 @@ fn ingest_literal_engine_mount(
     let empty_draws = HashMap::default();
     let empty_wrappers = HashSet::default();
     let empty_engine_routes = HashMap::default();
+    let empty_rack_apps = RackAppTargets::default();
     let empty_helper_sources = OnceCell::new();
     let empty_helper_loader = || Vec::new();
     for draw in draws {
@@ -472,6 +527,7 @@ fn ingest_literal_engine_mount(
             draws: &empty_draws,
             wrappers: &empty_wrappers,
             engine_routes: &empty_engine_routes,
+            rack_apps: &empty_rack_apps,
             helper_sources: &empty_helper_sources,
             load_helper_sources: &empty_helper_loader,
             concerns: RefCell::new(HashMap::default()),
@@ -480,6 +536,7 @@ fn ingest_literal_engine_mount(
             diagnostics: RefCell::new(Vec::new()),
             mount_scope_depth: Cell::new(1),
             mounted_engines: RefCell::new(HashSet::default()),
+            mounted_rack_apps: RefCell::new(HashSet::default()),
         };
         match ingest_route_body(body, &engine.file, None, &engine_cx) {
             Ok(mut inner) => {
@@ -665,9 +722,9 @@ fn receiver_chain_has(node: &Node<'_>, name: &str) -> bool {
         || call.receiver().is_some_and(|recv| receiver_chain_has(&recv, name))
 }
 
-/// Validate a static absolute mount prefix and return its relative route-scope
-/// path. Roots, trailing slashes, empty segments, and Rails pattern syntax are
-/// excluded so matching remains anchored at a path-segment boundary.
+/// Validate the shared literal-prefix grammar and return its relative form.
+/// Engines compose this as a route scope; Rack apps retain prefix matching
+/// and shift the remainder themselves. Roots and Rails pattern syntax stay out.
 fn literal_mount_prefix(path: &str) -> Option<String> {
     if !path.starts_with('/') || path == "/" || path.ends_with('/') || path.contains("//") {
         return None;
@@ -1559,7 +1616,7 @@ fn merge_outer_constraints(entries: &mut [RouteSpec], outer: &IndexMap<Symbol, S
             RouteSpec::Scope { entries, .. } => {
                 merge_outer_constraints(entries, outer);
             }
-            RouteSpec::Root { .. } => {}
+            RouteSpec::Root { .. } | RouteSpec::RackMount { .. } => {}
         }
     }
 }
@@ -2192,14 +2249,14 @@ fn ingest_route_call(
         // how to build a URL for a model. It names no route and defines
         // no helper, so there is nothing for the table to hold.
         "resolve" => Ok(None),
-        // Keep supported siblings and the ordinary error stream. The one
-        // composed mount form is a literal isolated PATH engine; Rack and
-        // dynamic mount forms retain a located gap.
+        // Keep supported siblings and the ordinary error stream. Isolated
+        // PATH engines and source-proven Rack constants have separate paths;
+        // unproven and dynamic targets retain a located gap.
         "mount" => {
             if cx.mount_scope_depth.get() == 0 && runtime_cable_mount(call) {
                 return Ok(None);
             }
-            Ok(ingest_literal_engine_mount(call, file, cx))
+            Ok(ingest_literal_mount(call, file, cx))
         }
         // `direct :fresh_user_avatar do |user, options| … end` — a
         // custom URL helper, not a route: it adds no path to the table,
@@ -3836,6 +3893,7 @@ mod lazy_helper_source_tests {
             &HashMap::default(),
             &HashSet::default(),
             engines,
+            &RackAppTargets::default(),
             helper_sources,
             load_helper_sources,
         )

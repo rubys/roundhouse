@@ -56,7 +56,7 @@ module Rails
     # as a miss would re-render it on every request forever.
     def read_str: (String key) -> String?
     def write_str: (String key, String value, Integer ttl) -> String
-    def increment: (String key, ?Integer amount, ?expires_in: Integer) -> Integer
+    def increment: (String key, ?Integer amount, ?expires_in: Integer) -> Integer?
     def increment_str: (String key, Integer amount, Integer ttl) -> Integer
     def forget: (String k) -> void
     def clear: () -> void

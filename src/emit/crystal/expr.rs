@@ -202,11 +202,74 @@ fn renders_as_trailing_modifier(e: &Expr) -> bool {
 }
 
 fn emit_arg(e: &Expr) -> String {
+    wrap_arg(e, emit_expr(e))
+}
+
+/// Make `s`, the rendering of `e`, parse as a call argument, index,
+/// array element or hash value. A postfix `if` gets parentheses. A
+/// value-position `if` that rendered as a block (`if c\n a\nelse\n
+/// b\nend`) is a Crystal syntax error inside `[...]`, so it becomes
+/// `(c ? a : b)` when every part is a one-line expression, and the
+/// parenthesized block `(if ... end)` otherwise. Assignment and
+/// statement positions keep the block form.
+fn wrap_arg(e: &Expr, s: String) -> String {
     if renders_as_trailing_modifier(e) {
-        format!("({})", emit_expr(e))
-    } else {
-        emit_expr(e)
+        return format!("({s})");
     }
+    if let ExprNode::If { cond, then_branch, else_branch } = &*e.node {
+        if let Some(t) = inline_ternary(cond, then_branch, else_branch) {
+            return t;
+        }
+        if s.contains('\n') {
+            return format!("({s})");
+        }
+    }
+    s
+}
+
+/// A setter call (`obj.value = 1`, `h[k] = v`): an assignment that `?:`
+/// would bind wrongly. The comparison operators that end in `=` are not
+/// setters.
+fn is_setter_send(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Send { method, .. } => {
+            let m = method.as_str();
+            m.ends_with('=') && !matches!(m, "==" | "!=" | "<=" | ">=" | "===")
+        }
+        _ => false,
+    }
+}
+
+/// `(c ? a : b)` for an `if`/`else` whose condition and branches each
+/// render as one plain line; `None` when any part would need the block
+/// form (multi-line, empty, an `if` / rescue modifier, or a statement
+/// such as an assignment, range or jump that `?:` would bind wrongly).
+fn inline_ternary(cond: &Expr, then_branch: &Expr, else_branch: &Expr) -> Option<String> {
+    let plain = |x: &Expr| {
+        !matches!(
+            &*x.node,
+            ExprNode::If { .. }
+                | ExprNode::RescueModifier { .. }
+                | ExprNode::Seq { .. }
+                | ExprNode::Assign { .. }
+                | ExprNode::OpAssign { .. }
+                | ExprNode::MultiAssign { .. }
+                | ExprNode::Range { .. }
+                | ExprNode::Return { .. }
+                | ExprNode::Next { .. }
+                | ExprNode::Break { .. }
+                | ExprNode::Raise { .. }
+        ) && !is_setter_send(x)
+    };
+    if is_empty_branch(else_branch) || ![cond, then_branch, else_branch].into_iter().all(plain) {
+        return None;
+    }
+    let parts = [emit_expr(cond), emit_expr(then_branch), emit_expr(else_branch)];
+    if parts.iter().any(|p| p.is_empty() || p.contains('\n')) {
+        return None;
+    }
+    let [c, a, b] = parts;
+    Some(format!("({c} ? {a} : {b})"))
 }
 
 /// Map Ruby stdlib type names that don't exist in Crystal to their
@@ -854,7 +917,7 @@ fn emit_or_left(left: &Expr) -> String {
         if method.as_str() == "[]" && !args.is_empty() {
             let recv_ty = recv.ty.as_ref().map(unwrap_nilable_union);
             if matches!(recv_ty, Some(crate::ty::Ty::Hash { .. })) {
-                let arg_strs: Vec<String> = args.iter().map(emit_expr).collect();
+                let arg_strs: Vec<String> = args.iter().map(emit_arg).collect();
                 return format!("{}[{}]?", emit_expr(recv), arg_strs.join(", "));
             }
         }
@@ -1314,14 +1377,21 @@ pub(super) fn emit_send_base(
     args: &[Expr],
     parenthesized: bool,
 ) -> String {
+    // Operator sends (`a + b`, `parts << x`) render infix, and the
+    // value of `h[k] = v` is an assignment position: a block `if`
+    // parses there, so only a postfix `if` needs wrapping. Index and
+    // call-argument positions get the full `wrap_arg` treatment.
+    let m = method.as_str();
+    let infix = !m.starts_with(|c: char| c.is_alphabetic() || c == '_') && m != "[]" && m != "[]=";
     let args_s: Vec<String> = args
         .iter()
-        .map(|a| {
+        .enumerate()
+        .map(|(i, a)| {
             let s = emit_expr_with_form_hint(a, force_hash_form_for_arg(recv, method));
-            if renders_as_trailing_modifier(a) {
-                format!("({s})")
+            if infix || (m == "[]=" && i + 1 == args.len()) {
+                if renders_as_trailing_modifier(a) { format!("({s})") } else { s }
             } else {
-                s
+                wrap_arg(a, s)
             }
         })
         .collect();
@@ -1912,7 +1982,7 @@ fn emit_lvalue(lv: &LValue) -> String {
         LValue::Var { name, .. } => escape_ident(name.as_str()),
         LValue::Ivar { name } => format!("@{name}"),
         LValue::Attr { recv, name } => format!("{}.{name}", emit_expr(recv)),
-        LValue::Index { recv, index } => format!("{}[{}]", emit_expr(recv), emit_expr(index)),
+        LValue::Index { recv, index } => format!("{}[{}]", emit_expr(recv), emit_arg(index)),
         LValue::Const { path } => path.iter().map(|s| s.as_str().to_string()).collect::<Vec<_>>().join("::"),
     }
 }

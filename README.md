@@ -42,7 +42,7 @@ own right: `roundhouse check` for a terminal or a CI gate, an
 [LSP server](docs/guide/editor.md) for your editor, an
 [MCP server](docs/guide/mcp.md) for your agent — types, nil-safety,
 static N+1 findings, and the full request trace for any action — and
-an [in-browser IDE](https://rubys.github.io/roundhouse/ide/) that
+an [in-browser IDE](https://roundhouse-rb.dev/ide/) that
 analyzes a folder on your disk without uploading it. Static, deep and
 annotation-free is a cell of the Ruby tooling space nobody else
 occupies: ruby-lsp is static but stops at names; ruby-lsp-rails and
@@ -76,7 +76,7 @@ and will for the foreseeable future, because it runs the framework
 runtime itself rather than a translation of it. Basecamp's Campfire
 runs this way — every page and every cable frame compared against
 live Rails in the full validation cycle, and a
-[Docker archive](https://rubys.github.io/roundhouse/apps/campfire.html)
+[Docker archive](https://roundhouse-rb.dev/apps/campfire.html)
 you can run in minutes. [OCRAN](https://github.com/Largo/ocran), the
 Ruby application packager, does the whole compile in one command:
 `ocran --roundhouse path/to/app`. → [Spinel](docs/guide/spinel.md)
@@ -104,17 +104,17 @@ the prerequisites.
 
 ## See it for yourself
 
-- [**IDE**](https://rubys.github.io/roundhouse/ide/) — the analyzer
+- [**IDE**](https://roundhouse-rb.dev/ide/) — the analyzer
   in a browser tab, preloaded with the Rails Guides store, the blog,
   Lobsters, Campfire and Mastodon; *open folder…* for your own app.
-- [**Campfire**](https://rubys.github.io/roundhouse/apps/campfire.html)
+- [**Campfire**](https://roundhouse-rb.dev/apps/campfire.html)
   — the compiled product, as a Docker archive.
-- [**Browse**](https://rubys.github.io/roundhouse/browse/) — what every
+- [**Browse**](https://roundhouse-rb.dev/browse/) — what every
   emitter produces from the blog fixture, refreshed by scheduled full validation.
-- [**Bench**](https://rubys.github.io/roundhouse/bench/) — throughput,
+- [**Bench**](https://roundhouse-rb.dev/bench/) — throughput,
   memory and latency across the live targets on a fixed box, against
   Rails as it ships.
-- [**Demo**](https://rubys.github.io/roundhouse/demo/) — the fixture
+- [**Demo**](https://roundhouse-rb.dev/demo/) — the fixture
   every target is built and tested against, and its three test layers.
 
 ## Why it is fast
@@ -138,7 +138,7 @@ interpreter; the static, monomorphic Ruby that remains is the input
 the JVM JIT was built for, worth a further ~7×; the compiled targets
 go further still. These are ratios from a CPU-bound microbenchmark of
 a small fixture, and the live numbers with their environment capture
-are on the [bench page](https://rubys.github.io/roundhouse/bench/).
+are on the [bench page](https://roundhouse-rb.dev/bench/).
 The long-form versions:
 
 - [Conformance vs Comprehension](https://intertwingly.net/blog/2026/06/27/Conformance-vs-Comprehension.html) — the project, and the conformance-oracle methodology behind it

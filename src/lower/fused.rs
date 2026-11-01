@@ -143,11 +143,8 @@ pub fn apply_fused_context_rewrites(app: &mut App) {
 /// `sum_symbol` is model methods/unknown last so its new `to_a`/`sum`
 /// children are not fed to the other fused rewrites.
 pub fn apply_fused_pre_tag_rewrites(app: &mut App) {
-    let models: HashSet<String> = app
-        .models
-        .iter()
-        .map(|m| m.name.0.as_str().to_string())
-        .collect();
+    super::attribute_aliases::receiver::prove(app);
+    let models = super::attribute_aliases::Models::of(app);
     let sti_names = super::sti_is_a::subclass_type_names(app);
     let contracts = super::controller_class_render::call_contracts(app);
     let none = HashSet::default();
