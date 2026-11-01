@@ -1275,6 +1275,7 @@ impl Analyzer {
         for declaration in &app.library_classes {
             if let Some(info) = classes.get_mut(&declaration.name) { info.is_module = declaration.is_module; }
         }
+        registry::library::register_prepends(&mut classes, app);
 
 
         assert!(

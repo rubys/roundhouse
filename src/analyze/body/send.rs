@@ -1173,14 +1173,20 @@ impl<'a> BodyTyper<'a> {
 
     /// Whether source defines `method` on `of`'s instances (own, included or inherited), harvested or not.
     fn declares_instance_method(&self, of: &ClassId, method: &Symbol) -> bool {
-        let mut stack = vec![of];
+        let mut stack = vec![(of, false)];
         let mut seen = crate::det::HashSet::default();
-        while let Some(id) = stack.pop() {
-            let Some(cls) = self.classes().get(id).filter(|_| seen.insert(id)) else { continue };
+        while let Some((id, prepended)) = stack.pop() {
+            if !seen.insert((id, prepended)) { continue; }
+            let Some(cls) = self.classes().get(id) else {
+                if prepended { return true; }
+                continue;
+            };
             if cls.source_instance_methods.contains(method) {
                 return true;
             }
-            stack.extend(cls.includes.iter().chain(cls.parent.iter()));
+            if cls.unresolved_prepend || prepended && cls.open { return true; }
+            stack.extend(cls.prepends.iter().map(|id| (id, true)));
+            stack.extend(cls.includes.iter().chain(cls.parent.iter()).map(|id| (id, prepended)));
         }
         false
     }
@@ -1233,6 +1239,13 @@ impl<'a> BodyTyper<'a> {
         block_ret: Option<&Ty>,
         args: &[crate::expr::Expr],
         instance_receiver: bool,
+    ) -> Ty {
+        self.dispatch_with_hash_default(recv_ty, method, block_ret, args, instance_receiver, false)
+    }
+
+    pub(super) fn dispatch_with_hash_default(
+        &self, recv_ty: Option<&Ty>, method: &Symbol, block_ret: Option<&Ty>,
+        args: &[crate::expr::Expr], instance_receiver: bool, nil_hash_default: bool,
     ) -> Ty {
         // Not the stdlib's String form too: the port reads `other.octets`, which a String lacks.
         if let Some(Ty::Class { id, .. }) = recv_ty
@@ -1531,7 +1544,7 @@ impl<'a> BodyTyper<'a> {
                 if let Some(name) = literal_name {
                     // A literal alias keeps the receiver's side, including
                     // an instance catalog method's gradual return contract.
-                    let result = self.dispatch_on(recv_ty, &name, block_ret, &args[1..], instance_receiver);
+                    let result = self.dispatch_with_hash_default(recv_ty, &name, block_ret, &args[1..], instance_receiver, nil_hash_default);
                     // The ordinary send's Object/Module fallback runs in the
                     // body typer. A literal reflective alias needs that same
                     // opaque setter contract, rather than a pending miss.
@@ -1555,10 +1568,16 @@ impl<'a> BodyTyper<'a> {
         // One-level dig projects the container's values, independently of an
         // opaque selector or an ignored block. An invalid selector raises;
         // every normal result is an element/value or nil.
-        if method.as_str() == "dig" && args.len() == 1 {
+        if method.as_str() == "dig" && args.len() == 1
+            && !matches!(&*args[0].node, ExprNode::Splat { .. } | ExprNode::ForwardArgs
+                | ExprNode::ForwardKeywords | ExprNode::ForwardKeywordsWithPairs { .. }
+                | ExprNode::KeywordSplat { .. } | ExprNode::Hash { kwargs: true, .. })
+        {
             let value = match recv_ty {
                 Some(Ty::Array { elem }) => Some(("Array", &**elem)),
-                Some(Ty::Hash { value, .. }) => Some(("Hash", &**value)),
+                Some(Ty::Hash { value, .. }) if nil_hash_default
+                    && !self.declares_instance_method(&ClassId(Symbol::from("Hash")), &Symbol::from("default"))
+                    && !self.declares_instance_method(&ClassId(Symbol::from("Hash")), &Symbol::from("default_proc")) => Some(("Hash", &**value)),
                 _ => None,
             };
             if let Some((class, value)) = value
@@ -2679,7 +2698,7 @@ impl<'a> BodyTyper<'a> {
                     if matches!(v, Ty::Nil | Ty::Var { .. }) {
                         continue;
                     }
-                    let r = self.dispatch_on(Some(v), method, block_ret, args, instance_receiver);
+                    let r = self.dispatch_with_hash_default(Some(v), method, block_ret, args, instance_receiver, nil_hash_default);
                     if !matches!(r, Ty::Var { .. }) {
                         resolved.push(r);
                     }

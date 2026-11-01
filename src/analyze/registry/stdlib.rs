@@ -589,7 +589,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "ActionDispatch::TestResponse", &[], &[
         ("status", Ty::Int),
         ("body", Ty::Str),
-        ("headers", Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) }),
+        ("headers", Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::gradual_untyped()) }),
     ]);
     let session = Ty::Class { id: ClassId(Symbol::from("ActionDispatch::Integration::Session")), args: vec![].into() };
     register_stdlib_class(classes, "ActionDispatch::Integration::Session", &[

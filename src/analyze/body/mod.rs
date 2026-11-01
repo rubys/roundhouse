@@ -71,6 +71,7 @@ mod narrowing;
 mod pagy;
 mod send;
 mod active_storage;
+mod hash_defaults;
 pub(crate) use send::PARAM_VALUE;
 pub(crate) use send::{indexed_pluck, string_answers};
 #[cfg(test)]
@@ -317,6 +318,9 @@ pub struct ClassInfo {
     /// class's own methods and before walking the parent. Empty for
     /// most classes.
     pub includes: Vec<crate::ident::ClassId>,
+    /// Source prepend edges, kept separate from includes for builtin eligibility.
+    pub prepends: Vec<crate::ident::ClassId>,
+    pub unresolved_prepend: bool,
     /// Declared by a gem's RBI rather than by the app or the catalog
     /// (`crate::gem_boundary`). Its own table is the gem's whole
     /// declared surface, so a miss on the class itself is a real miss --
@@ -434,6 +438,7 @@ pub struct BodyTyper<'a> {
     /// The locals of the outermost expression being typed, counted once
     /// for the selector proofs of `active_storage`.
     scope_bindings: std::cell::RefCell<Option<active_storage::ScopeBindings>>,
+    nil_hash_defaults: std::cell::RefCell<Option<hash_defaults::NilDefaults>>,
     /// The block parameter a literal symbol list binds (`%i[a b].each { |m| }`), for the Lambda arm.
     block_selector_param: std::cell::RefCell<Option<(Symbol, Vec<Symbol>)>>,
 }
@@ -574,6 +579,7 @@ impl<'a> BodyTyper<'a> {
             lambda_seeds: std::cell::RefCell::new(None),
             block_class_param: std::cell::RefCell::new(None),
             scope_bindings: std::cell::RefCell::new(None),
+            nil_hash_defaults: std::cell::RefCell::new(None),
             block_selector_param: std::cell::RefCell::new(None),
         }
     }
@@ -909,12 +915,17 @@ impl<'a> BodyTyper<'a> {
     /// annotation rides with the IR so emitters can render a runtime
     /// raise-equivalent without re-classifying.
     pub fn analyze_expr(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
+        let hash_root = self.nil_hash_defaults.borrow().is_none();
+        if hash_root {
+            *self.nil_hash_defaults.borrow_mut() = Some(hash_defaults::NilDefaults::of(expr, ctx));
+        }
         // The outermost call types a whole body: count the locals it binds.
         let root = self.inquirers.is_some() && self.scope_bindings.borrow().is_none();
         if root {
             *self.scope_bindings.borrow_mut() = Some(active_storage::ScopeBindings::of(expr));
         }
         let ty = self.compute(expr, ctx);
+        if hash_root { *self.nil_hash_defaults.borrow_mut() = None; }
         if root {
             *self.scope_bindings.borrow_mut() = None;
         }
@@ -2547,7 +2558,8 @@ impl<'a> BodyTyper<'a> {
                 let instance_receiver = recv.as_ref().map_or(ctx.instance_body, |r| self.is_instance(r, ctx))
                     && recv_ty.as_ref().is_some_and(instance_shaped);
                 let mut dispatched =
-                    self.dispatch_on(recv_ty.as_ref(), method, block_ret.as_ref(), args, instance_receiver);
+                    self.dispatch_with_hash_default(recv_ty.as_ref(), method, block_ret.as_ref(), args, instance_receiver,
+                        recv.as_ref().is_some_and(|r| self.nil_hash_defaults.borrow().as_ref().is_some_and(|proof| proof.proves(r))));
                 // An `app/helpers` method runs in the view, so a bare call that finds nothing on the module is the
                 // view's: the helper module that answers the name (`helpers :all`; the module itself while its own
                 // definition is untyped), else ActionView's `link_to`/`tag`/`image_tag`.

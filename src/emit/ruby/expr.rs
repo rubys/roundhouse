@@ -327,8 +327,8 @@ fn emit_node(n: &ExprNode) -> String {
         // `docs/limitations.md`'s `obj.method(:m)` coverage), so this
         // is not an approximation: the emitted call is exactly the
         // Ruby source's own construct. In block-argument position
-        // (`&method(:name)`), `emit_do_block`'s non-Lambda fallback
-        // re-attaches this as `&` — see its doc comment.
+        // (`&method(:name)`), the Send forwarding path
+        // re-attaches this as an explicit `&` argument.
         ExprNode::MethodRef { recv, name } => match recv {
             Some(r) => format!("{}.method(:{name})", emit_postfix_recv(r)),
             None => format!("method(:{name})"),
@@ -339,6 +339,16 @@ fn emit_node(n: &ExprNode) -> String {
             if let Some(b) = block { format!("{base} {{ {} }}", emit_expr(b)) } else { base }
         }
         ExprNode::Send { recv, method, args, block, parenthesized } => {
+            if let Some(b) = block.as_ref().filter(|b| !matches!(&*b.node, ExprNode::Lambda { .. })
+                || b.decisions & crate::expr::FORWARDED_BLOCK != 0)
+            {
+                let mut arguments: Vec<_> = args.iter().map(emit_keyword_forward_arg).collect();
+                arguments.push(format!("&{}", emit_expr(b)));
+                return match recv {
+                    Some(r) => format!("{}.{method}({})", emit_postfix_recv(r), arguments.join(", ")),
+                    None => format!("{method}({})", arguments.join(", ")),
+                };
+            }
             // A brace block binds to the nearest call: after paren-less
             // arguments it is the last argument's block (`f a, b { }` is
             // `f(a, b { })`) or a syntax error (`f a, k: 1 { }`). The
@@ -348,8 +358,7 @@ fn emit_node(n: &ExprNode) -> String {
             let brace = block.as_ref().is_some_and(|b| {
                 matches!(&*b.node, ExprNode::Lambda { block_style: crate::expr::BlockStyle::Brace, .. })
             });
-            let forwarded = block.as_ref().is_some_and(|b| b.decisions & crate::expr::FORWARDED_BLOCK != 0);
-            let base = emit_send_base(recv.as_ref(), method, args, *parenthesized || ((brace || forwarded) && !args.is_empty()));
+            let base = emit_send_base(recv.as_ref(), method, args, *parenthesized || (brace && !args.is_empty()));
             match block {
                 None => base,
                 Some(b) => emit_do_block(&base, b),
@@ -1731,28 +1740,6 @@ fn lambda_params(params: &[Symbol], extra_params: &[crate::dialect::Param], rest
 /// body; `do … end` spans multiple lines when the body has newlines.
 pub(super) fn emit_do_block(base: &str, block: &Expr) -> String {
     use crate::expr::BlockStyle;
-    if !matches!(&*block.node, ExprNode::Lambda { .. })
-        || block.decisions & crate::expr::FORWARDED_BLOCK != 0
-    {
-        // A non-Lambda block expression is a Proc FORWARD (`&block` —
-        // ingest lowers the block-pass arg to a bare Var in the block
-        // slot). Rendering it as a literal `{ block }` block made the
-        // callee YIELD THE PROC OBJECT instead of calling it —
-        // lobsters' `Rails.cache.fetch(key, &block)` forward returned
-        // the Proc, poisoning `@comments` to Proc under spinel and
-        // silently mis-caching on CRuby. A forwarded lambda also keeps
-        // its local returns and strict arity. Re-attach as a `&` argument.
-        let fwd = emit_expr(block);
-        return if let Some(stripped) = base.strip_suffix(')') {
-            if stripped.ends_with('(') {
-                format!("{stripped}&{fwd})")
-            } else {
-                format!("{stripped}, &{fwd})")
-            }
-        } else {
-            format!("{base}(&{fwd})")
-        };
-    }
     let ExprNode::Lambda { params, rest_param, extra_params, body, block_style, .. } = &*block.node else {
         unreachable!("forwarded expressions were handled above")
     };

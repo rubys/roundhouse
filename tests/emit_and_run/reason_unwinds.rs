@@ -1,6 +1,6 @@
 #[test]
 fn rescued_returns_and_forwarded_lambdas_keep_the_live_receiver() {
-    crate::emit_and_run::real_blog()
+    emit_and_run::real_blog()
         .write("lib/return_probes.rb", r#"module ReturnProbes
   def self.ensure_rebound
     JSON.parse("42").tap do
@@ -93,4 +93,26 @@ raise "array dig" unless ReturnProbes.array_value == "ok"
 raise "hash dig" unless ReturnProbes.hash_value == "ok"
 "#)
         .assert_passes();
+}
+use super::emit_and_run;
+
+#[test]
+fn forwarded_blocks_keep_explicit_index_operator_and_setter_calls() {
+    emit_and_run::real_blog().write("lib/forwarded_calls.rb", r#"module ForwardedCalls
+  def self.index
+    ["ok"].[](0, &-> { :ignored })
+  end
+  def self.add
+    "o".+("k", &-> { :ignored })
+  end
+  def self.write
+    values = {"k" => "initial"}
+    values.[]=("k", "ok", &-> { :ignored })
+    values.fetch("k")
+  end
+end
+"#).run_ruby(r#"raise "index" unless ForwardedCalls.index == "ok"
+raise "operator" unless ForwardedCalls.add == "ok"
+raise "setter" unless ForwardedCalls.write == "ok"
+"#).assert_passes();
 }

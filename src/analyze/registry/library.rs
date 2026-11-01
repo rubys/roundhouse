@@ -7,6 +7,7 @@ use crate::det::HashMap;
 use crate::analyze::ClassInfo;
 use crate::App;
 use crate::ident::{ClassId, Symbol};
+use crate::expr::{Expr, ExprNode};
 use crate::ty::Ty;
 
 pub(in crate::analyze) fn register(
@@ -457,5 +458,71 @@ fn ar_instance_ty(kind: crate::catalog::ReturnKind) -> Option<Ty> {
         | ReturnKind::RelationOfSelf
         | ReturnKind::ArrayOfUntyped
         | ReturnKind::Untyped => None,
+    }
+}
+/// Preserve prepend ownership separately from includes for builtin eligibility.
+pub(in crate::analyze) fn register_prepends(classes: &mut HashMap<ClassId, ClassInfo>, app: &App) {
+    fn resolve(classes: &HashMap<ClassId, ClassInfo>, owner: &ClassId, expr: &Expr) -> Option<ClassId> {
+        let ExprNode::Const { path } = &*expr.node else { return None };
+        let written = path.iter().map(Symbol::as_str).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
+        if path.first().is_some_and(|s| s.as_str().is_empty()) {
+            return (matches!(written.as_str(), "Array" | "Hash") || classes.contains_key(&ClassId(Symbol::from(written.as_str())))).then(|| ClassId(Symbol::from(written)));
+        }
+        let mut scope = owner.0.as_str();
+        loop {
+            let candidate = ClassId(Symbol::from(format!("{scope}::{written}")));
+            if classes.contains_key(&candidate) { return Some(candidate); }
+            let Some((parent, _)) = scope.rsplit_once("::") else { break };
+            scope = parent;
+        }
+        let id = ClassId(Symbol::from(written));
+        (matches!(id.0.as_str(), "Array" | "Hash") || classes.contains_key(&id)).then_some(id)
+    }
+    fn visit(expr: &Expr, owner: &ClassId, classes: &HashMap<ClassId, ClassInfo>, out: &mut Vec<(ClassId, Option<ClassId>)>) {
+        if let ExprNode::Send { recv, method, args, .. } = &*expr.node
+            && method.as_str() == "prepend"
+        {
+            let target = match recv.as_ref() {
+                None => Some(owner.clone()),
+                Some(r) if matches!(&*r.node, ExprNode::SelfRef) => Some(owner.clone()),
+                Some(r) => resolve(classes, owner, r),
+            };
+            if let Some(target) = target {
+                for arg in args {
+                    let module = resolve(classes, owner, arg).filter(|id| classes.get(id).is_some_and(|c| c.is_module));
+                    out.push((target.clone(), module));
+                }
+            }
+        }
+        expr.node.for_each_child(&mut |child| visit(child, owner, classes, out));
+    }
+    let mut prepends = Vec::new();
+    for lc in &app.library_classes {
+        for call in &lc.unknown_calls { visit(call, &lc.name, classes, &mut prepends); }
+    }
+    for model in &app.models {
+        for item in &model.body {
+            if let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item {
+                visit(expr, &model.name, classes, &mut prepends);
+            }
+        }
+    }
+    for controller in &app.controllers {
+        for item in &controller.body {
+            if let crate::dialect::ControllerBodyItem::Unknown { expr, .. } = item {
+                visit(expr, &controller.name, classes, &mut prepends);
+            }
+        }
+    }
+    for expr in &app.boot_program {
+        visit(expr, &ClassId(Symbol::from("Object")), classes, &mut prepends);
+    }
+    for (owner, module) in prepends {
+        let info = classes.entry(owner).or_default();
+        match module {
+            Some(module) if !info.prepends.contains(&module) => info.prepends.push(module),
+            Some(_) => {},
+            None => info.unresolved_prepend = true,
+        }
     }
 }
