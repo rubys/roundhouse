@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# probe APP [VAR=VALUE ...]
+#
+# Runs `roundhouse check --continue` on one pinned public app with every fixpoint
+# flag on (S3) and the canaries enabled, and prints the run's rh-fixpoint report as
+# one JSON line. PROBE_BASE=1 runs main's behavior in the same binary (the S3 flags
+# off). Extra VAR=VALUE arguments are added to the environment and override the
+# defaults. The run's diagnostics go to probe-APP.stderr in the current directory.
+#
+# RH_BIN: the roundhouse binary (default rh/target/release/roundhouse)
+# APPS:   the pinned apps (default lab/corpus/apps, from the fixpoint lab)
+#
+# Needs bash and jq. Exits non-zero, with a message on stderr, unless the check
+# completed and printed exactly one valid report.
+set -euo pipefail
+app=${1:?usage: probe APP [VAR=VALUE ...]}; shift
+bin=${RH_BIN:-rh/target/release/roundhouse}
+apps=${APPS:-lab/corpus/apps}
+log="$PWD/probe-$app.stderr"
+[ -x "$bin" ] || { echo "probe: no roundhouse binary at $bin; build fixpoint-next or set RH_BIN" >&2; exit 2; }
+[ -d "$apps/$app" ] || { echo "probe: no app at $apps/$app; run lab/corpus/fetch.sh or set APPS" >&2; exit 2; }
+bin=$(cd "$(dirname "$bin")" && pwd)/$(basename "$bin")
+if [ "${PROBE_BASE:-0}" = 1 ]; then
+  flags=(RH_FOLD=0 RH_FOLD_SLOTS=0 RH_FOLD_JOIN=0 RH_FOLD_TAIL=0 RH_BRK_ALLARMS=0 RH_SCHED=rounds)
+else
+  flags=(RH_FOLD=1 RH_FOLD_SLOTS=1 RH_FOLD_JOIN=1 RH_FOLD_TAIL=1 RH_BRK_ALLARMS=1 RH_SCHED=sccq)
+fi
+status=0
+(cd "$apps/$app" &&
+  env "${flags[@]}" RH_FIXPOINT_VERIFY=1 RH_FIXPOINT_DIGEST=1 RH_FIXPOINT_STATS=1 "$@" \
+      "$bin" check --continue . 2>"$log" >/dev/null) || status=$?
+# Exit 1 means the app has diagnostics; 2 or more means the check didn't complete.
+[ "$status" -le 1 ] || { echo "probe: check on $app exited $status; see $log" >&2; exit "$status"; }
+sed -n 's/^rh-fixpoint: //p' "$log" |
+  jq -ces 'if length == 1 then .[0] else error("expected one report, got \(length)") end' ||
+  { echo "probe: no valid rh-fixpoint report for $app; see $log" >&2; exit 1; }
