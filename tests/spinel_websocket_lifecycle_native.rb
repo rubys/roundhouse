@@ -29,6 +29,7 @@ class LifecycleReport
     @presence_calls = 0
     @open_gate = Mutex.new
     @open_ready = false
+    @write_ready = false
   end
   def signal_open
     @open_gate.synchronize { @open_ready = true }
@@ -42,8 +43,28 @@ class LifecycleReport
     end
     0
   end
+  def signal_write
+    @open_gate.synchronize { @write_ready = true }
+    0
+  end
+  def await_write
+    ready = false
+    while !ready
+      @open_gate.synchronize { ready = @write_ready }
+      sleep 0.001 unless ready
+    end
+    0
+  end
 end
 LIFECYCLE_REPORT = LifecycleReport.new
+
+# Mark the socket boundary under the real writer lock; keep the native write.
+module Sock
+  def self.sphttp_write_bytes(fd, bytes, n)
+    LIFECYCLE_REPORT.signal_write if n > 1000000
+    Sock.sp_net_write_bytes(fd, bytes, n)
+  end
+end
 
 # Presence is a no-op in this runtime. Count the calls at that boundary.
 module Tep::Presence
@@ -119,7 +140,17 @@ req.path = "/synthetic"
 res = Tep::Response.new
 res.start_websocket("synthetic", ws)
 sender = Thread.new(ws, mode) do |driver, test_mode|
-  if test_mode == "concurrent"
+  if test_mode == "blocked_writer"
+    LIFECYCLE_REPORT.await_open
+    writer = Thread.new(driver) do |out|
+      out.binary("x" * 33554432)
+      puts "WRITE_RETURNED"
+      $stdout.flush
+    end
+    LIFECYCLE_REPORT.await_write
+    driver.close(4000, "local")
+    writer.join
+  elsif test_mode == "concurrent"
     # Writers are admitted only after the upgrade and its open frame.
     LIFECYCLE_REPORT.await_open
     a = Thread.new(driver) { |out| lifecycle_writes(out, "A") }
@@ -127,7 +158,7 @@ sender = Thread.new(ws, mode) do |driver, test_mode|
     a.join
     b.join
     driver.close(4000, "local")
-  elsif test_mode == "server" || test_mode == "server_eof" || test_mode == "server_silent" || test_mode == "race" || test_mode == "close_error"
+  elsif test_mode == "server" || test_mode == "server_eof" || test_mode == "server_silent" || test_mode == "race" || test_mode == "close_error" || test_mode == "closing_ping"
     sleep 0.15
     driver.close(4000, "local")
   end

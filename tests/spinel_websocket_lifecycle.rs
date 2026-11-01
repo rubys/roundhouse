@@ -116,6 +116,21 @@ fn run_case(mut command: Command, mode: &str) -> Vec<String> {
         "open_frame",
         frame(&mut input).unwrap() == (1, b"ready".to_vec())
     );
+    if mode == "blocked_writer" {
+        // Read only the large frame's header, then leave its payload unread.
+        // Seeing bytes on the wire rules out merely waiting for the writer.
+        let mut header = [0; 10];
+        input.read_exact(&mut header).unwrap();
+        check!("large_binary_frame", header[..2] == [0x82, 127]);
+        check!(
+            "large_frame_length",
+            u64::from_be_bytes(header[2..].try_into().unwrap()) == 33_554_432
+        );
+        thread::sleep(Duration::from_millis(100));
+        check!("writer_parked", !contains("WRITE_RETURNED"));
+        // Exercise receiver state queries while the writer owns its mutex.
+        socket.write_all(&masked(9, b"blocked")).unwrap();
+    }
     if mode == "client" || mode == "client_race" || mode == "race" {
         if mode == "race" {
             thread::sleep(Duration::from_millis(150));
@@ -147,7 +162,7 @@ fn run_case(mut command: Command, mode: &str) -> Vec<String> {
         check!("concurrent_frames_intact", payloads == expected);
     }
     let mut close = None;
-    if !["open_error", "message_error", "eof"].contains(&mode) {
+    if !["open_error", "message_error", "eof", "blocked_writer"].contains(&mode) {
         let (op, payload) = frame(&mut input).unwrap();
         check!("close_frame", op == 8);
         if mode == "client" {
@@ -174,6 +189,15 @@ fn run_case(mut command: Command, mode: &str) -> Vec<String> {
             // Application messages while closing are ignored; the following
             // close still supplies the received handshake result.
             let mut bytes = masked(1, b"late application message");
+            if mode == "closing_ping" {
+                bytes.extend(masked(9, b"closing ping"));
+                socket.write_all(&bytes).unwrap();
+                check!(
+                    "pong_while_closing",
+                    frame(&mut input).ok() == Some((10, b"closing ping".to_vec()))
+                );
+                bytes.clear();
+            }
             bytes.extend(masked(8, b"\x0f\xa1peer"));
             let _ = socket.write_all(&bytes);
         }
@@ -245,11 +269,13 @@ fn run_case(mut command: Command, mode: &str) -> Vec<String> {
     failed
 }
 
-fn modes() -> [&'static str; 12] {
+fn modes() -> [&'static str; 14] {
     [
         "server",
         "server_eof",
         "server_silent",
+        "blocked_writer",
+        "closing_ping",
         "client",
         "client_race",
         "race",
