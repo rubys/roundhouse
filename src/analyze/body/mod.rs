@@ -2977,6 +2977,28 @@ impl<'a> BodyTyper<'a> {
                 {
                     return Ty::Str;
                 }
+                // Kernel#proc / Kernel#lambda with a literal block answer
+                // the Proc that block becomes: the value `->(x) { … }` is,
+                // typed the same way, by the block (core `kernel.rbs`:
+                // `proc: () { (?) -> untyped } -> Proc`). A module-body
+                // `Formatter = proc do |upload| … end` was a constant with
+                // no inferred value, so every read of it (app_profiler's
+                // `mattr_reader :profile_url_formatter, default:
+                // DefaultProfileFormatter`) was "constant not supported".
+                // As for `Array`, an app method of the name has already
+                // dispatched and wins.
+                if recv.is_none() && args.is_empty() && matches!(method.as_str(), "proc" | "lambda")
+                    && (matches!(dispatched, Ty::Var { .. })
+                        || (matches!(dispatched, Ty::Untyped { .. }) && !self.app_defines(ctx.self_ty.as_ref(), method)))
+                {
+                    if let Some(block_ty @ Ty::Fn { .. }) = block
+                        .as_ref()
+                        .filter(|b| matches!(&*b.node, ExprNode::Lambda { .. }))
+                        .and_then(|b| b.ty.clone())
+                    {
+                        return block_ty;
+                    }
+                }
                 // What every object and every module answers, when the
                 // receiver's own table did not. App analyzer only.
                 // `class_object_receiver` was resolved above for block binding
@@ -5129,6 +5151,48 @@ mod tests {
             let mut expr = send(None, "Array", vec![nil_lit()]);
             assert_eq!(BodyTyper::new(&classes).analyze_expr(&mut expr, &ctx), ret);
         }
+    }
+
+    #[test]
+    fn kernel_proc_and_lambda_answer_their_block_unless_the_app_defines_them() {
+        // `Fmt = proc { |x| x }` / `lambda { … }`: the Proc the block
+        // becomes, typed as `->(x) { … }` is (app_profiler's
+        // `DefaultProfileFormatter = proc do |upload| … end`).
+        let block_of = |body: Expr| {
+            synth(ExprNode::Send {
+                recv: None,
+                method: Symbol::from("proc"),
+                args: vec![],
+                block: Some(lambda(vec!["x"], body)),
+                parenthesized: false,
+            })
+        };
+        let str_lit = || synth(ExprNode::Lit { value: Literal::Str { value: "p".into() } });
+        for method in ["proc", "lambda"] {
+            let mut expr = block_of(str_lit());
+            if let ExprNode::Send { method: m, .. } = &mut *expr.node {
+                *m = Symbol::from(method);
+            }
+            let ty = BodyTyper::new(&empty_classes()).analyze_expr(&mut expr, &Ctx::default());
+            assert!(matches!(&ty, Ty::Fn { ret, .. } if **ret == Ty::Str), "{method}: {ty:?}");
+        }
+        // An app method of the name (inherited here) answers instead.
+        let owner = ClassId(Symbol::from("Owner"));
+        let child = ClassId(Symbol::from("Child"));
+        let mut classes = empty_classes();
+        let mut info = ClassInfo::default();
+        info.instance_methods.insert(Symbol::from("proc"), Ty::Int);
+        classes.insert(owner.clone(), info);
+        let mut info = ClassInfo::default();
+        info.parent = Some(owner);
+        classes.insert(child.clone(), info);
+        let mut ctx = Ctx::default();
+        ctx.self_ty = Some(Ty::Class { id: child, args: vec![].into() });
+        let mut expr = block_of(str_lit());
+        assert_eq!(BodyTyper::new(&classes).analyze_expr(&mut expr, &ctx), Ty::Int);
+        // `proc(&blk)` and `proc(arg)` are not the literal-block form.
+        let mut expr = send(None, "proc", vec![nil_lit()]);
+        assert!(!matches!(BodyTyper::new(&empty_classes()).analyze_expr(&mut expr, &Ctx::default()), Ty::Fn { .. }));
     }
 
     #[test]

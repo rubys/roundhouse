@@ -8,7 +8,7 @@ fn string_truncate_runs_natively() {
             "app/models/string_truncate_probe.rb",
             string_truncate::SOURCE,
         )
-        .run_spinel(string_truncate::ASSERTIONS);
+        .run_spinel_slim(&["runtime/json_impl", "runtime/active_support_ext"], string_truncate::ASSERTIONS);
     run.assert_passes();
     assert!(run.stdout.contains("String truncate emitted contract passed"));
     let emitted = std::fs::read_to_string(run.emitted.join("app/models/string_truncate_probe.rb"))

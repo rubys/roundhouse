@@ -61,7 +61,12 @@ struct Registry {
     by_path: HashMap<String, FileId>,
     root: Option<PathBuf>,
     parsed: HashMap<usize, ParsedSource>,
+    type_var_scopes: HashMap<FileId, std::rc::Rc<Vec<TypeVarScope>>>,
 }
+
+/// A byte range of a registered file and the RBS type variables it
+/// declares (`type_ascription::generic_scopes`).
+pub(super) type TypeVarScope = (usize, usize, Vec<String>);
 
 struct ParsedSource {
     /// Byte offset of the start of each line (Prism `line_offsets()`).
@@ -245,6 +250,23 @@ pub fn with_text<R>(path: &str, f: impl FnOnce(&str) -> R) -> Option<R> {
         let i = (id.0 as usize).checked_sub(1)?;
         reg.files.get(i).map(|file| f(&file.text))
     })
+}
+
+/// `compute` over `path`'s registered text, once per file and ingest.
+pub(super) fn type_var_scopes(
+    path: &str,
+    compute: impl FnOnce(&str) -> Vec<TypeVarScope>,
+) -> Option<std::rc::Rc<Vec<TypeVarScope>>> {
+    let id = file_id(path);
+    if id == FileId(0) {
+        return None;
+    }
+    if let Some(scopes) = SOURCES.with(|s| s.borrow().type_var_scopes.get(&id).cloned()) {
+        return Some(scopes);
+    }
+    let scopes = std::rc::Rc::new(with_text(path, compute)?);
+    SOURCES.with(|s| s.borrow_mut().type_var_scopes.insert(id, scopes.clone()));
+    Some(scopes)
 }
 
 /// The registered path for a `FileId`; `None` for the synthetic

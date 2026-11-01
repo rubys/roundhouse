@@ -2768,6 +2768,19 @@ impl<'a> BodyTyper<'a> {
                 // A union of concrete arms that all lack the method
                 // (`Str | Nil` with `join`) still errors, as it should.
                 let has_var = variants.iter().any(|v| matches!(v, Ty::Var { .. }));
+                // `nil.dup` / `nil.clone` answer `nil` (Ruby >= 2.4), so
+                // the copy of a `T | Nil` is `T' | Nil`, not `T'`. A
+                // `@status_change = status_change.dup.freeze` over
+                // `[String?, String]?` was typed `Array[String?]`, the
+                // reader inherited it, and `status_change.present?` ground
+                // to `!status_change.empty?` -- nil at runtime.
+                if matches!(method.as_str(), "dup" | "clone")
+                    && args.is_empty()
+                    && !resolved.is_empty()
+                    && variants.iter().any(|v| matches!(v, Ty::Nil))
+                {
+                    resolved.push(Ty::Nil);
+                }
                 match resolved.len() {
                     0 if has_var => Ty::pending_untyped(),
                     0 => unknown(),
@@ -4053,6 +4066,10 @@ pub(super) fn sym_method(method: &Symbol) -> Ty {
     // Sym-specific shapes here.
     match method.as_str() {
         "to_sym" => Ty::Sym,
+        // `SERIALIZE_PROC = :as_pack.to_proc` (paquito's registry): a
+        // constant holding it was a value with no inferred type, so
+        // every read of it was "constant not supported".
+        "to_proc" => Ty::Class { id: crate::ident::ClassId(crate::ident::Symbol::from("Proc")), args: vec![].into() },
         "length" | "size" => Ty::Int,
         "upcase" | "downcase" | "capitalize" | "swapcase" => Ty::Sym,
         "empty?" => Ty::Bool,

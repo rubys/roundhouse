@@ -69,6 +69,11 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("size", Ty::Int),
         ("any?", Ty::Bool),
         ("none?", Ty::Bool),
+        // Blockless, as Enumerable over the Errors (always truthy) and
+        // over the accumulator's messages alike: the count is one, and
+        // true.
+        ("one?", Ty::Bool),
+        ("all?", Ty::Bool),
         ("empty?", Ty::Bool),
         ("include?", Ty::Bool),
         ("key?", Ty::Bool),
