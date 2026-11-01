@@ -101,11 +101,12 @@ fn a_time_zone_picker_stores_the_iana_identifier_on_spinel() {
 /// build of the picker stops at `undefined constant
 /// ::ActiveSupport::TimeZone` and Go's at `undefined:
 /// ActiveSupportTimeZone_all`. Off the ruby family a `tzinfo` read is
-/// refused, naming the target.
+/// refused, naming the target; on Roda too, whose views keep the line as
+/// written in an app that loads no ActiveSupport.
 #[test]
 fn a_tzinfo_read_is_refused_off_the_ruby_family() {
     use roundhouse::project::BuildTarget;
-    for target in [BuildTarget::Typescript, BuildTarget::Crystal, BuildTarget::Go] {
+    for target in [BuildTarget::Typescript, BuildTarget::Crystal, BuildTarget::Go, BuildTarget::Roda] {
         let (_, errors) = app().emit(target);
         assert!(errors.iter().any(|e| e.contains("tzinfo not supported")), "{target:?}: {errors:?}");
     }

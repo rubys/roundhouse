@@ -1272,11 +1272,12 @@ fn is_plain_ruby_class(app: &App, lc: &crate::dialect::LibraryClass) -> bool {
 /// Crystal's build of a picker that reads it stops at `undefined constant
 /// ::ActiveSupport::TimeZone` and Go's at `undefined:
 /// ActiveSupportTimeZone_all`, so off the ruby family a `tzinfo` read is
-/// refused rather than emitted.
+/// refused rather than emitted. Roda too: it keeps the view's line as
+/// written, and its app loads no ActiveSupport.
 fn report_tzinfo_reads(app: &App, target: BuildTarget) {
     if matches!(
         target,
-        BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Roda | BuildTarget::Futamura
+        BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Futamura
     ) {
         return;
     }
