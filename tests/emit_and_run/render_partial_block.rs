@@ -134,3 +134,50 @@ fn a_partial_reading_its_record_keeps_it_and_yields_nothing_without_a_block() {
         .run_test("test/controllers/card_controller_test.rb")
         .assert_passes();
 }
+
+/// A collection render of a partial that carries the yield: each element
+/// would land in its String slot and `yield` print it, where Rails'
+/// `yield` with no block renders nothing (review, partial.rs:1295).
+#[test]
+fn a_collection_render_of_a_yielding_partial_yields_nothing() {
+    let test = "require \"test_helper\"\n\nclass WrapControllerTest < ActionDispatch::IntegrationTest\n  test \"wrap\" do\n    get articles_url\n    assert_match(%r{<div id=\"wraps\">(<p class=\"wrap\"></p>\\n?)+</div>}, response.body)\n  end\nend\n";
+    emit_and_run::real_blog()
+        .write("app/views/articles/_wrap.html.erb", "<p class=\"wrap\"><%= yield %></p>\n")
+        .edit("app/views/articles/index.html.erb", "<% content_for :title, \"Articles\" %>\n", "<% content_for :title, \"Articles\" %>\n<div id=\"wraps\"><%= render partial: \"articles/wrap\", collection: @articles, as: :article %></div>\n")
+        .write("test/controllers/wrap_controller_test.rb", test)
+        .run_test("test/controllers/wrap_controller_test.rb")
+        .assert_passes();
+}
+
+/// A partial collected `as: :card` that reads `card` and yields: its
+/// record local is `card`, so a block render to it is refused, as for
+/// any partial reading its record local (review, mod.rs:3826).
+#[test]
+fn a_block_render_to_a_partial_reading_its_collection_local_is_refused() {
+    let errors = emit_and_run::real_blog()
+        .write("app/views/articles/_card.html.erb", "<b><%= card.title %></b><%= yield %>\n")
+        .edit(
+            "app/views/articles/index.html.erb",
+            "<% content_for :title, \"Articles\" %>\n",
+            "<% content_for :title, \"Articles\" %>\n<%= render partial: \"articles/card\", collection: @articles, as: :card %>\n<%= render \"articles/card\" do %>x<% end %>\n",
+        )
+        .check_errors();
+    assert!(errors.iter().any(|e| e.contains("render with a block not supported") && e.contains("record local")), "{errors:?}");
+}
+
+/// Two formats of one partial: the HTML one carries the yield, the text
+/// one reads its record. They share one key, so neither carries it: the
+/// text variant keeps its `Article` (review, mod.rs:3827).
+#[test]
+fn a_partial_carries_the_yield_only_when_every_format_does() {
+    let (out, errors) = emit_and_run::real_blog()
+        .write("app/views/articles/_card.html.erb", "<p><%= yield %></p>\n")
+        .write("app/views/articles/_card.text.erb", "<%= article.title %>\n")
+        .edit("app/views/articles/show.html.erb", "<% content_for :title, \"Showing article\" %>\n", "<% content_for :title, \"Showing article\" %>\n<%= render \"articles/card\", article: @article %>\n")
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:?}");
+    let sigs: String = std::fs::read_dir(out.join("sig/app/views/articles")).unwrap()
+        .filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().contains("card"))
+        .map(|e| std::fs::read_to_string(e.path()).unwrap()).collect();
+    assert!(!sigs.contains("String article"), "{sigs}");
+}

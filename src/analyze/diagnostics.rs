@@ -136,16 +136,7 @@ fn unmodeled_block_renders(app: &App) -> Vec<Diagnostic> {
         let nested = nested || matches!(&*e.node, ExprNode::Lambda { .. } | ExprNode::While { .. });
         e.node.for_each_child(&mut |c| yields(c, nested, count, in_block));
     }
-    fn reads_local(e: &Expr, name: &str) -> bool {
-        match &*e.node {
-            ExprNode::Var { name: n, .. } if n.as_str() == name => return true,
-            ExprNode::Send { recv: None, method, args, .. } if method.as_str() == name && args.is_empty() => return true,
-            _ => {}
-        }
-        let mut found = false;
-        e.node.for_each_child(&mut |c| found = found || reads_local(c, name));
-        found
-    }
+    let carrying = crate::lower::view_to_library::yield_carrying_partials(app);
     let reason = |e: &Expr, caller_dir: &str| -> Option<&'static str> {
         let ExprNode::Send { recv, method, args, block: Some(block), .. } = &*e.node else { return None };
         if method.as_str() != "render" || recv.is_some() {
@@ -175,12 +166,17 @@ fn unmodeled_block_renders(app: &App) -> Vec<Diagnostic> {
         if count != 1 || in_block {
             return Some("the partial does not yield exactly once at its top level; Rails runs the block at each `yield`, which a captured string doesn't");
         }
+        // The lowering's own answer (its effective record local, every
+        // format of the partial): a partial outside it reads that local.
+        if !carrying.contains(partial.name.as_str()) {
+            return Some("the partial's yielded body rides its record local, which this partial (or another format of it) also reads");
+        }
         let record = crate::naming::singularize(dir.rsplit('/').next().unwrap_or(&dir));
         let passed = locals.is_some_and(|ls| {
             ls.iter().any(|(k, _)| matches!(&*k.node, ExprNode::Lit { value: crate::expr::Literal::Sym { value } } if value.as_str() == record))
         });
-        if passed || reads_local(&partial.body, &record) {
-            return Some("the partial's yielded body rides its record local, which this partial also reads or is passed");
+        if passed {
+            return Some("the partial's yielded body rides its record local, which this render also passes");
         }
         None
     };

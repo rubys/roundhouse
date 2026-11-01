@@ -530,7 +530,8 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // A layout, or a partial that yields and never reads its record local,
     // takes the yielded markup in its record slot (`render "x" do … end`,
     // `render layout: "x" do … end`), a String.
-    let body_arg = is_layout || (is_partial && carries_yield(&view.body, &arg_name));
+    let body_arg = is_layout
+        || (is_partial && view_key_of(view, &lx.partial_stems).is_some_and(|k| lx.yielding_partials.contains(&k)));
 
     // Render-tree ivar closure: the ivars this view needs (its own reads ∪
     // the ivars every partial it renders needs, transitively). Action views
@@ -3811,20 +3812,38 @@ pub(crate) fn carries_yield(body: &Expr, record: &str) -> bool {
     !record.is_empty() && yields_body(body) && !reads(body, record)
 }
 
-/// The partials that carry their yielded markup in the record slot
-/// (`carries_yield` of their effective record local), keyed like
-/// `strict_locals_by_key`.
+/// The partials that carry their yielded markup in the record slot,
+/// keyed like `strict_locals_by_key`: every format of the partial
+/// (`_card.html.erb`, `_card.text.erb` share one key) yields and never
+/// reads its effective record local (`carries_yield`).
 fn yielding_partials(
     views: &[View],
     element_locals: &crate::det::HashMap<ViewKey, String>,
     known_models: &[String],
 ) -> crate::det::HashSet<ViewKey> {
     let stems = PartialStems::of(views);
-    views
+    let mut carries: crate::det::HashMap<ViewKey, bool> = crate::det::HashMap::default();
+    for v in views.iter().filter(|v| split_view_name(v.name.as_str()).1.starts_with('_')) {
+        let Some(key) = view_key_of(v, &stems) else { continue };
+        let this = carries_yield(&v.body, &effective_record_arg(v, element_locals, known_models, &stems));
+        let all = carries.entry(key).or_insert(true);
+        *all = *all && this;
+    }
+    carries.into_iter().filter(|(_, all)| *all).map(|(k, _)| k).collect()
+}
+
+/// The view names of the partials that carry their yield in the record
+/// slot (`yielding_partials`), for `analyze::diagnostics`, which refuses
+/// a block render to any other partial.
+pub(crate) fn yield_carrying_partials(app: &crate::App) -> crate::det::HashSet<String> {
+    let known_models: Vec<String> = app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
+    let element_locals = collection_element_locals(&app.views, app);
+    let keys = yielding_partials(&app.views, &element_locals, &known_models);
+    let stems = PartialStems::of(&app.views);
+    app.views
         .iter()
-        .filter(|v| split_view_name(v.name.as_str()).1.starts_with('_'))
-        .filter(|v| carries_yield(&v.body, &effective_record_arg(v, element_locals, known_models, &stems)))
-        .filter_map(|v| view_key_of(v, &stems))
+        .filter(|v| view_key_of(v, &stems).is_some_and(|k| keys.contains(&k)))
+        .map(|v| v.name.as_str().to_string())
         .collect()
 }
 
