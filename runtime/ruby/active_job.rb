@@ -116,6 +116,9 @@ module ActiveJob
   # and no priority to honour, so every entry runs in arrival order.
   PENDING = []
 
+  # Not a field of the entry: an entry stays a bare `() -> nil` so every target can hold it.
+  PENDING_QUEUES = []
+
   # Whether a drain exists to pick the work up. Empty means no — and
   # then `perform_later` runs inline, exactly as before, because a job
   # put on a queue nobody drains is a job silently dropped, which is
@@ -147,6 +150,11 @@ module ActiveJob
   # Proc is opaque to the analyzer either way -- `work.call` answers
   # gradually under both.
   def self.enqueue(work)
+    enqueue_on("default", work)
+  end
+
+  def self.enqueue_on(queue, work)
+    PENDING_QUEUES << queue
     PENDING << work
     nil
   end
@@ -166,7 +174,11 @@ module ActiveJob
   # entry, so the one FIFO and its locking stay as they are. What the
   # Proc closes over is the serialized text, not the job's objects.
   def self.enqueue_payload(json)
-    enqueue(-> { perform_payload(json)
+    enqueue_payload_on("default", json)
+  end
+
+  def self.enqueue_payload_on(queue, json)
+    enqueue_on(queue, -> { perform_payload(json)
     nil })
   end
 
@@ -174,7 +186,15 @@ module ActiveJob
   # holds nothing; the Ruby-family job registry redefines it to hold the
   # payload while `Model.transaction` is open.
   def self.enqueue_payload_after_commit(json)
-    enqueue_payload(json)
+    enqueue_payload_after_commit_on("default", json)
+  end
+
+  def self.enqueue_payload_after_commit_on(queue, json)
+    enqueue_payload_on(queue, json)
+  end
+
+  def self.queue_or(queue, own)
+    queue == "" ? own : queue
   end
 
   def self.pending_count
@@ -257,17 +277,22 @@ module ActiveJob
   end
 
   # Run the held jobs `only` names (all of them when it is empty), in
-  # the order they were enqueued, and answer how many ran. A job one of
-  # them enqueues is held behind it and runs in the same pass. Jobs
-  # `only` leaves out stay held.
+  # the order they were enqueued, and answer how many ran. Only the jobs
+  # held when the call starts run: Rails' `flush_enqueued_jobs` walks a
+  # snapshot (`jobs.dup`), so a job one of them enqueues stays held
+  # behind it for a later call. That is what ends a job that re-enqueues
+  # itself (an interrupted job-iteration job continues from its cursor
+  # as a new enqueue). Jobs `only` leaves out stay held.
   def self.perform_held(only)
     ran = 0
     i = 0
-    while i < HELD.length
+    limit = HELD.length
+    while i < limit && i < HELD.length
       if only.empty? || only.include?(HELD_NAMES[i])
         work = HELD[i]
         HELD.delete_at(i)
         HELD_NAMES.delete_at(i)
+        limit = limit - 1
         work.call
         ran = ran + 1
       else

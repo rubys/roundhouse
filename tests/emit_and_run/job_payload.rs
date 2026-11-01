@@ -69,7 +69,7 @@ fn a_payload_job_round_trips_through_the_drain() {
     );
     let job = std::fs::read_to_string(run.emitted.join("app/models/article_job.rb"))
         .expect("emitted job");
-    assert!(job.contains("ActiveJob.enqueue_payload(JobRegistry.payload_article_job("), "{job}");
+    assert!(job.contains("ActiveJob.enqueue_payload_on(\"default\", JobRegistry.payload_article_job("), "{job}");
 }
 
 const AFTER_COMMIT_JOB: &str = r#"class CommitJob < ApplicationJob
@@ -132,7 +132,7 @@ fn an_after_commit_job_waits_for_the_commit() {
     let job = std::fs::read_to_string(run.emitted.join("app/models/commit_job.rb"))
         .expect("emitted job");
     assert!(
-        job.contains("ActiveJob.enqueue_payload_after_commit(JobRegistry.payload_commit_job(article))"),
+        job.contains("ActiveJob.enqueue_payload_after_commit_on(\"default\", JobRegistry.payload_commit_job(article))"),
         "{job}"
     );
 }

@@ -60,6 +60,8 @@ use crate::ty::Ty;
 
 use super::util::map_expr;
 
+mod uploaded_arrays;
+
 /// One (resource, fields) recognition: enough info to synthesize the
 /// `<Resource>Params` class and to rewrite call sites that consume it.
 #[derive(Clone, Debug)]
@@ -127,6 +129,7 @@ pub struct ParamsSpec {
     /// the models are known; empty until then, which is every field a
     /// String — the shape every emitter already compiles.
     pub file_fields: std::collections::BTreeSet<Symbol>,
+    pub file_array_fields: std::collections::BTreeSet<Symbol>,
     /// The scalar permitted fields the list was recognized with, before
     /// [`ParamsSpecs::carry_nested`] adds carried nested keys to
     /// `fields`: what a call site's own `(resource, fields)` matches.
@@ -354,7 +357,7 @@ impl ParamsSpec {
     }
 
     pub(crate) fn scalar_lookup(&self) -> bool {
-        self.value_demand() && !self.lookup_blocked && self.file_fields.is_empty()
+        self.value_demand() && !self.lookup_blocked && self.file_fields.is_empty() && self.file_array_fields.is_empty()
     }
 
     pub(crate) fn value_map(&self) -> bool {
@@ -418,7 +421,9 @@ fn merged_only_ty(spec: &ParamsSpec, field: &Symbol) -> Option<Ty> {
 fn request_field_ty(spec: &ParamsSpec, field: &Symbol) -> Ty {
     if let Some(nested) = spec.nested_fields.get(field) {
         if nested.mode == "scalars" {
-            Ty::Array { elem: Ty::Str.into() }
+            Ty::Array { elem: if spec.file_array_fields.contains(field) {
+                Ty::Union { variants: vec![Ty::Str, uploaded_file_ty()].into() }.into()
+            } else { Ty::Str.into() } }
         } else if nested.mode == "list" {
             let record = Ty::Hash { key: Ty::Str.into(), value: param_value_ty().into() };
             Ty::Union { variants: vec![
@@ -480,9 +485,12 @@ fn field_reads(spec: &ParamsSpec, field: &Symbol, sub: Expr, span: Span) -> (Exp
     if spec.nested_fields.get(field).is_some_and(|n| n.mode == "scalars") {
         let params = vec![Symbol::from("Params")];
         let args = vec![sub, str_lit(field.as_str())];
+        let reader = if spec.file_array_fields.contains(field) {
+            uploaded_file_class().0.as_str().split("::").map(Symbol::from).collect()
+        } else { params.clone() };
         return (
             call(params.clone(), "scalar_list_provided", args.clone(), Ty::Bool),
-            call(params, "scalar_list", args, field_ty(spec, field)),
+            call(reader, "scalar_list", args, field_ty(spec, field)),
         );
     }
     if let Some(nested) = spec.nested_fields.get(field) {
@@ -602,6 +610,22 @@ pub fn collect_specs(controllers: &[Controller]) -> ParamsSpecs {
     collect_specs_impl(controllers, true)
 }
 
+pub(crate) fn upload_array_fields(controllers: &[Controller]) -> BTreeMap<ClassId, BTreeMap<(Symbol, Vec<Symbol>, Vec<String>), std::collections::BTreeSet<Symbol>>> {
+    let mut fields = BTreeMap::new();
+    for spec in collect_specs_impl(controllers, false).specs {
+        if spec.file_array_fields.is_empty() {
+            continue;
+        }
+        for controller in spec.declaring {
+            fields.entry(controller).or_insert_with(BTreeMap::new).insert(
+                (spec.resource.clone(), spec.key_fields.clone(), spec.nested_signature.clone()),
+                spec.file_array_fields.clone(),
+            );
+        }
+    }
+    fields
+}
+
 fn collect_specs_impl(controllers: &[Controller], report: bool) -> ParamsSpecs {
     let mut index: BTreeMap<(Symbol, Vec<Symbol>, Vec<String>), usize> = BTreeMap::new();
     let mut specs: Vec<ParamsSpec> = Vec::new();
@@ -614,6 +638,7 @@ fn collect_specs_impl(controllers: &[Controller], report: bool) -> ParamsSpecs {
     let mut specs = ParamsSpecs { specs, ..Default::default() };
     scan_create_demand(controllers, &mut specs);
     scan_lookup_demand(controllers, &mut specs);
+    uploaded_arrays::mark(controllers, &mut specs);
     specs
 }
 
@@ -1005,6 +1030,7 @@ pub fn specs_from_lists(lists: &[(Symbol, Vec<Symbol>)]) -> ParamsSpecs {
                 declaring: Vec::new(),
                 is_canonical: true,
                 file_fields: std::collections::BTreeSet::new(),
+                file_array_fields: std::collections::BTreeSet::new(),
                 key_fields: fields.clone(),
                 nested_signature: Vec::new(),
                 nested_candidates: Vec::new(),
@@ -1066,6 +1092,7 @@ fn record(
                 declaring: vec![controller.clone()],
                 is_canonical: false,
                 file_fields: std::collections::BTreeSet::new(),
+                file_array_fields: std::collections::BTreeSet::new(),
                 key_fields: fields.clone(),
                 nested_signature: signature_of(&candidates),
                 nested_candidates: candidates,
@@ -2090,7 +2117,7 @@ fn synth_params_initialize(spec: &ParamsSpec) -> MethodDef {
         let rhs = if spec.nested_fields.get(field).is_some_and(|n| n.mode == "scalars") {
             expr(
                 ExprNode::Array { elements: Vec::new(), style: crate::expr::ArrayStyle::default() },
-                Some(Ty::Array { elem: Ty::Str.into() }),
+                Some(field_ty(spec, field)),
             )
         } else if spec.file_fields.contains(field) || spec.nested_fields.contains_key(field) || merged_only_ty(spec, field).is_some() {
             expr(ExprNode::Lit { value: Literal::Nil }, Some(Ty::Nil))

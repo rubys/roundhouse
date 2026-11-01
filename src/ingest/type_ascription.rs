@@ -21,6 +21,7 @@
 use std::cell::RefCell;
 
 use ruby_prism::Node;
+use super::prism_api::PrismLocation;
 
 use crate::expr::{Expr, ExprNode};
 use crate::ty::Ty;
@@ -152,7 +153,8 @@ pub(super) fn leading_self_binding(file: &str, start: usize) -> Option<Expr> {
         end: (at + len) as u32,
     };
     let class_object = written.starts_with("singleton(");
-    let binding = bind_self(ascribe(Expr::new(span, ExprNode::SelfRef), rbs_type(&written)), class_object);
+    let ty = rbs_type_with_vars(&written, &type_vars_at(file, start));
+    let binding = bind_self(ascribe(Expr::new(span, ExprNode::SelfRef), ty), class_object);
     crate::expr::is_self_binding(&binding).then_some(binding)
 }
 
@@ -198,7 +200,7 @@ pub(super) fn trailing_ascription(file: &str, end: usize) -> Option<Trailing> {
     if comment == "!nil" {
         return Some(Trailing::NotNil);
     }
-    rbs_type(comment).map(Trailing::Type)
+    rbs_type_with_vars(comment, &type_vars_at(file, end)).map(Trailing::Type)
 }
 
 /// Apply a trailing ascription to `value`: a `Cast` to the declared
@@ -273,16 +275,127 @@ pub(super) fn receiver_rbs_assertion(file: &str, end: usize) -> Option<Trailing>
 }
 
 /// Parse one RBS type expression by wrapping it in a method signature
-/// the RBS reader already understands.
-pub(crate) fn rbs_type(text: &str) -> Option<Ty> {
+/// the RBS reader already understands. The type variables in scope
+/// (`vars`) are declared on that method, so `U` in `result = nil #: U?`
+/// inside a `#: [U] (...) -> U` method reads as a type variable
+/// (untyped, as in the signature itself), not a constant named `U`.
+fn rbs_type_with_vars(text: &str, vars: &[String]) -> Option<Ty> {
     if text.is_empty() || text.contains('\n') || text.starts_with('!') {
         return None;
     }
-    let src = format!("class X\n  def m: () -> {text}\nend\n");
+    let words: Vec<&str> =
+        text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':')).collect();
+    let used: Vec<&str> =
+        vars.iter().map(String::as_str).filter(|var| words.contains(var)).collect();
+    let generics = if used.is_empty() { String::new() } else { format!("[{}] ", used.join(", ")) };
+    let src = format!("class X\n  def m: {generics}() -> {text}\nend\n");
     let sigs = crate::rbs::parse_signatures(&src).ok()?;
     let (_, sig) = sigs.methods.into_iter().next()?;
     match sig {
         Ty::Fn { ret, .. } => Some(std::sync::Arc::unwrap_or_clone(ret)),
         _ => None,
     }
+}
+
+/// The type variables in scope at byte `at` of `file`: those a
+/// `#: [U] (...) -> ...` signature declares for its method, and those a
+/// `#: [K, V]` line above a class or module declares for its body.
+fn type_vars_at(file: &str, at: usize) -> Vec<String> {
+    let Some(scopes) = sources::type_var_scopes(file, generic_scopes) else {
+        return Vec::new();
+    };
+    let mut vars: Vec<String> = Vec::new();
+    for (start, end, names) in scopes.iter() {
+        if (*start..*end).contains(&at) {
+            for name in names {
+                if !vars.contains(name) {
+                    vars.push(name.clone());
+                }
+            }
+        }
+    }
+    vars
+}
+
+/// Every def, class and module in `text` whose `#:` comment opens with
+/// a type parameter list, with its byte range.
+fn generic_scopes(text: &str) -> Vec<sources::TypeVarScope> {
+    if !text.contains("#: [") {
+        return Vec::new();
+    }
+    struct Scopes<'a> {
+        source: &'a [u8],
+        out: Vec<sources::TypeVarScope>,
+    }
+    impl Scopes<'_> {
+        fn record(&mut self, location: &ruby_prism::Location<'_>) {
+            let start = location.start_offset();
+            if let Some(names) =
+                super::sorbet_sig::rbs_comment_text(self.source, start).and_then(|sig| type_param_names(&sig))
+            {
+                self.out.push((start, location.end_offset(), names));
+            }
+        }
+    }
+    impl<'pr> ruby_prism::Visit<'pr> for Scopes<'_> {
+        fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+            self.record(&node.location());
+            ruby_prism::visit_def_node(self, node);
+        }
+        fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+            self.record(&node.location());
+            ruby_prism::visit_class_node(self, node);
+        }
+        fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
+            self.record(&node.location());
+            ruby_prism::visit_module_node(self, node);
+        }
+    }
+    let result = ruby_prism::parse(text.as_bytes());
+    let mut scopes = Scopes { source: text.as_bytes(), out: Vec::new() };
+    ruby_prism::Visit::visit(&mut scopes, &result.node());
+    scopes.out
+}
+
+/// The names in a leading RBS type parameter list, `[out K, unchecked
+/// in V < Comparable, E = String]` -> `K, V, E`.
+fn type_param_names(sig: &str) -> Option<Vec<String>> {
+    let rest = sig.strip_prefix('[')?;
+    let mut depth = 0usize;
+    let mut close = None;
+    for (i, c) in rest.char_indices() {
+        match c {
+            '[' | '(' => depth += 1,
+            ']' | ')' if depth > 0 => depth -= 1,
+            ']' => {
+                close = Some(i);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let list = &rest[..close?];
+    let mut names = Vec::new();
+    let mut depth = 0usize;
+    let mut from = 0;
+    for (i, c) in list.char_indices().chain(std::iter::once((list.len(), ','))) {
+        match c {
+            '[' | '(' => depth += 1,
+            ']' | ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                let name = list[from..i]
+                    .split_whitespace()
+                    .find(|w| !matches!(*w, "unchecked" | "out" | "in"))?;
+                if !name.starts_with(|c: char| c.is_ascii_uppercase())
+                    || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                {
+                    return None;
+                }
+                names.push(name.to_string());
+                from = i + 1;
+            }
+            _ => {}
+        }
+    }
+    Some(names)
 }

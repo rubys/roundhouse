@@ -79,14 +79,33 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
     // (`lower::job_payload`). `at` is the epoch in seconds as a Float,
     // 0.0 for none; `queue` a String, "" for the job's own.
     let sidekiq = app.queue_adapter.as_deref() == Some("sidekiq");
+    // Not dropped under solid_queue: `SolidQueue::Queue#clear` reads the queue a job was put on.
+    let solid_queue = app.queue_adapter.as_deref() == Some("solid_queue");
+    let own_queues: crate::det::HashMap<String, String> = app
+        .library_classes
+        .iter()
+        .filter(|lc| jobs.contains(lc.name.0.as_str()))
+        .map(|lc| (lc.name.0.as_str().to_string(), super::job_payload::queue_name(app, lc)))
+        .collect();
     let mut unfolded: BTreeSet<String> = BTreeSet::new();
     let mut folded: Vec<crate::span::Span> = Vec::new();
     let mut delayed: Vec<crate::span::Span> = Vec::new();
     let mut scheduled = SetFolds::default();
     super::for_each_hook_body(app, &mut |body| {
-        fold_set_chains(body, &jobs, &mut unfolded, &mut folded, sidekiq.then_some(&mut scheduled));
+        fold_set_chains(body, &jobs, &mut unfolded, &mut folded, (sidekiq || solid_queue).then_some(&mut scheduled));
         fold_delayed_enqueues(body, &delay_folds, &mut delayed);
     });
+    for span in scheduled.waits.iter().filter(|_| !sidekiq) {
+        diags.push(crate::lower::residue_diagnostic(
+            "job_class_side",
+            "job-set-options",
+            *span,
+            "in-process queue",
+            "`set(wait:/wait_until:)` is dropped: the in-process queue runs its jobs in order, \
+             with no scheduled time"
+                .to_string(),
+        ));
+    }
     for span in &scheduled.priority {
         diags.push(crate::lower::residue_diagnostic(
             "job_class_side",
@@ -98,7 +117,10 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
                 .to_string(),
         ));
     }
-    for span in &scheduled.rejected {
+    for span in scheduled.rejected.iter().filter(|_| !sidekiq) {
+        folded.push(*span);
+    }
+    for span in scheduled.rejected.iter().filter(|_| sidekiq) {
         let mut d = crate::lower::residue_diagnostic(
             "job_class_side",
             "job-set-options",
@@ -364,12 +386,21 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
                 // parameter `^() -> nil` so the runtime file types
                 // fully, and RBS has no syntax for naming a block.
                 let held_block = block.clone();
+                let mut own_queue = Expr::new(
+                    span,
+                    ExprNode::Lit {
+                        value: crate::expr::Literal::Str {
+                            value: own_queues.get(lc.name.0.as_str()).cloned().unwrap_or_else(|| "default".to_string()),
+                        },
+                    },
+                );
+                own_queue.ty = Some(Ty::Str);
                 let mut enqueue = Expr::new(
                     span,
                     ExprNode::Send {
                         recv: Some(active_job(span)),
-                        method: Symbol::from("enqueue"),
-                        args: vec![block],
+                        method: Symbol::from("enqueue_on"),
+                        args: vec![own_queue, block],
                         block: None,
                         parenthesized: true,
                     },
@@ -538,6 +569,7 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
 struct SetFolds {
     jobs: BTreeSet<String>,
     priority: Vec<crate::span::Span>,
+    waits: Vec<crate::span::Span>,
     rejected: Vec<crate::span::Span>,
 }
 
@@ -566,6 +598,9 @@ fn set_options(args: &[Expr], span: crate::span::Span, folds: &mut SetFolds) -> 
     let mut queue = typed(ExprNode::Lit { value: crate::expr::Literal::Str { value: String::new() } }, Ty::Str);
     for (k, v) in entries {
         let ExprNode::Lit { value: crate::expr::Literal::Sym { value: key } } = &*k.node else { return None };
+        if matches!(key.as_str(), "wait" | "wait_until") {
+            folds.waits.push(k.span);
+        }
         match key.as_str() {
             // `wait_until:` wins over `wait:` whichever comes first,
             // as Rails' `set` reads them.
@@ -626,12 +661,40 @@ fn perform_later_with(later: &crate::dialect::MethodDef) -> crate::dialect::Meth
     if let Some(Ty::Fn { params: tys, block, ret, effects }) = &later.signature {
         let mut all = vec![
             crate::ty::Param { name: at, ty: Ty::Float.into(), kind: crate::ty::ParamKind::Required },
-            crate::ty::Param { name: queue, ty: Ty::Str.into(), kind: crate::ty::ParamKind::Required },
+            crate::ty::Param { name: queue.clone(), ty: Ty::Str.into(), kind: crate::ty::ParamKind::Required },
         ];
         all.extend(tys.iter().cloned());
         w.signature = Some(Ty::Fn { params: all.into(), block: block.clone(), ret: ret.clone(), effects: effects.clone() });
     }
+    queue_from_param(&mut w.body, &queue);
     w
+}
+
+fn queue_from_param(e: &mut Expr, queue: &Symbol) {
+    if let ExprNode::Send { recv: Some(r), method, args, .. } = &mut *e.node
+        && method.as_str() == "enqueue_on"
+        && matches!(&*r.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "ActiveJob")
+        && let Some(own) = args.first_mut()
+        && matches!(&*own.node, ExprNode::Lit { value: crate::expr::Literal::Str { .. } })
+    {
+        let span = own.span;
+        let mut named = Expr::new(span, ExprNode::Var { id: crate::ident::VarId(1), name: queue.clone() });
+        named.ty = Some(Ty::Str);
+        let mut pick = Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(Expr::new(span, ExprNode::Const { path: vec![Symbol::from("ActiveJob")] })),
+                method: Symbol::from("queue_or"),
+                args: vec![named, own.clone()],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        pick.ty = Some(Ty::Str);
+        *own = pick;
+        return;
+    }
+    e.node.for_each_child_mut(&mut |c| queue_from_param(c, queue));
 }
 
 /// Fold `Job.set(…).perform_later(args)` / `.perform_now(args)` to the

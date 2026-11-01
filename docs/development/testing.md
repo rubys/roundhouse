@@ -42,6 +42,19 @@ The generated trees are ignored by Git; a fresh clone has neither. Accessors in
 Missing Ruby, gems, or SDKs can cause a harness to skip or fail; read the
 executed test output rather than assuming exit zero means coverage.
 
+## Native probes
+
+A Spinel test that checks one construct rather than the app can compile the
+probe alone: `run_spinel_slim(&["runtime/active_support_ext"], script)` in
+[`emit_and_run.rs`](../../tests/support/emit_and_run.rs) builds only the
+files the overlay `write`s and the runtime entries named, which takes seconds
+where `run_spinel`'s whole-blog `boot` takes minutes. Name too few entries
+and spinel refuses or the run raises; it does not pass. The probe no longer
+shares whole-program inference with the app, so scheduled Full validation
+sets `ROUNDHOUSE_SPINEL_SLIM=0` and compiles the same tests inside `boot`.
+Keep `run_spinel` for tests whose subject is the app, its models or its HTTP
+surface.
+
 ## Native controls
 
 A test that claims emitted behavior matches Rails runs the same program under

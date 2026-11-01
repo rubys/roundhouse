@@ -671,7 +671,7 @@ end
 # ---------------------------------------------------------------------
 # Subcommand: transpile
 #
-# `cargo run --release --bin roundhouse -- --target <t> -o <out>
+# `$ROUNDHOUSE_BIN` (or `cargo run --release --bin roundhouse --`) `--target <t> -o <out>
 # <fixture>` produces a runnable tree for <t>. Some targets need a
 # post-build step:
 #   - ruby:    seed the demo SQLite DB from real-blog's Rails-populated
@@ -696,16 +696,16 @@ def cmd_transpile(argv)
   end
   validate_target!(target)
   need_fixture!
-  need_cargo!
+  compiler = roundhouse_command
+  return 127 unless compiler
 
   out = build_dir(target)
   FileUtils.rm_rf(out)
   FileUtils.mkdir_p(File.dirname(out))
 
-  ok = system(
-    'cargo', 'run', '--release', '--quiet', '--bin', 'roundhouse', '--',
-    '--target', target, '-o', out, fixture_path
-  )
+  command = [*compiler, '--target', target, '-o', out, fixture_path]
+  warn "roundhouse-bin: exec #{command.shelljoin}" if ENV['ROUNDHOUSE_BIN_TRACE'].to_s != ''
+  ok = system(*command)
   return 1 unless ok
 
   case target
@@ -715,6 +715,24 @@ def cmd_transpile(argv)
   when 'typescript' then post_transpile_typescript(out)
   end
   0
+end
+
+# The compiler `transpile` runs: ROUNDHOUSE_BIN when set (CI stages
+# build-roundhouse's current-run binary there, as scripts/lib/roundhouse-bin.sh
+# documents), else a release build through Cargo. A set ROUNDHOUSE_BIN that is
+# not an executable file fails rather than quietly rebuilding.
+def roundhouse_command
+  bin = ENV['ROUNDHOUSE_BIN'].to_s
+  if bin.empty?
+    need_cargo!
+    return ['cargo', 'run', '--release', '--quiet', '--bin', 'roundhouse', '--']
+  end
+  bin = File.expand_path(bin)
+  unless File.file?(bin) && File.executable?(bin)
+    warn "roundhouse-bin: ROUNDHOUSE_BIN is not an executable file: #{bin}"
+    return nil
+  end
+  [bin]
 end
 
 # Ruby target's post-build: seed the demo DB. main.rb's Schema.load!
