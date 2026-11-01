@@ -120,7 +120,6 @@ fn requiring_a_gem_file_whose_classes_were_all_dropped_loads_nothing() {
 /// the subclass file loaded first and `Node` was an uninitialized
 /// constant.
 #[test]
-#[ignore = "fork spec: load order"]
 fn a_require_written_below_a_gem_class_runs_after_the_class_is_defined() {
     let files: &[(&str, &str)] = &[
         ("lib/tessera.rb", "require 'tessera/node'\n"),
@@ -134,10 +133,13 @@ fn a_require_written_below_a_gem_class_runs_after_the_class_is_defined() {
         ),
     ];
     let run = app_with(files, "require \"tessera\"\n").run_ruby("puts \"#{Tessera::Leaf.new.kind} #{Tessera::Leaf.superclass} #{Tessera::LEAF}\"\n");
-    let node = std::fs::read_to_string(run.emitted.join("app/models/tessera/node.rb")).expect("emitted node.rb");
-    let class = node.find("class Node").expect("class Node emitted");
-    let require = node.find("require_relative").unwrap_or_else(|| panic!("the trailing require is carried:\n{node}"));
-    assert!(class < require, "the require written below the class moved above it:\n{node}");
+    // The file's program loads the class's emitted file, then the require
+    // written below it.
+    let program = std::fs::read_to_string(run.emitted.join("app/models/roundhouse_files/vendor/gems/tessera-1.2.3/lib/tessera/node.rb"))
+        .expect("node.rb's program");
+    let class = program.find("models/tessera/node\")").unwrap_or_else(|| panic!("the class is loaded:\n{program}"));
+    let require = program.find("lib/tessera/leaf\")").unwrap_or_else(|| panic!("the trailing require is carried:\n{program}"));
+    assert!(class < require, "the require written below the class moved above it:\n{program}");
     assert!(
         run.success,
         "the emitted program failed in {}\n=== stdout ===\n{}\n=== stderr ===\n{}\nerrors: {:#?}",
@@ -156,7 +158,6 @@ fn a_require_written_below_a_gem_class_runs_after_the_class_is_defined() {
 /// level's, as `Rails::Railtie` inside `class Money` is natively; the
 /// emitted tree must not define the nested namespace ahead of its file.
 #[test]
-#[ignore = "fork spec: load order"]
 fn a_nested_namespace_a_later_file_opens_does_not_shadow_the_top_level_before_it_loads() {
     const NESTED: &[(&str, &str)] = &[
         (
@@ -199,7 +200,6 @@ fn a_nested_namespace_a_later_file_opens_does_not_shadow_the_top_level_before_it
 /// (`require_relative "node"`) must therefore not run while that file is
 /// still loading.
 #[test]
-#[ignore = "fork spec: load order"]
 fn a_require_written_below_a_gem_class_does_not_re_enter_the_loading_file() {
     let files: &[(&str, &str)] = &[
         ("lib/tessera.rb", "require 'tessera/node'\n"),
@@ -223,4 +223,110 @@ fn a_require_written_below_a_gem_class_does_not_re_enter_the_loading_file() {
     assert_eq!(lines(&run.stdout), ["leaf twig"]);
     let circular: Vec<&str> = run.stderr.lines().filter(|l| l.contains("circular require")).collect();
     assert!(circular.is_empty(), "a require re-entered a loading file: {circular:#?}");
+}
+
+/// A gem file whose class becomes a model (`Node`, an ActiveModel class)
+/// still declares what is written beside it: `Helpers` in the same
+/// `module Tessera` is a library class the file loads, as it was while
+/// the whole file was one.
+#[test]
+fn a_class_beside_a_gem_model_in_its_file_is_still_declared() {
+    let files: &[(&str, &str)] = &[
+        ("lib/tessera.rb", "require 'tessera/node'\n"),
+        (
+            "lib/tessera/node.rb",
+            "module Tessera\n  class Node\n    include ActiveModel::Validations\n\n    validate :check\n\n    def check\n    end\n\n    def kind\n      Helpers.label\n    end\n  end\n\n  class Helpers\n    def self.label\n      :helped\n    end\n  end\nend\n",
+        ),
+    ];
+    let run = app_with(files, "require \"tessera\"\n").run_ruby("puts \"#{Tessera::Node.new.kind} #{Tessera::Helpers.label}\"\n");
+    assert!(
+        run.success,
+        "the emitted program failed in {}\n=== stdout ===\n{}\n=== stderr ===\n{}\nerrors: {:#?}",
+        run.emitted.display(),
+        run.stdout,
+        run.stderr,
+        run.errors
+    );
+    assert_eq!(lines(&run.stdout), ["helped helped"]);
+}
+
+/// A class opened in two gem files, one required in each arm of a
+/// file-level `if`, and the other file required after it. Ruby loads
+/// only the arm that runs (`b.rb`, then `z.rb` below the `if`), so
+/// `z.rb`'s `who` is the one left. Which arm runs is not known
+/// statically, so the openings keep their ingest order (`b.rb` before
+/// `z.rb`, which here matches the load). Ranking the `then` arm's
+/// require as run put `z.rb` first and left `b.rb`'s `who`.
+#[test]
+fn openings_whose_order_a_conditional_require_decides_keep_their_order() {
+    let files: &[(&str, &str)] = &[
+        (
+            "lib/tessera.rb",
+            "if RUBY_VERSION < \"1\"\n  module Tessera\n    FLAG = :old\n  end\n  require 'tessera/z'\nelse\n  require 'tessera/b'\nend\nrequire 'tessera/z'\n",
+        ),
+        ("lib/tessera/b.rb", "module Tessera\n  class Thing\n    def self.who\n      :b\n    end\n  end\nend\n"),
+        ("lib/tessera/z.rb", "module Tessera\n  class Thing\n    def self.who\n      :z\n    end\n  end\nend\n"),
+    ];
+    let run = app_with(files, "require \"tessera\"\n").run_ruby("p Tessera::Thing.who\n");
+    assert!(
+        run.success,
+        "the emitted program failed in {}\n=== stdout ===\n{}\n=== stderr ===\n{}\nerrors: {:#?}",
+        run.emitted.display(),
+        run.stdout,
+        run.stderr,
+        run.errors
+    );
+    assert_eq!(lines(&run.stdout), [":z"]);
+}
+
+/// A class beside a gem model whose alias names a method of an ancestor
+/// in another gem file (`Helpers < Base`, `alias tag label`)
+/// is held until that ancestor is known, as a library file's class is.
+/// Ingested without that hold, the alias failed the walk and every class
+/// beside the model was dropped with no trace.
+#[test]
+fn a_class_beside_a_gem_model_aliasing_an_ancestor_method_is_declared() {
+    let files: &[(&str, &str)] = &[
+        ("lib/tessera.rb", "require 'tessera/base'\nrequire 'tessera/node'\n"),
+        ("lib/tessera/base.rb", "module Tessera\n  class Base\n    def label\n      :based\n    end\n  end\nend\n"),
+        (
+            "lib/tessera/node.rb",
+            "module Tessera\n  class Node\n    include ActiveModel::Validations\n\n    validate :check\n\n    def check\n    end\n  end\n\n  class Helpers < Base\n    alias tag label\n  end\nend\n",
+        ),
+    ];
+    let run = app_with(files, "require \"tessera\"\n").run_ruby("puts \"#{Tessera::Helpers.new.tag} #{Tessera::Node.new.valid?}\"\n");
+    assert!(
+        run.success,
+        "the emitted program failed in {}\n=== stdout ===\n{}\n=== stderr ===\n{}\nerrors: {:#?}",
+        run.emitted.display(),
+        run.stdout,
+        run.stderr,
+        run.errors
+    );
+    assert_eq!(lines(&run.stdout), ["based true"]);
+}
+
+/// A concern written beside the gem model that includes it runs its
+/// `included` block in the model, as a library file's concern does: the
+/// validation it declares holds.
+#[test]
+fn a_concern_beside_a_gem_model_runs_its_included_block_in_the_model() {
+    let files: &[(&str, &str)] = &[
+        ("lib/tessera.rb", "require 'tessera/node'\n"),
+        (
+            "lib/tessera/node.rb",
+            "module Tessera\n  module Named\n    extend ActiveSupport::Concern\n\n    included do\n      validates :name, presence: true\n    end\n  end\n\n  class Node\n    include ActiveModel::Model\n    include Named\n\n    attr_accessor :name\n  end\nend\n",
+        ),
+    ];
+    let run = app_with(files, "require \"tessera\"\n")
+        .run_ruby("puts \"#{Tessera::Node.new.valid?} #{Tessera::Node.new(name: 'x').valid?}\"\n");
+    assert!(
+        run.success,
+        "the emitted program failed in {}\n=== stdout ===\n{}\n=== stderr ===\n{}\nerrors: {:#?}",
+        run.emitted.display(),
+        run.stdout,
+        run.stderr,
+        run.errors
+    );
+    assert_eq!(lines(&run.stdout), ["false true"]);
 }

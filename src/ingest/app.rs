@@ -1067,11 +1067,20 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
             // validations and scopes — replayed by the ruby emitter,
             // dropped by a strict target.
             //
+            // So is a gem's own ActiveModel class (`include
+            // ActiveModel::Validations` with no superclass): no runtime
+            // port defines the module to include, and the gem's
+            // validations compile as a model's do. An app `lib/` class
+            // keeps `lower::active_model_model`'s treatment (it may reopen
+            // a framework class).
+            //
             // Only an explicit `Model` classification routes this way.
             // `None` — a file with no class, a bare module — stays a
             // library class here, unlike under `app/models` where the
             // directory itself is the app saying what the file is.
-            if super::library_class::has_active_record_base(&source, &model_bases) {
+            if super::library_class::has_active_record_base(&source, &model_bases)
+                || (gem_libs.iter().any(|lib| entry.starts_with(lib)) && super::library_class::is_tableless_active_model(&source))
+            {
                 match ingest_model_with_enum_constants(
                     &source, &path_str, &app.schema, &table_prefixes, &base_prefixes, &enum_constants,
                     &model_bases,
@@ -1079,6 +1088,64 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                     Ok(Some(model)) => {
                         let outer = model.name.clone();
                         app.models.push(model);
+                        let mut beside_names: Vec<crate::ident::ClassId> = Vec::new();
+                        // A gem's file runs more than its declaration when
+                        // it loads: a require written below the class runs
+                        // after it (`file_program`), a model's file as any.
+                        if gem_libs.iter().any(|lib| entry.starts_with(lib)) {
+                            let mut carried: crate::det::HashSet<String> = Default::default();
+                            carried.insert(outer.0.as_str().to_string());
+                            if let Ok(nested) = ingest_nested_library_classes(&source, &path_str, outer.0.as_str()) {
+                                carried.extend(nested_under(&outer, nested).iter().map(|c| c.name.0.as_str().to_string()));
+                            }
+                            // A declaration beside the model (`Helpers`
+                            // beside `Node` in `module Tessera`) is the
+                            // file's too, a library class as it was
+                            // before the file became a model's, held and
+                            // registered as one. A refused alias in it
+                            // takes the file's program out with it, as
+                            // the program would name the refused class.
+                            let (beside, aliases) = super::inherited_alias::capturing(|| {
+                                super::library_class::ingest_library_classes_beside(&source, &path_str, outer.0.as_str())
+                            });
+                            match beside {
+                                Ok(beside) if !beside.is_empty() => {
+                                    carried.extend(beside.iter().map(|c| c.name.0.as_str().to_string()));
+                                    beside_names = beside.iter().map(|c| c.name.clone()).collect();
+                                    let conditional: crate::det::HashSet<&crate::ident::ClassId> = beside
+                                        .iter()
+                                        .flat_map(|c| c.conditional_definitions.iter().flat_map(|d| d.declared_names()))
+                                        .collect();
+                                    let unconditional =
+                                        beside_names.iter().filter(|name| !conditional.contains(name)).cloned().collect();
+                                    app.library_class_files.push((path_str.clone(), unconditional));
+                                    let start = app.library_classes.len();
+                                    app.library_classes.extend(beside);
+                                    if !aliases.is_empty() {
+                                        held_aliases.push(super::inherited_alias::Held {
+                                            path: path_str.clone(),
+                                            classes: start..app.library_classes.len(),
+                                            spans: aliases,
+                                        });
+                                    }
+                                }
+                                Ok(_) => {}
+                                Err(err) => record_library_ingest_failure(&mut app, &path_str, &err),
+                            }
+                            let list_dir = |dir: &Path| -> Vec<(String, bool)> {
+                                vfs.read_dir(dir)
+                                    .map(|entries| {
+                                        entries
+                                            .into_iter()
+                                            .filter_map(|e| Some((e.file_name()?.to_str()?.to_string(), vfs.is_dir(&e))))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default()
+                            };
+                            if let Some(program) = super::file_program::file_program(&source, &path_str, &carried, &list_dir) {
+                                app.file_programs.push(program);
+                            }
+                        }
                         // Classes nested in the model's body are classes
                         // of their own, exactly as under `app/models` —
                         // and, same as there, the plain (non-nested)
@@ -1096,12 +1163,11 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                             for (id, name) in ingest_concern_included_redefs(&source, &path_str) {
                                 app.concern_included_redefs.entry(id).or_default().push(name);
                             }
-                            append_concern_items(&mut app, concern_items, concern_guarded, |id| {
-                                nested.iter().any(|class| class.name == *id)
-                            });
-                            concern_enums.extend(concern_enum_decls.into_iter().filter(
-                                |(id, _)| nested.iter().any(|class| class.name == *id),
-                            ));
+                            let own = |id: &crate::ident::ClassId| {
+                                nested.iter().any(|class| class.name == *id) || beside_names.contains(id)
+                            };
+                            append_concern_items(&mut app, concern_items, concern_guarded, |id| own(id));
+                            concern_enums.extend(concern_enum_decls.into_iter().filter(|(id, _)| own(id)));
                             app.library_classes.extend(nested);
                         }
                         super::on_load_reopen::ingest_on_load_reopens(&source, &path_str, &mut app);
@@ -1194,20 +1260,7 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                     append_concern_items(&mut app, concern_items, concern_guarded, |_| true);
                     concern_enums.extend(concern_enum_decls);
                 }
-                Err(err) => {
-                    if survey::is_active() {
-                        survey::record(&err);
-                    }
-                    // Left out of the IR, and named at what failed it.
-                    if let IngestError::Unsupported { message, .. } = &err {
-                        let (start, end) = super::error_site::of(&err).unwrap_or((0, 0));
-                        let file = super::sources::file_id(&path_str);
-                        app.ingest_drops.push(crate::app::IngestDrop {
-                            span: crate::span::Span { file, start: start as u32, end: end as u32 },
-                            message: message.clone(),
-                        });
-                    }
-                }
+                Err(err) => record_library_ingest_failure(&mut app, &path_str, &err),
             }
             // A reopen deferred behind `ActiveSupport.on_load` is
             // invisible to the class finder above (it skips blocks);
@@ -8493,6 +8546,22 @@ fn append_concern_items(
     }
     for (id, items) in items.into_iter().filter(|(id, _)| keep(id)) {
         app.concern_model_items.entry(id).or_default().extend(items);
+    }
+}
+
+/// A support file's library classes that failed to ingest: surveyed, and
+/// left out of the IR named at what failed them.
+fn record_library_ingest_failure(app: &mut App, path: &str, err: &IngestError) {
+    if survey::is_active() {
+        survey::record(err);
+    }
+    if let IngestError::Unsupported { message, .. } = err {
+        let (start, end) = super::error_site::of(err).unwrap_or((0, 0));
+        let file = super::sources::file_id(path);
+        app.ingest_drops.push(crate::app::IngestDrop {
+            span: crate::span::Span { file, start: start as u32, end: end as u32 },
+            message: message.clone(),
+        });
     }
 }
 

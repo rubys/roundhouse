@@ -87,6 +87,7 @@ fn record_return_overridden(
 pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     let _indexes = install_lookup_indexes(app);
     let mut lcs: Vec<LibraryClass> = app.library_classes.clone();
+    order_openings_by_load(&mut lcs, app);
     // An alias of an ancestor's method is the native `alias_method` here.
     if super::expr::carries_body_statements() {
         crate::ingest::inherited_alias::drop_replayed_copies(&mut lcs);
@@ -250,6 +251,147 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
             }
             out
         })
+}
+
+/// A class opened in several gem files (graphql-client's `Client`, in
+/// `error.rb`, `collocated.rb` and `client.rb`) is one emitted file, its
+/// openings concatenated. Ruby runs them in the order the gem's requires
+/// load those files: `client.rb` requires `collocated.rb`, which requires
+/// `error.rb`, so `client.rb`'s `extend Collocated` runs after the
+/// constants `collocated.rb` writes. Ingest order is the directory walk's;
+/// each group of openings is put in load order here, the rest unmoved.
+/// A group with an opening whose file's place a file-level `if` decides
+/// keeps the ingest order: which arm runs is not known here.
+fn order_openings_by_load(lcs: &mut [LibraryClass], app: &App) {
+    let mut by_name: HashMap<&str, Vec<usize>> = HashMap::default();
+    for (i, lc) in lcs.iter().enumerate() {
+        by_name.entry(lc.name.0.as_str()).or_default().push(i);
+    }
+    let groups: Vec<Vec<usize>> = by_name.into_values().filter(|g| g.len() > 1).collect();
+    if groups.is_empty() || app.file_programs.is_empty() {
+        return;
+    }
+    let ranks = file_load_ranks(app);
+    let file_of = |lc: &LibraryClass| -> Option<String> {
+        let span = std::iter::once(lc.parent_span)
+            .chain(lc.include_spans.iter().copied())
+            .chain(lc.constants.iter().map(|(_, v)| v.span))
+            .chain(lc.methods.iter().map(|m| m.body.span))
+            .chain(lc.unknown_calls.iter().map(|c| c.span))
+            .find(|s| !s.is_synthetic())?;
+        let source = app.sources.get((span.file.0 as usize).checked_sub(1)?)?;
+        Some(normalize_path(&source.path))
+    };
+    for group in groups {
+        // `None` (a conditional decides the file's place) leaves the group as is.
+        let Some(mut keyed) = group
+            .iter()
+            .enumerate()
+            .map(|(at, &i)| match file_of(&lcs[i]).and_then(|f| ranks.get(&f).copied()) {
+                Some(rank) => rank.map(|rank| (rank, at)),
+                None => Some((usize::MAX, at)),
+            })
+            .collect::<Option<Vec<(usize, usize)>>>()
+        else {
+            continue;
+        };
+        if keyed.iter().all(|(rank, _)| *rank == usize::MAX) {
+            continue;
+        }
+        keyed.sort();
+        let ordered: Vec<LibraryClass> = keyed.iter().map(|&(_, at)| lcs[group[at]].clone()).collect();
+        for (slot, lc) in group.iter().zip(ordered) {
+            lcs[*slot] = lc;
+        }
+    }
+}
+
+/// Each gem file's place in the order its declarations run: a depth-first
+/// walk of the file programs from the boot's gem entries, a file's
+/// requires followed where they stand, its declarations ranked as reached.
+/// Inside a file-level `if`/`unless` only one arm runs, so a file first
+/// reached there, or whose first declaration is there, has no rank
+/// (`None`): its place depends on the condition.
+fn file_load_ranks(app: &App) -> HashMap<String, Option<usize>> {
+    use crate::app::ProgramItem;
+    let programs: HashMap<String, &crate::app::FileProgram> =
+        app.file_programs.iter().map(|p| (normalize_path(&p.source), p)).collect();
+    let resolve = |from: &str, feature: &str, relative: bool| -> Option<String> {
+        let file = if feature.ends_with(".rb") { feature.to_string() } else { format!("{feature}.rb") };
+        if relative {
+            let dir = Path::new(from).parent()?;
+            return Some(normalize_path(&dir.join(&file).display().to_string()));
+        }
+        if let Some(at) = from.rfind("/lib/") {
+            let own = normalize_path(&format!("{}{file}", &from[..at + 5]));
+            if programs.contains_key(&own) {
+                return Some(own);
+            }
+        }
+        let suffix = format!("/lib/{file}");
+        let mut found: Vec<&String> = programs.keys().filter(|p| p.ends_with(&suffix)).collect();
+        found.sort();
+        found.first().map(|p| p.to_string())
+    };
+    fn walk<'a>(
+        file: &str,
+        items: &'a [ProgramItem],
+        programs: &HashMap<String, &'a crate::app::FileProgram>,
+        resolve: &dyn Fn(&str, &str, bool) -> Option<String>,
+        seen: &mut crate::det::HashSet<String>,
+        ranks: &mut HashMap<String, Option<usize>>,
+        certain: bool,
+    ) {
+        for item in items {
+            match item {
+                ProgramItem::Require { feature, relative, .. } => {
+                    if let Some(target) = resolve(file, feature, *relative) {
+                        if let Some(program) = programs.get(&target) {
+                            if seen.insert(target.clone()) {
+                                walk(&target, &program.items, programs, resolve, seen, ranks, certain);
+                            }
+                        }
+                    }
+                }
+                ProgramItem::Declared(_) => {
+                    let next = ranks.len();
+                    ranks.entry(file.to_string()).or_insert(certain.then_some(next));
+                }
+                ProgramItem::Branch { then_items, else_items, .. } => {
+                    walk(file, then_items, programs, resolve, seen, ranks, false);
+                    walk(file, else_items, programs, resolve, seen, ranks, false);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut seen: crate::det::HashSet<String> = Default::default();
+    let mut ranks: HashMap<String, Option<usize>> = HashMap::default();
+    let mut roots: Vec<String> = app.boot_gem_entries.iter().map(|e| normalize_path(e)).collect();
+    let mut rest: Vec<String> = programs.keys().cloned().collect();
+    rest.sort();
+    roots.extend(rest);
+    for root in roots {
+        let Some(program) = programs.get(&root) else { continue };
+        if seen.insert(root.clone()) {
+            walk(&root, &program.items, &programs, &resolve, &mut seen, &mut ranks, true);
+        }
+    }
+    ranks
+}
+
+fn normalize_path(path: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "." => {}
+            ".." if out.last().is_some_and(|s| !s.is_empty() && *s != "..") => {
+                out.pop();
+            }
+            _ => out.push(segment),
+        }
+    }
+    out.join("/")
 }
 
 /// `Data.define(<symbols>)` — the factory `analyze::data` models.

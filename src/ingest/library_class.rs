@@ -69,7 +69,7 @@ pub fn ingest_library_classes(
     source: &[u8],
     file: &str,
 ) -> IngestResult<Vec<LibraryClass>> {
-    ingest_library_classes_impl(source, file, None)
+    ingest_library_classes_impl(source, file, Walk::All)
 }
 
 /// Like [`ingest_library_classes`], but only classes/modules NESTED
@@ -99,7 +99,28 @@ pub fn ingest_nested_library_classes(
     file: &str,
     outer: &str,
 ) -> IngestResult<Vec<LibraryClass>> {
-    ingest_library_classes_impl(source, file, Some(outer))
+    ingest_library_classes_impl(source, file, Walk::NestedIn(outer))
+}
+
+/// Every declaration in a gem model's file except the model's own class
+/// and what nests under it, which the model ingest and
+/// [`ingest_nested_library_classes`] take: a sibling written beside the
+/// model (`Tessera::Helpers` beside `Tessera::Node`) is a library class
+/// the file declares and loads like any other. The model's class is left
+/// out so its synthesized methods are not needed to walk it.
+pub fn ingest_library_classes_beside(
+    source: &[u8],
+    file: &str,
+    model: &str,
+) -> IngestResult<Vec<LibraryClass>> {
+    ingest_library_classes_impl(source, file, Walk::Beside(model))
+}
+
+#[derive(Clone, Copy)]
+enum Walk<'a> {
+    All,
+    NestedIn(&'a str),
+    Beside(&'a str),
 }
 
 /// The modules a file declares with an empty body (`module MarkA; end`):
@@ -120,18 +141,32 @@ pub(super) fn ingest_empty_modules(source: &[u8], file: &str) -> IngestResult<Ve
     Ok(out)
 }
 
-/// `nested_in`: `None` walks every declaration; `Some(outer)` walks
-/// only nested ones and top-level compact names under `outer`.
+/// `Walk::All` walks every declaration; `NestedIn(outer)` walks only
+/// nested ones and top-level compact names under `outer`; `Beside(model)`
+/// walks every class and module but `model` and the ones under it, and
+/// takes nothing written at file level (the model's file program carries
+/// that, as it did before the walk).
 fn ingest_library_classes_impl(
     source: &[u8],
     file: &str,
-    nested_in: Option<&str>,
+    walk: Walk<'_>,
 ) -> IngestResult<Vec<LibraryClass>> {
-    let walked = |scope: &[String], path: Option<Vec<String>>| match nested_in {
-        None => true,
-        Some(_) if !scope.is_empty() => true,
-        Some(outer) => path.is_some_and(|path| {
+    let nested_in = match walk {
+        Walk::NestedIn(outer) => Some(outer),
+        _ => None,
+    };
+    let file_level = matches!(walk, Walk::All);
+    let outside = |model: &str, name: &str| {
+        name != model && !name.strip_prefix(model).is_some_and(|rest| rest.starts_with("::"))
+    };
+    let walked = |scope: &[String], path: Option<Vec<String>>| match walk {
+        Walk::All => true,
+        Walk::NestedIn(_) if !scope.is_empty() => true,
+        Walk::NestedIn(outer) => path.is_some_and(|path| {
             path.join("::").strip_prefix(outer).is_some_and(|rest| rest.starts_with("::"))
+        }),
+        Walk::Beside(model) => path.is_some_and(|path| {
+            outside(model, &scope.iter().chain(&path).cloned().collect::<Vec<_>>().join("::"))
         }),
     };
     super::sources::register(file, &String::from_utf8_lossy(source));
@@ -191,9 +226,13 @@ fn ingest_library_classes_impl(
     // module body declares (`ConditionalArm::declarations`), which the
     // finders above do not reach: each loads only where its branch runs.
     if nested_in.is_none() {
-        out.extend(conditional_declaration_classes(&root, file)?);
+        let conditional = conditional_declaration_classes(&root, file)?;
+        out.extend(conditional.into_iter().filter(|lc| match walk {
+            Walk::Beside(model) => outside(model, lc.name.0.as_str()),
+            _ => true,
+        }));
     }
-    if out.is_empty() {
+    if out.is_empty() && file_level {
         if let Some(lc) = file_data_class(&root, file)? {
             return Ok(vec![lc]);
         }
@@ -219,10 +258,10 @@ fn ingest_library_classes_impl(
     // classes (any of which may subclass them); a factory that subclasses
     // an in-file class follows that class — Ruby resolves the superclass
     // while defining the subclass. A file of nothing else defines just
-    // those classes. The nested walk (`nested_in`) takes no top-level
+    // those classes. The nested and beside walks take no top-level
     // declaration.
-    let made = match (nested_in, root.as_program_node()) {
-        (None, Some(program)) => {
+    let made = match (file_level, root.as_program_node()) {
+        (true, Some(program)) => {
             super::class_new_factory::constant_classes(None, Some(program.statements().as_node()), file)
         }
         _ => Vec::new(),
@@ -233,7 +272,7 @@ fn ingest_library_classes_impl(
     // Class.new-only library file drops `TIMEOUT = 5` beside the
     // factories, and a refused factory that should stay a constant has
     // nowhere to land.
-    let file_constants = if nested_in.is_none() {
+    let file_constants = if file_level {
         file_level_constants(&root, file, &made)?
     } else {
         Vec::new()
@@ -4465,6 +4504,21 @@ pub fn has_active_record_base(source: &[u8], bases: &ModelBases) -> bool {
         .superclass()
         .and_then(|n| constant_path_of(&n))
         .is_some_and(|p| bases.contains(&bases.resolve_superclass(&scope, &p)))
+}
+
+/// A file whose primary class has no superclass and includes
+/// `ActiveModel::Model` or `ActiveModel::Validations`, as
+/// `classify_class_file` reads a tableless model under `app/models`. A
+/// gem's `class Node; include ActiveModel::Validations; validate :check`
+/// carried as a library class emitted the include of a module no runtime
+/// port defines, a NameError as the file loaded.
+pub fn is_tableless_active_model(source: &[u8]) -> bool {
+    let result = parse(source);
+    let root = result.node();
+    let Some((_, class)) = super::util::primary_class_with_scope(&root) else {
+        return false;
+    };
+    class.superclass().is_none() && includes_active_model(&class)
 }
 
 pub fn classify_class_file(source: &[u8], bases: &ModelBases) -> Option<ClassKind> {
