@@ -22,6 +22,9 @@ mod i18n_locales_app;
 #[path = "support/record_slice_app.rs"]
 #[allow(dead_code)]
 mod record_slice_app;
+#[path = "support/ts_controller_ivars.rs"]
+#[allow(dead_code)]
+mod ts_controller_ivars;
 
 use roundhouse::emit::csharp;
 use roundhouse::ingest::ingest_app;
@@ -261,6 +264,45 @@ public class RecordSliceProbeTest
 "#).expect("write probe test");
     let output = Command::new("dotnet")
         .args(["test", "tests", "--nologo", "--filter", "RecordSliceProbeTest"])
+        .current_dir(&emitted)
+        .output()
+        .expect("run dotnet test");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore]
+fn controller_ivars_named_like_base_state_build() {
+    // An app controller's `@status`, `@location` and `@headers` (its own,
+    // ApplicationController's and a concern's) build next to the runtime
+    // base's members of those names (#1625).
+    let (emitted, errors) = ts_controller_ivars::overlay().emit(roundhouse::project::BuildTarget::CSharp);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_dotnet_build_passes("an app controller with ivars named like the base's state", &emitted);
+}
+
+#[test]
+#[ignore]
+fn controller_ivars_named_like_base_state_render() {
+    // The three names render on the page, and the response is as Rails
+    // leaves it: 200, no Location (#1625).
+    let (emitted, errors) = ts_controller_ivars::overlay().emit(roundhouse::project::BuildTarget::CSharp);
+    assert!(errors.is_empty(), "{errors:?}");
+    let body = serde_json::to_string(ts_controller_ivars::BODY).unwrap();
+    std::fs::write(
+        emitted.join("tests/ControllerIvarsProbeTest.cs"),
+        format!(
+            "using Xunit;\n\nnamespace Roundhouse;\n\npublic class ControllerIvarsProbeTest\n{{\n    [Fact]\n    public void RendersAsRails()\n    {{\n        var c = new ProbesController();\n        c.RequestMethod = \"GET\";\n        c.ProcessAction(\"show\");\n        Assert.Equal(200L, c.Status);\n        Assert.Null(c.Location);\n        Assert.Equal({body}, c.Body);\n    }}\n}}\n"
+        ),
+    )
+    .expect("write probe test");
+    let output = Command::new("dotnet")
+        .args(["test", "tests", "--nologo", "--filter", "ControllerIvarsProbeTest"])
         .current_dir(&emitted)
         .output()
         .expect("run dotnet test");
