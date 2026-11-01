@@ -189,6 +189,7 @@ module ActionView
     def self.stylesheet_link_tag: (String name, ?Hash[Symbol, untyped] opts) -> String
     def self.stylesheet_href: (String source) -> String
     def self.asset_url?: (String source) -> bool
+    def self.scheme_letter_count: (String s) -> Integer
     def self.css_extname?: (String path) -> bool
     def self.first_char_index: (String s, String ch) -> Integer
     def self.javascript_include_tag: (String | Symbol source, ?Hash[Symbol, untyped] opts) -> String

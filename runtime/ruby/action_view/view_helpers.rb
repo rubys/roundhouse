@@ -1008,11 +1008,19 @@ module ActionView
       return true if source.start_with?("//")
       lower = source.downcase
       return true if lower.start_with?("cid:") || lower.start_with?("data:")
+      i = scheme_letter_count(lower)
+      i > 0 && lower[i, 3] == "://"
+    end
+
+    # How many of `s`'s first characters are `-` or `a`-`z`. Its own
+    # method, a counter loop at the top, as Elixir's loop lowering takes it.
+    def self.scheme_letter_count(s)
       i = 0
-      while i < lower.length && "-abcdefghijklmnopqrstuvwxyz".include?(lower[i, 1])
+      while i < s.length
+        return i unless "-abcdefghijklmnopqrstuvwxyz".include?(s[i, 1])
         i += 1
       end
-      i > 0 && lower[i, 3] == "://"
+      s.length
     end
 
     # `File.extname(path) == ".css"`: the last segment ends in `.css` after
