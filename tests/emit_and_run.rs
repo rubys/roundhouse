@@ -202,6 +202,8 @@ mod assert_recognizes;
 mod assert_routing;
 #[path = "emit_and_run/class_new_constants.rs"]
 mod class_new_constants;
+#[path = "emit_and_run/missing_class_method.rs"]
+mod missing_class_method;
 #[path = "emit_and_run/i18n_subtree.rs"]
 mod i18n_subtree;
 #[path = "emit_and_run/i18n_values.rs"]
