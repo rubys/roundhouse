@@ -12231,7 +12231,10 @@ fn redis_setting(node: &Node<'_>, src: &str) -> Option<crate::app::RedisSetting>
 /// localhost, so the app's own config stays the only source of where
 /// jobs land.
 fn require_sidekiq_redis_url(app: &App) {
-    if app.sidekiq_redis.url.is_some() {
+    // `url: ""` names nothing: the push would raise at run time, so it
+    // is refused here with the rest.
+    let empty = matches!(&app.sidekiq_redis.url, Some(crate::app::RedisSetting::Literal(url)) if url.is_empty());
+    if app.sidekiq_redis.url.is_some() && !empty {
         return;
     }
     let detail = "an app on `queue_adapter :sidekiq` must name its Redis in config/initializers: \

@@ -195,8 +195,8 @@ fn cable_yml_redis_and_the_worker_broadcast_warning() {
 }
 
 /// An app on `:sidekiq` names its Redis in `Sidekiq.configure_client`.
-/// No block, a block without `url:`, or a `url:` ingest can't read is an
-/// error: the push has no REDIS_PROVIDER, REDIS_URL or localhost to fall
+/// No block, a block without `url:`, an empty literal `url:`, or a `url:`
+/// ingest can't read is an error: the push has no REDIS_PROVIDER, REDIS_URL or localhost to fall
 /// back to. A readable `url:` is clean.
 #[test]
 fn on_sidekiq_a_missing_url_is_an_error() {
@@ -206,6 +206,7 @@ fn on_sidekiq_a_missing_url_is_an_error() {
     for init in [
         "Rails.application.config.x.jobs = 1\n",
         "Sidekiq.configure_client do |config|\n  config.redis = { password: ENV[\"REDIS_PASSWORD\"] }\nend\n",
+        "Sidekiq.configure_client do |config|\n  config.redis = { url: \"\" }\nend\n",
         "Sidekiq.configure_client do |config|\n  config.redis = { url: Rails.application.credentials.redis_url }\nend\n",
         "redis = { url: ENV[\"REDIS_URL\"] }\nSidekiq.configure_client do |config|\n  config.redis = redis\nend\n",
         "Sidekiq.configure_server do |config|\n  config.redis = { url: ENV[\"REDIS_URL\"] }\nend\n",
