@@ -814,7 +814,8 @@ fn emit_url_arg(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
     // `resolve("ActiveStorage::Blob")` / `resolve("ActiveStorage::Attachment")`
     // route it: `rails_blob_path`, the blob's redirect route. Keyed off
     // the type, ahead of the name convention below, which read a `blob`
-    // local as `blob_path(blob.id)`.
+    // local as `blob_path(blob.id)`. A nilable one (`Attached#blob` is
+    // `Blob?`) too: the runtime answers "" for nil rather than raising.
     if let Some(crate::ty::Ty::Class { id, .. }) = url.ty.as_ref().map(crate::ty::Ty::peel_nilable)
         && matches!(id.0.as_str(), "ActiveStorage::Blob" | "ActiveStorage::Attachment" | "ActiveStorage::Attached")
     {

@@ -1896,7 +1896,10 @@ module RouteHelpers
     rails_storage_redirect_path(model, disposition: disposition, only_path: only_path)
   end
 
+  # nil when there is none: a link to a missing file (`record.file.blob`
+  # when nothing is attached) gets an empty href rather than raising.
   def self.storage_blob(model)
+    return nil if model.nil?
     model.is_a?(ActiveStorage::Blob) ? model : model.blob
   end
 

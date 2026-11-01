@@ -38,6 +38,7 @@ const SHOW: &str = concat!(
     "<p id=\"attached\"><%= link_to \"file\", @doc.file %></p>\n",
     "<p id=\"helper\"><%= link_to \"file\", rails_blob_path(@doc.file.blob, disposition: \"attachment\") %></p>\n",
     "<p id=\"override\"><%= render \"active_storage/blobs/blob\", blob: @doc.file.blob %></p>\n",
+    "<p id=\"attachment\"><%= link_to \"file\", ActiveStorage::Attachment.find(1) %></p>\n",
 );
 
 fn app() -> emit_and_run::Overlay {
@@ -63,11 +64,19 @@ class DocsControllerTest < ActionDispatch::IntegrationTest
     get doc_url(doc)
     assert_response :success
     href = %r{<a href="/rails/active_storage/blobs/redirect/[^/"]+/notes%20v1\.txt">file</a>}
-    %w[block text attached override].each do |id|
+    %w[block text attached override attachment].each do |id|
       # The override partial's own trailing newline stays in, as in Rails.
       assert_match(%r{<p id="#{id}">#{href.source}\n?</p>}, response.body)
     end
     assert_match(%r{<p id="helper"><a href="/rails/active_storage/blobs/redirect/[^/"]+/notes%20v1\.txt\?disposition=attachment">file</a></p>}, response.body)
+  end
+
+  test "a record with no file links nowhere instead of raising" do
+    Doc.attached
+    empty = Doc.create!(name: "empty")
+    get doc_url(empty)
+    assert_response :success
+    assert_match(%r{<p id="text"><a href="">file</a></p>}, response.body)
   end
 end
 "##;
@@ -110,3 +119,4 @@ fn a_blob_links_to_its_redirect_route_on_spinel() {
         ))
         .assert_passes();
 }
+
