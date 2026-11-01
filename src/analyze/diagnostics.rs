@@ -776,6 +776,21 @@ fn unresolved_name(expr: &Expr) -> Option<crate::ident::Symbol> {
     }
 }
 
+// The diagnostic code groups unknown values; its text distinguishes their
+// inference origin. Only the gradual reason comes from a declared contract.
+fn untyped_warning_message(expr_kind: &str, ty: Option<&Ty>) -> String {
+    match ty {
+        Some(Ty::Untyped { why }) if why.is_gradual() => {
+            format!("{expr_kind} resolves to declared `untyped` (gradual escape)")
+        }
+        Some(Ty::Untyped { why }) if why.is_pending_only() => {
+            format!("{expr_kind} has a pending inference type")
+        }
+        Some(Ty::Untyped { .. }) => format!("{expr_kind} has a computed unknown type"),
+        _ => format!("{expr_kind} has an unknown type (origin unavailable)"),
+    }
+}
+
 fn diagnose_expr(expr: &Expr, out: &mut Vec<Diagnostic>) {
     diagnose_expr_in(expr, out, true)
 }
@@ -813,7 +828,7 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
                 format!("no known method `{}` on {}", method.as_str(), render_ty(recv_ty))
             }
             DiagnosticKind::GradualUntyped { expr_kind } => {
-                format!("{} resolves to RBS `untyped` (gradual escape)", expr_kind.as_str())
+                untyped_warning_message(expr_kind.as_str(), expr.ty.as_ref())
             }
             DiagnosticKind::UnresolvedType { expr_kind, name } => {
                 Diagnostic::unresolved_type_text(expr_kind, name.as_ref())
@@ -878,8 +893,8 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
         }
     }
 
-    // RBS-declared `untyped` reaches this site. Emit a GradualUntyped
-    // warning so consumers can track gradual-escape coverage and so
+    // A bare unknown reaches this site. Preserve the warning eligibility
+    // for every inference reason, and describe that reason in its text so
     // strict-target emitters can elevate to Error at emit time. The
     // body-typer doesn't annotate `expr.diagnostic` for Untyped — the
     // walker is the natural place since every node's `.ty` already
@@ -901,10 +916,7 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
             span: expr.span,
             severity: Diagnostic::default_severity(&kind),
             kind,
-            message: format!(
-                "{} resolves to RBS `untyped` (gradual escape)",
-                expr_kind_label(expr)
-            ),
+            message: untyped_warning_message(expr_kind_label(expr), expr.ty.as_ref()),
         });
     }
 
@@ -1239,6 +1251,26 @@ mod gradual_warning_tests {
         assert_eq!(warnings(Ty::Union {
             variants: vec![Ty::untyped(), Ty::Nil].into(),
         }), 0);
+    }
+
+    #[test]
+    fn unknown_warning_messages_identify_the_reason() {
+        for (ty, expected) in [
+            (Ty::gradual_untyped(), "expression resolves to declared `untyped` (gradual escape)"),
+            (Ty::untyped(), "expression has a computed unknown type"),
+            (Ty::pending_untyped(), "expression has a pending inference type"),
+        ] {
+            let mut expr = Expr::new(crate::span::Span::synthetic(), ExprNode::Lit {
+                value: crate::expr::Literal::Nil,
+            });
+            expr.ty = Some(ty);
+            let mut diagnostics = Vec::new();
+            diagnose_expr(&expr, &mut diagnostics);
+            let warnings: Vec<_> = diagnostics.iter().filter(|d| matches!(d.kind,
+                DiagnosticKind::GradualUntyped { .. })).collect();
+            assert_eq!(warnings.len(), 1);
+            assert_eq!(warnings[0].message, expected);
+        }
     }
 
     #[test]
