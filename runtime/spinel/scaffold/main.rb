@@ -204,18 +204,13 @@ module Main
     path.start_with?("/assets/") || path == "/icon.png" || path == "/icon.svg"
   end
 
-  # Rails' ActionDispatch::Static: a GET/HEAD for a file that exists
-  # under public/ (robots.txt, the error pages) is served ahead of the
-  # routes. Only a path whose last segment names a file (has an
-  # extension) is looked up, so a route like `/rooms` never stats the
-  # disk; the `..` guard is static_asset?'s.
-  def self.public_file?(verb, path)
-    return false unless verb == "GET" || verb == "HEAD"
-    return false if path.include?("..")
-    slash = path.rindex("/")
-    return false if slash.nil?
-    return false unless path[slash + 1, path.length].to_s.include?(".")
-    Sock.sphttp_filesize("public" + path) >= 0
+  # Rails' ActionDispatch::Static: a GET/HEAD for a file under public/
+  # (robots.txt, the error pages, a page `caches_page` wrote) is served
+  # ahead of the routes, by FileHandler's lookup (runtime/public_files.rb).
+  # The URL path of the file to send, or "" for none.
+  def self.public_file(verb, path)
+    return "" unless verb == "GET" || verb == "HEAD"
+    ActionController::PublicFiles.lookup(path)
   end
 
   # Resolve a (pre-validated) static URL to its on-disk path under
@@ -411,8 +406,9 @@ module Main
       Main.serve_static(req.path, res)
       return
     end
-    if Main.public_file?(req.verb, req.path)
-      Main.serve_static(req.path, res, "public")
+    public_path = Main.public_file(req.verb, req.path)
+    unless public_path.empty?
+      Main.serve_static(public_path, res, "public")
       return
     end
 

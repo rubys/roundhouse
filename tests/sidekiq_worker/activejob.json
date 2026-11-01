@@ -1,0 +1,1151 @@
+{
+  "versions": {
+    "sidekiq": "8.1.7",
+    "activejob": "8.1.3",
+    "redis_server": "7.0.15"
+  },
+  "clock_starts_at": "2026-10-22T01:32:10.250000000Z",
+  "clock_ticks_before_each_run": 60,
+  "kernel_rand": 0.5,
+  "default_retry_jitter": 0.0,
+  "scenarios": {
+    "fixed_wait": [
+      {
+        "pushed": {
+          "to": "queue:default",
+          "envelope_keys": [
+            "retry",
+            "queue",
+            "wrapped",
+            "args",
+            "class",
+            "jid",
+            "created_at",
+            "enqueued_at"
+          ],
+          "envelope": {
+            "retry": true,
+            "queue": "default",
+            "wrapped": "FixedWaitJob",
+            "args": [
+              {
+                "job_class": "FixedWaitJob",
+                "job_id": "<uuid>",
+                "provider_job_id": null,
+                "queue_name": "default",
+                "priority": null,
+                "arguments": [
+                  "fixed"
+                ],
+                "executions": 0,
+                "exception_executions": {},
+                "locale": "en",
+                "timezone": null,
+                "enqueued_at": "2026-10-22T01:32:10.250000000Z",
+                "scheduled_at": null
+              }
+            ],
+            "class": "Sidekiq::ActiveJob::Wrapper",
+            "jid": "<jid>",
+            "created_at": "<ms>",
+            "enqueued_at": "<ms>"
+          }
+        }
+      },
+      {
+        "run": 1,
+        "raised": null,
+        "wrote": {
+          "to": "schedule",
+          "score_minus_now": 1.0,
+          "envelope_keys": [
+            "retry",
+            "queue",
+            "wrapped",
+            "args",
+            "class",
+            "jid",
+            "created_at"
+          ],
+          "envelope": {
+            "retry": true,
+            "queue": "default",
+            "wrapped": "FixedWaitJob",
+            "args": [
+              {
+                "job_class": "FixedWaitJob",
+                "job_id": "<uuid>",
+                "provider_job_id": "<previous jid>",
+                "queue_name": "default",
+                "priority": null,
+                "arguments": [
+                  "fixed"
+                ],
+                "executions": 1,
+                "exception_executions": {
+                  "[Sticky]": 1
+                },
+                "locale": "en",
+                "timezone": null,
+                "enqueued_at": "2026-10-22T01:33:10.250000000Z",
+                "scheduled_at": "2026-10-22T01:33:11.250000000Z"
+              }
+            ],
+            "class": "Sidekiq::ActiveJob::Wrapper",
+            "jid": "<jid>",
+            "created_at": "<ms>"
+          }
+        }
+      },
+      {
+        "run": 2,
+        "raised": null,
+        "wrote": {
+          "to": "schedule",
+          "score_minus_now": 1.0,
+          "envelope_keys": [
+            "retry",
+            "queue",
+            "wrapped",
+            "args",
+            "class",
+            "jid",
+            "created_at"
+          ],
+          "envelope": {
+            "retry": true,
+            "queue": "default",
+            "wrapped": "FixedWaitJob",
+            "args": [
+              {
+                "job_class": "FixedWaitJob",
+                "job_id": "<uuid>",
+                "provider_job_id": "<previous jid>",
+                "queue_name": "default",
+                "priority": null,
+                "arguments": [
+                  "fixed"
+                ],
+                "executions": 2,
+                "exception_executions": {
+                  "[Sticky]": 2
+                },
+                "locale": "en",
+                "timezone": null,
+                "enqueued_at": "2026-10-22T01:34:10.250000000Z",
+                "scheduled_at": "2026-10-22T01:34:11.250000000Z"
+              }
+            ],
+            "class": "Sidekiq::ActiveJob::Wrapper",
+            "jid": "<jid>",
+            "created_at": "<ms>"
+          }
+        }
+      },
+      {
+        "run": 3,
+        "raised": "Sticky: fixed sticks"
+      }
+    ],
+    "polynomially_longer_two_exceptions": [
+      {
+        "pushed": {
+          "to": "queue:default",
+          "envelope_keys": [
+            "retry",
+            "queue",
+            "wrapped",
+            "args",
+            "class",
+            "jid",
+            "created_at",
+            "enqueued_at"
+          ],
+          "envelope": {
+            "retry": true,
+            "queue": "default",
+            "wrapped": "PolyJob",
+            "args": [
+              {
+                "job_class": "PolyJob",
+                "job_id": "<uuid>",
+                "provider_job_id": null,
+                "queue_name": "default",
+                "priority": null,
+                "arguments": [
+                  "poly"
+                ],
+                "executions": 0,
+                "exception_executions": {},
+                "locale": "en",
+                "timezone": null,
+                "enqueued_at": "2026-10-22T01:35:10.250000000Z",
+                "scheduled_at": null
+              }
+            ],
+            "class": "Sidekiq::ActiveJob::Wrapper",
+            "jid": "<jid>",
+            "created_at": "<ms>",
+            "enqueued_at": "<ms>"
+          }
+        }
+      },
+      {
+        "run": 1,
+        "raised": null,
+        "wrote": {
+          "to": "schedule",
+          "score_minus_now": 3.0,
+          "envelope_keys": [
+            "retry",
+            "queue",
+            "wrapped",
+            "args",
+            "class",
+            "jid",
+            "created_at"
+          ],
+          "envelope": {
+            "retry": true,
+            "queue": "default",
+            "wrapped": "PolyJob",
+            "args": [
+              {
+                "job_class": "PolyJob",
+                "job_id": "<uuid>",
+                "provider_job_id": "<previous jid>",
+                "queue_name": "default",
+                "priority": null,
+                "arguments": [
+                  "poly"
+                ],
+                "executions": 1,
+                "exception_executions": {
+                  "[Sticky, Slippery]": 1
+                },
+                "locale": "en",
+                "timezone": null,
+                "enqueued_at": "2026-10-22T01:36:10.250000000Z",
+                "scheduled_at": "2026-10-22T01:36:13.250000000Z"
+              }
+            ],
+            "class": "Sidekiq::ActiveJob::Wrapper",
+            "jid": "<jid>",
+            "created_at": "<ms>"
+          }
+        }
+      },
+      {
+        "run": 2,
+        "raised": null,
+        "wrote": {
+          "to": "schedule",
+          "score_minus_now": 18.0,
+          "envelope_keys": [
+            "retry",
+            "queue",
+            "wrapped",
+            "args",
+            "class",
+            "jid",
+            "created_at"
+          ],
+          "envelope": {
+            "retry": true,
+            "queue": "default",
+            "wrapped": "PolyJob",
+            "args": [
+              {
+                "job_class": "PolyJob",
+                "job_id": "<uuid>",
+                "provider_job_id": "<previous jid>",
+                "queue_name": "default",
+                "priority": null,
+                "arguments": [
+                  "poly"
+                ],
+                "executions": 2,
+                "exception_executions": {
+                  "[Sticky, Slippery]": 2
+                },
+                "locale": "en",
+                "timezone": null,
+                "enqueued_at": "2026-10-22T01:37:10.250000000Z",
+                "scheduled_at": "2026-10-22T01:37:28.250000000Z"
+              }
+            ],
+            "class": "Sidekiq::ActiveJob::Wrapper",
+            "jid": "<jid>",
+            "created_at": "<ms>"
+          }
+        }
+      },
+      {
+        "run": 3,
+        "raised": null,
+        "wrote": {
+          "to": "schedule",
+          "score_minus_now": 83.0,
+          "envelope_keys": [
+            "retry",
+            "queue",
+            "wrapped",
+            "args",
+            "class",
+            "jid",
+            "created_at"
+          ],
+          "envelope": {
+            "retry": true,
+            "queue": "default",
+            "wrapped": "PolyJob",
+            "args": [
+              {
+                "job_class": "PolyJob",
+                "job_id": "<uuid>",
+                "provider_job_id": "<previous jid>",
+                "queue_name": "default",
+                "priority": null,
+                "arguments": [
+                  "poly"
+                ],
+                "executions": 3,
+                "exception_executions": {
+                  "[Sticky, Slippery]": 3
+                },
+                "locale": "en",
+                "timezone": null,
+                "enqueued_at": "2026-10-22T01:38:10.250000000Z",
+                "scheduled_at": "2026-10-22T01:39:33.250000000Z"
+              }
+            ],
+            "class": "Sidekiq::ActiveJob::Wrapper",
+            "jid": "<jid>",
+            "created_at": "<ms>"
+          }
+        }
+      },
+      {
+        "run": 4,
+        "raised": "Slippery: poly slips"
+      }
+    ],
+    "duration_unlimited_queue_priority": [
+      {
+        "pushed": {
+          "to": "queue:default",
+          "envelope_keys": [
+            "retry",
+            "queue",
+            "wrapped",
+            "args",
+            "class",
+            "jid",
+            "created_at",
+            "enqueued_at"
+          ],
+          "envelope": {
+            "retry": true,
+            "queue": "default",
+            "wrapped": "DurationJob",
+            "args": [
+              {
+                "job_class": "DurationJob",
+                "job_id": "<uuid>",
+                "provider_job_id": null,
+                "queue_name": "default",
+                "priority": null,
+                "arguments": [
+                  "dur"
+                ],
+                "executions": 0,
+                "exception_executions": {},
+                "locale": "en",
+                "timezone": null,
+                "enqueued_at": "2026-10-22T01:39:10.250000000Z",
+                "scheduled_at": null
+              }
+            ],
+            "class": "Sidekiq::ActiveJob::Wrapper",
+            "jid": "<jid>",
+            "created_at": "<ms>",
+            "enqueued_at": "<ms>"
+          }
+        }
+      },
+      {
+        "run": 1,
+        "raised": null,
+        "wrote": {
+          "to": "schedule",
+          "score_minus_now": 300.0,
+          "envelope_keys": [
+            "retry",
+            "queue",
+            "wrapped",
+            "args",
+            "class",
+            "jid",
+            "created_at"
+          ],
+          "envelope": {
+            "retry": true,
+            "queue": "low",
+            "wrapped": "DurationJob",
+            "args": [
+              {
+                "job_class": "DurationJob",
+                "job_id": "<uuid>",
+                "provider_job_id": "<previous jid>",
+                "queue_name": "low",
+                "priority": 5,
+                "arguments": [
+                  "dur"
+                ],
+                "executions": 1,
+                "exception_executions": {
+                  "[Sticky]": 1
+                },
+                "locale": "en",
+                "timezone": null,
+                "enqueued_at": "2026-10-22T01:40:10.250000000Z",
+                "scheduled_at": "2026-10-22T01:45:10.250000000Z"
+              }
+            ],
+            "class": "Sidekiq::ActiveJob::Wrapper",
+            "jid": "<jid>",
+            "created_at": "<ms>"
+          }
+        }
+      },
+      {
+        "run": 2,
+        "raised": null,
+        "wrote": {
+          "to": "schedule",
+          "score_minus_now": 300.0,
+          "envelope_keys": [
+            "retry",
+            "queue",
+            "wrapped",
+            "args",
+            "class",
+            "jid",
+            "created_at"
+          ],
+          "envelope": {
+            "retry": true,
+            "queue": "low",
+            "wrapped": "DurationJob",
+            "args": [
+              {
+                "job_class": "DurationJob",
+                "job_id": "<uuid>",
+                "provider_job_id": "<previous jid>",
+                "queue_name": "low",
+                "priority": 5,
+                "arguments": [
+                  "dur"
+                ],
+                "executions": 2,
+                "exception_executions": {
+                  "[Sticky]": 2
+                },
+                "locale": "en",
+                "timezone": null,
+                "enqueued_at": "2026-10-22T01:41:10.250000000Z",
+                "scheduled_at": "2026-10-22T01:46:10.250000000Z"
+              }
+            ],
+            "class": "Sidekiq::ActiveJob::Wrapper",
+            "jid": "<jid>",
+            "created_at": "<ms>"
+          }
+        }
+      },
+      {
+        "run": 3,
+        "raised": null,
+        "wrote": {
+          "to": "schedule",
+          "score_minus_now": 300.0,
+          "envelope_keys": [
+            "retry",
+            "queue",
+            "wrapped",
+            "args",
+            "class",
+            "jid",
+            "created_at"
+          ],
+          "envelope": {
+            "retry": true,
+            "queue": "low",
+            "wrapped": "DurationJob",
+            "args": [
+              {
+                "job_class": "DurationJob",
+                "job_id": "<uuid>",
+                "provider_job_id": "<previous jid>",
+                "queue_name": "low",
+                "priority": 5,
+                "arguments": [
+                  "dur"
+                ],
+                "executions": 3,
+                "exception_executions": {
+                  "[Sticky]": 3
+                },
+                "locale": "en",
+                "timezone": null,
+                "enqueued_at": "2026-10-22T01:42:10.250000000Z",
+                "scheduled_at": "2026-10-22T01:47:10.250000000Z"
+              }
+            ],
+            "class": "Sidekiq::ActiveJob::Wrapper",
+            "jid": "<jid>",
+            "created_at": "<ms>"
+          }
+        }
+      }
+    ],
+    "class_jitter_fixed": [
+      {
+        "pushed": {
+          "to": "queue:default",
+          "envelope_keys": [
+            "retry",
+            "queue",
+            "wrapped",
+            "args",
+            "class",
+            "jid",
+            "created_at",
+            "enqueued_at"
+          ],
+          "envelope": {
+            "retry": true,
+            "queue": "default",
+            "wrapped": "ClassJitterJob",
+            "args": [
+              {
+                "job_class": "ClassJitterJob",
+                "job_id": "<uuid>",
+                "provider_job_id": null,
+                "queue_name": "default",
+                "priority": null,
+                "arguments": [
+                  "stick"
+                ],
+                "executions": 0,
+                "exception_executions": {},
+                "locale": "en",
+                "timezone": null,
+                "enqueued_at": "2026-10-22T01:42:10.250000000Z",
+                "scheduled_at": null
+              }
+            ],
+            "class": "Sidekiq::ActiveJob::Wrapper",
+            "jid": "<jid>",
+            "created_at": "<ms>",
+            "enqueued_at": "<ms>"
+          }
+        }
+      },
+      {
+        "run": 1,
+        "raised": null,
+        "wrote": {
+          "to": "schedule",
+          "score_minus_now": 10.75,
+          "envelope_keys": [
+            "retry",
+            "queue",
+            "wrapped",
+            "args",
+            "class",
+            "jid",
+            "created_at"
+          ],
+          "envelope": {
+            "retry": true,
+            "queue": "default",
+            "wrapped": "ClassJitterJob",
+            "args": [
+              {
+                "job_class": "ClassJitterJob",
+                "job_id": "<uuid>",
+                "provider_job_id": "<previous jid>",
+                "queue_name": "default",
+                "priority": null,
+                "arguments": [
+                  "stick"
+                ],
+                "executions": 1,
+                "exception_executions": {
+                  "[Sticky]": 1
+                },
+                "locale": "en",
+                "timezone": null,
+                "enqueued_at": "2026-10-22T01:43:10.250000000Z",
+                "scheduled_at": "2026-10-22T01:43:21.000000000Z"
+              }
+            ],
+            "class": "Sidekiq::ActiveJob::Wrapper",
+            "jid": "<jid>",
+            "created_at": "<ms>"
+          }
+        }
+      },
+      {
+        "run": 2,
+        "raised": "Sticky: stick"
+      }
+    ],
+    "class_jitter_polynomially_longer": [
+      {
+        "pushed": {
+          "to": "queue:default",
+          "envelope_keys": [
+            "retry",
+            "queue",
+            "wrapped",
+            "args",
+            "class",
+            "jid",
+            "created_at",
+            "enqueued_at"
+          ],
+          "envelope": {
+            "retry": true,
+            "queue": "default",
+            "wrapped": "ClassJitterJob",
+            "args": [
+              {
+                "job_class": "ClassJitterJob",
+                "job_id": "<uuid>",
+                "provider_job_id": null,
+                "queue_name": "default",
+                "priority": null,
+                "arguments": [
+                  "slip"
+                ],
+                "executions": 0,
+                "exception_executions": {},
+                "locale": "en",
+                "timezone": null,
+                "enqueued_at": "2026-10-22T01:44:10.250000000Z",
+                "scheduled_at": null
+              }
+            ],
+            "class": "Sidekiq::ActiveJob::Wrapper",
+            "jid": "<jid>",
+            "created_at": "<ms>",
+            "enqueued_at": "<ms>"
+          }
+        }
+      },
+      {
+        "run": 1,
+        "raised": null,
+        "wrote": {
+          "to": "schedule",
+          "score_minus_now": 3.075,
+          "envelope_keys": [
+            "retry",
+            "queue",
+            "wrapped",
+            "args",
+            "class",
+            "jid",
+            "created_at"
+          ],
+          "envelope": {
+            "retry": true,
+            "queue": "default",
+            "wrapped": "ClassJitterJob",
+            "args": [
+              {
+                "job_class": "ClassJitterJob",
+                "job_id": "<uuid>",
+                "provider_job_id": "<previous jid>",
+                "queue_name": "default",
+                "priority": null,
+                "arguments": [
+                  "slip"
+                ],
+                "executions": 1,
+                "exception_executions": {
+                  "[Slippery]": 1
+                },
+                "locale": "en",
+                "timezone": null,
+                "enqueued_at": "2026-10-22T01:45:10.250000000Z",
+                "scheduled_at": "2026-10-22T01:45:13.325000000Z"
+              }
+            ],
+            "class": "Sidekiq::ActiveJob::Wrapper",
+            "jid": "<jid>",
+            "created_at": "<ms>"
+          }
+        }
+      },
+      {
+        "run": 2,
+        "raised": "Slippery: slip"
+      }
+    ],
+    "handler_jitter": [
+      {
+        "pushed": {
+          "to": "queue:default",
+          "envelope_keys": [
+            "retry",
+            "queue",
+            "wrapped",
+            "args",
+            "class",
+            "jid",
+            "created_at",
+            "enqueued_at"
+          ],
+          "envelope": {
+            "retry": true,
+            "queue": "default",
+            "wrapped": "HandlerJitterJob",
+            "args": [
+              {
+                "job_class": "HandlerJitterJob",
+                "job_id": "<uuid>",
+                "provider_job_id": null,
+                "queue_name": "default",
+                "priority": null,
+                "arguments": [
+                  "hj"
+                ],
+                "executions": 0,
+                "exception_executions": {},
+                "locale": "en",
+                "timezone": null,
+                "enqueued_at": "2026-10-22T01:46:10.250000000Z",
+                "scheduled_at": null
+              }
+            ],
+            "class": "Sidekiq::ActiveJob::Wrapper",
+            "jid": "<jid>",
+            "created_at": "<ms>",
+            "enqueued_at": "<ms>"
+          }
+        }
+      },
+      {
+        "run": 1,
+        "raised": null,
+        "wrote": {
+          "to": "schedule",
+          "score_minus_now": 12.5,
+          "envelope_keys": [
+            "retry",
+            "queue",
+            "wrapped",
+            "args",
+            "class",
+            "jid",
+            "created_at"
+          ],
+          "envelope": {
+            "retry": true,
+            "queue": "default",
+            "wrapped": "HandlerJitterJob",
+            "args": [
+              {
+                "job_class": "HandlerJitterJob",
+                "job_id": "<uuid>",
+                "provider_job_id": "<previous jid>",
+                "queue_name": "default",
+                "priority": null,
+                "arguments": [
+                  "hj"
+                ],
+                "executions": 1,
+                "exception_executions": {
+                  "[Sticky]": 1
+                },
+                "locale": "en",
+                "timezone": null,
+                "enqueued_at": "2026-10-22T01:47:10.250000000Z",
+                "scheduled_at": "2026-10-22T01:47:22.750000000Z"
+              }
+            ],
+            "class": "Sidekiq::ActiveJob::Wrapper",
+            "jid": "<jid>",
+            "created_at": "<ms>"
+          }
+        }
+      },
+      {
+        "run": 2,
+        "raised": "Sticky: hj"
+      }
+    ],
+    "discard_on": [
+      {
+        "pushed": {
+          "to": "queue:default",
+          "envelope_keys": [
+            "retry",
+            "queue",
+            "wrapped",
+            "args",
+            "class",
+            "jid",
+            "created_at",
+            "enqueued_at"
+          ],
+          "envelope": {
+            "retry": true,
+            "queue": "default",
+            "wrapped": "DiscardJob",
+            "args": [
+              {
+                "job_class": "DiscardJob",
+                "job_id": "<uuid>",
+                "provider_job_id": null,
+                "queue_name": "default",
+                "priority": null,
+                "arguments": [
+                  "gone"
+                ],
+                "executions": 0,
+                "exception_executions": {},
+                "locale": "en",
+                "timezone": null,
+                "enqueued_at": "2026-10-22T01:48:10.250000000Z",
+                "scheduled_at": null
+              }
+            ],
+            "class": "Sidekiq::ActiveJob::Wrapper",
+            "jid": "<jid>",
+            "created_at": "<ms>",
+            "enqueued_at": "<ms>"
+          }
+        }
+      },
+      {
+        "run": 1,
+        "raised": null
+      }
+    ],
+    "search_order": [
+      {
+        "pushed": {
+          "to": "queue:default",
+          "envelope_keys": [
+            "retry",
+            "queue",
+            "wrapped",
+            "args",
+            "class",
+            "jid",
+            "created_at",
+            "enqueued_at"
+          ],
+          "envelope": {
+            "retry": true,
+            "queue": "default",
+            "wrapped": "OrderJob",
+            "args": [
+              {
+                "job_class": "OrderJob",
+                "job_id": "<uuid>",
+                "provider_job_id": null,
+                "queue_name": "default",
+                "priority": null,
+                "arguments": [
+                  "order"
+                ],
+                "executions": 0,
+                "exception_executions": {},
+                "locale": "en",
+                "timezone": null,
+                "enqueued_at": "2026-10-22T01:49:10.250000000Z",
+                "scheduled_at": null
+              }
+            ],
+            "class": "Sidekiq::ActiveJob::Wrapper",
+            "jid": "<jid>",
+            "created_at": "<ms>",
+            "enqueued_at": "<ms>"
+          }
+        }
+      },
+      {
+        "run": 1,
+        "raised": null
+      }
+    ],
+    "sidekiq_options_then_exhausted": [
+      {
+        "pushed": {
+          "to": "queue:default",
+          "envelope_keys": [
+            "retry",
+            "queue",
+            "retry_queue",
+            "wrapped",
+            "args",
+            "class",
+            "jid",
+            "created_at",
+            "enqueued_at"
+          ],
+          "envelope": {
+            "retry": 3,
+            "queue": "default",
+            "retry_queue": "low",
+            "wrapped": "OptionsJob",
+            "args": [
+              {
+                "job_class": "OptionsJob",
+                "job_id": "<uuid>",
+                "provider_job_id": null,
+                "queue_name": "default",
+                "priority": null,
+                "arguments": [
+                  "opts"
+                ],
+                "executions": 0,
+                "exception_executions": {},
+                "locale": "en",
+                "timezone": null,
+                "enqueued_at": "2026-10-22T01:50:10.250000000Z",
+                "scheduled_at": null
+              }
+            ],
+            "class": "Sidekiq::ActiveJob::Wrapper",
+            "jid": "<jid>",
+            "created_at": "<ms>",
+            "enqueued_at": "<ms>"
+          }
+        }
+      },
+      {
+        "run": 1,
+        "raised": null,
+        "wrote": {
+          "to": "schedule",
+          "score_minus_now": 1.0,
+          "envelope_keys": [
+            "retry",
+            "queue",
+            "retry_queue",
+            "wrapped",
+            "args",
+            "class",
+            "jid",
+            "created_at"
+          ],
+          "envelope": {
+            "retry": 3,
+            "queue": "default",
+            "retry_queue": "low",
+            "wrapped": "OptionsJob",
+            "args": [
+              {
+                "job_class": "OptionsJob",
+                "job_id": "<uuid>",
+                "provider_job_id": "<previous jid>",
+                "queue_name": "default",
+                "priority": null,
+                "arguments": [
+                  "opts"
+                ],
+                "executions": 1,
+                "exception_executions": {
+                  "[Sticky]": 1
+                },
+                "locale": "en",
+                "timezone": null,
+                "enqueued_at": "2026-10-22T01:51:10.250000000Z",
+                "scheduled_at": "2026-10-22T01:51:11.250000000Z"
+              }
+            ],
+            "class": "Sidekiq::ActiveJob::Wrapper",
+            "jid": "<jid>",
+            "created_at": "<ms>"
+          }
+        }
+      },
+      {
+        "run": 2,
+        "raised": "Sticky: opts"
+      }
+    ],
+    "no_handler": [
+      {
+        "pushed": {
+          "to": "queue:default",
+          "envelope_keys": [
+            "retry",
+            "queue",
+            "wrapped",
+            "args",
+            "class",
+            "jid",
+            "created_at",
+            "enqueued_at"
+          ],
+          "envelope": {
+            "retry": true,
+            "queue": "default",
+            "wrapped": "NoHandlerJob",
+            "args": [
+              {
+                "job_class": "NoHandlerJob",
+                "job_id": "<uuid>",
+                "provider_job_id": null,
+                "queue_name": "default",
+                "priority": null,
+                "arguments": [
+                  "none"
+                ],
+                "executions": 0,
+                "exception_executions": {},
+                "locale": "en",
+                "timezone": null,
+                "enqueued_at": "2026-10-22T01:52:10.250000000Z",
+                "scheduled_at": null
+              }
+            ],
+            "class": "Sidekiq::ActiveJob::Wrapper",
+            "jid": "<jid>",
+            "created_at": "<ms>",
+            "enqueued_at": "<ms>"
+          }
+        }
+      },
+      {
+        "run": 1,
+        "raised": "Sticky: none"
+      }
+    ],
+    "deserialization_discarded": [
+      {
+        "pushed": {
+          "to": "queue:default",
+          "envelope_keys": [
+            "retry",
+            "queue",
+            "class",
+            "wrapped",
+            "args",
+            "jid",
+            "created_at",
+            "enqueued_at"
+          ],
+          "envelope": {
+            "retry": true,
+            "queue": "default",
+            "class": "Sidekiq::ActiveJob::Wrapper",
+            "wrapped": "ArgJob",
+            "args": [
+              {
+                "job_class": "ArgJob",
+                "job_id": "<uuid>",
+                "provider_job_id": null,
+                "queue_name": "default",
+                "priority": null,
+                "arguments": [
+                  {
+                    "_aj_serialized": "NoSuchSerializer"
+                  }
+                ],
+                "executions": 0,
+                "exception_executions": {},
+                "locale": "en",
+                "timezone": null,
+                "enqueued_at": "2026-10-22T01:53:10.250000000Z",
+                "scheduled_at": null
+              }
+            ],
+            "jid": "<jid>",
+            "created_at": "<ms>",
+            "enqueued_at": "<ms>"
+          }
+        }
+      },
+      {
+        "run": 1,
+        "raised": null
+      }
+    ],
+    "deserialization_no_handler": [
+      {
+        "pushed": {
+          "to": "queue:default",
+          "envelope_keys": [
+            "retry",
+            "queue",
+            "class",
+            "wrapped",
+            "args",
+            "jid",
+            "created_at",
+            "enqueued_at"
+          ],
+          "envelope": {
+            "retry": true,
+            "queue": "default",
+            "class": "Sidekiq::ActiveJob::Wrapper",
+            "wrapped": "ArgNoHandlerJob",
+            "args": [
+              {
+                "job_class": "ArgNoHandlerJob",
+                "job_id": "<uuid>",
+                "provider_job_id": null,
+                "queue_name": "default",
+                "priority": null,
+                "arguments": [
+                  {
+                    "_aj_serialized": "NoSuchSerializer"
+                  }
+                ],
+                "executions": 0,
+                "exception_executions": {},
+                "locale": "en",
+                "timezone": null,
+                "enqueued_at": "2026-10-22T01:54:10.250000000Z",
+                "scheduled_at": null
+              }
+            ],
+            "jid": "<jid>",
+            "created_at": "<ms>",
+            "enqueued_at": "<ms>"
+          }
+        }
+      },
+      {
+        "run": 1,
+        "raised": "ActiveJob::DeserializationError: Error while trying to deserialize arguments: Serializer NoSuchSerializer is not known"
+      }
+    ]
+  },
+  "exhausted_payload_reruns": [
+    {
+      "raised": null,
+      "wrote": true
+    },
+    {
+      "raised": "Sticky: again",
+      "wrote": false
+    },
+    {
+      "raised": "Sticky: again",
+      "wrote": false
+    },
+    {
+      "raised": "Sticky: again",
+      "wrote": false
+    }
+  ]
+}

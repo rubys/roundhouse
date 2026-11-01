@@ -15,12 +15,15 @@
 //! `-t` win over what this reads, and this wins over `RAILS_MAX_THREADS`.
 //!
 //! An emitted tree runs in production, so the `production:` section is
-//! the one merged. Only `concurrency`, `timeout` and `queues` are read,
-//! with or without the leading colon. A queue is a name, `"name,weight"`,
-//! or `[name, weight]`, as `Capsule#queues=` reads them. A value that is
-//! ERB, a key the worker has no use for (`capsules`, `max_retries`,
-//! `logfile`, ...), and a value in another shape are each a warning and
-//! are left to the command line.
+//! the one merged. Read, with or without the leading colon: `concurrency`,
+//! `timeout` and `queues`; the retry limit `max_retries`; the dead set's
+//! `dead_max_jobs` and `dead_timeout_in_seconds`; and the poller's
+//! `poll_interval_average` and `average_scheduled_poll_interval`. A queue
+//! is a name, `"name,weight"`, or `[name, weight]`, as `Capsule#queues=`
+//! reads them. A value that is ERB, a key the worker has no use for
+//! (`capsules`, `logfile`, ...), and a value in another shape are each a
+//! warning; the setting keeps Sidekiq's default, or what the command
+//! line gives.
 
 use std::path::Path;
 
@@ -45,7 +48,17 @@ pub fn read<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> (SidekiqWorkerDefaults, Vec
 }
 
 /// The keys the worker reads (and `strict`, which it accepts).
-const WORKER_KEYS: [&str; 4] = ["concurrency", "timeout", "queues", "strict"];
+const WORKER_KEYS: [&str; 9] = [
+    "concurrency",
+    "timeout",
+    "queues",
+    "strict",
+    "max_retries",
+    "dead_max_jobs",
+    "dead_timeout_in_seconds",
+    "poll_interval_average",
+    "average_scheduled_poll_interval",
+];
 
 pub fn parse(text: &str) -> (SidekiqWorkerDefaults, Vec<String>) {
     let mut defaults = SidekiqWorkerDefaults::default();
@@ -109,6 +122,31 @@ pub fn parse(text: &str) -> (SidekiqWorkerDefaults, Vec<String>) {
                 None => warnings.push(format!(
                     "`:queues:` in config/sidekiq.yml is not a list of names, `name,weight` or `[name, weight]`, so it is not read"
                 )),
+            },
+            "max_retries" => match value.as_i64() {
+                Some(n) if n >= 0 => defaults.max_retries = Some(n),
+                _ => warnings.push(format!("`:max_retries: {}` in config/sidekiq.yml is not an Integer, so it is not read", show(&value))),
+            },
+            "dead_max_jobs" => match value.as_i64() {
+                Some(n) if n > 0 => defaults.dead_max_jobs = Some(n),
+                _ => warnings.push(format!("`:dead_max_jobs: {}` in config/sidekiq.yml is not a positive Integer, so it is not read", show(&value))),
+            },
+            "dead_timeout_in_seconds" => match value.as_i64() {
+                Some(n) if n > 0 => defaults.dead_timeout_in_seconds = Some(n),
+                _ => warnings.push(format!(
+                    "`:dead_timeout_in_seconds: {}` in config/sidekiq.yml is not a positive Integer, so it is not read",
+                    show(&value)
+                )),
+            },
+            "poll_interval_average" | "average_scheduled_poll_interval" => match value.as_f64() {
+                Some(n) if n > 0.0 => {
+                    if key == "poll_interval_average" {
+                        defaults.poll_interval_average = Some(n);
+                    } else {
+                        defaults.average_scheduled_poll_interval = Some(n);
+                    }
+                }
+                _ => warnings.push(format!("`:{key}: {}` in config/sidekiq.yml is not a positive number, so it is not read", show(&value))),
             },
             "strict" => {}
             other => warnings.push(format!("`:{other}` in config/sidekiq.yml is not read by the Roundhouse worker")),
@@ -237,13 +275,35 @@ mod tests {
     #[test]
     fn erb_and_unknown_keys_warn_and_are_not_read() {
         let (d, w) = parse(
-            ":concurrency: <%= ENV.fetch(\"SIDEKIQ_CONCURRENCY\", 5) %>\n:max_retries: 3\n:queues:\n  - default\n",
+            ":concurrency: <%= ENV.fetch(\"SIDEKIQ_CONCURRENCY\", 5) %>\n:logfile: ./log/sidekiq.log\n:queues:\n  - default\n",
         );
         assert_eq!(d.concurrency, None);
         assert_eq!(d.queues, vec![("default".into(), 0)]);
         assert_eq!(w.len(), 2, "{w:#?}");
         assert!(w[0].contains(":concurrency") && w[0].contains("ERB"), "{w:#?}");
-        assert!(w[1].contains(":max_retries"), "{w:#?}");
+        assert!(w[1].contains(":logfile"), "{w:#?}");
+    }
+
+    #[test]
+    fn the_retry_dead_set_and_poller_settings_read() {
+        let (d, w) = parse(
+            ":max_retries: 3\n:dead_max_jobs: 500\n:dead_timeout_in_seconds: 86400\n:average_scheduled_poll_interval: 2\nproduction:\n  :poll_interval_average: 0.5\n",
+        );
+        assert!(w.is_empty(), "{w:#?}");
+        assert_eq!(d.max_retries, Some(3));
+        assert_eq!(d.dead_max_jobs, Some(500));
+        assert_eq!(d.dead_timeout_in_seconds, Some(86400));
+        assert_eq!(d.average_scheduled_poll_interval, Some(2.0));
+        assert_eq!(d.poll_interval_average, Some(0.5));
+    }
+
+    #[test]
+    fn retry_dead_set_and_poller_settings_in_another_shape_warn() {
+        let (d, w) = parse(
+            ":max_retries: -1\n:dead_max_jobs: 0\n:dead_timeout_in_seconds: forever\n:poll_interval_average: 0\n:average_scheduled_poll_interval: soon\n",
+        );
+        assert_eq!(d, Default::default());
+        assert_eq!(w.len(), 5, "{w:#?}");
     }
 
     #[test]

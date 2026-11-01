@@ -1252,6 +1252,7 @@ pub(crate) fn emit_spinel_with_param_binds(app: &App, param_binds: bool) -> Vec<
             &app.models,
             fixture_extras,
             &crate::lower::routes::helper_id_segments(app),
+            &crate::lower::routes::direct_helper_names(app),
             true,
         );
         // A test body writes the same relation chains an app body does —

@@ -119,6 +119,10 @@ pub struct App {
     /// fresh. None when the app has no seeds file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seeds: Option<Expr>,
+    /// The app's own top-level initializer statements, in load order
+    /// (`ingest::boot_program`): run at boot on the ruby family and spinel.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub boot_program: Vec<Expr>,
     /// Pins from `config/importmap.rb`, expanded (each
     /// `pin_all_from` has been resolved into explicit per-file
     /// pins via `app/javascript/**` walking). Consumed by the
@@ -705,6 +709,13 @@ pub struct App {
     /// Read by `lower::controller_to_library::params_wrapper`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub wrap_parameters_by_default: bool,
+    /// `ActiveJob::Base.retry_jitter`, app-wide: 0.15 when
+    /// `config.load_defaults` is 6.1 or later, else 0.0, unless
+    /// `config.active_job.retry_jitter = <number>` sets it (application,
+    /// production or an initializer). `retry_on`'s delays use it when the
+    /// handler gives no `jitter:` and the job class doesn't set its own.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub active_job_retry_jitter: f64,
     /// The target's runtime defines `ActiveModel::Validator`
     /// (`runtime/ruby/active_model_validator.rb`, the ruby family), so a
     /// `validates_with` class keeps its base instead of being dropped as
@@ -1168,6 +1179,7 @@ impl App {
             test_modules: Vec::new(),
             fixtures: Vec::new(),
             seeds: None,
+            boot_program: Vec::new(),
             importmap: None,
             inertia: None,
             vite_manifest: None,
@@ -1239,6 +1251,7 @@ impl App {
             controller_resolutions: HashMap::default(),
             sources: Vec::new(),
             wrap_parameters_by_default: false,
+            active_job_retry_jitter: 0.0,
             ports_active_model_validator: false,
             each_validator_calls: Vec::new(),
             const_resolver: Default::default(),
@@ -1317,11 +1330,25 @@ pub struct SidekiqWorkerDefaults {
     pub concurrency: Option<i64>,
     pub timeout: Option<i64>,
     pub queues: Vec<(String, i64)>,
+    /// The retry limit for a job whose `retry` is `true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<i64>,
+    /// The dead set's trims: how many jobs it keeps, and for how long.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dead_max_jobs: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dead_timeout_in_seconds: Option<i64>,
+    /// The poller's interval: a fixed average, or the per-process one
+    /// that is scaled by the number of Sidekiq processes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll_interval_average: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub average_scheduled_poll_interval: Option<f64>,
 }
 
 impl SidekiqWorkerDefaults {
     pub fn is_empty(&self) -> bool {
-        self.concurrency.is_none() && self.timeout.is_none() && self.queues.is_empty()
+        *self == Self::default()
     }
 }
 
@@ -1385,6 +1412,10 @@ pub enum ProgramItem {
     /// A statement the ingest cannot carry, reported as
     /// `file_statement_unsupported` and named when the file loads.
     NotCarried { span: crate::span::Span, message: String },
+}
+
+fn is_zero_f64(v: &f64) -> bool {
+    *v == 0.0
 }
 
 /// A support file the class ingest left out (`App::ingest_drops`).

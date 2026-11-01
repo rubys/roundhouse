@@ -1,0 +1,2 @@
+app/controllers/parents_controller.rb
+app/controllers/children_controller.rb

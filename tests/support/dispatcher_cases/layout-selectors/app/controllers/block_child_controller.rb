@@ -1,0 +1,2 @@
+class BlockChildController < BlockParentController
+end

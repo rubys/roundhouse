@@ -1,31 +1,29 @@
-# Pins @seconds (and every unit constructor's n) to Integer so the
+# Pins @seconds (and every unit constructor's n) to real numbers so the
 # temporal arithmetic in ago/from_now stays Time-typed under AOT
 # inference — an untyped @seconds widens `Time.now.utc - @seconds` to
-# poly, which the declared Time return then contradicts. Corpus units
-# are integral (45, minutes(5), 70.days); fractional durations would
-# need a widening here first.
+# poly, which the declared Time return then contradicts.
 module ActiveSupport
   class Duration
-    @seconds: Integer
+    @seconds: (Integer | Float)
 
-    def initialize: (Integer seconds) -> void
+    def initialize: ((Integer | Float) seconds) -> void
     def self.time_operand: (untyped value) -> untyped
-    def self.seconds: (Integer n) -> Duration
-    def self.second: (Integer n) -> Duration
-    def self.minutes: (Integer n) -> Duration
-    def self.minute: (Integer n) -> Duration
-    def self.hours: (Integer n) -> Duration
-    def self.hour: (Integer n) -> Duration
-    def self.days: (Integer n) -> Duration
-    def self.day: (Integer n) -> Duration
-    def self.weeks: (Integer n) -> Duration
-    def self.week: (Integer n) -> Duration
-    def self.fortnights: (Integer n) -> Duration
-    def self.fortnight: (Integer n) -> Duration
-    def self.months: (Integer n) -> Duration
-    def self.month: (Integer n) -> Duration
-    def self.years: (Integer n) -> Duration
-    def self.year: (Integer n) -> Duration
+    def self.seconds: ((Integer | Float) n) -> Duration
+    def self.second: ((Integer | Float) n) -> Duration
+    def self.minutes: ((Integer | Float) n) -> Duration
+    def self.minute: ((Integer | Float) n) -> Duration
+    def self.hours: ((Integer | Float) n) -> Duration
+    def self.hour: ((Integer | Float) n) -> Duration
+    def self.days: ((Integer | Float) n) -> Duration
+    def self.day: ((Integer | Float) n) -> Duration
+    def self.weeks: ((Integer | Float) n) -> Duration
+    def self.week: ((Integer | Float) n) -> Duration
+    def self.fortnights: ((Integer | Float) n) -> Duration
+    def self.fortnight: ((Integer | Float) n) -> Duration
+    def self.months: ((Integer | Float) n) -> Duration
+    def self.month: ((Integer | Float) n) -> Duration
+    def self.years: ((Integer | Float) n) -> Duration
+    def self.year: ((Integer | Float) n) -> Duration
     def ago: () -> Time
     def until: () -> Time
     def from_now: () -> Time
@@ -36,7 +34,8 @@ module ActiveSupport
     def positive?: () -> bool
     def negative?: () -> bool
     def to_s: () -> String
-    def seconds: () -> Integer
+    def seconds: () -> (Integer | Float)
+    def value: () -> (Integer | Float)
     def ==: (untyped other) -> bool
     def <=>: (untyped other) -> (Integer | nil)
     def coerce: (untyped other) -> Array[untyped]

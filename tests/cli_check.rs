@@ -76,7 +76,7 @@ fn continue_writes_inventory_json_and_prints_hotspots() {
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
         ("app/models/article.rb", "class Article < ApplicationRecord\nend\n"),
         ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n"),
-        ("app/controllers/articles_controller.rb", "class ArticlesController < ApplicationController\n  def show\n    @missing_thing\n  end\nend\n"),
+        ("app/controllers/articles_controller.rb", "class ArticlesController < ApplicationController\n  def show\n    @missing_thing = Article.find(params[:id]).nope_nope\n    @missing_thing.foo\n  end\nend\n"),
         ("db/schema.rb", "ActiveRecord::Schema[8.1].define do\n  create_table :articles do |t|\n    t.string :title\n  end\nend\n"),
         ("config/routes.rb", "Rails.application.routes.draw do\n  resources :articles, only: :show\nend\n"),
     ] {

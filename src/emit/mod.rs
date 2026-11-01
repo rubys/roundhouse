@@ -4,6 +4,7 @@
 //! Emitters are pure: no I/O, no filesystem — the caller decides where to write.
 
 pub mod audit;
+mod controller_ivars;
 pub mod crystal;
 pub mod csharp;
 pub mod diagnostics;

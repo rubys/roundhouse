@@ -105,5 +105,5 @@ cd studio && node verify-studio.mjs
 
 The CI `build-site` job copies this dir into `_site/studio/` alongside
 `_site/lib/` and `_site/playground/`, so the surface lands at
-`rubys.github.io/roundhouse/studio/`. See the "Publishing to Pages" section of
+`roundhouse-rb.dev/studio/`. See the "Publishing to Pages" section of
 `docs/archive/browser-demo-plan.md`.

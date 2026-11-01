@@ -226,7 +226,7 @@ A new deployment with no such volume can drop `boot` for `USER
 600 MB, nearly all of it libvips and ffmpeg (the binary is 11 MB), and
 runs the whole product — sign-in, rooms, uploads, search,
 live updates over the socket — from `docker run -p 3000:3000`.
-[rubys.github.io/roundhouse/campfire/docker.tgz](https://rubys.github.io/roundhouse/campfire/docker.tgz)
+[roundhouse-rb.dev/campfire/docker.tgz](https://roundhouse-rb.dev/campfire/docker.tgz)
 is that archive, refreshed by scheduled full validation or an explicitly
 publishing manual run on canonical main. PR archive checks never publish it;
 see [CI publication](../ci/README.md#publication-is-separate). It is the fastest way to see the door's
@@ -256,7 +256,7 @@ cleanly, and when it does not, the failure is in one of two places:
 The binary's performance is measured continuously on the blog and on
 Campfire against Rails as Rails ships it — with its fragment caching
 on, jemalloc, and Puma's default configuration — on the same machine:
-[rubys.github.io/roundhouse/bench](https://rubys.github.io/roundhouse/bench/).
+[roundhouse-rb.dev/bench](https://roundhouse-rb.dev/bench/).
 Read that page rather than a number quoted here; it changes with
 every Spinel release and the methodology is written beside the
 charts.

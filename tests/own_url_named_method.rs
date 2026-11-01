@@ -7,7 +7,9 @@
 //! Rails 8.1.4 (actionpack 8.1.4, the route set's `url_helpers`
 //! included into each class): `WidgetFinder#widget` is `"found acme"`,
 //! `#listing` is `"own list"`, and `WidgetsController#links` is
-//! `["own", "/widgets/7"]`. Before, the finder's two calls emitted as
+//! `["own", "/widgets/7", "/widgets/7.json"]`, even with another class
+//! defining a `widget_json_path` of its own. Before, the finder's two
+//! calls emitted as
 //! `url_for_path(RouteHelpers.widget_from_path)` (a helper synthesized
 //! for a `.from` format, raising ArgumentError on CRuby) and
 //! `url_for_path(RouteHelpers.widgets_path)`.
@@ -47,13 +49,22 @@ const CONTROLLER: &str = "class WidgetsController < ApplicationController
   end
 
   def links
-    [widgets_url, widget_path(7)]
+    [widgets_url, widget_path(7), widget_path(7, format: :json)]
   end
 
   private
 
   def widgets_url
     \"own\"
+  end
+end
+";
+
+// Defines a method named like the format variant the controller asks
+// for; it is this class's method, and the variant is still generated.
+const FORMATTER: &str = "class FeedFormatter
+  def widget_json_path
+    \"own json\"
   end
 end
 ";
@@ -67,7 +78,7 @@ raise found.inspect unless found == "found acme"
 listing = WidgetFinder.new("acme").listing
 raise listing.inspect unless listing == "own list"
 links = WidgetsController.new.links
-raise links.inspect unless links == ["own", "/widgets/7"]
+raise links.inspect unless links == ["own", "/widgets/7", "/widgets/7.json"]
 puts "own url methods passed"
 "#;
 
@@ -75,6 +86,7 @@ fn example() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
         .write("db/schema.rb", "ActiveRecord::Schema.define do\nend\n")
         .write("app/models/widget_finder.rb", FINDER)
+        .write("app/models/feed_formatter.rb", FORMATTER)
         .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
         .write("app/controllers/widgets_controller.rb", CONTROLLER)
         .write("config/routes.rb", "Rails.application.routes.draw do\n  resources :widgets, only: [:index, :show]\nend\n")
@@ -89,7 +101,7 @@ fn an_own_url_named_method_is_called_not_routed() {
     let helpers = std::fs::read_to_string(emitted.join("app/route_helpers.rb")).expect("read the route helpers");
     assert!(!helpers.contains("widget_from_path"), "{helpers}");
     let controller = std::fs::read_to_string(emitted.join("app/controllers/widgets_controller.rb")).expect("read the emitted controller");
-    assert!(controller.contains("[self.widgets_url, RouteHelpers.widget_path(7)]"), "{controller}");
+    assert!(controller.contains("[self.widgets_url, RouteHelpers.widget_path(7), RouteHelpers.widget_json_path(7)]"), "{controller}");
 }
 
 #[test]

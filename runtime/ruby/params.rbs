@@ -25,6 +25,7 @@ module Params
   def self.scalars_only: (Array[Roundhouse::ParamValue]) -> bool
   def self.require_present: (Hash[String, Roundhouse::ParamValue], String) -> Hash[String, Roundhouse::ParamValue]
   def self.nested: (Hash[String, Roundhouse::ParamValue], String, Array[String], String) -> Roundhouse::ParamValue
+  def self.record_list: (Hash[String, Roundhouse::ParamValue] sub, String key, Array[String] allowed) -> (Array[Hash[String, Roundhouse::ParamValue]] | Hash[String, Hash[String, Roundhouse::ParamValue]] | nil)
   def self.scalar_list: (Hash[String, Roundhouse::ParamValue], String) -> Array[String]
   def self.scalar_list_provided: (Hash[String, Roundhouse::ParamValue], String) -> bool
   def self.nested_provided: (Hash[String, Roundhouse::ParamValue], String, Array[String], String) -> bool

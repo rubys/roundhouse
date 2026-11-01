@@ -40,6 +40,7 @@ module ActiveRecord
     def to_a: () -> Array[Hash[String, untyped]]
     def first: () -> Hash[String, untyped]?
     def each: () { (Hash[String, untyped]) -> void } -> Array[Hash[String, untyped]]
+    def map: [U] () { (Hash[String, untyped]) -> U } -> Array[U]
   end
 
   class RawConnection

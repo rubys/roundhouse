@@ -19,6 +19,11 @@
 # turned into a class) and raises DeserializationError for a row that is
 # gone, as Rails does.
 #
+# Under `queue_adapter :sidekiq`, `handler_for` and `retry_rule` are the
+# jobs' `retry_on` and `discard_on` handlers (`ActiveJob.perform_parsed_from`
+# reads them), and `sidekiq_retry` and `sidekiq_extra` their
+# `sidekiq_options` (`SidekiqPush.enqueue` writes them).
+#
 # `sidekiq?` says whether the app is on `queue_adapter :sidekiq` with a
 # payload job, so the tree pushes jobs to Redis (`runtime/sidekiq_push.rb`)
 # and carries a real Redis client. `sidekiq_redis_url` and
@@ -36,6 +41,22 @@ module JobRegistry
 
   def self.discards_deserialization_error(job_class)
     false
+  end
+
+  def self.handler_for(job_class, e)
+    0
+  end
+
+  def self.retry_rule(id)
+    ActiveJob::RetryRule.new("", 0.0, false, 0, "", false, 0, 0.0)
+  end
+
+  def self.sidekiq_retry(job_class)
+    "true"
+  end
+
+  def self.sidekiq_extra(job_class)
+    ""
   end
 
   def self.sidekiq?
@@ -60,6 +81,26 @@ module JobRegistry
 
   def self.sidekiq_worker_queues
     ""
+  end
+
+  def self.sidekiq_worker_max_retries
+    -1
+  end
+
+  def self.sidekiq_worker_dead_max_jobs
+    -1
+  end
+
+  def self.sidekiq_worker_dead_timeout
+    -1
+  end
+
+  def self.sidekiq_worker_poll_interval_average
+    -1.0
+  end
+
+  def self.sidekiq_worker_scheduled_poll_interval
+    -1.0
   end
 
   def self.cable_redis?
@@ -147,12 +188,42 @@ module ActiveJob
   PERFORM_DISCARDED = 1
   PERFORM_UNKNOWN_CLASS = 2
   PERFORM_FAILED = 3
+  # A `retry_on` caught the error and pushed the job again.
+  PERFORM_RETRIED = 4
 
-  # Run one parsed ActiveJob payload. A record that is gone is
-  # DeserializationError: DISCARDED when the job says `discard_on
-  # ActiveJob::DeserializationError`, FAILED otherwise. Any other
-  # StandardError is FAILED with its own class.
+  # One `retry_on`: the key its tries are counted under in
+  # `exception_executions` (the exception list's `to_s`, "[Sticky]"),
+  # its wait in seconds or `polynomially_longer`, its attempts (0 for
+  # `:unlimited`), the queue and priority it pushes to ("" and no
+  # priority to keep the job's), and its jitter.
+  class RetryRule
+    attr_reader :key, :wait, :polynomially_longer, :attempts, :queue, :has_priority, :priority, :jitter
+
+    def initialize(key, wait, polynomially_longer, attempts, queue, has_priority, priority, jitter)
+      @key = key
+      @wait = wait
+      @polynomially_longer = polynomially_longer
+      @attempts = attempts
+      @queue = queue
+      @has_priority = has_priority
+      @priority = priority
+      @jitter = jitter
+    end
+  end
+
   def self.perform_parsed(job)
+    perform_parsed_from(job, "")
+  end
+
+  # Run one parsed ActiveJob payload, popped from Sidekiq as `jid` ("" in
+  # process). An error goes to the job's handlers first, as ActiveJob's
+  # `rescue_from` does: a `discard_on` is DISCARDED, and a `retry_on`
+  # with tries left pushes the job again and is RETRIED. In process a
+  # `retry_on` does nothing, and a record that is gone is DISCARDED when
+  # the job says `discard_on ActiveJob::DeserializationError`. Otherwise
+  # FAILED, with the error's class (ActiveJob::DeserializationError for
+  # a record that is gone).
+  def self.perform_parsed_from(job, jid)
     name = job["job_class"].to_s
     begin
       if JobRegistry.perform(name, job["arguments"])
@@ -160,15 +231,69 @@ module ActiveJob
       else
         PERFORM_UNKNOWN_CLASS
       end
-    rescue ActiveJob::DeserializationError => e
-      if JobRegistry.discards_deserialization_error(name)
+    rescue Exception => e
+      # ActiveJob's perform_now rescues Exception for `rescue_from`, and
+      # re-raises what no handler takes; the worker sees only a
+      # StandardError as a job failure.
+      gone = e.is_a?(ActiveJob::DeserializationError)
+      handler = JobRegistry.handler_for(name, e)
+      if handler < 0 || (handler == 0 && gone && JobRegistry.discards_deserialization_error(name))
         PERFORM_DISCARDED
-      else
+      elsif handler > 0 && jid != "" && retry_job(job, jid, JobRegistry.retry_rule(handler))
+        PERFORM_RETRIED
+      elsif !e.is_a?(StandardError)
+        raise e
+      elsif gone
         note_failure("ActiveJob::DeserializationError", e.message)
+      else
+        note_failure(e.class.name.to_s, e.message)
       end
-    rescue StandardError => e
-      note_failure(e.class.name.to_s, e.message)
     end
+  end
+
+  # ActiveJob's `retry_on` for a job that raised: count the try under
+  # the rule's key and, while tries are left, push the job again after
+  # the rule's wait, as `retry_job` does. False when the tries are used
+  # up, so the error goes on to Sidekiq's own retry rules.
+  def self.retry_job(job, jid, rule)
+    # ActiveJob's `executions_for`: a job enqueued before per-handler
+    # counters existed counts its executions instead.
+    counts = job["exception_executions"]
+    tries = (counts.is_a?(Hash) ? counts[rule.key].to_i : job["executions"].to_i) + 1
+    return false if rule.attempts > 0 && tries >= rule.attempts
+    counts[rule.key] = tries if counts.is_a?(Hash)
+    job["executions"] = job["executions"].to_i + 1
+    job["provider_job_id"] = jid
+    job["queue_name"] = rule.queue unless rule.queue == ""
+    job["priority"] = rule.priority if rule.has_priority
+    now = Time.now.to_f
+    at = now + retry_delay(rule, tries)
+    job["enqueued_at"] = Time.at(now).utc.iso8601(9)
+    job["scheduled_at"] = Time.at(at).utc.iso8601(9)
+    name = job["job_class"].to_s
+    SidekiqPush.enqueue(name, job["queue_name"].to_s, at, JSON.generate(job))
+    true
+  end
+
+  # ActiveJob's `determine_delay`: a fixed wait, or `polynomially_longer`'s
+  # `tries**4 + 2`, plus up to `jitter` of the wait at random.
+  def self.retry_delay(rule, tries)
+    if rule.polynomially_longer
+      delay = (tries**4).to_f
+      delay + retry_jitter(delay, rule.jitter) + 2.0
+    else
+      rule.wait + retry_jitter(rule.wait, rule.jitter)
+    end
+  end
+
+  def self.retry_jitter(delay, jitter)
+    return 0.0 if jitter == 0.0
+    retry_rand * delay * jitter
+  end
+
+  # `Kernel.rand`, the seam a test pins.
+  def self.retry_rand
+    rand
   end
 
   def self.note_failure(error_class, message)

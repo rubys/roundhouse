@@ -1332,7 +1332,7 @@ raising façade on spinel (`runtime/ruby/rqrcode_facade.rb`, the
 write-path rule every gem façade follows) and the real gem on CRuby and
 JRuby. It is now real on spinel too: when an app names `RQRCode`,
 `spin_shape` swaps the façade file for `require "rqrcode"` and declares
-the spinel-rqrcode spin package (github.com/rubys/spinel-rqrcode;
+the spinel-rqrcode spin package (github.com/roundhouse-rb/spinel-rqrcode;
 matz/spin-index#8 is the registration, so the manifest uses the git form
 until it merges), the same seam bcrypt and ruby-vips use.
 
@@ -1830,10 +1830,10 @@ come from the job's `perform_later` call sites, and
   under `:sidekiq`, and `set(priority:)` is dropped with a warning.
   This holds on ruby, jruby and spinel; the other targets warn
   (`sidekiq-adapter-not-honored`) and run the jobs in process. A pushed
-  job carries `"retry":true`, so Sidekiq retries it with its own
-  defaults; Active Job's `retry_on`, TLS (`rediss://`) and per-job
-  adapters are still missing.
-- **The worker role has no retries.** The same build runs the pushed
+  job carries `"retry":true`, or the job's literal `sidekiq_options`
+  (`retry`, `retry_queue`, `retry_for`, `dead`), where Sidekiq writes
+  them. TLS (`rediss://`) and per-job adapters are still missing.
+- **The worker role has no heartbeat.** The same build runs the pushed
   jobs as `./app sidekiq` (spinel) or `ruby sidekiq.rb` (ruby, jruby),
   a Sidekiq 8.1 server process with BasicFetch
   (`runtime/spinel/sidekiq/sidekiq_worker.rb`); a Ruby Sidekiq process
@@ -1842,10 +1842,31 @@ come from the job's `perform_later` call sites, and
   `:timeout:` (its `production:` section merged over the top level),
   which win over `RAILS_MAX_THREADS` and the defaults (5, `default`,
   25). TSTP quiets it, and TERM or INT waits up to the timeout and
-  pushes unfinished jobs back. A job that raises goes straight to the
-  dead set with Sidekiq's error fields, so the retry set, the scheduler
-  that moves `schedule` and `retry` to their queues, `retry_on`, and the
-  heartbeat Sidekiq's Web UI reads are still missing. Under
+  pushes unfinished jobs back. A job that raises takes Sidekiq's retry
+  rules: `retry: false` drops it; otherwise it goes to the retry set
+  with Sidekiq's error fields and backoff (`count**4 + 15` seconds plus
+  jitter) until its `retry` limit (`:max_retries:`, 25 by default) or
+  `retry_for` runs out, then to the dead set (trimmed by
+  `:dead_max_jobs:` and `:dead_timeout_in_seconds:`), unless it says
+  `dead: false`. A scheduler thread moves due jobs from `retry`, then
+  `schedule`, back onto their queues with Sidekiq's Lua pop (`EVALSHA`,
+  so spinel needs spinel-redis with scripting) every
+  `:poll_interval_average:` or 5 s per Sidekiq process, randomized as
+  Sidekiq randomizes it. Before Sidekiq's rules, an error goes to the
+  job's `retry_on` and `discard_on` handlers, searched as Active Job
+  searches them (the job's own, last declared first, then its
+  ancestors'): `discard_on` drops the job, and `retry_on` pushes it
+  again with Active Job's counters (`executions`,
+  `exception_executions`, `provider_job_id`) after its wait (a literal
+  number or Duration, or `:polynomially_longer`, plus `jitter:` or the
+  job's `retry_jitter`, which `load_defaults` 6.1 sets to 0.15) to its
+  `queue:` and `priority:`, until its `attempts:` are used up and the
+  error goes on to Sidekiq's rules. A handler with a block, a computed
+  option or an exception class the tree doesn't define is an error
+  (`job-handler-unsupported`) at its call; `after_discard` is dropped
+  with a warning. The heartbeat Sidekiq's Web UI
+  reads (and the process count the scheduler scales by) is still
+  missing. Under
   config/cable.yml's `adapter: redis`, every process's broadcasts go
   out as `PUBLISH <channel_prefix>:<stream>`, as Action Cable's Redis
   adapter sends them, and each server process delivers what it

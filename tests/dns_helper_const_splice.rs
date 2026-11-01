@@ -72,6 +72,7 @@ fn dns_helper_qualified_const_is_unqualified_on_the_test_body() {
         &app.models,
         Vec::new(),
         &roundhouse::lower::routes::helper_id_segments(&app),
+        &roundhouse::lower::routes::direct_helper_names(&app),
     );
     let mut lowered_paths = Vec::new();
     for m in lcs.iter().flat_map(|lc| lc.methods.iter()) {
@@ -109,6 +110,7 @@ fn dns_helper_const_stays_bare_through_analyze() {
         &app.models,
         Vec::new(),
         &roundhouse::lower::routes::helper_id_segments(&app),
+        &roundhouse::lower::routes::direct_helper_names(&app),
     );
     let mut lowered_paths = Vec::new();
     for m in lcs.iter().flat_map(|lc| lc.methods.iter()) {

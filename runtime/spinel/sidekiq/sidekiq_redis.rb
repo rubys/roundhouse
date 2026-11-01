@@ -181,6 +181,37 @@ module SidekiqRedis
     nil
   end
 
+  # ---- the scheduler -----------------------------------------------------
+
+  # SCRIPT LOAD: the script's SHA1.
+  def self.script_load(conn, source)
+    conn.script(:load, source)
+  end
+
+  # EVALSHA <sha> 1 <key> <arg>: the script's reply, a String or nil.
+  # A script the server doesn't hold raises a command error whose
+  # message starts with NOSCRIPT, on both clients.
+  def self.evalsha(conn, sha, key, arg)
+    conn.evalsha(sha, [key], [arg])
+  end
+
+  # SCARD processes: the Sidekiq processes that heartbeat.
+  def self.scard(conn, key)
+    conn.scard(key)
+  end
+
+  # A due job pushed back onto its queue, as Sidekiq's client pushes:
+  # SADD queues and LPUSH queue:<name> in one round trip.
+  def self.push_on(conn, queue, json)
+    send_push(conn, queue, json)
+  end
+
+  # ZADD retry: the failed job, due at `at` (a Float epoch).
+  def self.write_retry(conn, at, json)
+    conn.zadd("retry", at, json)
+    nil
+  end
+
   # ZADD dead, then the trims by age (scores up to `oldest`) and by
   # count (ranks 0..`keep`, a negative String).
   def self.write_dead(conn, now, json, oldest, keep)

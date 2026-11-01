@@ -11,6 +11,10 @@ mod emit_and_run;
 mod time_change_usec_contract;
 #[path = "emit_and_run/time_change_usec.rs"]
 mod time_change_usec;
+#[path = "emit_and_run/rate_limits.rs"]
+mod rate_limits;
+#[path = "emit_and_run/rack_mounts.rs"]
+mod rack_mounts;
 #[path = "support/i18n_locales_app.rs"]
 #[allow(dead_code)]
 mod i18n_locales_app;
@@ -60,6 +64,10 @@ mod framework_exceptions;
 mod active_storage_exceptions;
 #[path = "emit_and_run/rescue_surface.rs"]
 mod rescue_surface;
+#[path = "support/dispatcher_json.rs"]
+mod dispatcher_json_contract;
+#[path = "emit_and_run/dispatcher_json.rs"]
+mod dispatcher_json;
 #[path = "emit_and_run/preloader_runtime.rs"]
 mod preloader_runtime;
 #[path = "emit_and_run/framework_surface_rest.rs"]
@@ -409,6 +417,8 @@ mod defined_const_fold;
 mod job_payload;
 #[path = "emit_and_run/sidekiq_push.rs"]
 mod sidekiq_adapter;
+#[path = "emit_and_run/sidekiq_retry_on.rs"]
+mod sidekiq_retry_on;
 #[path = "emit_and_run/silent_lowerings.rs"]
 mod silent_lowerings;
 #[path = "emit_and_run/validates_options.rs"]
@@ -20439,6 +20449,8 @@ mod module_factory;
 mod spinel_unknown_gem;
 #[path = "emit_and_run/json_column_name.rs"]
 mod json_column_name;
+#[path = "emit_and_run/block_locals.rs"]
+mod block_locals;
 
 /// `ActiveSupport::JSON.encode(value, escape: false)` — Rails' document
 /// without the HTML-entity escaping, which campfire's fragment keys can
@@ -20561,6 +20573,15 @@ mod namespaced_controller_symbol;
 
 #[path = "emit_and_run/route_format_lookahead.rs"]
 mod route_format_lookahead;
+#[path = "emit_and_run/page_caching.rs"]
+mod page_caching;
+#[path = "emit_and_run/route_requirement_span.rs"]
+mod route_requirement_span;
+#[path = "emit_and_run/boot_program.rs"]
+mod boot_program;
+
+#[path = "emit_and_run/route_dot_span.rs"]
+mod route_dot_span;
 
 #[path = "emit_and_run/params_write_assign.rs"]
 mod params_write_assign;
@@ -20574,3 +20595,6 @@ mod model_class_attribute;
 mod record_slice_app;
 #[path = "emit_and_run/record_slice.rs"]
 mod record_slice;
+
+#[path = "emit_and_run/csrf_meta_tag_alias.rs"]
+mod csrf_meta_tag_alias;
