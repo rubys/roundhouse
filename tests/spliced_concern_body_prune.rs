@@ -197,3 +197,36 @@ end
     assert!(!module.contains("memo_wise :ensure_can_administer") && !module.contains("memo_wise(:ensure_can_administer"), "{module}");
     assert!(!module.contains(":ensure_can_administer"), "no call names the pruned method:\n{module}");
 }
+
+#[test]
+fn a_string_name_of_a_pruned_method_goes_with_it() {
+    // Ruby takes a String wherever it takes a Symbol name:
+    // `alias_method "administer!", "ensure_can_administer"` raises once the
+    // method is gone, as the symbol form does. A call that takes the name
+    // as data (`register`) still stays.
+    let decorated = r#"module Authorization
+  extend ActiveSupport::Concern
+
+  def ensure_can_administer
+    head :forbidden unless Current.user.can_administer?
+  end
+
+  alias_method "administer!", "ensure_can_administer"
+  memo_wise "ensure_can_administer"
+  helper_method "ensure_can_administer"
+  register "ensure_can_administer"
+end
+"#;
+    let app = app(&[("app/controllers/concerns/authorization.rb", decorated)]);
+    let module = app
+        .library_classes
+        .iter()
+        .find(|lc| lc.name.0.as_str() == "Authorization")
+        .expect("the module is kept");
+    let calls: Vec<String> = module.unknown_calls.iter().map(ruby::emit_expr).collect();
+    assert!(module.methods.iter().all(|m| m.name.as_str() != "ensure_can_administer"), "the instance method is pruned");
+    for gone in ["alias_method", "memo_wise", "helper_method"] {
+        assert!(!calls.iter().any(|c| c.starts_with(gone)), "{gone} names the pruned method: {calls:?}");
+    }
+    assert!(calls.iter().any(|c| c.starts_with("register")), "a registry call stays: {calls:?}");
+}

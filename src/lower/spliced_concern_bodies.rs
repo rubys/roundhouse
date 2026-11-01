@@ -118,8 +118,8 @@ pub fn apply_spliced_concern_body_prune(app: &mut App) {
     }
 }
 
-/// A receiverless class-body call that looks up the method a symbol
-/// argument names, and so raises once that method is gone: a visibility
+/// A receiverless class-body call that looks up the method a symbol (or
+/// string) argument names, and so raises once that method is gone: a visibility
 /// change, `memoize` / `memo_wise`, `helper_method`, `deprecate`, New
 /// Relic's `add_method_tracer`, a StatsD instrumentation macro
 /// (`statsd_count_if`, `statsd_measure`, …) by its leading symbol, and
@@ -131,7 +131,13 @@ pub fn apply_spliced_concern_body_prune(app: &mut App) {
 /// the module's own replayed call would.
 fn decorates(call: &Expr, names: &HashSet<Symbol>) -> bool {
     let ExprNode::Send { recv: None, method, args, .. } = &*call.node else { return false };
-    let names_pruned = |a: &Expr| matches!(&*a.node, ExprNode::Lit { value: Literal::Sym { value } } if names.contains(value));
+    // Ruby takes a String name wherever it takes a Symbol one
+    // (`private "ensure_admin"`, `alias_method "x", "y"`).
+    let names_pruned = |a: &Expr| match &*a.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => names.contains(value),
+        ExprNode::Lit { value: Literal::Str { value } } => names.contains(&Symbol::from(value.as_str())),
+        _ => false,
+    };
     if method.as_str() == "alias_method" {
         return args.iter().any(names_pruned);
     }
