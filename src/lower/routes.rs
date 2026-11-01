@@ -448,9 +448,11 @@ impl Ctx {
         let parts = match (scope, self.parents.split_last()) {
             (Some(ResourceScope::Member | ResourceScope::Collection), Some((innermost, outer))) => {
                 let resource = if scope == Some(ResourceScope::Member) {
-                    &innermost.singular
+                    innermost.singular.clone()
+                } else if innermost.has_id {
+                    collection_name(&innermost.singular, &innermost.plural)
                 } else {
-                    &innermost.plural
+                    innermost.plural.clone()
                 };
                 let outer: String = outer.iter().map(|n| format!("{}_", n.singular)).collect();
                 [part.map(str::to_string), Some(format!("{}{outer}{resource}", self.name_prefix))]
@@ -922,10 +924,17 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     })
                     .map(|(name, rx)| (name.as_str().to_string(), rx.clone()))
                     .collect();
+                // A singleton (`resource :answer`) has no collection of its
+                // own: its name is its singular, as written.
+                let collection = if *singular {
+                    helper_plural.clone()
+                } else {
+                    collection_name(&helper_singular, &helper_plural)
+                };
                 let as_name = resource_as_name(
                     action_name,
                     &helper_singular,
-                    &helper_plural,
+                    &collection,
                     &ctx.parent_name_prefix(),
                     &ctx.name_prefix,
                 );
@@ -1280,11 +1289,25 @@ fn extract_path_params(path: &str, params: &mut Vec<String>) {
     }
 }
 
+/// The name Rails gives a plural resource's collection routes: its plural,
+/// or `<plural>_index` when the singular is the same word (`news`,
+/// `following`), so the collection (`news_index`, `/news`) and the member
+/// (`news`, `/news/:id`) keep apart (Rails' `Resource#collection_name`).
+/// A singleton resource has no collection and keeps its name.
+pub(crate) fn collection_name(singular: &str, plural: &str) -> String {
+    if singular == plural {
+        format!("{plural}_index")
+    } else {
+        plural.to_string()
+    }
+}
+
 /// Route-helper base name for a standard Rails action. The
 /// emitter then appends `_path` / `_url` / `Path` / `_url` per
 /// target convention.
 ///
-/// - `index`/`create` → plural (`articles`, `article_comments`)
+/// - `index`/`create` → plural (`articles`, `article_comments`); the
+///   caller passes `collection_name`'s answer (`news_index`)
 /// - `new` → `new_<singular>` (`new_article`)
 /// - `edit` → `edit_<singular>` (`edit_article`)
 /// - `show`/`update`/`destroy` → singular (`article`)
