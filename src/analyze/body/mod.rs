@@ -215,6 +215,8 @@ pub struct ClassInfo {
     pub unresolved_include: bool,
     /// Retained inclusion/extension hooks can install singleton methods.
     pub unknown_class_side_hook: bool,
+    /// Several source declarations have no combined finder ownership contract.
+    pub finder_ownership_ambiguous: bool,
     /// Literal, unconditional registrations on the hook's target. These
     /// prove an emitted implementation exists, without proving its owner/type.
     pub class_side_hook_methods: crate::det::HashSet<Symbol>,
@@ -354,6 +356,7 @@ impl ClassInfo {
         while let Some((id, side)) = pending.pop() {
             if !seen.insert((id, side)) { continue; }
             let Some(class) = classes.get(id) else { continue };
+            if class.finder_ownership_ambiguous { return false; }
             let methods = if side == Class { &class.source_class_methods } else { &class.source_instance_methods };
             if methods.contains(method) || (side == Class && class.class_side_hook_methods.contains(method)) { return true; }
             pending.extend(class.parent.iter().map(|id| (id, side)));
@@ -379,7 +382,7 @@ impl ClassInfo {
                 if side == Instance { return true; }
                 continue;
             };
-            if class.unresolved_include || class.unknown_class_side_hook { return true; }
+            if class.finder_ownership_ambiguous || class.unresolved_include || class.unknown_class_side_hook { return true; }
             let methods = if side == Class { &class.source_class_methods } else { &class.source_instance_methods };
             if methods.contains(method) { return false; }
             pending.extend(class.parent.iter().map(|id| (id, side)));
@@ -438,7 +441,7 @@ impl ClassInfo {
                 if side == Instance { return None; }
                 continue;
             };
-            if class.unresolved_include || class.unknown_class_side_hook { return None; }
+            if class.finder_ownership_ambiguous || class.unresolved_include || class.unknown_class_side_hook { return None; }
             let methods = if side == Class { &class.source_class_methods } else { &class.source_instance_methods };
             if methods.contains(method) {
                 return Some((id.clone(), side));

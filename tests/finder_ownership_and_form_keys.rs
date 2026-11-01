@@ -708,3 +708,56 @@ fn nested_fields_for_keeps_ordinary_association_precision() { nested_fields_for_
 
 #[test]
 fn nested_fields_for_does_not_guess_unresolved_association_target() { nested_fields_for_association_case("unresolved"); }
+
+fn reopened_finder_ownership_case(library: bool) {
+    let owner = if library { "LookupService" } else { "Category" };
+    let base = if library { "LookupParent" } else { "ActiveRecord::Base" };
+    let prelude = if library { "class LookupParent < ActiveRecord::Base\nself.table_name='categories'\nend\n" } else { "" };
+    let extra_declaration = if library { format!("class {owner} < {base}\nend\n") } else { String::new() };
+    let finder_header = if library { format!("class {owner}") } else { format!("class {owner} < {base}") };
+    let methods = format!("{extra_declaration}{finder_header}\ndef self.find_by_name(value); 'source finder'; end\ndef self.find_by_name!(value); 'source finder'; end\ndef self.find_by(attributes); 'source finder'; end\ndef self.find_by!(attributes); 'source finder'; end\nend\n");
+    let include_header = if library { format!("class {owner}") } else { format!("class {owner} < {base}") };
+    let ancestry = format!("{include_header}\ninclude MissingFinderExtension\nend\n");
+    let controller = format!("class CategoriesController < ActionController::Base\ndef dynamic; {owner}.find_by_name('found'); end\ndef dynamic_bang; {owner}.find_by_name!('found'); end\ndef ordinary; {owner}.find_by(name: 'found'); end\ndef ordinary_bang; {owner}.find_by!(name: 'found'); end\nend\n");
+    let mut failures = Vec::new();
+    for reversed in [false, true] {
+        let (first, second) = if reversed { (&ancestry, &methods) } else { (&methods, &ancestry) };
+        // Bootstrap the class so both orders are valid Ruby reopenings;
+        // the compiler still receives its written superclass declaration.
+        native(&["activerecord"], &format!("{AR}{CATEGORIES}{prelude}\nmodule MissingFinderExtension; end\nclass {owner} < {base}; end\neval({first:?}, TOPLEVEL_BINDING, 'first.rb')\neval({second:?}, TOPLEVEL_BINDING, 'second.rb')\nraise 'dynamic' unless {owner}.find_by_name('found') == 'source finder'\nraise 'dynamic bang' unless {owner}.find_by_name!('found') == 'source finder'\nraise 'ordinary' unless {owner}.find_by(name: 'found') == 'source finder'\nraise 'ordinary bang' unless {owner}.find_by!(name: 'found') == 'source finder'\n"));
+        let root = if library { "app/services" } else { "app/models" };
+        let a = format!("{root}/first.rb");
+        let b = format!("{root}/second.rb");
+        let tree: HashMap<PathBuf, Vec<u8>> = [
+            ("db/schema.rb".to_owned(), CATEGORIES.to_owned()),
+            ("app/models/lookup_parent.rb".to_owned(), prelude.to_owned()),
+            (a.clone(), first.clone()), (b.clone(), second.clone()),
+            ("app/controllers/categories_controller.rb".to_owned(), controller.clone()),
+        ].into_iter().map(|(p,s)| (p.into(),s.into_bytes())).collect();
+        let mut app = roundhouse::ingest::ingest_app_from_tree(tree).unwrap();
+        let declarations = app.models.iter().filter(|m| m.name.0.as_str()==owner).count()
+            + app.library_classes.iter().filter(|c| c.name.0.as_str()==owner).count();
+        assert_eq!(declarations, if library { 3 } else { 2 }, "the fixture must retain its declarations");
+        let mut analyzer = Analyzer::new(&app);
+        analyzer.analyze(&mut app);
+        for action in app.controllers[0].actions() {
+            if !action.body.ty.as_ref().unwrap().is_unknown() {
+                failures.push(format!("order={reversed}, {} inferred {:?}", action.name, action.body.ty));
+            }
+        }
+        let (_, errors) = emit_and_run::empty_app().write("db/schema.rb", CATEGORIES)
+            .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+            .write("app/models/lookup_parent.rb", prelude)
+            .write(&a, first).write(&b, second)
+            .write("app/controllers/categories_controller.rb", &controller).emit(BuildTarget::Ruby);
+        if !errors.iter().any(|e| e.contains("dynamic finder without established implementation")) {
+            failures.push(format!("order={reversed}, missing ambiguous finder refusal"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn reopened_model_finder_ownership_is_order_independent() { reopened_finder_ownership_case(false); }
+#[test]
+fn reopened_library_finder_ownership_is_order_independent() { reopened_finder_ownership_case(true); }

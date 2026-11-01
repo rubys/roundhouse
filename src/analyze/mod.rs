@@ -8256,7 +8256,7 @@ fn redefined_reader_names(items: &[ModelBodyItem], out: &mut BTreeSet<Symbol>) {
 
 /// The source ownership facts shared by class and association finder lowering.
 pub(crate) fn source_finder_classes(app: &App, resolver: &ConstResolver) -> HashMap<ClassId, ClassInfo> {
-    let mut classes = crate::det::HashMap::default();
+    let mut declarations: HashMap<ClassId, Vec<ClassInfo>> = HashMap::default();
     for model in &app.models {
         let mut info = crate::analyze::ClassInfo::default();
         info.parent = model.parent.clone();
@@ -8270,7 +8270,7 @@ pub(crate) fn source_finder_classes(app: &App, resolver: &ConstResolver) -> Hash
             .filter(|m| m.receiver == MethodReceiver::Class)
             .map(|m| m.name.clone()).collect();
         info.source_class_methods.extend(model.scopes().map(|s| s.name.clone()));
-        classes.insert(model.name.clone(), info);
+        declarations.entry(model.name.clone()).or_default().push(info);
     }
     for class in &app.library_classes {
         let mut info = crate::analyze::ClassInfo::default();
@@ -8284,8 +8284,16 @@ pub(crate) fn source_finder_classes(app: &App, resolver: &ConstResolver) -> Hash
         info.includes = class.includes.clone();
         info.unresolved_include = class.unknown_calls.iter().any(|expr| matches!(expr.diagnostic(),
             Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. }) if construct.as_str() == "include"));
-        classes.entry(class.name.clone()).or_insert(info);
+        declarations.entry(class.name.clone()).or_default().push(info);
     }
+    // Ingest retains each model declaration separately. Without a whole-class
+    // merge contract, no declaration can stand in for the others' dispatch.
+    let mut classes = declarations.into_iter().map(|(id, mut parts)| {
+        let info = if parts.len() == 1 { parts.pop().unwrap() } else {
+            ClassInfo { finder_ownership_ambiguous: true, ..Default::default() }
+        };
+        (id, info)
+    }).collect();
     record_class_side_ownership(&mut classes, app, resolver);
     classes
 }
@@ -8293,6 +8301,15 @@ pub(crate) fn source_finder_classes(app: &App, resolver: &ConstResolver) -> Hash
 /// Shared by ingest qualification and the typed finder registry. Retained
 /// hooks are effects, whereas expanded carriers already have concrete defs.
 pub(crate) fn record_class_side_ownership(classes: &mut HashMap<ClassId, ClassInfo>, app: &App, resolver: &ConstResolver) {
+    // The inference registry must refuse the same ownership proof as lowering.
+    let mut declared = crate::det::HashSet::default();
+    for id in app.models.iter().map(|model| &model.name)
+        .chain(app.library_classes.iter().map(|class| &class.name))
+    {
+        if !declared.insert(id) {
+            classes.entry(id.clone()).or_default().finder_ownership_ambiguous = true;
+        }
+    }
     // Explicit SDK surfaces that cannot own framework finders: Forwardable
     // defines instance delegates; T::Sig contributes only the consumed `sig`
     // annotation DSL. Source reopenings and existing declaration tables win.
@@ -10862,3 +10879,45 @@ mod concern_method_snapshot_tests {
 
 #[cfg(test)]
 mod ordered_worker_tests;
+
+#[cfg(test)]
+mod finder_reopening_tests {
+    use super::*;
+
+    fn check(library: bool) {
+        let owner = if library { "LookupService" } else { "Category" };
+        let parent = if library { "LookupParent" } else { "ActiveRecord::Base" };
+        let root = if library { "app/services" } else { "app/models" };
+        let methods = "def self.find_by_name(value); 'source finder'; end\ndef self.find_by_name!(value); 'source finder'; end\ndef self.find_by(attributes); 'source finder'; end\ndef self.find_by!(attributes); 'source finder'; end\n";
+        let first = if library {
+            format!("class {owner} < {parent}; end\nclass {owner}\n{methods}end\n")
+        } else { format!("class {owner} < {parent}\n{methods}end\n") };
+        let second = if library { format!("class {owner}\ninclude MissingFinderExtension\nend\n") }
+            else { format!("class {owner} < {parent}\ninclude MissingFinderExtension\nend\n") };
+        let mut failures = Vec::new();
+        for reverse in [false, true] {
+            let (a,b) = if reverse { (&second,&first) } else { (&first,&second) };
+            let tree = [
+                ("db/schema.rb".to_owned(), "ActiveRecord::Schema.define do\ncreate_table(:categories) { |t| t.string :name }\nend\n".to_owned()),
+                ("app/models/lookup_parent.rb".to_owned(), "class LookupParent < ActiveRecord::Base\nself.table_name='categories'\nend\n".to_owned()),
+                (format!("{root}/first.rb"), a.clone()),
+                (format!("{root}/second.rb"), b.clone()),
+            ].into_iter().map(|(p,s)| (std::path::PathBuf::from(p),s.into_bytes())).collect();
+            let app = crate::ingest::ingest_app_from_tree(tree).unwrap();
+            let resolver = app.const_resolver.for_sources(&app.sources);
+            let classes = source_finder_classes(&app,&resolver);
+            for name in ["find_by_name","find_by_name!","find_by","find_by!"] {
+                let id=ClassId(Symbol::from(owner));let method=Symbol::from(name);
+                if !ClassInfo::class_method_ownership_unknown(&classes,&id,&method)
+                    || ClassInfo::source_class_method_owner(&classes,&id,&method).is_some()
+                { failures.push(format!("order={reverse}, {name} has a selected owner")); }
+            }
+        }
+        assert!(failures.is_empty(),"{}",failures.join("\n"));
+    }
+
+    #[test]
+    fn source_finder_reopenings_are_ambiguous_in_both_model_orders() { check(false); }
+    #[test]
+    fn source_finder_reopenings_are_ambiguous_in_both_library_orders() { check(true); }
+}
