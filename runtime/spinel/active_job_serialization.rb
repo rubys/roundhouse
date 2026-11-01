@@ -112,7 +112,7 @@ module ActiveJob
     # An Array argument, or the whole argument list: the element JSON
     # each helper above wrote, joined.
     def self.list(parts)
-      "[" + parts.join(",") + "]"
+      "[" + parts.reject { |part| part == "" }.join(",") + "]"
     end
 
     # A job's keyword arguments, as the one Hash ActiveJob writes for
@@ -120,7 +120,9 @@ module ActiveJob
     # then `"_aj_ruby2_keywords"` listing the names, which is what tells
     # Rails' reader to pass them back as keywords. A name of "" is a
     # keyword the caller left at its default: Rails doesn't write a
-    # keyword the caller omits, so it is left out here.
+    # keyword the caller omits, so it is left out here. With none left,
+    # the answer is "", which `list` drops: Rails writes no Hash at all
+    # for a call that passes no keywords.
     RUBY2_KEYWORDS_KEY = "_aj_ruby2_keywords"
 
     def self.keywords(names, values)
@@ -136,6 +138,7 @@ module ActiveJob
         end
         i += 1
       end
+      return "" if written.empty?
       out << "\"" + RUBY2_KEYWORDS_KEY + "\":[" + written.join(",") + "]}"
       out
     end
@@ -150,6 +153,14 @@ module ActiveJob
       hash = args[i]
       raise ActiveJob::DeserializationError, deserialize_message("expected keyword arguments") if key_of(hash, RUBY2_KEYWORDS_KEY).nil?
       names.map { |name| hash[name] }
+    end
+
+    # `keywords_at` for a job whose keywords all have defaults: a call
+    # that passed none has no Hash at `args[i]` (Rails writes none), and
+    # reads as every keyword absent.
+    def self.optional_keywords_at(args, i, names)
+      return names.map { |name| nil } if args.length <= i
+      keywords_at(args, i, names)
     end
 
     # Not `count`: a second user `count(x)` in the program turns Spinel's

@@ -1814,7 +1814,9 @@ A `perform` with named keywords (`def perform(car, count:, label:
 into one trailing Hash marked `_aj_ruby2_keywords`, as ActiveJob writes
 them, and come back by name. An optional keyword whose value equals
 its literal default is left out, as Rails leaves out a keyword the
-caller omits, and reads back as that default. Two known differences
+caller omits, and reads back as that default; with every keyword left
+out there is no Hash at all, as Rails writes none, and a job whose
+keywords all have defaults reads a missing Hash as all of them absent. Two known differences
 from Rails: the keys are written in `perform`'s order, not the call
 site's, and a caller that passes the default explicitly gets no key
 where Rails would write one; `perform` receives the same values either

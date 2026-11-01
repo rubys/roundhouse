@@ -21,6 +21,7 @@ module ActiveJob
     def self.keywords: (Array[String] names, Array[String] values) -> String
 
     def self.keywords_at: (untyped args, Integer i, Array[String] names) -> untyped
+    def self.optional_keywords_at: (untyped args, Integer i, Array[String] names) -> untyped
     def self.arg_count: (untyped args) -> Integer
     def self.null_at: (untyped args, Integer i) -> bool
     def self.bool_at: (untyped args, Integer i) -> bool

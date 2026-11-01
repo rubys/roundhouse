@@ -57,7 +57,9 @@ end
 keyword_arguments = [
   KeywordJob.new(Room.new(7), count: 2, label: "custom").serialize["arguments"],
   KeywordJob.new(Room.new(7), count: 3).serialize["arguments"],
-  KeywordJob.new(at: t, kind: :open, ids: [1, 2], room: Rooms::Open.new(8)).serialize["arguments"]
+  KeywordJob.new(at: t, kind: :open, ids: [1, 2], room: Rooms::Open.new(8)).serialize["arguments"],
+  # No keywords at all: no Hash.
+  KeywordJob.new(Room.new(7)).serialize["arguments"]
 ]
 
 job = PushMessageJob.new(*values)

@@ -149,7 +149,9 @@ kw_label = kw_default
 kwargs = [
   A.list([A.record(gid("Room", 7)), A.keywords(["count", "label"], [A.int(2), A.str("custom")])]),
   A.list([A.record(gid("Room", 7)), A.keywords(["count", kw_label == kw_default ? "" : "label"], [A.int(3), kw_label == kw_default ? "" : A.str(kw_label)])]),
-  A.list([A.keywords(["at", "kind", "ids", "room"], [A.time(t), A.sym(:open), A.list([A.int(1), A.int(2)]), A.record(gid("Rooms::Open", 8))])])
+  A.list([A.keywords(["at", "kind", "ids", "room"], [A.time(t), A.sym(:open), A.list([A.int(1), A.int(2)]), A.record(gid("Rooms::Open", 8))])]),
+  # Every keyword at its default: no Hash, as Rails writes none.
+  A.list([A.record(gid("Room", 7)), A.keywords(["", ""], ["", ""])])
 ]
 puts "kwargs " + A.list(kwargs)
 
@@ -193,6 +195,10 @@ check("keyword record", A.locate_room_at(kw, 0).kind == "Rooms::Open", "")
 check("keyword array", A.int_array_at(kw, 1) == [1, 2], "")
 check("keyword symbol", A.sym_at(kw, 2) == :open, "")
 check("keyword time", A.time_at(kw, 3) == t, "")
+kw = A.optional_keywords_at(JSON.parse(kwargs[3]), 1, ["count", "label"])
+check("no keyword Hash reads as every keyword absent", kw.length == 2 && A.null_at(kw, 0) && A.null_at(kw, 1), "")
+kw = A.optional_keywords_at(JSON.parse(kwargs[1]), 1, ["count", "label"])
+check("optional keywords still read a Hash", A.int_at(kw, 0) == 3 && A.null_at(kw, 1), "")
 not_keywords = begin
   A.keywords_at(JSON.parse(kwargs[0]), 0, ["count"])
   "no error"

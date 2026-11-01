@@ -106,11 +106,16 @@
           "room"
         ]
       }
+    ],
+    [
+      {
+        "_aj_globalid": "gid://campfire/Room/7"
+      }
     ]
   ],
   "job": {
     "job_class": "PushMessageJob",
-    "job_id": "899af2a2-b0b3-4696-9034-ecb95bcf838c",
+    "job_id": "92e87832-b7b1-4276-be04-51195b88fb34",
     "provider_job_id": null,
     "queue_name": "default",
     "priority": null,
@@ -175,7 +180,7 @@
     "exception_executions": {},
     "locale": "en",
     "timezone": "UTC",
-    "enqueued_at": "2026-11-01T15:00:22.002141358Z",
+    "enqueued_at": "2026-11-01T22:59:30.881574576Z",
     "scheduled_at": null
   }
 }

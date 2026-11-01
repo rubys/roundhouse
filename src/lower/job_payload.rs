@@ -1297,7 +1297,8 @@ fn arguments_list(plan: &JobPlan) -> String {
 /// The keywords as the one trailing Hash ActiveJob writes for them,
 /// `{"count":2,"_aj_ruby2_keywords":["count"]}`: the names and the
 /// values' JSON, each name "" (left out) for an optional keyword whose
-/// value is its default.
+/// value is its default. With every one left out there is no Hash, as
+/// Rails writes none for a call without keywords.
 fn keywords_expr(keywords: &[&JobParam]) -> String {
     let mut names = Vec::new();
     let mut values = Vec::new();
@@ -1386,8 +1387,14 @@ pub fn registry_source(plans: &[JobPlan], sidekiq: bool) -> String {
             let keywords: Vec<&JobParam> = plan.params.iter().filter(|p| p.keyword).collect();
             if !keywords.is_empty() {
                 let names: Vec<String> = keywords.iter().map(|p| ruby_str(p.name.as_str())).collect();
+                // All optional: a call that passed none has no Hash.
+                let reader = if keywords.iter().all(|p| p.default.is_some()) {
+                    "optional_keywords_at"
+                } else {
+                    "keywords_at"
+                };
                 s.push_str(&format!(
-                    "      kw = ActiveJob::Arguments.keywords_at(args, {}, [{}])\n",
+                    "      kw = ActiveJob::Arguments.{reader}(args, {}, [{}])\n",
                     positional.len(),
                     names.join(", ")
                 ));
