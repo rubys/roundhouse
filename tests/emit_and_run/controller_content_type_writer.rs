@@ -20,7 +20,7 @@ fn controller_writer_values_and_headers_match_rails() {
         .write("app/controllers/media_controller.rb", include_str!("../support/controller_content_type_writer/controller.rb"))
         .write("app/controllers/other_media_controller.rb", include_str!("../support/controller_content_type_writer/other_controller.rb"))
         .write("app/controllers/custom_media_controller.rb", include_str!("../support/controller_content_type_writer/custom_controller.rb"))
-        .write("config/routes.rb", "Rails.application.routes.draw do\nget '/media', to: 'media#show'\nend\n")
+        .write("config/routes.rb", include_str!("../support/controller_content_type_writer/routes.rb"))
         .emit(roundhouse::project::BuildTarget::Ruby);
     assert!(errors.is_empty(), "{errors:?}");
     let actual = Command::new("ruby").arg(support.join("oracle.rb")).arg("emitted")

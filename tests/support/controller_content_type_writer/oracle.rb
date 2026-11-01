@@ -13,6 +13,9 @@ if mode == "rails"
 else
   require File.expand_path("main", Dir.pwd)
   Main.configure_default_adapter!
+  # CRuby controller loading is lazy, as it is on main. Exercise the routed
+  # dispatch arms before inspecting controller instances directly.
+  %i[media other_media custom_media].each { |name| Main.instantiate_controller(name) }
 end
 
 def controller_for(klass, rails)
