@@ -990,7 +990,7 @@ impl FormBuilderMethod {
 }
 
 /// Split a FormBuilder method's positional args into its two
-/// Rails-shaped halves: the field-name symbol and the trailing
+/// Rails-shaped halves: the field name (a Symbol or String) and the trailing
 /// options hash. `form.text_field :title, class: "..."` yields
 /// `(Some("title"), Some(&[(class, "...")]))`; `form.submit` with
 /// no args yields `(None, None)`. Emitters format the opts pairs
@@ -1002,7 +1002,9 @@ pub fn classify_form_builder_args(
         return (None, None);
     }
     let (field, rest): (Option<&str>, &[Expr]) = match &*args[0].node {
+        // A String field name is the same field (`f.text_field "title"`), as the lowering reads it.
         ExprNode::Lit { value: Literal::Sym { value } } => (Some(value.as_str()), &args[1..]),
+        ExprNode::Lit { value: Literal::Str { value } } => (Some(value.as_str()), &args[1..]),
         _ => (None, args),
     };
     let opts = rest.iter().find_map(|a| match &*a.node {

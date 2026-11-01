@@ -1240,7 +1240,9 @@ fn is_plain_ruby_class(app: &App, lc: &crate::dialect::LibraryClass) -> bool {
 /// `form.datetime_local_field` on a datetime or date column formats the
 /// column's text (`ViewHelpers.datetime_local_value_attr`), which starts
 /// `YYYY-MM-DD HH:MM:SS` on the targets measured against Rails 8.1.4:
-/// the ruby family, Crystal, Go and Python. TypeScript's record reads the
+/// the ruby family, Crystal, Go and Python (a datetime column; an app with
+/// a Date-only column is refused off the ruby family before this, by
+/// `reject_unsupported_dates`). TypeScript's record reads the
 /// column as a `Date`, whose text is not that (`Sun Nov 01 2026 …`, in
 /// the host's zone), and the Rust emit of the read does not build; the
 /// rest are unmeasured. Each of those refuses the call rather than

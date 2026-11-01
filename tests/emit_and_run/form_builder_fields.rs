@@ -215,6 +215,9 @@ fn a_datetime_local_field_on_a_time_column_is_refused_where_unmeasured() {
             "{target:?}: {errors:?}"
         );
     }
+    // A String field name is the same column.
+    let (_, errors) = app("    <%= form.datetime_local_field \"created_at\" %>\n").emit(BuildTarget::Typescript);
+    assert!(errors.iter().any(|e| e.contains("form builder field not supported")), "{errors:?}");
     for target in [BuildTarget::Crystal, BuildTarget::Go, BuildTarget::Python] {
         let (_, errors) = app(field).emit(target);
         assert!(errors.is_empty(), "{target:?}: {errors:?}");
@@ -222,4 +225,40 @@ fn a_datetime_local_field_on_a_time_column_is_refused_where_unmeasured() {
     let (_, errors) = app("    <%= form.datetime_local_field :created_at, value: \"2026-01-01T00:00\" %>\n")
         .emit(BuildTarget::Typescript);
     assert!(errors.is_empty(), "{errors:?}");
+}
+
+const DATE_COLUMN_TEST: &str = r#"require "test_helper"
+
+class DateColumnFieldsControllerTest < ActionDispatch::IntegrationTest
+  test "a date column renders at midnight" do
+    get edit_article_url(articles(:one))
+    assert_response :success
+    assert_select "input.date#article_published_on[type=datetime-local][value='2026-11-01T00:00:00']"
+  end
+
+  test "a new record's date field carries no value" do
+    get new_article_url
+    assert_response :success
+    assert_select "input.date#article_published_on[type=datetime-local]"
+    assert_select "input.date#article_published_on[value]", count: 0
+  end
+end
+"#;
+
+/// `Tags::DatetimeLocalField` formats a Date as midnight
+/// (`2026-11-01T00:00:00`, actionview 8.1.4). A Date-only column is
+/// supported on the ruby family; the other targets refuse the app's
+/// Date column itself (`project::reject_unsupported_dates`).
+#[test]
+fn a_datetime_local_field_on_a_date_column_renders_midnight() {
+    app("    <%= form.datetime_local_field :published_on, class: \"date\" %>\n")
+        .edit("db/schema.rb", "    t.string \"title\"\n", "    t.string \"title\"\n    t.date \"published_on\"\n")
+        .edit(
+            "test/fixtures/articles.yml",
+            "  title: Getting Started with Rails\n",
+            "  title: Getting Started with Rails\n  published_on: 2026-11-01\n",
+        )
+        .write("test/controllers/date_column_fields_controller_test.rb", DATE_COLUMN_TEST)
+        .run_test("test/controllers/date_column_fields_controller_test.rb")
+        .assert_passes();
 }
