@@ -1888,53 +1888,7 @@ fn is_bare_params(e: &Expr) -> bool {
 }
 
 fn walk_children<F: FnMut(&Expr)>(expr: &Expr, f: &mut F) {
-    use crate::expr::InterpPart;
-    match &*expr.node {
-        ExprNode::Seq { exprs } => exprs.iter().for_each(f),
-        ExprNode::If { cond, then_branch, else_branch } => {
-            f(cond);
-            f(then_branch);
-            f(else_branch);
-        }
-        ExprNode::Send { recv, args, block, .. } => {
-            if let Some(r) = recv.as_ref() {
-                f(r);
-            }
-            args.iter().for_each(&mut *f);
-            if let Some(b) = block.as_ref() {
-                f(b);
-            }
-        }
-        ExprNode::Apply { fun, args, block } => {
-            f(fun);
-            args.iter().for_each(&mut *f);
-            if let Some(b) = block.as_ref() {
-                f(b);
-            }
-        }
-        ExprNode::BoolOp { left, right, .. } => {
-            f(left);
-            f(right);
-        }
-        ExprNode::Lambda { body, .. } => f(body),
-        ExprNode::Assign { value, .. } => f(value),
-        ExprNode::Array { elements, .. } => elements.iter().for_each(&mut *f),
-        ExprNode::Hash { entries, .. } => {
-            for (k, v) in entries {
-                f(k);
-                f(v);
-            }
-        }
-        ExprNode::StringInterp { parts } => {
-            for p in parts {
-                if let InterpPart::Expr { expr } = p {
-                    f(expr);
-                }
-            }
-        }
-        ExprNode::Return { value } => f(value),
-        _ => {}
-    }
+    expr.node.for_each_child(f);
 }
 
 /// Companion slot naming: `bio` → `bio_provided`.
