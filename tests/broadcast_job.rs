@@ -37,16 +37,7 @@ end
 "#;
 
 fn app(adapter: &str) -> App {
-    let mut app = ingest_app_from_tree(tree(&[
-        ("db/schema.rb", SCHEMA),
-        (
-            "config/environments/production.rb",
-            &format!("Rails.application.configure do\n  config.active_job.queue_adapter = :{adapter}\nend\n"),
-        ),
-        (
-            "app/models/application_record.rb",
-            "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n",
-        ),
+    app_with(adapter, &[
         (
             "app/models/car.rb",
             "class Car < ApplicationRecord\n  broadcasts_to ->(_car) { \"cars\" }, inserts_by: :prepend\nend\n",
@@ -56,10 +47,24 @@ fn app(adapter: &str) -> App {
             "class Room < ApplicationRecord\n  broadcasts_to ->(_room) { \"rooms\" }\nend\n",
         ),
         ("app/models/rooms/open.rb", "class Rooms::Open < Room\nend\n"),
+    ])
+}
+
+fn app_with(adapter: &str, models: &[(&str, &str)]) -> App {
+    let mut files: Vec<(&str, &str)> = vec![
+        ("db/schema.rb", SCHEMA),
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n",
+        ),
         ("app/views/cars/_car.html.erb", "<div id=\"<%= dom_id(car) %>\"><%= car.name %></div>\n"),
         ("app/views/rooms/_room.html.erb", "<div><%= room.name %></div>\n"),
-    ]))
-    .expect("ingest broadcast app");
+        ("app/views/messages/_message.html.erb", "<div><%= message.body %></div>\n"),
+    ];
+    let config = format!("Rails.application.configure do\n  config.active_job.queue_adapter = :{adapter}\nend\n");
+    files.push(("config/environments/production.rb", &config));
+    files.extend_from_slice(models);
+    let mut app = ingest_app_from_tree(tree(&files)).expect("ingest broadcast app");
     roundhouse::session::analyze_and_lower(&mut app);
     app
 }
@@ -138,4 +143,28 @@ fn the_registry_pushes_and_runs_the_job() {
     assert!(src.contains("      Broadcasts.prepend(stream: stream, target: target, html: html)\n"), "{src}");
     assert!(src.contains("job_class == \"Turbo::Streams::ActionBroadcastJob\""), "the job discards a gone record:\n{src}");
     assert!(src.contains("record = Car.find_by(id: GlobalID::Locator.cast_id(parts[2]))"), "{src}");
+}
+
+#[test]
+fn a_record_stream_stays_inline_and_out_of_the_registry() {
+    let app = app_with(
+        "sidekiq",
+        &[
+            (
+                "app/models/room.rb",
+                "class Room < ApplicationRecord\n  has_many :messages\nend\n",
+            ),
+            (
+                "app/models/message.rb",
+                "class Message < ApplicationRecord\n  belongs_to :room\n  broadcasts_to ->(m) { m.room }\nend\n",
+            ),
+        ],
+    );
+    // No model enqueues the job, so the registry has no arm or locator
+    // for it and `needs_redis` (which counts these models) stays false.
+    assert!(broadcast_job::models(&app).is_empty());
+    let src = registry_source_with_broadcasts(&app.job_plans, true, &broadcast_job::models(&app));
+    assert!(!src.contains("locate_broadcast_") && !src.contains("Turbo"), "{src}");
+    let model = model_file(&app, "message");
+    assert!(!model.contains("push_turbo_broadcast") && !model.contains("turbo_broadcast_html"), "{model}");
 }

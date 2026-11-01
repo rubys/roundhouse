@@ -89,8 +89,42 @@ fn declarations(model: &Model) -> Vec<&Expr> {
         .collect()
 }
 
-/// Every model whose `broadcasts_to` enqueues the job, in name order.
-/// Empty off `:sidekiq`.
+/// Whether a declaration's create and update broadcasts can go through
+/// the job: its stream (a String literal, or the lambda's body) and its
+/// `target:` override, when it gives one, are String expressions, which
+/// is what [`rewrite`] asks of their lowered forms. The lambda rewrite in
+/// `model_to_library::broadcasts` turns only a bare parameter or a
+/// `param.attr` read into something else (`self`, an ivar), and neither
+/// is a String expression before or after it.
+fn job_eligible(decl: &Expr) -> bool {
+    let ExprNode::Send { args, .. } = &*decl.node else { return false };
+    let Some(first) = args.first() else { return false };
+    let stream_ok = match &*first.node {
+        ExprNode::Lit { value: Literal::Str { .. } } => true,
+        ExprNode::Lambda { body, .. } => stringish(single(body)),
+        _ => false,
+    };
+    let target_ok = match args.get(1).map(|o| &*o.node) {
+        Some(ExprNode::Hash { entries, .. }) => entries.iter().all(|(k, v)| {
+            !matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "target")
+                || stringish(single(v))
+        }),
+        _ => true,
+    };
+    stream_ok && target_ok
+}
+
+/// A one-expression `Seq` (a lambda body as written) as that expression.
+fn single(e: &Expr) -> &Expr {
+    match &*e.node {
+        ExprNode::Seq { exprs } if exprs.len() == 1 => single(&exprs[0]),
+        _ => e,
+    }
+}
+
+/// Every model whose `broadcasts_to` enqueues the job, in name order:
+/// one with a declaration [`job_eligible`] accepts, and not an STI
+/// model. Empty off `:sidekiq`.
 pub fn models(app: &App) -> Vec<BroadcastModel> {
     if !enabled(app) {
         return Vec::new();
@@ -99,7 +133,7 @@ pub fn models(app: &App) -> Vec<BroadcastModel> {
     let mut out: Vec<BroadcastModel> = app
         .models
         .iter()
-        .filter(|m| !declarations(m).is_empty())
+        .filter(|m| declarations(m).iter().any(|d| job_eligible(d)))
         .filter(|m| !sti.contains_key(&m.name) && !sti.values().any(|b| *b == m.name))
         .map(|m| {
             let name = m.name.0.as_str();
@@ -133,11 +167,14 @@ pub fn apply_ruby(lcs: &mut [LibraryClass], app: &App) {
             continue;
         }
         let Some(plan) = planned.iter().find(|p| p.model == model.name.0.as_str()) else {
+            let sti = decls.iter().any(|d| job_eligible(d));
             for d in decls {
-                crate::emit::diagnostics::push(inline_diagnostic(
-                    d.span,
-                    &format!("`{}` is an STI model, so its partial and local name follow each row's class", model.name.0.as_str()),
-                ));
+                let why = if sti {
+                    format!("`{}` is an STI model, so its partial and local name follow each row's class", model.name.0.as_str())
+                } else {
+                    "its stream or `target:` is not a String expression".to_string()
+                };
+                crate::emit::diagnostics::push(inline_diagnostic(d.span, &why));
             }
             continue;
         };
@@ -166,6 +203,8 @@ pub fn apply_ruby(lcs: &mut [LibraryClass], app: &App) {
     }
 }
 
+/// The `broadcast-later-inline` warning for a declaration that keeps its
+/// inline create and update broadcasts.
 fn inline_diagnostic(span: Span, why: &str) -> crate::diagnostic::Diagnostic {
     crate::lower::residue_diagnostic(
         "broadcast_job",
@@ -179,6 +218,11 @@ fn inline_diagnostic(span: Span, why: &str) -> crate::diagnostic::Diagnostic {
     )
 }
 
+/// Wrap each create or update call expanded from one of `spans` (the
+/// model's `broadcasts_to` declarations) in the drain check and push,
+/// keeping the first one's html render for `turbo_broadcast_html`. A
+/// call whose stream or target isn't a String expression is left as it
+/// is and its declaration recorded in `kept`.
 fn rewrite(e: &mut Expr, spans: &[Span], plan: &BroadcastModel, html: &mut Option<Expr>, kept: &mut Vec<Span>) {
     if spans.contains(&e.span) {
         if let Some(action) = broadcast_action(e) {
@@ -223,6 +267,7 @@ fn broadcast_action(e: &Expr) -> Option<&'static str> {
     }
 }
 
+/// The `stream:`, `target:` and `html:` arguments of a `Broadcasts` call.
 fn kwargs(e: &Expr) -> (Option<Expr>, Option<Expr>, Option<Expr>) {
     let ExprNode::Send { args, .. } = &*e.node else { return (None, None, None) };
     let Some(first) = args.first() else { return (None, None, None) };
@@ -259,6 +304,8 @@ fn str_lit(span: Span, s: &str) -> Expr {
     e
 }
 
+/// `JobRegistry.push_turbo_broadcast(stream, action, target, partial,
+/// local, self.to_gid_uri)`.
 fn push_call(span: Span, stream: Expr, action: &str, target: Expr, plan: &BroadcastModel) -> Expr {
     let mut gid = Expr::new(
         span,
