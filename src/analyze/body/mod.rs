@@ -2159,8 +2159,13 @@ impl<'a> BodyTyper<'a> {
                 };
                 // `filter_map` drops the false an `l && r` block answers, so
                 // the result holds only `r`'s values, not the Bool of `l`.
+                // Not an app's own `filter_map`, which may answer the false.
+                let owner_ty = if recv.is_some() { recv_ty.as_ref() } else { ctx.self_ty.as_ref() };
                 let block_ret = match block.as_ref().map(|b| &*b.node) {
-                    Some(ExprNode::Lambda { body, .. }) if method.as_str() == "filter_map" => {
+                    Some(ExprNode::Lambda { body, .. })
+                        if method.as_str() == "filter_map"
+                            && !self.owns_operator(owner_ty, method, class_object_receiver) =>
+                    {
                         filter_map_and_value(body).or(block_ret)
                     }
                     _ => block_ret,

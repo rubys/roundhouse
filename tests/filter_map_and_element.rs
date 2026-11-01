@@ -62,6 +62,24 @@ const TAG_LIST: &str = r##"class TagList
 end
 "##;
 
+// An app's own `filter_map` that answers its block's value is not
+// Enumerable's: it drops nothing, so the `&&`'s false stays in its type,
+// called on a receiver or on self.
+const BASKET: &str = r##"class Basket
+  def filter_map
+    yield 1
+  end
+
+  def own(text)
+    filter_map { |n| text.to_s.empty? && "x" }
+  end
+
+  def self.custom(text)
+    Basket.new.filter_map { |n| text.to_s.empty? && "x" }
+  end
+end
+"##;
+
 const ASSERTIONS: &str = r##"
 text = "#Foo bar #Baz"
 items = [{ "type" => "Hashtag", "name" => "#Foo" }, { "type" => "Note", "name" => "x" }, { "type" => "Hashtag" }]
@@ -69,6 +87,7 @@ raise ItemTags.names(items).inspect unless ItemTags.names(items) == ["foo"]
 got = [TagList.names(text), TagList.bare(text), TagList.skipping(text), TagList.skipping_false(text), TagList.skipping_true(text), TagList.flags(text), TagList.marked(text), TagList.tagged(text)]
 want = [["foo", "baz"], ["Foo", "Baz"], ["Foo", 3, "Baz"], ["Foo", "Baz"], ["Foo", true, "Baz"], [true, true], ["Foo", false, "Baz"], ["#Foo", "#Baz"]]
 raise got.inspect unless got == want
+raise "custom" unless Basket.custom(text) == false && Basket.custom("") == "x" && Basket.new.own(text) == false
 puts "filter_map passed"
 "##;
 
@@ -79,6 +98,7 @@ fn example() -> emit_and_run::Overlay {
         .write("app/models/tag_list.rb", TAG_LIST)
         .write("app/models/name_normalizer.rb", NAME_NORMALIZER)
         .write("app/models/item_tags.rb", ITEM_TAGS)
+        .write("app/models/basket.rb", BASKET)
 }
 
 fn sig_line(sig: &str, name: &str) -> String {
@@ -112,6 +132,10 @@ fn a_filter_map_of_cond_and_value_yields_the_values_type() {
     // `map` and `select` are unchanged.
     assert_eq!(sig_line(&list, "self.marked"), "def self.marked: (untyped text) -> Array[(bool | String)]");
     assert_eq!(sig_line(&list, "self.tagged"), "def self.tagged: (untyped text) -> Array[String]");
+    // An app's own block-value `filter_map` keeps the false.
+    let basket = read("app/models/basket.rbs");
+    assert_eq!(sig_line(&basket, "self.custom"), "def self.custom: (untyped text) -> (bool | String)");
+    assert_eq!(sig_line(&basket, "own"), "def own: (untyped text) -> (bool | String)");
 }
 
 #[test]
