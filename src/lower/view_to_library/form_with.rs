@@ -885,7 +885,13 @@ fn classify_form_with_components(
     // table nesting comments under articles does not have) —
     // `check` stayed clean while the emitted form was broken.
     if let Some(form) = prefixed_record_form(&model, ctx) {
-        let (action, method) = prefixed_record_action(&form, ctx, method_expr.clone());
+        let (derived_action, method) = prefixed_record_action(&form, ctx, method_expr.clone());
+        // An explicit `url:` replaces only the action, as Rails does; the
+        // method still follows the record's persistence.
+        let action = match url_expr.clone() {
+            Some(url) => route_helperize(url, &route_helpers, ctx),
+            None => derived_action,
+        };
         return Some(FormWithComponents {
             model: form.record,
             model_name: form.model_name,
