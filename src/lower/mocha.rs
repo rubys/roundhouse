@@ -508,20 +508,25 @@ pub fn apply_mocha_lowering(app: &mut App) {
     let mut ctx = AppMethods::index(app);
     for tm in &mut app.test_modules {
         ctx.setup = tm.setup.clone();
+        ctx.helpers = tm.helpers.clone();
         if let Some(setup) = &mut tm.setup {
             lower_mock_graphs(setup, &ctx);
+            ctx.body = None;
             rewrite(setup, &mut ctx);
         }
         for t in &mut tm.tests {
             lower_mock_graphs(&mut t.body, &ctx);
+            ctx.body = Some(t.body.clone());
             rewrite(&mut t.body, &mut ctx);
         }
         for m in &mut tm.helpers {
             lower_mock_graphs(&mut m.body, &ctx);
+            ctx.body = Some(m.body.clone());
             rewrite(&mut m.body, &mut ctx);
         }
     }
     guard_app_methods(app, &ctx.stubbed);
+    guard_answer_slots(app, &ctx.answer_slots);
 }
 
 /// The app's instance methods, by model — what an instance or
@@ -537,6 +542,26 @@ struct AppMethods {
     singular_assocs: BTreeMap<(String, String), String>,
     /// The enclosing test module's `setup` body, for an ivar's origin.
     setup: Option<Expr>,
+    /// The test body being rewritten, for a local's origin.
+    body: Option<Expr>,
+    /// The enclosing test module's helpers: a `let` reads as a helper
+    /// whose memoized value names the object's class.
+    helpers: Vec<MethodDef>,
+    /// Every app method (models and library classes) by (class, method,
+    /// class side): its parameters and analyzed signature.
+    signatures: BTreeMap<(String, String, bool), (Vec<Param>, Option<Ty>)>,
+    /// The answer slots the test bodies filed, by (class, method, class side).
+    answer_slots: BTreeMap<(String, String, bool), AnswerSlot>,
+}
+
+/// A stubbed app method's typed answer slot: `MochaSlots::<stem>_*`.
+struct AnswerSlot {
+    stem: String,
+    /// Positional parameter names and types, in order.
+    params: Vec<(Symbol, Ty)>,
+    ret: Ty,
+    /// The exception classes its chains raise.
+    exceptions: BTreeSet<String>,
 }
 
 impl AppMethods {
@@ -566,7 +591,40 @@ impl AppMethods {
             .iter()
             .map(|f| (f.name.as_str().to_string(), crate::naming::classify_path(f.path.as_str())))
             .collect();
-        AppMethods { methods, stubbed: BTreeMap::new(), fixtures, singular_assocs, setup: None }
+        let mut signatures = BTreeMap::new();
+        let mut file = |class: &str, def: &MethodDef| {
+            if def.kind != AccessorKind::Method {
+                return;
+            }
+            let class_side = def.receiver == MethodReceiver::Class;
+            signatures
+                .entry((class.to_string(), def.name.as_str().to_string(), class_side))
+                .or_insert_with(|| (def.params.clone(), def.signature.clone()));
+        };
+        for m in &app.models {
+            for def in m.methods() {
+                file(m.name.0.as_str(), def);
+            }
+        }
+        for lc in &app.library_classes {
+            if lc.is_module {
+                continue;
+            }
+            for def in &lc.methods {
+                file(lc.name.0.as_str(), def);
+            }
+        }
+        AppMethods {
+            methods,
+            stubbed: BTreeMap::new(),
+            fixtures,
+            singular_assocs,
+            setup: None,
+            body: None,
+            helpers: Vec::new(),
+            signatures,
+            answer_slots: BTreeMap::new(),
+        }
     }
 
     #[cfg(test)]
@@ -577,6 +635,10 @@ impl AppMethods {
             fixtures: BTreeMap::new(),
             singular_assocs: BTreeMap::new(),
             setup: None,
+            body: None,
+            helpers: Vec::new(),
+            signatures: BTreeMap::new(),
+            answer_slots: BTreeMap::new(),
         }
     }
 
@@ -599,6 +661,30 @@ impl AppMethods {
             ExprNode::Send { recv: None, method, args, block: None, .. } if args.len() == 1 => {
                 self.fixtures.get(method.as_str()).cloned()
             }
+            // A memoized helper (an RSpec `let`): the class of the value
+            // it memoizes.
+            ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
+                let helper = self.helpers.iter().find(|h| &h.name == method)?;
+                let value = find_let_value(&helper.body)?;
+                self.class_of_head(&value)
+            }
+            // A local the same body assigned.
+            ExprNode::Var { name, .. } => {
+                let body = self.body.as_ref()?;
+                let assigned = find_var_assignment(body, name)?;
+                self.class_of_head(&assigned)
+            }
+            // `Klass.new(...)` and the finders that answer an instance.
+            ExprNode::Send { recv: Some(k), method, block: None, .. }
+                if matches!(
+                    method.as_str(),
+                    "new" | "create" | "create!" | "find" | "find_by!" | "first" | "first!" | "last" | "last!" | "take" | "take!"
+                ) =>
+            {
+                let ExprNode::Const { path } = &*k.node else { return None };
+                let class = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+                self.signatures.keys().any(|(c, _, _)| c == &class).then_some(class)
+            }
             ExprNode::Ivar { name } => {
                 let setup = self.setup.as_ref()?;
                 let assigned = find_ivar_assignment(setup, name)?;
@@ -611,6 +697,45 @@ impl AppMethods {
             _ => None,
         }
     }
+}
+
+/// The value a memoized helper stores: the `@__let_<name> = <value>` an
+/// RSpec `let` is read as (`ingest::spec`).
+fn find_let_value(body: &Expr) -> Option<Expr> {
+    let mut found: Option<Expr> = None;
+    fn walk(e: &Expr, found: &mut Option<Expr>) {
+        if found.is_some() {
+            return;
+        }
+        if let ExprNode::Assign { target: LValue::Ivar { name }, value } = &*e.node {
+            if name.as_str().starts_with("__let_") && !name.as_str().starts_with("__let_set_") {
+                *found = Some(value.clone());
+                return;
+            }
+        }
+        e.node.for_each_child(&mut |c| walk(c, found));
+    }
+    walk(body, &mut found);
+    found
+}
+
+/// The value the first `name = …` in `body` assigns, if any.
+fn find_var_assignment(body: &Expr, name: &Symbol) -> Option<Expr> {
+    let mut found: Option<Expr> = None;
+    fn walk(e: &Expr, name: &Symbol, found: &mut Option<Expr>) {
+        if found.is_some() {
+            return;
+        }
+        if let ExprNode::Assign { target: LValue::Var { name: n, .. }, value } = &*e.node {
+            if n == name {
+                *found = Some(value.clone());
+                return;
+            }
+        }
+        e.node.for_each_child(&mut |c| walk(c, name, found));
+    }
+    walk(body, name, &mut found);
+    found
 }
 
 /// The value the last `@name = …` in `body` assigns, if any.
@@ -1091,10 +1216,351 @@ fn lower_chain(span: crate::span::Span, chain: Chain, ctx: &mut AppMethods) -> O
             return Some(served);
         }
     }
+    if let Some(served) = lower_app_answer(span, &chain, ctx) {
+        return Some(served);
+    }
     if chain.instance.is_some() {
         return None;
     }
     Some(bridge_chain(span, chain))
+}
+
+/// An app-method chain the instance slot above does not serve, as an
+/// entry in the method's typed ANSWER slot: a class method
+/// (`Current.stubs(:site_manager)`), a library class's method, a
+/// `returns(v)`, a `with(...)` of plain values and `anything`.
+///
+/// ```text
+///   Current.stubs(:site_manager).returns(sm)
+///     MochaSlots::CURRENT__SITE_MANAGER__C_STUBS << MochaStub.stub("Current.site_manager")
+///     MochaSlots::CURRENT__SITE_MANAGER__C_ANSWERS << sm
+///   manager.stubs(:config).with(:settings).returns(s)
+///     …_STUBS << MochaStub.stub("SiteManager#config")
+///     …_OWNERS << manager                       # nil for any_instance
+///     …_KEY0 << :settings ; …_ANY0 << false     # `anything`: nil, true
+///     …_ANSWERS << s
+/// ```
+///
+/// `guard_answer_slots` gives the method the guard that reads them.
+/// `None` (and the bridge) for a method with keyword, rest or optional
+/// parameters, no analyzed signature, a `with` matcher other than
+/// `anything` / `any_parameters`, a block, or a link this slot has no
+/// field for.
+fn lower_app_answer(span: crate::span::Span, chain: &Chain, ctx: &mut AppMethods) -> Option<Expr> {
+    let class_side = chain.instance.is_none() && !chain.any_instance;
+    let key = (chain.path.clone(), chain.method.as_str().to_string(), class_side);
+    let (params, signature) = ctx.signatures.get(&key)?.clone();
+    if params.iter().any(|p| p.keyword || p.rest || p.forwarding || p.default.is_some()) {
+        return None;
+    }
+    let Some(Ty::Fn { params: param_tys, ret, .. }) = signature else { return None };
+    if param_tys.len() != params.len() {
+        return None;
+    }
+    let mut count: Option<Expr> = None;
+    let mut raises: Option<String> = None;
+    let mut returns: Option<Expr> = None;
+    let mut with: Option<Vec<Expr>> = None;
+    for op in &chain.ops {
+        if op.block.is_some() {
+            return None;
+        }
+        if let Some(n) = count_of(op) {
+            if count.replace(n).is_some() {
+                return None;
+            }
+            continue;
+        }
+        match (op.name.as_str(), op.args.as_slice()) {
+            ("raises", [e]) if raises.is_none() => raises = Some(exception_class_name(e)?),
+            ("returns", [v]) if returns.is_none() => returns = Some(v.clone()),
+            ("with", args) if with.is_none() => with = Some(args.to_vec()),
+            _ => return None,
+        }
+    }
+    let is_matcher = |e: &Expr, name: &str| {
+        matches!(&*e.node, ExprNode::Send { recv: None, method, args, block: None, .. } if method.as_str() == name && args.is_empty())
+    };
+    let mentions_matcher = |e: &Expr| {
+        let mut hit = false;
+        fn walk(e: &Expr, hit: &mut bool) {
+            if let ExprNode::Send { recv: None, method, .. } = &*e.node {
+                if MATCHERS.contains(&method.as_str()) {
+                    *hit = true;
+                }
+            }
+            e.node.for_each_child(&mut |c| walk(c, hit));
+        }
+        walk(e, &mut hit);
+        hit
+    };
+    let keys: Vec<Option<Expr>> = match with {
+        None => vec![None; params.len()],
+        Some(args) if args.len() == 1 && is_matcher(&args[0], "any_parameters") => vec![None; params.len()],
+        Some(args) if args.len() == params.len() => {
+            let mut keys = Vec::new();
+            for a in args {
+                if is_matcher(&a, "anything") {
+                    keys.push(None);
+                } else if mentions_matcher(&a) {
+                    return None;
+                } else {
+                    keys.push(Some(a));
+                }
+            }
+            keys
+        }
+        Some(_) => return None,
+    };
+
+    let name = format!("{}{}{}", chain.path, if class_side { "." } else { "#" }, chain.method.as_str());
+    let stem = slot_stem(&key);
+    let slot = ctx.answer_slots.entry(key).or_insert_with(|| AnswerSlot {
+        stem: stem.clone(),
+        params: params.iter().zip(param_tys.iter()).map(|(p, t)| (p.name.clone(), (*t.ty).clone())).collect(),
+        ret: (*ret).clone(),
+        exceptions: BTreeSet::new(),
+    });
+    if let Some(e) = &raises {
+        slot.exceptions.insert(e.clone());
+    }
+
+    let mocha_stub = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("MochaStub")] });
+    let mut stub = match (chain.kind.as_str(), count) {
+        ("expects", count) => call(span, mocha_stub, "expect", vec![str_lit(span, &name), count.unwrap_or_else(|| int_lit(span, 1))]),
+        ("stubs", Some(n)) => call(span, mocha_stub, "expect", vec![str_lit(span, &name), n]),
+        (_, None) => call(span, mocha_stub, "stub", vec![str_lit(span, &name)]),
+        _ => return None,
+    };
+    if let Some(e) = &raises {
+        stub = call(span, stub, "raising", vec![str_lit(span, e)]);
+    }
+    let nil = || Expr::new(span, ExprNode::Lit { value: Literal::Nil });
+    let push = |field: &str, value: Expr| {
+        let holder = Expr::new(span, ExprNode::Const { path: vec![Symbol::from(SLOTS_CLASS), Symbol::from(format!("{stem}_{field}"))] });
+        call(span, holder, "<<", vec![value])
+    };
+    let mut stmts = vec![push("STUBS", stub)];
+    if !class_side {
+        stmts.push(push("OWNERS", chain.instance.clone().unwrap_or_else(nil)));
+    }
+    for (j, k) in keys.into_iter().enumerate() {
+        let any = k.is_none();
+        stmts.push(push(&format!("KEY{j}"), k.unwrap_or_else(nil)));
+        stmts.push(push(&format!("ANY{j}"), Expr::new(span, ExprNode::Lit { value: Literal::Bool { value: any } })));
+    }
+    stmts.push(push("ANSWERS", returns.unwrap_or_else(nil)));
+    Some(Expr::new(span, ExprNode::Seq { exprs: stmts }))
+}
+
+/// The library class that holds every answer slot's arrays.
+const SLOTS_CLASS: &str = "MochaSlots";
+
+/// `("SiteManager", "config", false)` -> `SITE_MANAGER__CONFIG__I`: a
+/// constant-name stem, unique per (class, method, side).
+fn slot_stem((class, method, class_side): &(String, String, bool)) -> String {
+    let word = |s: &str| {
+        crate::naming::underscore(s)
+            .replace("::", "_")
+            .replace('/', "_")
+            .replace('?', "_P")
+            .replace('!', "_B")
+            .replace('=', "_EQ")
+            .to_uppercase()
+    };
+    format!("{}__{}__{}", word(class), word(method), if *class_side { "C" } else { "I" })
+}
+
+/// Give every method with an answer slot the guard that reads it, ahead
+/// of its body, and declare the slot's arrays on `MochaSlots`:
+///
+/// ```ruby
+///   def config(key)
+///     __mocha_i = MochaSlots::SITE_MANAGER__CONFIG__I_STUBS.length - 1
+///     __mocha_unmatched = false
+///     while __mocha_i >= 0
+///       __mocha_s = MochaSlots::SITE_MANAGER__CONFIG__I_STUBS[__mocha_i]
+///       __mocha_o = MochaSlots::SITE_MANAGER__CONFIG__I_OWNERS[__mocha_i]
+///       if __mocha_s.live? && (__mocha_o.nil? || __mocha_o.equal?(self))
+///         if MochaSlots::…_ANY0[__mocha_i] || MochaSlots::…_KEY0[__mocha_i] == key
+///           __mocha_s.record!
+///           raise Klass if __mocha_s.raises == "Klass"
+///           return MochaSlots::…_ANSWERS[__mocha_i]
+///         end
+///         __mocha_unmatched = true
+///       end
+///       __mocha_i = __mocha_i - 1
+///     end
+///     raise "unexpected invocation: SiteManager#config" if __mocha_unmatched
+///     <body>
+///   end
+/// ```
+///
+/// The newest matching entry answers, as in mocha; an entry filed in an
+/// earlier test is not live (`MochaStub#live?`). A call that no entry
+/// admits, on a method a live entry stubs, is mocha's unexpected
+/// invocation. Everything inserted is typed as it is built: this runs
+/// after analysis.
+fn guard_answer_slots(app: &mut App, slots: &BTreeMap<(String, String, bool), AnswerSlot>) {
+    if slots.is_empty() {
+        return;
+    }
+    let with_ty = crate::lower::typing::with_ty;
+    let sp = crate::span::Span::synthetic;
+    let stub_ty = || Ty::Class { id: ClassId(Symbol::from("MochaStub")), args: vec![].into() };
+    let nullable = |t: Ty| match t {
+        Ty::Nil => Ty::Nil,
+        Ty::Union { .. } if t.clone().strip_nil() != t => t,
+        other => Ty::Union { variants: vec![other, Ty::Nil].into() },
+    };
+    let array = |t: Ty| Ty::Array { elem: std::sync::Arc::new(t) };
+    let mut constants: Vec<(Symbol, Expr)> = Vec::new();
+    for ((class, method, class_side), slot) in slots {
+        let field = |name: &str| Symbol::from(format!("{}_{name}", slot.stem));
+        let owner_ty = nullable(Ty::Class { id: ClassId(Symbol::from(class.as_str())), args: vec![].into() });
+        let answer_ty = nullable(slot.ret.clone());
+        let mut fields: Vec<(String, Ty)> = vec![("STUBS".into(), stub_ty())];
+        if !class_side {
+            fields.push(("OWNERS".into(), owner_ty.clone()));
+        }
+        for (j, (_, t)) in slot.params.iter().enumerate() {
+            fields.push((format!("KEY{j}"), nullable(t.clone())));
+            fields.push((format!("ANY{j}"), Ty::Bool));
+        }
+        fields.push(("ANSWERS".into(), answer_ty.clone()));
+        for (name, elem) in &fields {
+            let empty = with_ty(Expr::new(sp(), ExprNode::Array { elements: Vec::new(), style: Default::default() }), array(elem.clone()));
+            constants.push((field(name), empty));
+        }
+
+        let read = |name: &str, elem: Ty| {
+            let holder = with_ty(
+                Expr::new(sp(), ExprNode::Const { path: vec![Symbol::from(SLOTS_CLASS), field(name)] }),
+                array(elem.clone()),
+            );
+            let i = with_ty(Expr::new(sp(), ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("__mocha_i") }), Ty::Int);
+            with_ty(call(sp(), holder, "[]", vec![i]), elem)
+        };
+        let var = |name: &str, t: Ty| with_ty(Expr::new(sp(), ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from(name) }), t);
+        let assign = |name: &str, value: Expr| {
+            Expr::new(sp(), ExprNode::Assign { target: LValue::Var { id: crate::ident::VarId(0), name: Symbol::from(name) }, value })
+        };
+        let int = |n: i64| with_ty(int_lit(sp(), n), Ty::Int);
+        let bool_lit = |b: bool| with_ty(Expr::new(sp(), ExprNode::Lit { value: Literal::Bool { value: b } }), Ty::Bool);
+        let typed_call = |recv: Expr, m: &str, args: Vec<Expr>, t: Ty| with_ty(call(sp(), recv, m, args), t);
+        let or = |l: Expr, r: Expr| {
+            with_ty(Expr::new(sp(), ExprNode::BoolOp { op: crate::expr::BoolOpKind::Or, surface: Default::default(), left: l, right: r }), Ty::Bool)
+        };
+        let and = |l: Expr, r: Expr| {
+            with_ty(Expr::new(sp(), ExprNode::BoolOp { op: crate::expr::BoolOpKind::And, surface: Default::default(), left: l, right: r }), Ty::Bool)
+        };
+        let nil_lit = || with_ty(Expr::new(sp(), ExprNode::Lit { value: Literal::Nil }), Ty::Nil);
+
+        let stubs = with_ty(
+            Expr::new(sp(), ExprNode::Const { path: vec![Symbol::from(SLOTS_CLASS), field("STUBS")] }),
+            array(stub_ty()),
+        );
+        let length = typed_call(stubs, "length", vec![], Ty::Int);
+        let start = assign("__mocha_i", typed_call(length, "-", vec![int(1)], Ty::Int));
+        let unmatched0 = assign("__mocha_unmatched", bool_lit(false));
+
+        // The entry admits the call: every keyed position equal.
+        let mut admits = bool_lit(true);
+        for (j, (pname, pty)) in slot.params.iter().enumerate() {
+            let param = with_ty(Expr::new(sp(), ExprNode::Var { id: crate::ident::VarId(0), name: pname.clone() }), pty.clone());
+            let any = read(&format!("ANY{j}"), Ty::Bool);
+            let key = read(&format!("KEY{j}"), nullable(pty.clone()));
+            let eq = typed_call(key, "==", vec![param], Ty::Bool);
+            admits = and(admits, or(any, eq));
+        }
+        let mut hit: Vec<Expr> = vec![typed_call(var("__mocha_s", stub_ty()), "record!", vec![], Ty::Nil)];
+        for e in &slot.exceptions {
+            let konst = Expr::new(sp(), ExprNode::Const { path: e.split("::").map(Symbol::from).collect() });
+            let raises = typed_call(var("__mocha_s", stub_ty()), "raises", vec![], Ty::Str);
+            let is = typed_call(raises, "==", vec![str_lit(sp(), e)], Ty::Bool);
+            hit.push(Expr::new(sp(), ExprNode::If { cond: is, then_branch: Expr::new(sp(), ExprNode::Raise { value: konst }), else_branch: nil_lit() }));
+        }
+        hit.push(Expr::new(sp(), ExprNode::Return { value: read("ANSWERS", answer_ty.clone()) }));
+        let on_hit = Expr::new(
+            sp(),
+            ExprNode::If { cond: admits, then_branch: Expr::new(sp(), ExprNode::Seq { exprs: hit }), else_branch: nil_lit() },
+        );
+        let live = typed_call(var("__mocha_s", stub_ty()), "live?", vec![], Ty::Bool);
+        let mut entry_stmts = vec![assign("__mocha_s", read("STUBS", stub_ty()))];
+        let applies = if *class_side {
+            live
+        } else {
+            entry_stmts.push(assign("__mocha_o", read("OWNERS", owner_ty.clone())));
+            let o = || var("__mocha_o", owner_ty.clone());
+            let self_ref = with_ty(Expr::new(sp(), ExprNode::SelfRef), Ty::Class { id: ClassId(Symbol::from(class.as_str())), args: vec![].into() });
+            let mine = or(typed_call(o(), "nil?", vec![], Ty::Bool), typed_call(o(), "equal?", vec![self_ref], Ty::Bool));
+            and(live, mine)
+        };
+        let considered = Expr::new(
+            sp(),
+            ExprNode::If {
+                cond: applies,
+                then_branch: Expr::new(sp(), ExprNode::Seq { exprs: vec![on_hit, assign("__mocha_unmatched", bool_lit(true))] }),
+                else_branch: nil_lit(),
+            },
+        );
+        entry_stmts.push(considered);
+        entry_stmts.push(assign("__mocha_i", typed_call(var("__mocha_i", Ty::Int), "-", vec![int(1)], Ty::Int)));
+        let lp = Expr::new(
+            sp(),
+            ExprNode::While {
+                cond: typed_call(var("__mocha_i", Ty::Int), ">=", vec![int(0)], Ty::Bool),
+                body: Expr::new(sp(), ExprNode::Seq { exprs: entry_stmts }),
+                until_form: false,
+            },
+        );
+        let name = format!("{class}{}{method}", if *class_side { "." } else { "#" });
+        let message = with_ty(str_lit(sp(), &format!("unexpected invocation: {name}")), Ty::Str);
+        let refuse = Expr::new(
+            sp(),
+            ExprNode::If {
+                cond: var("__mocha_unmatched", Ty::Bool),
+                then_branch: Expr::new(sp(), ExprNode::Raise { value: message }),
+                else_branch: nil_lit(),
+            },
+        );
+        let guard = vec![start, unmatched0, lp, refuse];
+
+        let receiver = if *class_side { MethodReceiver::Class } else { MethodReceiver::Instance };
+        let prepend = |def: &mut MethodDef| {
+            let body = std::mem::replace(&mut def.body, Expr::new(sp(), ExprNode::Lit { value: Literal::Nil }));
+            let mut exprs = guard.clone();
+            match *body.node {
+                ExprNode::Seq { exprs: rest } => exprs.extend(rest),
+                _ => exprs.push(body),
+            }
+            def.body = Expr::new(sp(), ExprNode::Seq { exprs });
+        };
+        if let Some(model) = app.models.iter_mut().find(|m| m.name.0.as_str() == class) {
+            if let Some(def) = model.methods_mut().find(|d| d.name.as_str() == method && d.receiver == receiver) {
+                prepend(def);
+            }
+        } else if let Some(lc) = app.library_classes.iter_mut().find(|c| c.name.0.as_str() == class) {
+            if let Some(def) = lc.methods.iter_mut().find(|d| d.name.as_str() == method && d.receiver == receiver) {
+                prepend(def);
+            }
+        }
+    }
+    app.library_classes.push(crate::dialect::LibraryClass {
+        name: ClassId(Symbol::from(SLOTS_CLASS)),
+        is_module: false,
+        parent: None,
+        parent_span: Default::default(),
+        includes: Vec::new(),
+        include_spans: Vec::new(),
+        methods: Vec::new(),
+        nullable_columns: Vec::new(),
+        origin: None,
+        constants,
+        unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
+        conditional_definitions: Vec::new(),
+    });
 }
 
 /// The class a receiver's static type names, its nil arm stripped.

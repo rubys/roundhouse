@@ -9866,7 +9866,17 @@ fn apply_test_gem_wiring(files: &mut Vec<(String, String)>) {
             needed.push((gem, entry));
         }
     }
-    if needed.is_empty() {
+    // A test whose stubs `lower::mocha` served entirely as app-method
+    // slots (`MochaStub.` / `MochaSlots::`) names no gem, but its slots
+    // still need the clear between tests and the verify after each, or a
+    // stub filed by one test answers in the next.
+    let uses_app_stub_slots = files.iter().any(|(p, c)| {
+        p.starts_with("test/")
+            && p.ends_with(".rb")
+            && p != "test/test_helper.rb"
+            && (c.contains("MochaStub.") || c.contains("MochaSlots::"))
+    });
+    if needed.is_empty() && !uses_app_stub_slots {
         return;
     }
     // One require, in the helper every test file loads — the place the
@@ -9899,7 +9909,7 @@ fn apply_test_gem_wiring(files: &mut Vec<(String, String)>) {
         }
         let with_mocha = needed.iter().any(|(gem, _)| *gem == "mocha");
         let with_webmock = needed.iter().any(|(gem, _)| *gem == "webmock");
-        if with_mocha || with_webmock {
+        if with_mocha || with_webmock || uses_app_stub_slots {
             patch_stub_lifecycle(helper, with_mocha);
         }
         if with_webmock {

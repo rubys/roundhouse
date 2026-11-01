@@ -7,8 +7,10 @@ class MochaStub
   def raises: () -> String
   def record!: () -> nil
   def verify!: () -> nil
+  def live?: () -> bool
   ANY_INSTANCE: Hash[String, MochaStub]
   PENDING: Array[MochaStub]
+  GENERATION: Array[Integer]
   def self.file_any_instance: (String name, MochaStub stub) -> MochaStub
   def self.any_instance_for: (String name) -> MochaStub?
   def self.pending_expectations: () -> Array[MochaStub]
