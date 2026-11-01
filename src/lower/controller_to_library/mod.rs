@@ -2599,10 +2599,15 @@ fn reads_action_name(
     // as an inline callback. Inspect that binding from source too.
     let contextual_views = view_ivars.values().any(|view| view.uses_action_name);
     let renders_with_action_name = |c: &Controller, e: &Expr| {
-        contextual_views && reads(&rewrite_render_to_views(
-            e, views_module_name(c).as_deref(), &[], view_ivars, partials,
-            "", false, false, &[],
-        ))
+        contextual_views && {
+            // This is only a query. Actual body lowering owns any
+            // diagnostics; inspecting its binding must not report them.
+            let (bound, _) = crate::emit::diagnostics::scope(|| rewrite_render_to_views(
+                e, views_module_name(c).as_deref(), &[], view_ivars, partials,
+                "", false, false, &[],
+            ));
+            reads(&bound)
+        }
     };
     dispatched.iter().any(|e| reads(e))
         || chain.iter().any(|c| {
@@ -2616,6 +2621,48 @@ fn reads_action_name(
                         .any(reads)
                 })
         })
+}
+
+#[cfg(test)]
+mod action_name_probe_tests {
+    use super::*;
+
+    #[test]
+    fn action_name_probe_does_not_report_serializer_diagnostics() {
+        let tree = [
+            ("db/schema.rb", "ActiveRecord::Schema.define(version: 1) do\nend\n"),
+            ("config/routes.rb", "Rails.application.routes.draw do\n  get '/probes', to: 'probes#index'\nend\n"),
+            ("app/controllers/probes_controller.rb", "class ProbesController < ActionController::Base\n  def index\n    render json: { value: 1 }, serializer: :custom\n  end\nend\n"),
+        ].into_iter().map(|(path, source)| {
+            (std::path::PathBuf::from(path), source.as_bytes().to_vec())
+        }).collect();
+        let app = crate::ingest::ingest_app_from_tree(tree).expect("ingest probe");
+        let controller = app.controllers.iter()
+            .find(|c| c.name.0.as_str() == "ProbesController").expect("probe controller");
+        let mut views = ViewIvarMap::default();
+        views.insert(("Probes".into(), "context".into()),
+            crate::lower::view_to_library::ViewArgs {
+                uses_action_name: true,
+                ..Default::default()
+            });
+        let partials = PartialMap::default();
+        let (reads, inspection) = crate::emit::diagnostics::scope(|| {
+            reads_action_name(controller, &app.controllers, &[], &views, &partials)
+        });
+        assert!(!reads);
+        assert!(inspection.is_empty(), "inspection reported diagnostics: {inspection:?}");
+
+        // Isolating inspection must not hide the real lowering refusal.
+        let action = controller.actions().next().expect("index action");
+        let (_, actual) = crate::emit::diagnostics::scope(|| {
+            rewrite_render_to_views(&action.body, Some("Probes"), &[], &views,
+                &partials, "index", true, false, &[])
+        });
+        assert_eq!(actual.len(), 1, "actual lowering diagnostics: {actual:?}");
+        assert!(matches!(&actual[0].kind,
+            crate::diagnostic::DiagnosticKind::LowerResidue { reason, .. }
+                if reason.as_str() == "serializer_render_not_modelled"), "{:?}", actual[0]);
+    }
 }
 
 fn body_renders_partial(e: &Expr) -> bool {

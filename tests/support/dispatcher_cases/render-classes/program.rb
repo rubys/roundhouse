@@ -16,8 +16,11 @@ def observe(label, klass)
   selected = {}
   headers.each { |key, value| selected[key.downcase] = value if ["x-before", "x-after", "x-observed", "location"].include?(key.downcase) }
   selected["location"] = URI.parse(selected["location"]).request_uri if selected["location"]&.start_with?("http")
+  observation = {case: label}
+  observation[:encoded_body] = body if label == "encoded"
   decoded = begin JSON.parse(body); rescue JSON::ParserError; body; end
-  puts JSON.generate({case: label, value: [status, decoded, selected]})
+  observation[:value] = [status, decoded, selected]
+  puts JSON.generate(observation)
 rescue => error
   puts JSON.generate({case: label, error: error.class.name, message: error.message})
 end
