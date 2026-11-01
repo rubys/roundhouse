@@ -51,6 +51,54 @@ raise "send_json content type" unless controller.content_type == "application/js
 controller = ContentProbesController.new
 controller.process_action(:inherited_charset)
 raise "inherited_charset content type" unless controller.content_type == "text/csv; charset=iso-8859-1"
+controller = ContentProbesController.new
+controller.process_action(:new_symbol_type)
+raise "new_symbol_type content type" unless controller.content_type == "text/csv; charset=utf-8"
+controller = ContentProbesController.new
+controller.process_action(:inherited_trailing_parameter)
+raise "inherited_trailing_parameter content type" unless controller.content_type == "text/csv; charset=iso-8859-1"
+controller = ContentProbesController.new
+controller.process_action(:inherited_quoted)
+raise "inherited_quoted content type" unless controller.content_type == "text/csv; charset=iso-8859-1"
+controller = ContentProbesController.new
+controller.process_action(:inherited_trailing_space)
+raise "inherited_trailing_space content type" unless controller.content_type == "text/csv; charset=iso-8859-1"
+controller = ContentProbesController.new
+controller.process_action(:inherited_uppercase_value)
+raise "inherited_uppercase_value content type" unless controller.content_type == "text/csv; charset=iso-8859-1"
+controller = ContentProbesController.new
+controller.process_action(:inherited_uppercase_key)
+raise "inherited_uppercase_key content type" unless controller.content_type == "text/csv; charset=utf-8"
+controller = ContentProbesController.new
+controller.process_action(:inherited_no_charset)
+raise "inherited_no_charset content type" unless controller.content_type == "text/csv; charset=utf-8"
+controller = ContentProbesController.new
+controller.process_action(:inherited_empty_charset)
+raise "inherited_empty_charset content type" unless controller.content_type == "text/csv; charset=utf-8"
+controller = ContentProbesController.new
+controller.process_action(:inherited_other_parameter)
+raise "inherited_other_parameter content type" unless controller.content_type == "text/csv; charset=utf-8"
+controller = ContentProbesController.new
+controller.process_action(:inherited_duplicate_charset)
+raise "inherited_duplicate_charset content type" unless controller.content_type == "text/csv; charset=iso-8859-1"
+controller = ContentProbesController.new
+controller.process_action(:inherited_boundary_before)
+raise "inherited_boundary_before content type" unless controller.content_type == "text/csv; boundary=new; charset=iso-8859-1"
+controller = ContentProbesController.new
+controller.process_action(:new_quoted_charset)
+raise "new_quoted_charset content type" unless controller.content_type == "text/csv; charset=iso-8859-1"
+controller = ContentProbesController.new
+controller.process_action(:new_trailing_parameter)
+raise "new_trailing_parameter content type" unless controller.content_type == "text/csv; charset=iso-8859-1"
+controller = ContentProbesController.new
+controller.process_action(:new_uppercase_value)
+raise "new_uppercase_value content type" unless controller.content_type == "text/csv; charset=iso-8859-1"
+controller = ContentProbesController.new
+controller.process_action(:new_uppercase_key)
+raise "new_uppercase_key content type" unless controller.content_type == "text/csv; Charset=iso-8859-1; charset=utf-8"
+controller = ContentProbesController.new
+controller.process_action(:new_empty_charset)
+raise "new_empty_charset content type" unless controller.content_type == "text/csv; charset=utf-8"
 puts "response content types passed"
 "#);
     run.assert_passes();

@@ -52,7 +52,7 @@ fn content_type_css_with_only_a_format_agnostic_template_renders_it_as_css() {
             r#"
 status, headers, body = Main.run_rack("REQUEST_METHOD" => "GET", "PATH_INFO" => "/gadget.css", "QUERY_STRING" => "", "rack.input" => StringIO.new(""))
 raise "status #{status}" unless status == 200
-raise "Content-Type #{headers["content-type"].inspect}" unless headers["content-type"] == "text/css"
+raise "Content-Type #{headers["content-type"].inspect}" unless headers["content-type"] == "text/css; charset=utf-8"
 raise "body #{body.join.inspect}" unless body.join.strip == ".gadget { color: teal; }"
 puts "ALL OK"
 "#,

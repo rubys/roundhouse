@@ -72,7 +72,7 @@ show = ->(id) { c = ArticleJsonController.new; c.params = {"id" => id.to_s}; c.p
 c = show.(a.id)
 expected = '{"id":' + a.id.to_s + ',"title":"Hello","summary":"A lon","text":"A long body","shout":"HELLO","public_note":"public"}'
 raise c.body.inspect unless c.body == expected
-raise c.content_type.inspect unless c.content_type == "application/json"
+raise c.content_type.inspect unless c.content_type == "application/json; charset=utf-8"
 c = show.(d.id)
 expected = '{"id":' + d.id.to_s + ',"title":"Draft one","summary":"A lon","text":"A long draft","shout":"DRAFT ONE","draft_note":"draft"}'
 raise c.body.inspect unless c.body == expected

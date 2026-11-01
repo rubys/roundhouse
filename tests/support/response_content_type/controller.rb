@@ -49,4 +49,62 @@ class ContentProbesController < ActionController::API
     self.content_type = "text/html; charset=iso-8859-1"
     render plain: "ok", content_type: "text/csv"
   end
+  def new_symbol_type
+    render plain: "ok", content_type: :csv
+  end
+  def inherited_trailing_parameter
+    self.content_type = "text/html; charset=iso-8859-1; profile=old"
+    render plain: "ok", content_type: "text/csv"
+  end
+  def inherited_quoted
+    self.content_type = "text/html; charset=\"iso-8859-1\""
+    render plain: "ok", content_type: "text/csv"
+  end
+  def inherited_trailing_space
+    self.content_type = "text/html; charset=iso-8859-1 "
+    render plain: "ok", content_type: "text/csv"
+  end
+  def inherited_uppercase_value
+    self.content_type = "text/html; charset=ISO-8859-1"
+    render plain: "ok", content_type: "text/csv"
+  end
+  def inherited_uppercase_key
+    self.content_type = "text/html; Charset=iso-8859-1"
+    render plain: "ok", content_type: "text/csv"
+  end
+  def inherited_no_charset
+    self.content_type = "text/html"
+    render plain: "ok", content_type: "text/csv"
+  end
+  def inherited_empty_charset
+    self.content_type = "text/html; charset="
+    render plain: "ok", content_type: "text/csv"
+  end
+  def inherited_other_parameter
+    self.content_type = "text/html; xcharset=iso-8859-1"
+    render plain: "ok", content_type: "text/csv"
+  end
+  def inherited_duplicate_charset
+    self.content_type = "text/html; charset=iso-8859-1; charset=utf-8"
+    render plain: "ok", content_type: "text/csv"
+  end
+  def inherited_boundary_before
+    self.content_type = "text/html; boundary=old; charset=iso-8859-1"
+    render plain: "ok", content_type: "text/csv; boundary=new"
+  end
+  def new_quoted_charset
+    render plain: "ok", content_type: 'text/csv; charset="iso-8859-1"'
+  end
+  def new_trailing_parameter
+    render plain: "ok", content_type: "text/csv; charset=iso-8859-1; profile=new"
+  end
+  def new_uppercase_value
+    render plain: "ok", content_type: "text/csv; charset=ISO-8859-1"
+  end
+  def new_uppercase_key
+    render plain: "ok", content_type: "text/csv; Charset=iso-8859-1"
+  end
+  def new_empty_charset
+    render plain: "ok", content_type: "text/csv; charset="
+  end
 end

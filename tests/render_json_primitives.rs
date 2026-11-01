@@ -27,7 +27,7 @@ require_relative "app/controllers/payloads_controller"
 controller = PayloadsController.new
 controller.process_action(:show)
 raise "wrong status" unless controller.status == 202
-raise "wrong content type" unless controller.content_type == "application/json"
+raise "wrong content type" unless controller.content_type == "application/json; charset=utf-8"
 raise controller.body unless controller.body == '{"message":"hello\n\"world\"","html":"\u003cb\u003e\u0026\u003c/b\u003e","count":2,"active":true,"missing":null,"nested":{"tags":["one","two"],"empty":[],"object":{}}}'
 controller = PayloadsController.new
 controller.process_action(:index)

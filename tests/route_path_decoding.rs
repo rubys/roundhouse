@@ -25,7 +25,7 @@ cases = [
 cases.each do |segment, expected|
   status, headers, body = Main.run_rack("REQUEST_METHOD" => "GET", "PATH_INFO" => "/echo/#{segment}".b, "QUERY_STRING" => "", "rack.input" => StringIO.new(""))
   raise "status #{segment}: #{status}" unless status == 200
-  raise "content type #{segment}: #{headers.inspect}" unless headers["content-type"] == "text/plain"
+  raise "content type #{segment}: #{headers.inspect}" unless headers["content-type"] == "text/plain; charset=utf-8"
   raise "body #{segment}: #{body.inspect}" unless body.join == expected
 end
 puts "PASS percent-decoded controller paths (emitted text/plain header retained)"

@@ -21,6 +21,22 @@ const ROUTES: &str = r#"Rails.application.routes.draw do
   get "/head_no_content", to: "content_probes#head_no_content"
   get "/send_json", to: "content_probes#send_json"
   get "/inherited_charset", to: "content_probes#inherited_charset"
+  get "/new_symbol_type", to: "content_probes#new_symbol_type"
+  get "/inherited_trailing_parameter", to: "content_probes#inherited_trailing_parameter"
+  get "/inherited_quoted", to: "content_probes#inherited_quoted"
+  get "/inherited_trailing_space", to: "content_probes#inherited_trailing_space"
+  get "/inherited_uppercase_value", to: "content_probes#inherited_uppercase_value"
+  get "/inherited_uppercase_key", to: "content_probes#inherited_uppercase_key"
+  get "/inherited_no_charset", to: "content_probes#inherited_no_charset"
+  get "/inherited_empty_charset", to: "content_probes#inherited_empty_charset"
+  get "/inherited_other_parameter", to: "content_probes#inherited_other_parameter"
+  get "/inherited_duplicate_charset", to: "content_probes#inherited_duplicate_charset"
+  get "/inherited_boundary_before", to: "content_probes#inherited_boundary_before"
+  get "/new_quoted_charset", to: "content_probes#new_quoted_charset"
+  get "/new_trailing_parameter", to: "content_probes#new_trailing_parameter"
+  get "/new_uppercase_value", to: "content_probes#new_uppercase_value"
+  get "/new_uppercase_key", to: "content_probes#new_uppercase_key"
+  get "/new_empty_charset", to: "content_probes#new_empty_charset"
 end
 "#;
 

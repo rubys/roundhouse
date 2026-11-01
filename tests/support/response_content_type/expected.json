@@ -78,5 +78,85 @@
     "inherited_charset",
     200,
     "text/csv; charset=iso-8859-1"
+  ],
+  [
+    "new_symbol_type",
+    200,
+    "text/csv; charset=utf-8"
+  ],
+  [
+    "inherited_trailing_parameter",
+    200,
+    "text/csv; charset=iso-8859-1"
+  ],
+  [
+    "inherited_quoted",
+    200,
+    "text/csv; charset=iso-8859-1"
+  ],
+  [
+    "inherited_trailing_space",
+    200,
+    "text/csv; charset=iso-8859-1"
+  ],
+  [
+    "inherited_uppercase_value",
+    200,
+    "text/csv; charset=iso-8859-1"
+  ],
+  [
+    "inherited_uppercase_key",
+    200,
+    "text/csv; charset=utf-8"
+  ],
+  [
+    "inherited_no_charset",
+    200,
+    "text/csv; charset=utf-8"
+  ],
+  [
+    "inherited_empty_charset",
+    200,
+    "text/csv; charset=utf-8"
+  ],
+  [
+    "inherited_other_parameter",
+    200,
+    "text/csv; charset=utf-8"
+  ],
+  [
+    "inherited_duplicate_charset",
+    200,
+    "text/csv; charset=iso-8859-1"
+  ],
+  [
+    "inherited_boundary_before",
+    200,
+    "text/csv; boundary=new; charset=iso-8859-1"
+  ],
+  [
+    "new_quoted_charset",
+    200,
+    "text/csv; charset=iso-8859-1"
+  ],
+  [
+    "new_trailing_parameter",
+    200,
+    "text/csv; charset=iso-8859-1"
+  ],
+  [
+    "new_uppercase_value",
+    200,
+    "text/csv; charset=iso-8859-1"
+  ],
+  [
+    "new_uppercase_key",
+    200,
+    "text/csv; Charset=iso-8859-1; charset=utf-8"
+  ],
+  [
+    "new_empty_charset",
+    200,
+    "text/csv; charset=utf-8"
   ]
 ]

@@ -60,7 +60,7 @@ fn css_erb_view_renders_with_text_css_content_type() {
             r#"
 status, headers, body = Main.run_rack("REQUEST_METHOD" => "GET", "PATH_INFO" => "/gadget.css", "QUERY_STRING" => "", "rack.input" => StringIO.new(""))
 raise "status #{status}" unless status == 200
-raise "Content-Type #{headers["content-type"].inspect}" unless headers["content-type"] == "text/css"
+raise "Content-Type #{headers["content-type"].inspect}" unless headers["content-type"] == "text/css; charset=utf-8"
 raise "body #{body.join.inspect}" unless body.join.strip == ".gadget { color: teal; }"
 puts "ALL OK"
 "#,

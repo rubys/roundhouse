@@ -910,17 +910,45 @@ module ActionController
       @status = resolve_status(status)
       @performed = true
       unless content_type.nil?
-        # A render inherits the response's charset, regardless of media type.
-        # An explicit charset wins; head and send_data suppress it themselves.
-        charset = @content_type.to_s.split("charset=", 2)[1].to_s
-        @content_type = content_type
-        if !content_type.include?("charset=") && !charset.empty?
-          @content_type = content_type + "; charset=" + charset
+        # Resolve MIME symbols before inspecting the header's parameters.
+        normalized = content_type.to_s
+        if content_type.is_a?(Symbol)
+          mime_type = Mime[content_type]
+          raise ArgumentError, "Unknown MIME type #{content_type}" if mime_type.nil?
+          normalized = mime_type.to_s
         end
+        incoming = render_content_type_parts(normalized)
+        previous = render_content_type_parts(@content_type.to_s)
+        charset = incoming[1].to_s
+        charset = previous[1].to_s if charset.empty?
+        charset = "utf-8" if charset.empty?
+        @content_type = incoming[0].to_s
+        @content_type += "; charset=" + charset.downcase unless @content_type.empty?
       end
       @location = ActionController.sanitize_location(location) unless location.nil?
       apply_vary_header
       nil
+    end
+
+    # Only a complete, case-sensitive charset parameter supplies a charset,
+    # as in Rails 8.1.4. Later parameters belong to the replaced header, not
+    # to its charset. Preserve the new type's preceding parameters verbatim.
+    def render_content_type_parts(value)
+      parts = value.split(";")
+      type = parts[0].to_s
+      charset = ""
+      parts.drop(1).each do |parameter|
+        pair = parameter.strip.split("=", 2)
+        if pair[0].to_s == "charset"
+          charset = pair[1].to_s.strip
+          if charset.start_with?("\"") && charset.end_with?("\"")
+            charset = charset[1..-2].to_s
+          end
+          break
+        end
+        type += ";" + parameter
+      end
+      [type, charset]
     end
 
     # Rails' `_set_vary_header`, which every `render` runs (`send_data`
