@@ -170,3 +170,30 @@ end
     );
     assert!(module.contains("ROLE = \"admin\""), "{module}");
 }
+
+#[test]
+fn memo_wise_and_alias_method_of_a_pruned_method_go_with_it() {
+    // `memo_wise :name` looks the method up; `alias_method :new, :old`
+    // looks up its second argument. Both raise once the module no longer
+    // defines it.
+    let decorated = r#"module Authorization
+  extend ActiveSupport::Concern
+
+  def self.memo_wise(name)
+    raise ArgumentError, "could not find method #{name} for #{self}" unless method_defined?(name)
+  end
+
+  def ensure_can_administer
+    head :forbidden unless Current.user.can_administer?
+  end
+
+  memo_wise :ensure_can_administer
+  alias_method :administer!, :ensure_can_administer
+end
+"#;
+    let app = app(&[("app/controllers/concerns/authorization.rb", decorated)]);
+    let module = emitted(&app, "authorization.rb");
+    assert!(!module.contains("def ensure_can_administer"), "the instance method is pruned:\n{module}");
+    assert!(!module.contains("memo_wise :ensure_can_administer") && !module.contains("memo_wise(:ensure_can_administer"), "{module}");
+    assert!(!module.contains(":ensure_can_administer"), "no call names the pruned method:\n{module}");
+}

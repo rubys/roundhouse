@@ -118,21 +118,34 @@ pub fn apply_spliced_concern_body_prune(app: &mut App) {
     }
 }
 
-/// A receiverless class-body call that looks up the method its leading
-/// symbol names, and so raises once that method is gone: a visibility
-/// change, `memoize`, `helper_method`, or a StatsD instrumentation macro
-/// (`statsd_count_if`, `statsd_measure`, …). Any other call that happens
-/// to take a pruned name (`register(:ensure_admin, "policy")`, filling a
-/// registry) stays.
+/// A receiverless class-body call that looks up the method a symbol
+/// argument names, and so raises once that method is gone: a visibility
+/// change, `memoize` / `memo_wise`, `helper_method`, `deprecate`, New
+/// Relic's `add_method_tracer`, a StatsD instrumentation macro
+/// (`statsd_count_if`, `statsd_measure`, …) by its leading symbol, and
+/// `alias_method` by either. Any other call that happens to take a pruned
+/// name (`register(:ensure_admin, "policy")`, filling a registry) stays.
+///
+/// The list is knowingly incomplete: a decorator it does not name stays
+/// in the husk module and raises its NameError at load, loudly, where
+/// the module's own replayed call would.
 fn decorates(call: &Expr, names: &HashSet<Symbol>) -> bool {
     let ExprNode::Send { recv: None, method, args, .. } = &*call.node else { return false };
+    let names_pruned = |a: &Expr| matches!(&*a.node, ExprNode::Lit { value: Literal::Sym { value } } if names.contains(value));
+    if method.as_str() == "alias_method" {
+        return args.iter().any(names_pruned);
+    }
     let decorator = matches!(
         method.as_str(),
-        "private" | "protected" | "public" | "module_function" | "memoize" | "helper_method"
+        "private"
+            | "protected"
+            | "public"
+            | "module_function"
+            | "memoize"
+            | "memo_wise"
+            | "helper_method"
+            | "deprecate"
+            | "add_method_tracer"
     ) || method.as_str().starts_with("statsd_");
-    if !decorator {
-        return false;
-    }
-    let Some(first) = args.first() else { return false };
-    matches!(&*first.node, ExprNode::Lit { value: Literal::Sym { value } } if names.contains(value))
+    decorator && args.first().is_some_and(names_pruned)
 }
