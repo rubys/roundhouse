@@ -118,7 +118,6 @@ const COLLOCATED: &[(&str, &str)] = &[
 ];
 
 #[test]
-#[ignore = "fork spec: load order"]
 fn a_nested_module_from_another_file_loads_before_the_body_that_extends_it() {
     gem_same_as_native(
         "gqlc",
@@ -246,18 +245,17 @@ fn an_alias_no_ancestor_defines_still_refuses_its_file() {
 }
 
 /// A gem file of declarations only, required by config/application.rb.
-/// The boot list held file programs only, so a file with none loaded
-/// nothing, and a plain gem's constants have no autoload: `Gqlc::Plain`
-/// was undefined (NameError). Each class it declares now loads at that
-/// boot require, in the file's order (`Shapes` before `Plain`, whose
-/// body reads it).
+/// In the fork the boot list held file programs only, so a file with none
+/// loaded nothing: `Gqlc::Plain` was undefined (NameError). Here every gem
+/// file has a program, and boot's require of it loads each class it
+/// declares in the file's order (`Shapes` before `Plain`, whose body
+/// reads it).
 const PLAIN_DECLARATIONS: &[(&str, &str)] = &[(
     "gqlc/plain.rb",
     "module Gqlc\n  module Shapes\n    ALL = %i[a b c].freeze\n  end\n\n  class Plain\n    SIZE = Shapes::ALL.size\n\n    def self.x = SIZE\n  end\nend\n",
 )];
 
 #[test]
-#[ignore = "fork spec: load order"]
 fn a_gem_file_of_declarations_only_required_by_boot_is_loaded() {
     let run = gem_same_as_native(
         "gqlc",
@@ -266,10 +264,14 @@ fn a_gem_file_of_declarations_only_required_by_boot_is_loaded() {
         "p Gqlc::Plain.x, Gqlc::Shapes::ALL.last\n",
         "3\n:c\n",
     );
+    // Boot requires the file's program, which loads each class it declares
+    // in the file's order.
     let models = std::fs::read_to_string(run.emitted.join("app/models.rb")).unwrap();
-    let shapes = models.find("  [\"models/gqlc/shapes\", nil], # config/application.rb:1\n");
-    let plain = models.find("  [\"models/gqlc/plain\", nil], # config/application.rb:1\n");
-    assert!(shapes.is_some() && plain.is_some() && shapes < plain, "{models}");
+    assert!(models.contains("RoundhouseAutoload.require_gem_file(\"models/roundhouse_files/vendor/gems/gqlc-1.0.0/lib/gqlc/plain\")"), "{models}");
+    let program = std::fs::read_to_string(run.emitted.join("app/models/roundhouse_files/vendor/gems/gqlc-1.0.0/lib/gqlc/plain.rb")).unwrap();
+    let shapes = program.find("RoundhouseAutoload.path(\"models/gqlc/shapes\")");
+    let plain = program.find("RoundhouseAutoload.path(\"models/gqlc/plain\")");
+    assert!(shapes.is_some() && plain.is_some() && shapes < plain, "{program}");
 }
 
 const SINGLETON_ONLY: &[(&str, &str)] = &[(

@@ -120,7 +120,6 @@ fn requiring_a_gem_file_whose_classes_were_all_dropped_loads_nothing() {
 /// the subclass file loaded first and `Node` was an uninitialized
 /// constant.
 #[test]
-#[ignore = "fork spec: load order"]
 fn a_require_written_below_a_gem_class_runs_after_the_class_is_defined() {
     let files: &[(&str, &str)] = &[
         ("lib/tessera.rb", "require 'tessera/node'\n"),
@@ -134,10 +133,13 @@ fn a_require_written_below_a_gem_class_runs_after_the_class_is_defined() {
         ),
     ];
     let run = app_with(files, "require \"tessera\"\n").run_ruby("puts \"#{Tessera::Leaf.new.kind} #{Tessera::Leaf.superclass} #{Tessera::LEAF}\"\n");
-    let node = std::fs::read_to_string(run.emitted.join("app/models/tessera/node.rb")).expect("emitted node.rb");
-    let class = node.find("class Node").expect("class Node emitted");
-    let require = node.find("require_relative").unwrap_or_else(|| panic!("the trailing require is carried:\n{node}"));
-    assert!(class < require, "the require written below the class moved above it:\n{node}");
+    // The file's program loads the class's emitted file, then the require
+    // written below it.
+    let program = std::fs::read_to_string(run.emitted.join("app/models/roundhouse_files/vendor/gems/tessera-1.2.3/lib/tessera/node.rb"))
+        .expect("node.rb's program");
+    let class = program.find("models/tessera/node\")").unwrap_or_else(|| panic!("the class is loaded:\n{program}"));
+    let require = program.find("lib/tessera/leaf\")").unwrap_or_else(|| panic!("the trailing require is carried:\n{program}"));
+    assert!(class < require, "the require written below the class moved above it:\n{program}");
     assert!(
         run.success,
         "the emitted program failed in {}\n=== stdout ===\n{}\n=== stderr ===\n{}\nerrors: {:#?}",
@@ -156,7 +158,6 @@ fn a_require_written_below_a_gem_class_runs_after_the_class_is_defined() {
 /// level's, as `Rails::Railtie` inside `class Money` is natively; the
 /// emitted tree must not define the nested namespace ahead of its file.
 #[test]
-#[ignore = "fork spec: load order"]
 fn a_nested_namespace_a_later_file_opens_does_not_shadow_the_top_level_before_it_loads() {
     const NESTED: &[(&str, &str)] = &[
         (
@@ -199,7 +200,6 @@ fn a_nested_namespace_a_later_file_opens_does_not_shadow_the_top_level_before_it
 /// (`require_relative "node"`) must therefore not run while that file is
 /// still loading.
 #[test]
-#[ignore = "fork spec: load order"]
 fn a_require_written_below_a_gem_class_does_not_re_enter_the_loading_file() {
     let files: &[(&str, &str)] = &[
         ("lib/tessera.rb", "require 'tessera/node'\n"),
