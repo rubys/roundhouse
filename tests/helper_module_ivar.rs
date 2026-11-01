@@ -132,3 +132,30 @@ fn a_name_the_controller_already_defines_is_not_claimed() {
         "`show` is an action on RoomsController — the ivar stays alone:\n{src}"
     );
 }
+
+/// `@method` in a helper must not make the base controller define
+/// `def method`: that replaces `Object#method`, which Rails and the
+/// test harness both call (`method(:x)`), and every controller then
+/// dies with `wrong number of arguments (given 1, expected 0)`.
+/// The read still reaches the assign, by the ivar itself.
+#[test]
+fn an_ivar_named_like_an_object_method_gets_no_reader() {
+    let app = app(
+        "module RoomsHelper\n  def verb\n    \"#{@method}-#{@room.id}\"\n  end\nend\n",
+    );
+    let helper = emitted(&app, "rooms_helper.rb");
+    assert!(
+        helper.contains("ActionController::Current.controller.instance_variable_get :@method"),
+        "`@method` must be read off the live controller's ivar:\n{helper}"
+    );
+    assert!(
+        helper.contains("ActionController::Current.controller.room"),
+        "an ordinary name keeps its reader:\n{helper}"
+    );
+    let base = emitted(&app, "application_controller.rb");
+    assert!(
+        !base.contains("def method\n") && !base.contains("def method;"),
+        "ApplicationController must not redefine Object#method:\n{base}"
+    );
+    assert!(base.contains("def room"), "the ordinary reader stays:\n{base}");
+}
