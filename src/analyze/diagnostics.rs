@@ -717,6 +717,8 @@ fn method_registered_on(
 pub fn unknown_receiver_sends(app: &App, classes: &HashMap<ClassId, ClassInfo>) -> Vec<UnknownReceiverSend> {
     fn visit(expr: &Expr, classes: &HashMap<ClassId, ClassInfo>, out: &mut Vec<UnknownReceiverSend>) {
         if let ExprNode::Send { recv: Some(r), method, .. } = &*expr.node {
+            // Dispatch still needs evidence for an unknown receiver even when
+            // its only other arm is nil; warning policy is separate below.
             let gradual = r.ty.as_ref().is_some_and(Ty::has_untyped_arm);
             let unknown = is_unknown_ty(r.ty.as_ref())
                 || matches!(&r.ty, Some(Ty::Class { id, .. }) if !classes.contains_key(id));
@@ -776,6 +778,21 @@ fn unresolved_name(expr: &Expr) -> Option<crate::ident::Symbol> {
 
 fn diagnose_expr(expr: &Expr, out: &mut Vec<Diagnostic>) {
     diagnose_expr_in(expr, out, true)
+}
+
+/// Preserve the bare-untyped warning and expose newly retained concrete
+/// alternatives. A nil-only alternative, as in Hash[_, untyped]#[], adds no
+/// concrete value information and keeps main's quiet diagnostic boundary.
+fn should_warn_gradual_untyped(ty: &Ty) -> bool {
+    fn has_concrete_non_nil_arm(ty: &Ty) -> bool {
+        match ty {
+            Ty::Union { variants } => variants.iter().any(has_concrete_non_nil_arm),
+            Ty::Untyped { .. } | Ty::Var { .. } | Ty::Nil | Ty::Bottom => false,
+            _ => true,
+        }
+    }
+    matches!(ty, Ty::Untyped { .. })
+        || ty.has_untyped_arm() && has_concrete_non_nil_arm(ty)
 }
 
 /// `value_used`: whether this expression's VALUE flows anywhere. A
@@ -885,7 +902,7 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
     // A `Seq` has its tail's type; the tail reports itself. ForwardArgs is
     // an argument-packet marker, not a value escaping the type system.
     if value_used
-        && expr.ty.as_ref().is_some_and(Ty::has_untyped_arm)
+        && expr.ty.as_ref().is_some_and(should_warn_gradual_untyped)
         && !matches!(
             &*expr.node,
             ExprNode::Seq { .. } | ExprNode::ForwardArgs | ExprNode::ForwardKeywords
@@ -1212,4 +1229,51 @@ fn conditional_declarations_reopened(app: &App) -> Vec<Diagnostic> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod gradual_warning_tests {
+    use super::*;
+
+    fn warnings(ty: Ty) -> usize {
+        let mut expr = Expr::new(crate::span::Span::synthetic(), ExprNode::Lit {
+            value: crate::expr::Literal::Nil,
+        });
+        expr.ty = Some(ty);
+        let mut diagnostics = Vec::new();
+        diagnose_expr(&expr, &mut diagnostics);
+        diagnostics.iter().filter(|d| matches!(d.kind, DiagnosticKind::GradualUntyped { .. })).count()
+    }
+
+    #[test]
+    fn symbol_and_untyped_warns() {
+        assert_eq!(warnings(Ty::Union {
+            variants: vec![Ty::Sym, Ty::untyped()].into(),
+        }), 1);
+    }
+
+    #[test]
+    fn untyped_and_nil_stays_quiet() {
+        assert_eq!(warnings(Ty::Union {
+            variants: vec![Ty::untyped(), Ty::Nil].into(),
+        }), 0);
+        assert_eq!(warnings(Ty::untyped()), 1);
+    }
+
+    #[test]
+    fn nullable_untyped_receiver_keeps_dispatch_evidence() {
+        let span = crate::span::Span { file: crate::span::FileId(1), start: 0, end: 7 };
+        let mut receiver = Expr::new(span, ExprNode::Lit { value: crate::expr::Literal::Nil });
+        receiver.ty = Some(Ty::Union { variants: vec![Ty::untyped(), Ty::Nil].into() });
+        let mut call = Expr::new(span, ExprNode::Send {
+            recv: Some(receiver), method: Symbol::from("m"), args: vec![], block: None, parenthesized: true,
+        });
+        call.ty = Some(Ty::untyped());
+        let mut app = App::default();
+        app.boot_program.push(call);
+        let sends = unknown_receiver_sends(&app, &HashMap::default());
+        assert_eq!(sends.len(), 1);
+        assert!(sends[0].gradual);
+        assert!(!sends[0].known_receiver);
+    }
 }

@@ -3150,7 +3150,7 @@ fn type_method_body(
     if crate::lower::enumerable_ext::rewrite_squish_body(&mut method.body) {
         body_ty = typer.analyze_expr(&mut method.body, &ctx);
     }
-    backfill_scalar_signature(method, body_ty);
+    backfill_value_signature(method, body_ty);
 }
 
 /// Backfill a signature for a user-defined method whose body types to a
@@ -3191,10 +3191,24 @@ fn scalar_or_nullable_scalar(ty: &Ty) -> bool {
     }
 }
 
-fn backfill_scalar_signature(method: &mut MethodDef, body_ty: Ty) {
+fn backfill_value_signature(method: &mut MethodDef, body_ty: Ty) {
+    // A raising rescue fallback contributes no normal answer. Preserve the
+    // protected value's return slot even while its source call is pending;
+    // emitters that consume signatures must not turn it into Unit/Void.
+    fn returning_rescue(body: &Expr) -> bool {
+        match &*body.node {
+            ExprNode::Seq { exprs } => exprs.last().is_some_and(returning_rescue),
+            ExprNode::RescueModifier { expr, fallback } => {
+                matches!(fallback.ty, Some(Ty::Bottom))
+                    && expr.ty.as_ref().is_some_and(|ty| !ty.is_open() && !matches!(ty, Ty::Nil))
+            }
+            _ => false,
+        }
+    }
     if method.signature.is_some()
         || method.block_param.is_some()
-        || !scalar_or_nullable_scalar(&body_ty)
+        || !(scalar_or_nullable_scalar(&body_ty)
+            || !body_ty.is_open() && !matches!(body_ty, Ty::Nil) && returning_rescue(&method.body))
         || contains_return(&method.body)
     {
         return;
@@ -3460,6 +3474,23 @@ mod tests {
             .find(|m| m.name.0.as_str() == "Article")
             .unwrap();
         build_class_info(model, methods, app.schema.tables.get(&model.table.0))
+    }
+
+    #[test]
+    fn a_reraising_rescue_retains_a_value_signature() {
+        let app = app("  def self.checked(s); s.to_s; end\n  def self.strict(s); checked(s) rescue raise(TypeError, \"bad\"); end");
+        let model = app.models.iter().find(|m| m.name.0.as_str() == "Article").unwrap();
+        let class = lower_model_to_library_class(model, &app.schema);
+        let strict = class.methods.iter().find(|m| m.name.as_str() == "strict").unwrap();
+        let Ty::Fn { ret, .. } = strict.signature.as_ref().expect("normal return signature") else {
+            panic!("expected a method signature")
+        };
+        let ExprNode::RescueModifier { expr, fallback } = &*strict.body.node else {
+            panic!("expected the source rescue modifier")
+        };
+        assert_eq!(fallback.ty, Some(Ty::Bottom));
+        assert!(ret.inference_eq(expr.ty.as_ref().unwrap()));
+        assert!(!ret.is_open() && !matches!(&**ret, Ty::Nil));
     }
 
     #[test]

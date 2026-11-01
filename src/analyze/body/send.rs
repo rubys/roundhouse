@@ -2016,7 +2016,11 @@ impl<'a> BodyTyper<'a> {
                         || (instance_side && cls.source_instance_methods.contains(method)
                             && !cls.instance_methods.contains_key(method))
                     {
-                        return unknown();
+                        // The method exists: its result is pending, not an
+                        // absent value. In particular, rescue with a raising
+                        // fallback must retain this protected value through
+                        // a later model retyping pass.
+                        return Ty::pending_untyped();
                     }
                     if !instance_side && let Some(ty) = cls.class_methods.get(method) {
                         // Same projection the relation arm uses. A source
@@ -4573,6 +4577,45 @@ mod source_receiver_reason_tests {
     use crate::det::HashMap;
 
     #[test]
+    fn raising_rescue_fallback_keeps_the_protected_source_return() {
+        let span = crate::span::Span::synthetic();
+        let string = || Expr::new(span, ExprNode::Lit {
+            value: crate::expr::Literal::Str { value: "value".into() },
+        });
+        let owner = ClassId(Symbol::from("SourceType"));
+        for registered in [false, true] {
+            let mut info = crate::analyze::ClassInfo::default();
+            info.parent = Some(ClassId(Symbol::from("ExternalBase")));
+            info.source_class_methods.insert(Symbol::from("checked"));
+            if registered { info.class_methods.insert(Symbol::from("checked"), Ty::Str); }
+            let classes: HashMap<_, _> = [
+                (owner.clone(), info),
+                (ClassId(Symbol::from("TypeError")), crate::analyze::ClassInfo::default()),
+            ].into_iter().collect();
+            let typer = BodyTyper::new(&classes);
+            let mut ctx = crate::analyze::Ctx::default();
+            ctx.self_ty = Some(Ty::Class { id: owner.clone(), args: vec![].into() });
+            ctx.class_side = true;
+            let call = |method, args| Expr::new(span, ExprNode::Send {
+                recv: None, method: Symbol::from(method), args, block: None, parenthesized: true,
+            });
+            let mut expression = Expr::new(span, ExprNode::RescueModifier {
+                expr: call("checked", vec![string()]),
+                fallback: call("raise", vec![
+                    Expr::new(span, ExprNode::Const { path: vec![Symbol::from("TypeError")] }),
+                    string(),
+                ]),
+            });
+            let result = typer.analyze_expr(&mut expression, &ctx);
+            let ExprNode::RescueModifier { expr, fallback } = &*expression.node else { unreachable!() };
+            assert_eq!(fallback.ty, Some(Ty::Bottom));
+            assert!(result.inference_eq(expr.ty.as_ref().unwrap()));
+            assert!(result.inference_eq(&if registered { Ty::Str } else { Ty::pending_untyped() }));
+            assert!(!result.is_open(), "a normal protected answer needs a return value");
+        }
+    }
+
+    #[test]
     fn unharvested_source_methods_are_pending_before_an_external_ancestor() {
         let id = ClassId(Symbol::from("SourceType"));
         let mut info = crate::analyze::ClassInfo::default();
@@ -4584,7 +4627,7 @@ mod source_receiver_reason_tests {
         let receiver = Ty::Class { id, args: vec![].into() };
         for (method, instance) in [("value", true), ("load", false)] {
             let result = typer.dispatch_on(Some(&receiver), &Symbol::from(method), None, &[], instance);
-            assert!(result.inference_eq(&unknown()), "{method}: {result:?}");
+            assert!(result.inference_eq(&Ty::pending_untyped()), "{method}: {result:?}");
         }
         let external = typer.dispatch_on(Some(&receiver), &Symbol::from("external"), None, &[], true);
         assert!(external.inference_eq(&Ty::untyped()), "{external:?}");
