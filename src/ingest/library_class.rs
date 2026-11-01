@@ -5015,14 +5015,14 @@ fn ingest_included_filter_statement(
                 filters.push(f);
             } else if let Some(f) = block_form_concern_filter(inner, file) {
                 filters.push(f);
-            } else if let Some(name) = forgery_macro_name(inner) {
-                // A forgery declaration `parse_filter_call` does not
-                // model (`prepend:`, a custom `store:`, an unknown
-                // `with:`) changes how every
-                // includer checks requests. The `included` block is
-                // otherwise dropped, so it would vanish without a
-                // trace where the same line in a controller is a
-                // survey gap; name it the same way.
+            } else if let Some(name) = callback_macro_name(inner) {
+                // A callback macro `parse_filter_call` does not model
+                // (`append_before_action`, `self.before_action`, a forgery
+                // declaration with `prepend:` or a custom `store:`) changes
+                // how every includer handles requests. The `included` block
+                // is otherwise dropped, so it would vanish without a trace
+                // where the same line in a controller is a survey gap; name
+                // it the same way.
                 super::survey::record(&super::IngestError::Unsupported {
                     file: file.to_string(),
                     message: format!(
@@ -5103,29 +5103,21 @@ fn conditional_callback_macro_name(stmt: &Node<'_>) -> Option<&'static str> {
     } else {
         return None;
     };
-    branches.into_iter().flat_map(flatten_statements).find_map(|inner| {
-        if let Some(call) = inner.as_call_node() {
-            let name = constant_id_str(&call.name());
-            return CONTROLLER_CALLBACK_MACROS
-                .iter()
-                .find(|m| call.receiver().is_none() && **m == name)
-                .copied();
-        }
-        conditional_callback_macro_name(&inner)
-    })
+    branches
+        .into_iter()
+        .flat_map(flatten_statements)
+        .find_map(|inner| callback_macro_name(&inner).or_else(|| conditional_callback_macro_name(&inner)))
 }
 
-/// `protect_from_forgery` / `skip_forgery_protection`, receiverless.
-fn forgery_macro_name(stmt: &ruby_prism::Node<'_>) -> Option<&'static str> {
+/// A callback macro called receiverless or on `self`; both reach the
+/// includer, since Rails runs the `included` block on it.
+fn callback_macro_name(stmt: &Node<'_>) -> Option<&'static str> {
     let call = stmt.as_call_node()?;
-    if call.receiver().is_some() {
+    if call.receiver().is_some_and(|r| r.as_self_node().is_none()) {
         return None;
     }
-    match constant_id_str(&call.name()) {
-        "protect_from_forgery" => Some("protect_from_forgery"),
-        "skip_forgery_protection" => Some("skip_forgery_protection"),
-        _ => None,
-    }
+    let name = constant_id_str(&call.name());
+    CONTROLLER_CALLBACK_MACROS.iter().find(|m| **m == name).copied()
 }
 
 /// `content_security_policy if: -> { … } do |policy| … end` inside

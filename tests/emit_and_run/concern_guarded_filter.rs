@@ -95,13 +95,9 @@ fn a_concern_filter_guarded_by_respond_to_runs_in_the_including_controller() {
     assert!(run.stdout.contains("guarded concern filters ran"), "{}", run.stdout);
 }
 
-#[test]
-fn a_concern_filter_behind_an_undecided_guard_is_a_survey_gap() {
+fn survey_gaps(included_body: &str) -> Vec<IngestError> {
     let tree: HashMap<PathBuf, Vec<u8>> = [
-        (
-            "app/controllers/concerns/authable.rb",
-            concern("Authable", "    before_action :require_login! if ENV[\"LOCKED\"]"),
-        ),
+        ("app/controllers/concerns/authable.rb", concern("Authable", included_body)),
         (
             "app/controllers/application_controller.rb",
             "class ApplicationController < ActionController::Base\nend\n".to_string(),
@@ -118,12 +114,30 @@ fn a_concern_filter_behind_an_undecided_guard_is_a_survey_gap() {
     survey::activate();
     let result = ingest_app_from_tree(tree);
     let gaps = survey::drain();
-    result.expect("an undecided guard is a survey gap, not a hard failure");
-    assert!(
-        gaps.iter().any(|g| matches!(
-            g,
-            IngestError::Unsupported { message, .. } if message.contains("before_action")
-        )),
-        "{gaps:?}"
+    result.expect("a dropped concern filter is a survey gap, not a hard failure");
+    gaps
+}
+
+fn has_gap(gaps: &[IngestError], needle: &str) -> bool {
+    gaps.iter().any(|g| matches!(g, IngestError::Unsupported { message, .. } if message.contains(needle)))
+}
+
+#[test]
+fn a_concern_filter_behind_an_undecided_guard_is_a_survey_gap() {
+    let gaps = survey_gaps("    before_action :require_login! if ENV[\"LOCKED\"]");
+    assert!(has_gap(&gaps, "`before_action` under a condition"), "{gaps:?}");
+}
+
+#[test]
+fn a_self_received_concern_filter_behind_an_undecided_guard_is_a_survey_gap() {
+    let gaps = survey_gaps("    self.before_action :require_login! if ENV[\"LOCKED\"]");
+    assert!(has_gap(&gaps, "`before_action` under a condition"), "{gaps:?}");
+}
+
+#[test]
+fn an_unmodelled_callback_under_a_decided_guard_is_a_survey_gap() {
+    let gaps = survey_gaps(
+        "    append_before_action :require_login! if respond_to?(:append_before_action)",
     );
+    assert!(has_gap(&gaps, "macro not recognized: `append_before_action`"), "{gaps:?}");
 }
