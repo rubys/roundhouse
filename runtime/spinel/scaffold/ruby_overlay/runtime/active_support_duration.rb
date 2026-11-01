@@ -71,6 +71,7 @@ module ActiveSupport
     # (lobsters embeds durations in cache keys).
     def to_s = @seconds.to_s
     def seconds = @seconds
+    def value = @seconds
 
     # Rails parity: a Duration IS its seconds count for equality, so
     # `1.year == 31556952` is true and `assert_equal 1.year, n` passes

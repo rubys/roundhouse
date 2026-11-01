@@ -106,6 +106,13 @@ impl Server {
         self.get_with_headers(path, &[("Cookie", self.cookie.as_str())])
     }
 
+    /// Retain every raw Set-Cookie field rather than collapsing its values
+    /// into the convenience header map.
+    pub fn get_with_set_cookies(&self, path: &str) -> (Response, Vec<String>) {
+        let (status, cookies, headers, body) = self.send("GET", path, &[], "");
+        (Response { status, headers, body }, cookies)
+    }
+
     /// A POST with the session's cookie and token.
     pub fn post(&self, path: &str, content_type: &str, body: &str) -> Response {
         let headers = [

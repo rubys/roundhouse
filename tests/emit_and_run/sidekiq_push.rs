@@ -54,7 +54,7 @@ fn a_spinel_tree_on_sidekiq_gets_spinel_redis() {
     let manifest = read(&emitted, "spin.toml");
     assert!(
         manifest.contains(
-            "redis = { git = \"https://github.com/roundhouse-rb/spinel-redis\", ref = \"v0.3.1\" }"
+            "redis = { git = \"https://github.com/roundhouse-rb/spinel-redis\", ref = \"v0.3.2\" }"
         ),
         "{manifest}"
     );
@@ -257,7 +257,7 @@ fn a_raising_commit_callback_drops_the_held_push() {
     assert!(run.stdout.contains("raising callback passed"), "{}", run.stdout);
 }
 
-const SIDEKIQ_YML: &str = ":concurrency: 3\n:timeout: 9\n:queues:\n  - critical\n  - [default, 2]\n";
+const SIDEKIQ_YML: &str = ":concurrency: 3\n:timeout: 9\n:queues:\n  - critical\n  - [default, 2]\n:max_retries: 4\n:dead_max_jobs: 50\n:dead_timeout_in_seconds: 3600\n:poll_interval_average: 2.5\n";
 
 const SIDEKIQ_YML_SCRIPT: &str = r#"SidekiqWorker.parse(["sidekiq"])
 raise "concurrency #{SidekiqWorker::CONCURRENCY[0]}" unless SidekiqWorker::CONCURRENCY[0] == 3
@@ -271,12 +271,19 @@ raise "-q #{SidekiqWorker::QUEUES.inspect}" unless SidekiqWorker::QUEUES == ["qu
 ENV["RAILS_MAX_THREADS"] = "11"
 SidekiqWorker.parse(["sidekiq"])
 raise "the file beats RAILS_MAX_THREADS: #{SidekiqWorker::CONCURRENCY[0]}" unless SidekiqWorker::CONCURRENCY[0] == 3
+raise "max_retries #{SidekiqWorker.max_retries}" unless SidekiqWorker.max_retries == 4
+raise "dead_max_jobs" unless JobRegistry.sidekiq_worker_dead_max_jobs == 50
+raise "dead_timeout_in_seconds" unless JobRegistry.sidekiq_worker_dead_timeout == 3600
+raise "poll_interval_average" unless JobRegistry.sidekiq_worker_poll_interval_average == 2.5
+raise "average_scheduled_poll_interval" unless JobRegistry.sidekiq_worker_scheduled_poll_interval == -1.0
 puts "sidekiq.yml passed"
 "#;
 
 /// `config/sidekiq.yml` gives the worker its defaults, and the command
 /// line wins over them, key by key, as Sidekiq's CLI merges them; the
-/// file wins over `RAILS_MAX_THREADS`.
+/// file wins over `RAILS_MAX_THREADS`. The retry limit, the dead set's
+/// trims and the poller's interval come from it too; a key it doesn't
+/// give stays at Sidekiq's default (-1 in the registry).
 #[test]
 fn sidekiq_yml_sets_the_worker_defaults() {
     let run = on_sidekiq().write("config/sidekiq.yml", SIDEKIQ_YML).run_ruby(SIDEKIQ_YML_SCRIPT);

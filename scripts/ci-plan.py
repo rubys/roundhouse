@@ -75,6 +75,7 @@ JRUBY_BIND_INPUTS = {
 PARAM_BIND_TESTS = ["param_binds", "param_binds_values", "param_binds_planner", "param_binds_cleanup"]
 SPINEL_TESTS = [
     "controller_process_action_override",
+    "select_alias_index",
     "date_columns_spinel",
     "temporal_initialize_spinel",
     "framework_tests_spinel",
@@ -126,6 +127,7 @@ SPINEL_TESTS = [
     "row_from_raw_hash_spinel",
     "helper_method_instance_state_spinel",
     "render_relation_chain",
+    "render_object_locals",
     "rails_cache_entry_options_spinel",
 ]
 # Inputs of the Sidekiq push gate (tests/sidekiq_push.rs): the files its
@@ -515,6 +517,8 @@ def native_coverage(path):
     # The fixture app beside its harness selects the same suite.
     if path.startswith("tests/find_or_create_bang_records/"):
         suites.add("find_or_create_bang_records")
+    if path.startswith("tests/select_alias_index/"):
+        suites.add("select_alias_index")
     if (
         path in GENERATED_COLUMNS_SPINEL_INPUTS
         or path.startswith("tests/support/generated_columns_")

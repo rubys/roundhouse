@@ -1833,7 +1833,7 @@ come from the job's `perform_later` call sites, and
   job carries `"retry":true`, so Sidekiq retries it with its own
   defaults; Active Job's `retry_on`, TLS (`rediss://`) and per-job
   adapters are still missing.
-- **The worker role has no retries.** The same build runs the pushed
+- **The worker role has no heartbeat.** The same build runs the pushed
   jobs as `./app sidekiq` (spinel) or `ruby sidekiq.rb` (ruby, jruby),
   a Sidekiq 8.1 server process with BasicFetch
   (`runtime/spinel/sidekiq/sidekiq_worker.rb`); a Ruby Sidekiq process
@@ -1842,10 +1842,19 @@ come from the job's `perform_later` call sites, and
   `:timeout:` (its `production:` section merged over the top level),
   which win over `RAILS_MAX_THREADS` and the defaults (5, `default`,
   25). TSTP quiets it, and TERM or INT waits up to the timeout and
-  pushes unfinished jobs back. A job that raises goes straight to the
-  dead set with Sidekiq's error fields, so the retry set, the scheduler
-  that moves `schedule` and `retry` to their queues, `retry_on`, and the
-  heartbeat Sidekiq's Web UI reads are still missing. Under
+  pushes unfinished jobs back. A job that raises takes Sidekiq's retry
+  rules: `retry: false` drops it; otherwise it goes to the retry set
+  with Sidekiq's error fields and backoff (`count**4 + 15` seconds plus
+  jitter) until its `retry` limit (`:max_retries:`, 25 by default) or
+  `retry_for` runs out, then to the dead set (trimmed by
+  `:dead_max_jobs:` and `:dead_timeout_in_seconds:`), unless it says
+  `dead: false`. A scheduler thread moves due jobs from `retry`, then
+  `schedule`, back onto their queues with Sidekiq's Lua pop (`EVALSHA`,
+  so spinel needs spinel-redis with scripting) every
+  `:poll_interval_average:` or 5 s per Sidekiq process, randomized as
+  Sidekiq randomizes it. `retry_on` and the heartbeat Sidekiq's Web UI
+  reads (and the process count the scheduler scales by) are still
+  missing. Under
   config/cable.yml's `adapter: redis`, every process's broadcasts go
   out as `PUBLISH <channel_prefix>:<stream>`, as Action Cable's Redis
   adapter sends them, and each server process delivers what it

@@ -1,0 +1,45 @@
+{
+  "symbol_layout": {
+    "case": "symbol_layout",
+    "error": "ArgumentError",
+    "message": "wrong number of arguments (given 0, expected 1)"
+  },
+  "dynamic_layout": {
+    "case": "dynamic_layout",
+    "error": "ArgumentError",
+    "message": "wrong number of arguments (given 0, expected 1)"
+  },
+  "implicit_context": {
+    "case": "implicit_context",
+    "value": [
+      200,
+      "<application>implicit;action:index;controller:implicit_context\n</application>\n",
+      "before"
+    ]
+  },
+  "nil_layout": {
+    "case": "nil_layout",
+    "error": "ArgumentError",
+    "message": "wrong number of arguments (given 0, expected 1)"
+  },
+  "string_layout": {
+    "case": "string_layout",
+    "error": "ArgumentError",
+    "message": "wrong number of arguments (given 0, expected 1)"
+  },
+  "rescue_dynamic_layout": {
+    "case": "rescue_dynamic_layout",
+    "error": "ArgumentError",
+    "message": "wrong number of arguments (given 0, expected 1)"
+  },
+  "rescue_nil_layout": {
+    "case": "rescue_nil_layout",
+    "error": "ArgumentError",
+    "message": "wrong number of arguments (given 0, expected 1)"
+  },
+  "rescue_symbol_layout": {
+    "case": "rescue_symbol_layout",
+    "error": "ArgumentError",
+    "message": "wrong number of arguments (given 0, expected 1)"
+  }
+}

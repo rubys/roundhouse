@@ -47,7 +47,7 @@ a transpiled version of this app must pass the same suite unchanged.
 
 ## Transpile it
 
-[Roundhouse](https://rubys.github.io/roundhouse/) ingests this app through its
+[Roundhouse](https://roundhouse-rb.dev/) ingests this app through its
 Roda + Sequel front-end and emits it for other runtimes. The CRuby target
 produces a metaprogramming-free Ruby tree (Puma + Rack, every query compiled
 to SQL at build time) that passes this repo's test suite:
@@ -69,7 +69,7 @@ Prerequisites: Rust (for the transpile) and Ruby 3.4+ with bundler (to run
 the output) — no Node, and no Rails, Roda, or Sequel gems in the emitted
 tree. Swap `--target ruby` for `typescript`, `crystal`, `go`, `rust`, … to
 see the other emitters, or try it without installing anything at
-[the in-browser playground](https://rubys.github.io/roundhouse/playground/?app=roda).
+[the in-browser playground](https://roundhouse-rb.dev/playground/?app=roda).
 
 ### Native binary (Spinel)
 

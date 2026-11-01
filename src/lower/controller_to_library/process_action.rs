@@ -99,6 +99,40 @@ pub(super) struct WrapFilters {
 /// The dispatcher's parameter in a controller that reads `action_name`.
 const ROUTED_ACTION: &str = "routed_action";
 
+/// Lower only source expressions. The dispatcher also contains synthesized
+/// wrapper code and already lowered action tails, which must not be lowered
+/// a second time (a positional response body can look like a template name).
+pub(super) fn lower_dispatcher_bodies(
+    preamble: &mut [PreambleStmt],
+    wraps: &mut WrapFilters,
+    rescues: &mut [RescueHandler],
+    mut lower: impl FnMut(&Expr) -> Expr,
+) {
+    fn guards(filter: &mut Filter, lower: &mut impl FnMut(&Expr) -> Expr) {
+        for expr in [&mut filter.if_cond_expr, &mut filter.unless_cond_expr].into_iter().flatten() {
+            *expr = lower(expr);
+        }
+    }
+    for stmt in preamble.iter_mut().chain(&mut wraps.after) {
+        match stmt {
+            PreambleStmt::Call { filter, .. } => guards(filter, &mut lower),
+            PreambleStmt::Block { body, if_cond_expr, unless_cond_expr, .. } => {
+                *body = lower(body);
+                for expr in [if_cond_expr, unless_cond_expr].into_iter().flatten() {
+                    *expr = lower(expr);
+                }
+            }
+            PreambleStmt::Lead { .. } => {}
+        }
+    }
+    for filter in &mut wraps.around {
+        guards(filter, &mut lower);
+    }
+    for handler in rescues {
+        handler.body = lower(&handler.body);
+    }
+}
+
 /// The expressions that the dispatcher runs in its own body: the filter
 /// blocks and lambdas, the `if:`/`unless:` lambdas, and the
 /// `rescue_from` handlers. Filter methods and actions are not here,

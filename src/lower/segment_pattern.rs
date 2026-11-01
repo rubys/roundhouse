@@ -748,6 +748,47 @@ fn lazy_is_terminal(items: &[Item]) -> bool {
 /// `(.:format)` requirement no extension meets.
 pub const NEVER: &str = "A";
 
+fn admits(item: &Item, c: char) -> bool {
+    match item {
+        Item::Literal { text, .. } => text.contains(c),
+        Item::Class { any: true, .. } => true,
+        Item::Class { chars, negated, .. } => chars.contains(&c) != *negated,
+    }
+}
+
+fn admits_slash(item: &Item) -> bool {
+    admits(item, '/')
+}
+
+/// A requirement `compile` refuses only because it admits `/`, which Rails
+/// reads over the rest of the path (`/%40.*/` takes `/enc/%40a/b` whole):
+/// its program for the joined value, and whether it also admits `.`, in
+/// which case a trailing extension stays in the value rather than becoming
+/// the format. Greedy only: a lazy one stops where the next token lets it,
+/// which the span does not reproduce.
+pub fn spanning(src: &str) -> Option<(String, bool)> {
+    let ast = parse_pattern(src)?;
+    let seqs = expand(&ast)?;
+    if seqs.is_empty() || (seqs.len() == 1 && seqs[0].is_empty()) {
+        return None;
+    }
+    if !seqs.iter().any(|seq| seq.iter().any(admits_slash)) {
+        return None;
+    }
+    let mut encoded = Vec::with_capacity(seqs.len());
+    let mut dot = false;
+    for seq in &seqs {
+        if seq.iter().any(|item| item.lazy()) {
+            return None;
+        }
+        check_safe_adjacency(seq)?;
+        dot |= seq.iter().any(|item| admits(item, '.'));
+        encoded.push(encode(seq));
+    }
+    let program = if encoded.len() == 1 { encoded.pop()? } else { encode_alternatives(&encoded) };
+    Some((program, dot))
+}
+
 pub fn compile(src: &str) -> Option<String> {
     let ast = parse_pattern(src)?;
     let seqs = expand(&ast)?;
@@ -757,6 +798,10 @@ pub fn compile(src: &str) -> Option<String> {
     let mut encoded = Vec::with_capacity(seqs.len());
     for seq in &seqs {
         if !lazy_is_terminal(seq) {
+            return None;
+        }
+        // Not matched within the segment: Rails reads the requirement over the rest of the path, so one that admits `/` spans segments there.
+        if seq.iter().any(admits_slash) {
             return None;
         }
         check_safe_adjacency(seq)?;
@@ -898,7 +943,8 @@ pub fn dispatch_path(path: &str, entries: &[(String, String)]) -> String {
 pub fn encode_route_constraints(entries: &[(String, String)]) -> String {
     let mut out = String::new();
     for (name, pattern) in entries {
-        if name.starts_with('*') {
+        // A `.+` span carries no program, only the `*name` marker `dispatch_path` reads; a spanning requirement's does.
+        if name.starts_with('*') && pattern.is_empty() {
             continue;
         }
         out.push_str(&name.chars().count().to_string());
@@ -1007,8 +1053,13 @@ mod tests {
     }
 
     #[test]
-    fn literal_prefix_then_any_star_compiles() {
-        ok(r"%40.*");
+    fn literal_prefix_then_any_star_spans_segments() {
+        // Rails reads `/%40.*/` over the rest of the path (`/enc/%40a/b` is `@a/b`): no single-segment program, a span that keeps the extension.
+        refused(r"%40.*");
+        assert!(matches!(spanning(r"%40.*"), Some((_, true))));
+        assert!(matches!(spanning(r"[^.]+"), Some((_, false))));
+        assert_eq!(spanning(r"\d+"), None);
+        assert_eq!(spanning(r".+?"), None);
     }
 
     #[test]

@@ -7,8 +7,8 @@
     <!--
       GitHub Pages serves this file for any path under the site that
       doesn't map to a static file. The live SharedWorker blog demo at
-      /roundhouse/blog/ is a client-side SPA: a hard reload or bookmark
-      of a deep route (e.g. /roundhouse/blog/articles/1) has no backing
+      /blog/ is a client-side SPA: a hard reload or bookmark
+      of a deep route (e.g. /blog/articles/1) has no backing
       file, so it lands here. Bounce it back to the blog shell with the
       deep path stashed in `?p=`; the shell's inline decoder restores
       the address bar before the worker client routes. Any other 404
@@ -19,7 +19,7 @@
     -->
     <script>
       (function () {
-        var base = "/roundhouse/blog/";
+        var base = "/blog/";
         var l = location;
         if (l.pathname.indexOf(base) === 0 && l.pathname !== base) {
           var rest = l.pathname.slice(base.length); // e.g. "articles/1"
@@ -34,6 +34,6 @@
   </head>
   <body>
     <h1>404 — Not Found</h1>
-    <p>That page doesn’t exist. <a href="/roundhouse/">Back to Roundhouse</a>.</p>
+    <p>That page doesn’t exist. <a href="/">Back to Roundhouse</a>.</p>
   </body>
 </html>

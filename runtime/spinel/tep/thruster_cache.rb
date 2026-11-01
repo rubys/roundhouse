@@ -40,9 +40,9 @@
 # ROUNDHOUSE_RESPONSE_CACHE=0 turns it off, for A/B measurement.
 module Tep
   class ThrusterCacheEntry
-    attr_reader :status, :headers, :body, :file_path, :vary_names, :vary_values, :expires_at, :size
+    attr_reader :status, :headers, :body, :file_path, :vary_names, :vary_values, :expires_at, :size, :header_fields
 
-    def initialize(status, headers, body, file_path, vary_names, vary_values, expires_at, size)
+    def initialize(status, headers, body, file_path, vary_names, vary_values, expires_at, size, header_fields)
       @status = status
       @headers = headers
       @body = body
@@ -51,6 +51,7 @@ module Tep
       @vary_values = vary_values
       @expires_at = expires_at
       @size = size
+      @header_fields = header_fields
     end
   end
 
@@ -66,7 +67,7 @@ module Tep
       @size = 0
       @enabled = (ENV["ROUNDHOUSE_RESPONSE_CACHE"] || "") != "0"
       # Insertion-ordered: least recently used first.
-      @items = { "" => ThrusterCacheEntry.new(0, Tep.str_hash, "", "", [""], [""], 0.0, 0) }
+      @items = { "" => ThrusterCacheEntry.new(0, Tep.str_hash, "", "", [""], [""], 0.0, 0, [["", ""]]) }
       @items.delete("")
       @lock = Mutex.new
     end
@@ -123,7 +124,7 @@ module Tep
       # The miss that stores loses Set-Cookie as the stored copy does.
       res.set_cookies.pop while res.set_cookies.length > 0
       ThrusterCache.drop_header(res.headers, "set-cookie")
-      res.headers["Vary"] = "Accept-Encoding" if ThrusterCache.header(res.headers, "vary").length == 0
+      res.headers["Vary"] = "Accept-Encoding" if ThrusterCache.response_header(res, "vary").length == 0
       now = ThrusterCache.now
       record(store_key(key, req, now), req, res, now + lifetime)
       res.headers["X-Cache"] = "miss"
@@ -135,8 +136,8 @@ module Tep
       return 0 if res.streaming || res.upgrading_ws
       status = res.status
       return 0 if status < 200 || status > 399 || status == 304
-      return 0 if ThrusterCache.header(res.headers, "vary").include?("*")
-      cc = ThrusterCache.header(res.headers, "cache-control")
+      return 0 if ThrusterCache.response_header(res, "vary").include?("*")
+      cc = ThrusterCache.response_header(res, "cache-control")
       return 0 if cc.length == 0
       return 0 unless cc.match?(/\bpublic\b/) && !cc.match?(/\bno-cache\b/)
       m = cc.match(/\bs-max-age=(\d+)\b/)
@@ -154,14 +155,27 @@ module Tep
       found
     end
 
+    # Cache-Control and Vary are list fields. Read all of their values in
+    # the same order as the shared writer, without changing the raw fields.
+    def self.response_header(res, name)
+      name = name.downcase
+      values = [""]
+      values.pop
+      res.headers.each { |key, value| values.push(value) if key.downcase == name }
+      res.header_fields.each do |field|
+        values.push(field[1]) if field[0].downcase == name
+      end
+      values.join(", ")
+    end
+
     def self.drop_header(headers, name)
       doomed = headers.keys.select { |k| k.downcase == name }
       doomed.each { |k| headers.delete(k) }
       nil
     end
 
-    def self.vary_names(headers)
-      vary = ThrusterCache.header(headers, "vary")
+    def self.vary_names(res)
+      vary = ThrusterCache.response_header(res, "vary")
       names = vary.split(",").map { |n| n.strip.downcase }.reject { |n| n.length == 0 }
       names.sort
     end
@@ -204,7 +218,7 @@ module Tep
     end
 
     def record(key, req, res, expires_at)
-      names = ThrusterCache.vary_names(res.headers)
+      names = ThrusterCache.vary_names(res)
       values = names.map { |name| req.req_headers.fetch(name, "") }
       headers = Tep.str_hash
       size = res.body.bytesize + key.bytesize + ENTRY_OVERHEAD
@@ -213,8 +227,10 @@ module Tep
         headers[k] = v
         size += k.bytesize + v.bytesize
       end
+      fields = res.header_fields.map { |field| [field[0], field[1]] }
+      fields.each { |field| size += field[0].bytesize + field[1].bytesize }
       entry = ThrusterCacheEntry.new(res.status, headers, res.body.dup, res.file_path.dup,
-                                     names, values, expires_at, size)
+                                     names, values, expires_at, size, fields)
       set(key, entry)
       nil
     end
@@ -228,8 +244,13 @@ module Tep
         res.set_status(304)
         ThrusterCache.drop_header(res.headers, "content-type")
         ThrusterCache.drop_header(res.headers, "content-length")
+        entry.header_fields.each do |field|
+          name = field[0].downcase
+          res.append_header(field[0], field[1]) unless name == "content-type" || name == "content-length"
+        end
         return nil
       end
+      entry.header_fields.each { |field| res.append_header(field[0], field[1]) }
       if entry.file_path.length > 0
         res.send_file(entry.file_path)
       else

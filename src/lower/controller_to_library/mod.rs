@@ -55,7 +55,7 @@ use crate::lower::controller::body::{
 
 use self::params::{helper_spec_map, ParamsSpec, ParamsSpecs};
 use self::process_action::{
-    dispatcher_bodies, halt_if_performed, synthesize_process_action, PreambleStmt,
+    dispatcher_bodies, halt_if_performed, lower_dispatcher_bodies, synthesize_process_action, PreambleStmt,
     RescueHandler,
 };
 use self::rewrites::{
@@ -328,6 +328,12 @@ pub struct LowerControllerOptions<'a> {
     >,
 }
 
+/// The ivars the controller lowering itself writes for the runtime's own
+/// state: bare `params` / `flash` / `session` become `@params` /
+/// `@flash` / `@session`, and the render rewrite passes `@flash[:notice]`
+/// to every view. They are the runtime's, not the app's.
+pub(crate) const FRAMEWORK_IVARS: [&str; 3] = ["params", "flash", "session"];
+
 pub fn lower_controllers_with_arel_views_assocs_and_routes(
     controllers: &[Controller],
     extras: Vec<(ClassId, crate::analyze::ClassInfo)>,
@@ -534,7 +540,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     let mut framework_ivars: crate::det::HashMap<Symbol, Ty> =
         crate::det::HashMap::default();
     framework_ivars.insert(
-        Symbol::from("params"),
+        Symbol::from(FRAMEWORK_IVARS[0]),
         Ty::Hash {
             key: std::sync::Arc::new(Ty::Str),
             value: std::sync::Arc::new(Ty::Untyped),
@@ -548,7 +554,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // + HWIA-shape shims); type `@flash` as Flash so `@flash[:k]`
     // routes through `Flash#[]` for typed targets.
     framework_ivars.insert(
-        Symbol::from("flash"),
+        Symbol::from(FRAMEWORK_IVARS[1]),
         Ty::Class {
             id: ClassId(Symbol::from("ActionDispatch::Flash")),
             args: vec![].into(),
@@ -558,12 +564,14 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // ActionDispatch::Session struct (empty for real-blog, HWIA-shape
     // shims preserved on the class for cross-target tests).
     framework_ivars.insert(
-        Symbol::from("session"),
+        Symbol::from(FRAMEWORK_IVARS[2]),
         Ty::Class {
             id: ClassId(Symbol::from("ActionDispatch::Session")),
             args: vec![].into(),
         },
     );
+
+    debug_assert_eq!(framework_ivars.len(), FRAMEWORK_IVARS.len());
 
     // Every relation-RETURNING class method the app registers — its
     // `scope` declarations plus the class methods whose body tail is a
@@ -980,7 +988,7 @@ fn subclass_template_hooks(
                         parenthesized: true,
                     },
                 );
-                rewrites::rewrite_render_to_views(&render, Some(&module), &[], view_ivars, partials, &template, true, &[])
+                rewrites::rewrite_render_to_views(&render, Some(&module), &[], view_ivars, partials, &template, true, false, &[])
             };
             methods.push(MethodDef {
                 visibility: crate::dialect::MethodVisibility::Public,
@@ -1364,18 +1372,29 @@ fn build_methods(
             &deferred_renders, &mut deferred_tails,
         ));
     }
-    if let Some((preamble, wraps)) = pending_dispatcher {
+    if let Some((mut preamble, mut wraps)) = pending_dispatcher {
         action_override::check_selectors(
             controller,
             all_controllers,
             publics_inlined.iter().map(|a| a.name.clone())
                 .chain(inherited.iter().cloned()).chain(missing.iter().cloned()).collect(),
         );
-        let rescues = collect_rescue_handlers(controller, all_controllers, format_breadth);
+        let mut rescues = collect_rescue_handlers(controller, all_controllers, format_breadth);
+        lower_dispatcher_bodies(&mut preamble, &mut wraps, &mut rescues, |body| {
+            lower_action_body(
+                body, controller, "process_action", &privs, &params_privs,
+                /*is_public=*/ false, params_specs, assocs, &[], view_ivars, partials,
+                format_breadth, &shadows, route_id_segments, false, false, None, None, &[],
+                /*preserve_named_layout=*/ true,
+            ).0
+        });
+        // Template lowering can introduce a read of self.action_name.
         let reads = reads_action_name(
             controller,
             all_controllers,
             &dispatcher_bodies(&preamble, &wraps, &rescues),
+            view_ivars,
+            partials,
         );
         let mut dispatcher = synthesize_process_action(
             &preamble,
@@ -1395,12 +1414,9 @@ fn build_methods(
             generated_dispatcher = Some(dispatcher_at);
             pending_adapter = Some(action_override::request_adapter(controller, reads));
         }
-        // Block-form filters are inlined into `process_action` after
-        // `rewrite_controller_route_helpers` has already run on action
-        // bodies. A CSP block calls `service_worker_path(format: :js)`,
-        // which `route_format_suffix` renamed. The rewrite is idempotent
-        // on nodes it has already touched, so every dispatcher gets it —
-        // the next block filter that names a helper would otherwise stay bare.
+        // Assembly adds expressions after action lowering. Route-helper
+        // rewriting is idempotent and must still cover the final dispatcher;
+        // response lowering is not, so deferred action tails stay untouched.
         dispatcher.body =
             rewrite_controller_route_helpers(&dispatcher.body, &shadows, route_id_segments);
         methods.insert(dispatcher_at, dispatcher);
@@ -2537,16 +2553,39 @@ fn ancestor_chain<'a>(controller: &Controller, all: &'a [Controller]) -> Vec<&'a
 /// lambda filters stay `Unknown` in the controller body, so only
 /// `dispatched` has them. A concern's methods count too, because ingest
 /// splices them into the controller.
-fn reads_action_name(controller: &Controller, all: &[Controller], dispatched: &[&Expr]) -> bool {
+fn reads_action_name(
+    controller: &Controller,
+    all: &[Controller],
+    dispatched: &[&Expr],
+    view_ivars: &ViewIvarMap,
+    partials: &PartialMap,
+) -> bool {
     let action_name = Symbol::from("action_name");
     let reads = |e: &Expr| body_calls_method(e, &action_name);
     let mut chain = ancestor_chain(controller, all);
     chain.push(controller);
     // A method that renders a partial passes the request's `action_name` on to it, outside an action too (a helper, an inherited one).
     let renders_partial = |e: &Expr| body_renders_partial(e);
+    // Named callback/rescue methods are lowered separately, possibly on
+    // an ancestor. Their template binding can introduce the same reader
+    // as an inline callback. Inspect that binding from source too.
+    let contextual_views = view_ivars.values().any(|view| view.uses_action_name);
+    let renders_with_action_name = |c: &Controller, e: &Expr| {
+        contextual_views && {
+            // This is only a query. Actual body lowering owns any
+            // diagnostics; inspecting its binding must not report them.
+            let (bound, _) = crate::emit::diagnostics::scope(|| rewrite_render_to_views(
+                e, views_module_name(c).as_deref(), &[], view_ivars, partials,
+                "", false, false, &[],
+            ));
+            reads(&bound)
+        }
+    };
     dispatched.iter().any(|e| reads(e))
         || chain.iter().any(|c| {
-            c.actions().any(|a| reads(&a.body) || renders_partial(&a.body))
+            c.actions().any(|a| {
+                reads(&a.body) || renders_partial(&a.body) || renders_with_action_name(c, &a.body)
+            })
                 || c.filters().any(|f| {
                     [&f.block, &f.if_cond_expr, &f.unless_cond_expr]
                         .into_iter()
@@ -2554,6 +2593,48 @@ fn reads_action_name(controller: &Controller, all: &[Controller], dispatched: &[
                         .any(reads)
                 })
         })
+}
+
+#[cfg(test)]
+mod action_name_probe_tests {
+    use super::*;
+
+    #[test]
+    fn action_name_probe_does_not_report_serializer_diagnostics() {
+        let tree = [
+            ("db/schema.rb", "ActiveRecord::Schema.define(version: 1) do\nend\n"),
+            ("config/routes.rb", "Rails.application.routes.draw do\n  get '/probes', to: 'probes#index'\nend\n"),
+            ("app/controllers/probes_controller.rb", "class ProbesController < ActionController::Base\n  def index\n    render json: { value: 1 }, serializer: :custom\n  end\nend\n"),
+        ].into_iter().map(|(path, source)| {
+            (std::path::PathBuf::from(path), source.as_bytes().to_vec())
+        }).collect();
+        let app = crate::ingest::ingest_app_from_tree(tree).expect("ingest probe");
+        let controller = app.controllers.iter()
+            .find(|c| c.name.0.as_str() == "ProbesController").expect("probe controller");
+        let mut views = ViewIvarMap::default();
+        views.insert(("Probes".into(), "context".into()),
+            crate::lower::view_to_library::ViewArgs {
+                uses_action_name: true,
+                ..Default::default()
+            });
+        let partials = PartialMap::default();
+        let (reads, inspection) = crate::emit::diagnostics::scope(|| {
+            reads_action_name(controller, &app.controllers, &[], &views, &partials)
+        });
+        assert!(!reads);
+        assert!(inspection.is_empty(), "inspection reported diagnostics: {inspection:?}");
+
+        // Isolating inspection must not hide the real lowering refusal.
+        let action = controller.actions().next().expect("index action");
+        let (_, actual) = crate::emit::diagnostics::scope(|| {
+            rewrite_render_to_views(&action.body, Some("Probes"), &[], &views,
+                &partials, "index", true, false, &[])
+        });
+        assert_eq!(actual.len(), 1, "actual lowering diagnostics: {actual:?}");
+        assert!(matches!(&actual[0].kind,
+            crate::diagnostic::DiagnosticKind::LowerResidue { reason, .. }
+                if reason.as_str() == "serializer_render_not_modelled"), "{:?}", actual[0]);
+    }
 }
 
 fn body_renders_partial(e: &Expr) -> bool {
@@ -3060,6 +3141,7 @@ fn action_to_method(
         inherited_spec,
         formats_template.as_ref(),
         &inheritor_modules,
+        /*preserve_named_layout=*/ false,
     );
     if let Some(tail) = deferred_tail {
         deferred_out.insert(a.name.clone(), tail);
@@ -3303,6 +3385,7 @@ fn lower_action_body(
     inherited_params_spec: Option<&ParamsSpec>,
     formats_only_render: Option<&Symbol>,
     inheritor_modules: &[String],
+    preserve_named_layout: bool,
 ) -> (Expr, Option<Expr>) {
     // BEFORE everything else: this turns a helper the permit recognizer
     // could not read into one that yields the params class, so every
@@ -3409,6 +3492,7 @@ fn lower_action_body(
             partials,
             action_name,
             is_public,
+            preserve_named_layout,
             inheritor_modules,
         )
     };
