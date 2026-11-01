@@ -47,6 +47,11 @@ class Holder
   def local_or(local, value)
     local&.profile_id ||= value
   end
+
+  # `&.` skips only nil: a false receiver is read, as Ruby reads it.
+  def false_receiver
+    false&.to_s ||= "x"
+  end
 end
 "##;
 
@@ -75,6 +80,7 @@ seen("add") { holder.add(4) }
 seen("count") { details.count }
 seen("local set") { holder.local_or(Details.new, 5) }
 seen("reads once") { holder.reads }
+seen("false receiver") { holder.false_receiver }
 "##;
 
 fn app() -> emit_and_run::Overlay {

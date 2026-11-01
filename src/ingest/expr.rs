@@ -2084,7 +2084,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             };
             let name = Symbol::from(constant_id_str(&w.read_name()));
             let value = ingest_expr(&w.value(), file)?;
-            guard_safe_nav_write(w.is_safe_navigation(), recv, |recv| ExprNode::OpAssign {
+            guard_safe_nav_write(w.is_safe_navigation(), &w.location(), recv, |recv| ExprNode::OpAssign {
                 target: crate::expr::LValue::Attr { recv, name },
                 op: crate::expr::OpAssignOp::OrOr,
                 value,
@@ -2103,7 +2103,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             };
             let name = Symbol::from(constant_id_str(&w.read_name()));
             let value = ingest_expr(&w.value(), file)?;
-            guard_safe_nav_write(w.is_safe_navigation(), recv, |recv| ExprNode::OpAssign {
+            guard_safe_nav_write(w.is_safe_navigation(), &w.location(), recv, |recv| ExprNode::OpAssign {
                 target: crate::expr::LValue::Attr { recv, name },
                 op: crate::expr::OpAssignOp::AndAnd,
                 value,
@@ -2130,7 +2130,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                     ),
                 })?;
             let value = ingest_expr(&w.value(), file)?;
-            guard_safe_nav_write(w.is_safe_navigation(), recv, |recv| ExprNode::OpAssign {
+            guard_safe_nav_write(w.is_safe_navigation(), &w.location(), recv, |recv| ExprNode::OpAssign {
                 target: crate::expr::LValue::Attr { recv, name },
                 op,
                 value,
@@ -4686,20 +4686,26 @@ fn merge_call(recv: Expr, arg: Expr, span: Span) -> Expr {
 /// `recv&.x ||= v` (and `&&=`, `+=`): Ruby evaluates the receiver once and
 /// skips the read, the operator and the write when it is nil, so the
 /// whole expression is nil. The IR has no safe-send flag, so it desugars
-/// as `&.` does for a send: `recv && recv.x ||= v`, with a receiver that
-/// is not a plain read bound once first (`(__safe_nav17 = a.b) &&
-/// __safe_nav17.x ||= v`). `request.details&.profile_id ||= …` read as
-/// `request.details.profile_id ||= …` raised on a request whose details
-/// were nil.
-fn guard_safe_nav_write(safe: bool, recv: Expr, build: impl FnOnce(Expr) -> ExprNode) -> ExprNode {
+/// to `recv.nil? ? nil : (recv.x ||= v)`, with a receiver that is not a
+/// plain read bound once first, to a local no source name takes
+/// (`(__safe_nav17 = a.b).nil? ? nil : (__safe_nav17.x ||= v)`). Only nil
+/// is skipped: `false&.x ||= v` writes, as Ruby's does.
+/// `request.details&.profile_id ||= …` read as `request.details.profile_id
+/// ||= …` raised on a request whose details were nil.
+fn guard_safe_nav_write(
+    safe: bool,
+    loc: &ruby_prism::Location<'_>,
+    recv: Expr,
+    build: impl FnOnce(Expr) -> ExprNode,
+) -> ExprNode {
     if !safe {
         return build(recv);
     }
     let span = recv.span;
-    let (left, target) = if is_plain_read(&recv) {
+    let (checked, target) = if is_plain_read(&recv) {
         (recv.clone(), recv)
     } else {
-        let temp = Symbol::from(format!("__safe_nav{}", recv.span.start));
+        let temp = fresh_reserved_local(loc, &format!("__safe_nav{}", recv.span.start));
         let read = Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: temp.clone() });
         let bound = Expr::new(
             span,
@@ -4710,11 +4716,14 @@ fn guard_safe_nav_write(safe: bool, recv: Expr, build: impl FnOnce(Expr) -> Expr
         );
         (bound, read)
     };
-    ExprNode::BoolOp {
-        op: crate::expr::BoolOpKind::And,
-        surface: crate::expr::BoolOpSurface::Symbol,
-        left,
-        right: Expr::new(span, build(target)),
+    let is_nil = Expr::new(
+        span,
+        ExprNode::Send { recv: Some(checked), method: Symbol::from("nil?"), args: vec![], block: None, parenthesized: false },
+    );
+    ExprNode::If {
+        cond: is_nil,
+        then_branch: Expr::new(span, ExprNode::Lit { value: crate::expr::Literal::Nil }),
+        else_branch: Expr::new(span, build(target)),
     }
 }
 
