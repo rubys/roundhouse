@@ -323,9 +323,10 @@ pub struct App {
     pub queue_adapter: Option<String>,
     /// The Redis the app's `Sidekiq.configure_client` block names
     /// (`config.redis = { url: …, password: … }`), read at ingest from
-    /// `config/initializers`. It is the source of truth for where jobs
-    /// are pushed; `REDIS_PROVIDER`, `REDIS_URL` and localhost are only
-    /// the fallback when it names no URL. Other keys are not read.
+    /// `config/initializers`. It is the only source of where jobs are
+    /// pushed: a tree on `:sidekiq` without a `url:` here is an ingest
+    /// error, with no fallback to `REDIS_PROVIDER`, `REDIS_URL` or
+    /// localhost. Other keys are not read.
     #[serde(default, skip_serializing_if = "SidekiqRedisConfig::is_empty")]
     pub sidekiq_redis: SidekiqRedisConfig,
     /// The worker's defaults from `config/sidekiq.yml` (concurrency,

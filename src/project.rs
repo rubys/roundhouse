@@ -3420,7 +3420,7 @@ fn with_sidekiq_readme(mut files: Vec<(String, String)>, target: BuildTarget, ap
     let section = format!(
         "### Jobs on Sidekiq\n\
          The app is on `queue_adapter :sidekiq`, so `perform_later` pushes each job \
-         to Redis (`REDIS_URL`, or `redis://localhost:6379`) in Sidekiq 8's format. \
+         to the Redis its `Sidekiq.configure_client` names, in Sidekiq 8's format. \
          Run them with the same build in a second process (or with a Ruby Sidekiq \
          process on the Rails app):\n\
          ```sh\n\
@@ -6383,8 +6383,9 @@ const SIDEKIQ_REDIS_CLIENT: &str = "runtime/spinel/sidekiq/sidekiq_redis.rb";
 const SIDEKIQ_WORKER: &str = "runtime/spinel/sidekiq/sidekiq_worker.rb";
 
 /// The body of `JobRegistry.sidekiq_redis_url` or `_password` for one
-/// `configure_client` setting: `""` when the app gives none, so the push
-/// falls back to the environment. `SidekiqPush.setting` reads a variable
+/// `configure_client` setting: `""` when the app gives none (a password;
+/// ingest refuses a tree on `:sidekiq` with no `url:`, so an empty URL
+/// only reaches the push past that error). `SidekiqPush.setting` reads a variable
 /// when the push first needs it, as Sidekiq reads it at boot.
 fn redis_setting_source(setting: Option<&crate::app::RedisSetting>) -> String {
     use crate::app::RedisSetting;
