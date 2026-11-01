@@ -1140,7 +1140,7 @@ fn record_model_name(model: &Expr, ctx: &ViewCtx, fallback: &str) -> String {
     if let ExprNode::Send { recv: Some(recv), method, .. } = &*model.node {
         if method.as_str() == "new" {
             if let ExprNode::Const { path } = &*recv.node {
-                let name = path.iter().map(|part| part.as_str()).collect::<Vec<_>>().join("::");
+                let name = path.iter().map(|part| part.as_str()).filter(|part| !part.is_empty()).collect::<Vec<_>>().join("::");
                 return ctx.model_param_keys.get(&name).cloned().unwrap_or_else(|| crate::naming::model_param_key(&name));
             }
         }

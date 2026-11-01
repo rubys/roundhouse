@@ -187,6 +187,15 @@ fn isolated_engine_form_keys_are_relative() {
 }
 
 #[test]
+fn rooted_constructor_form_keys_match_unrooted() {
+    let engine = "module Blog\nclass Engine < ::Rails::Engine\nisolate_namespace Blog\nend\nend\n";
+    paired_form("::Blog::Post", "ActiveRecord::Schema.define do\ncreate_table(:blog_posts) { |t| t.boolean :published }\nend\n", &[
+        ("lib/blog/engine.rb", engine),
+        ("app/models/blog/post.rb", "module Blog\nclass Post < ActiveRecord::Base\nattribute :nickname, :string\nattribute :enabled, :boolean\nend\nend\n"),
+    ], &format!("require 'rails'\n{engine}"), "post", false);
+}
+
+#[test]
 fn namespaced_form_metadata_preserves_attribute_values() {
     paired_form("Admin::User", "ActiveRecord::Schema.define do\ncreate_table(:users) { |t| t.boolean :published }\nend\n", &[
         ("app/models/admin/user.rb", "module Admin\nclass User < ActiveRecord::Base\nself.table_name = \"users\"\nattribute :nickname, :string\nattribute :enabled, :boolean\nend\nend\n"),
