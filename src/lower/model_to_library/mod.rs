@@ -3072,7 +3072,7 @@ fn type_method_body(
     table: Option<&Table>,
     model: Option<&Model>,
 ) {
-    let typer = crate::analyze::BodyTyper::new(classes);
+    let typer = crate::analyze::BodyTyper::new(classes).with_pending_source_values();
     let mut ctx = crate::analyze::Ctx::default();
     if let Some(Ty::Fn { params, .. }) = &method.signature {
         for (param, sig) in method.params.iter().zip(params.iter()) {

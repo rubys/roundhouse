@@ -415,6 +415,10 @@ pub(crate) fn lexical_class<T>(
 /// without cloning.
 pub struct BodyTyper<'a> {
     classes: &'a HashMap<ClassId, ClassInfo>,
+    // Model retyping needs a normal value slot before its local source
+    // surface is populated. Source fixpoints instead keep an open variable
+    // so circular constants and method returns can still refine (#521).
+    pending_source_values: bool,
     materialized_associations: Option<&'a crate::det::HashSet<Symbol>>,
     const_resolver: Option<std::sync::Arc<ConstResolver>>,
     typed_constants: Option<&'a IdentityHashMap<DeclarationId, Ty>>,
@@ -566,6 +570,7 @@ impl<'a> BodyTyper<'a> {
     pub fn new(classes: &'a HashMap<ClassId, ClassInfo>) -> Self {
         Self {
             classes,
+            pending_source_values: false,
             materialized_associations: None,
             const_resolver: None,
             typed_constants: None,
@@ -582,6 +587,11 @@ impl<'a> BodyTyper<'a> {
             nil_hash_defaults: std::cell::RefCell::new(None),
             block_selector_param: std::cell::RefCell::new(None),
         }
+    }
+
+    pub(crate) fn with_pending_source_values(mut self) -> Self {
+        self.pending_source_values = true;
+        self
     }
 
     /// Retype lambdas stored in this sequence once a later statement has

@@ -2020,7 +2020,11 @@ impl<'a> BodyTyper<'a> {
                         // absent value. In particular, rescue with a raising
                         // fallback must retain this protected value through
                         // a later model retyping pass.
-                        return Ty::pending_untyped();
+                        return if self.pending_source_values {
+                            Ty::pending_untyped()
+                        } else {
+                            unknown()
+                        };
                     }
                     if !instance_side && let Some(ty) = cls.class_methods.get(method) {
                         // Same projection the relation arm uses. A source
@@ -4592,7 +4596,7 @@ mod source_receiver_reason_tests {
                 (owner.clone(), info),
                 (ClassId(Symbol::from("TypeError")), crate::analyze::ClassInfo::default()),
             ].into_iter().collect();
-            let typer = BodyTyper::new(&classes);
+            let typer = BodyTyper::new(&classes).with_pending_source_values();
             let mut ctx = crate::analyze::Ctx::default();
             ctx.self_ty = Some(Ty::Class { id: owner.clone(), args: vec![].into() });
             ctx.class_side = true;
@@ -4627,7 +4631,10 @@ mod source_receiver_reason_tests {
         let receiver = Ty::Class { id, args: vec![].into() };
         for (method, instance) in [("value", true), ("load", false)] {
             let result = typer.dispatch_on(Some(&receiver), &Symbol::from(method), None, &[], instance);
-            assert!(result.inference_eq(&Ty::pending_untyped()), "{method}: {result:?}");
+            assert!(result.inference_eq(&unknown()), "{method}: {result:?}");
+            let value_typer = BodyTyper::new(&classes).with_pending_source_values();
+            let value = value_typer.dispatch_on(Some(&receiver), &Symbol::from(method), None, &[], instance);
+            assert!(value.inference_eq(&Ty::pending_untyped()), "{method}: {value:?}");
         }
         let external = typer.dispatch_on(Some(&receiver), &Symbol::from("external"), None, &[], true);
         assert!(external.inference_eq(&Ty::untyped()), "{external:?}");
