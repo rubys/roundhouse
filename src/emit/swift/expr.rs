@@ -2462,7 +2462,20 @@ pub(super) fn wrap_return(e: &Expr) -> String {
             // won't take, so the store converts it.
             let int_into_float = matches!(&*value.node, ExprNode::Lit { value: crate::expr::Literal::Int { .. } })
                 && matches!(instance_prop_ty(name.as_str()).as_ref().map(crate::ty::Ty::peel_nilable), Some(crate::ty::Ty::Float));
-            let stored = if int_into_float { format!("Double({held})") } else { held.clone() };
+            // The same for an array of Integer literals held for a Float-array
+            // property (`@ratios = [0]`): the method returns the `[Int]`, and
+            // the store maps each element to `Double`.
+            let ints_into_floats = matches!(&*value.node, ExprNode::Array { elements, .. }
+                    if !elements.is_empty() && elements.iter().all(|el| matches!(&*el.node, ExprNode::Lit { value: crate::expr::Literal::Int { .. } })))
+                && matches!(instance_prop_ty(name.as_str()).as_ref().map(crate::ty::Ty::peel_nilable),
+                    Some(crate::ty::Ty::Array { elem }) if matches!(elem.peel_nilable(), crate::ty::Ty::Float));
+            let stored = if int_into_float {
+                format!("Double({held})")
+            } else if ints_into_floats {
+                format!("{held}.map {{ Double($0) }}")
+            } else {
+                held.clone()
+            };
             let store = if IN_MODULE.with(|f| *f.borrow()) { format!("{sn} = {stored}") } else { format!("self.{sn} = {stored}") };
             // Its own scope, so an app local of the same name can't collide.
             format!("do {{\n{}\n}}", indent(&format!("let {held} = {coerced}\n{store}\nreturn {held}")))

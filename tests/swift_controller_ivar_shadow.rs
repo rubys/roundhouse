@@ -170,3 +170,25 @@ fn an_integer_literal_stored_in_a_float_property_converts_at_the_store() {
     assert!(!widget.contains("let __rhRet: Double"), "{widget}");
     assert!(widget.contains("let __rhRet = 1.5\n"), "{widget}");
 }
+
+/// The same for an array of Integer literals stored in a Float-array
+/// property: the method returns the `[Int]` it holds, and the store
+/// converts each element to the property's `Double`.
+#[test]
+fn an_integer_array_stored_in_a_float_array_property_converts_at_the_store() {
+    let (emitted, errors) = emit_and_run::empty_app()
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n")
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\n  def tune\n    @ratios = [1.5]\n  end\n\n  def reset\n    @ratios = [0]\n  end\nend\n")
+        .emit(BuildTarget::Swift);
+    assert!(errors.is_empty(), "{errors:?}");
+    let widget = std::fs::read_to_string(emitted.join("Sources/App/app/models/Widget.swift")).unwrap();
+    let reset = widget.split("func reset(").nth(1).expect("reset").split("\n    }\n").next().unwrap();
+    assert!(widget.contains("func reset() -> [Int] {"), "{widget}");
+    assert!(reset.contains("let __rhRet = [0]\n"), "{reset}");
+    assert!(reset.contains("self.ratios = __rhRet.map { Double($0) }\n"), "{reset}");
+    assert!(reset.contains("return __rhRet"), "{reset}");
+    // A Float array already matches the property.
+    assert!(widget.contains("let __rhRet = [1.5]\n            self.ratios = __rhRet\n"), "{widget}");
+}
