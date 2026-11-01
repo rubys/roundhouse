@@ -12,12 +12,12 @@ module ActionController
     CONTENT_TYPE_HEADER = /\A([^;\s]+\s*(?:;\s*(?:(?!charset)[^;\s])+)*)?(?:;\s*charset=("?)([^;\s]+)\2)?/
 
     def content_type=(value)
-      return if value.nil?
+      return value if value.nil?
 
       type = head_option_content_type(value)
       incoming = CONTENT_TYPE_HEADER.match(type)
       previous = CONTENT_TYPE_HEADER.match(@_headers["Content-Type"] || @_content_type)
-      return if incoming.nil? || previous.nil?
+      return value if incoming.nil? || previous.nil?
       charset = incoming[3] || previous[3]
       charset ||= "utf-8" unless previous[1]
       @_content_type = incoming[1].to_s
@@ -26,7 +26,7 @@ module ActionController
       # older extra header must neither override the write nor ship twice.
       @_headers.delete("Content-Type")
       @_content_type_explicit = true
-      @_content_type
+      value
     end
 
     # Rails' `redirect_to …, flash: { error: … }`: any key, set after

@@ -82,6 +82,18 @@ value = +"image/png"
 result = controller.write_media(value: value)
 raise "assigned value identity was lost" unless result.equal?(value)
 rows << {case: "inherited_concern", result: result}
+rows << {case: "super_return", result: result,
+         body: rails ? controller.response.body : controller.body,
+         content_type: controller.content_type}
+
+[+"image/png", nil, :json, "text/plain; charset=UTF-16"].each_with_index do |value, index|
+  controller = controller_for(MediaController, rails)
+  result = controller.public_send(:content_type=, value)
+  raise "writer method lost its argument identity" unless result.equal?(value)
+  controller.response_body = "body"
+  header = rails ? controller.response.to_a[1]["content-type"] : controller.content_type
+  rows << {case: "reflected_return_#{index}", result: result, final_header: header}
+end
 
 controller = controller_for(CustomMediaController, rails)
 rows << {case: "override", result: controller.write_media(value: "image/png"),

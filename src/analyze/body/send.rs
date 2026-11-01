@@ -1192,6 +1192,24 @@ impl<'a> BodyTyper<'a> {
         false
     }
 
+    // The controller writer is the only setter whose assignment path
+    // moves past dispatch. Leave other Ruby writers on their existing path.
+    pub(super) fn controller_writer_receiver(&self, recv: &Ty) -> bool {
+        match recv {
+            Ty::Union { variants } => variants.iter().any(|ty| self.controller_writer_receiver(ty)),
+            Ty::Class { id, .. } => {
+                let mut current = Some(id.clone());
+                for _ in 0..32 {
+                    let Some(id) = current else { return false };
+                    if id.0.as_str() == "ActionController::Base" { return true; }
+                    current = self.classes().get(&id).and_then(|cls| cls.parent.clone());
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
     // Method existence is separate evidence from its return type. In
     // particular, an app writer may exist while its body is unresolved.
     pub(super) fn defines_writer_surface(&self, recv: &Ty, method: &Symbol, instance_receiver: bool) -> bool {
@@ -1214,15 +1232,20 @@ impl<'a> BodyTyper<'a> {
     }
 
     pub(super) fn writer_has_missing_arm(&self, recv: &Ty, method: &Symbol,
-        block_ret: Option<&Ty>, args: &[Expr], instance_receiver: bool) -> bool
+        block_ret: Option<&Ty>, args: &[Expr], receiver_is_instance: bool) -> bool
     {
         let Ty::Union { variants } = recv else { return false };
-        variants.iter().any(|arm| match arm {
-            Ty::Union { .. } => self.writer_has_missing_arm(arm, method, block_ret, args, instance_receiver),
-            Ty::Var { .. } | Ty::Untyped => false,
-            Ty::Class { id, .. } if self.open_classes.is_some_and(|o| o.open(id, !instance_receiver).is_some()) => false,
-            _ => matches!(self.dispatch_on(Some(arm), method, block_ret, args, instance_receiver), Ty::Var { .. })
-                && !self.defines_writer_surface(arm, method, instance_receiver),
+        variants.iter().any(|arm| {
+            // An unknown arm cannot turn a known instance into a class
+            // receiver. Apply the shape check to this arm independently.
+            let instance_receiver = receiver_is_instance && super::instance_shaped(arm);
+            match arm {
+                Ty::Union { .. } => self.writer_has_missing_arm(arm, method, block_ret, args, receiver_is_instance),
+                Ty::Var { .. } | Ty::Untyped => false,
+                Ty::Class { id, .. } if self.open_classes.is_some_and(|o| o.open(id, !instance_receiver).is_some()) => false,
+                _ => matches!(self.dispatch_on(Some(arm), method, block_ret, args, instance_receiver), Ty::Var { .. })
+                    && !self.defines_writer_surface(arm, method, instance_receiver),
+            }
         })
     }
 

@@ -2298,10 +2298,12 @@ impl<'a> BodyTyper<'a> {
                 // registered answer does not say better — campfire's
                 // `self.join_code = generate_join_code` keeps the
                 // column's String rather than the generator's untyped.
+                let controller_writer = method.as_str() == "content_type="
+                    && recv_ty.as_ref().is_some_and(|ty| self.controller_writer_receiver(ty));
                 if recv.is_some()
                     && args.len() == 1
                     && crate::analyze::is_setter_name(method)
-                    && method.as_str() != "content_type="
+                    && !controller_writer
                 {
                     if let Some(t) = args[0]
                         .ty
@@ -2393,15 +2395,16 @@ impl<'a> BodyTyper<'a> {
                 {
                     return Ty::Untyped;
                 }
-                let instance_receiver = recv.as_ref().map_or(ctx.instance_body, |r| self.is_instance(r, ctx))
+                let receiver_is_instance = recv.as_ref().map_or(ctx.instance_body, |r| self.is_instance(r, ctx));
+                let instance_receiver = receiver_is_instance
                     && recv_ty.as_ref().is_some_and(instance_shaped);
                 let mut dispatched =
                     self.dispatch_on(recv_ty.as_ref(), method, block_ret.as_ref(), args, instance_receiver);
                 // One controller arm cannot supply a missing writer on a
                 // different concrete receiver in the same union.
-                if method.as_str() == "content_type="
+                if controller_writer
                     && recv_ty.as_ref().is_some_and(|ty|
-                        self.writer_has_missing_arm(ty, method, block_ret.as_ref(), args, instance_receiver))
+                        self.writer_has_missing_arm(ty, method, block_ret.as_ref(), args, receiver_is_instance))
                 {
                     return unknown();
                 }
@@ -2411,7 +2414,7 @@ impl<'a> BodyTyper<'a> {
                 // value. Dispatch first so an unrelated receiver cannot gain
                 // the writer merely by assigning a known literal.
                 if recv.is_some()
-                    && method.as_str() == "content_type="
+                    && controller_writer
                     && args.len() == 1
                     && (!matches!(dispatched, Ty::Var { .. })
                         || recv_ty.as_ref().is_some_and(|ty|

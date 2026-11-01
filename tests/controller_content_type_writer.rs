@@ -53,7 +53,7 @@ end
 }
 
 #[test]
-fn a_missing_writer_and_a_non_controller_are_still_rejected() {
+fn missing_writers_keep_the_existing_non_controller_assignment_path() {
     let app = analyze(&[
         ("app/controllers/probes_controller.rb", r#"
 class ProbesController < ActionController::Base
@@ -70,7 +70,31 @@ end
     let errors: Vec<_> = diagnose(&app).into_iter().filter(|d| d.severity == Severity::Error).collect();
     assert!(errors.iter().any(|d| d.message.contains("`absent_writer=`")), "{errors:?}");
     assert!(errors.iter().any(|d| d.message.contains("`content_type=`")), "{errors:?}");
-    assert_eq!(errors.iter().filter(|d| d.message.contains("`content_type=`")).count(), 4, "{errors:?}");
+    // Main's generic literal-assignment path is deliberately unchanged on
+    // non-controller receivers. Unresolved and mixed-controller misses remain.
+    assert_eq!(result(&app, "ProbesController", "literal_unrelated"), Ty::Str);
+    assert_eq!(errors.iter().filter(|d| d.message.contains("`content_type=`")).count(), 3, "{errors:?}");
+}
+
+#[test]
+fn gradual_union_arms_and_non_controller_proxies_keep_their_dispatch_paths() {
+    let app = analyze(&[
+        ("app/controllers/probes_controller.rb", r#"
+class ProbesController < ActionController::Base
+  def write_to(other, choice)
+    target = choice ? self : other
+    target.content_type = "image/png"
+  end
+  def proxy = (Plain.new.content_type = "image/png")
+end
+"#),
+        ("sig/probes_controller.rbs", "class ProbesController\ndef write_to: (untyped other, bool choice) -> String\nend\n"),
+        ("app/models/plain.rb", "class Plain\ndef method_missing(name, *args) = 123\nend\n"),
+    ]);
+    assert_eq!(result(&app, "ProbesController", "write_to"), Ty::Str);
+    assert_eq!(result(&app, "ProbesController", "proxy"), Ty::Str);
+    let errors: Vec<_> = diagnose(&app).into_iter().filter(|d| d.severity == Severity::Error).collect();
+    assert!(errors.is_empty(), "{errors:?}");
 }
 
 #[test]
