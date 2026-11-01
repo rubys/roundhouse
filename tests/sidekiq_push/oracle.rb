@@ -89,6 +89,10 @@ class AfterCommitJob < ActiveJob::Base
   def perform(car); end
 end
 
+class KeywordJob < ActiveJob::Base
+  def perform(car, count:, label: "touched"); end
+end
+
 class EveryArgumentJob < ActiveJob::Base
   def perform(*args); end
 end
@@ -188,6 +192,8 @@ pushes << record("set(wait: 5.minutes) on low") { WashCarJob.set(wait: 5.minutes
 pushes << record("set(wait_until:) in the past") { InspectCarJob.set(wait_until: Time.now - 60).perform_later(Car.new(6)) }
 pushes << record("enqueue_after_transaction_commit, no transaction") { AfterCommitJob.perform_later(Car.new(7)) }
 pushes << record("every Phase 1 argument type") { EveryArgumentJob.perform_later(*every_argument) }
+pushes << record("keyword arguments") { KeywordJob.perform_later(Car.new(9), count: 2, label: "custom") }
+pushes << record("an omitted optional keyword") { KeywordJob.perform_later(Car.new(10), count: 3) }
 
 # What Redis holds afterwards, as Sidekiq's own API would read it.
 state = Sidekiq.redis do |c|

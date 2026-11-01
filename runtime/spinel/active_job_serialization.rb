@@ -115,7 +115,42 @@ module ActiveJob
       "[" + parts.join(",") + "]"
     end
 
+    # A job's keyword arguments, as the one Hash ActiveJob writes for
+    # them after the positional ones: each name and its value's JSON,
+    # then `"_aj_ruby2_keywords"` listing the names, which is what tells
+    # Rails' reader to pass them back as keywords. A name of "" is a
+    # keyword the caller left at its default: Rails doesn't write a
+    # keyword the caller omits, so it is left out here.
+    RUBY2_KEYWORDS_KEY = "_aj_ruby2_keywords"
+
+    def self.keywords(names, values)
+      out = +"{"
+      written = [""]
+      written.clear
+      i = 0
+      while i < names.length
+        name = names[i]
+        if name != ""
+          out << str(name) + ":" + values[i] + ","
+          written << str(name)
+        end
+        i += 1
+      end
+      out << "\"" + RUBY2_KEYWORDS_KEY + "\":[" + written.join(",") + "]}"
+      out
+    end
+
     # ---- Read side: one argument out of the parsed array --------------
+
+    # The keyword Hash at `args[i]`, as the values of `names` in order,
+    # nil for a name it doesn't have, so the `*_at` readers below take
+    # them by index. Not a Hash is a DeserializationError, as a record
+    # that won't load is.
+    def self.keywords_at(args, i, names)
+      hash = args[i]
+      raise ActiveJob::DeserializationError, deserialize_message("expected keyword arguments") if key_of(hash, RUBY2_KEYWORDS_KEY).nil?
+      names.map { |name| hash[name] }
+    end
 
     # Not `count`: a second user `count(x)` in the program turns Spinel's
     # poly `ActiveRecord.adapter.count(table)` into an unboxed sp_int

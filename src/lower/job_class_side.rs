@@ -15,9 +15,10 @@
 //! ledgered as residue (see `fold_set_chains`).
 //!
 //! Job classes are those whose parent chain (within the ingested set)
-//! reaches ActiveJob::Base. Same guards as the mailer twin
-//! (`mailer_class_side`): positional forwarding only — kwarg or block
-//! `perform`s stay unwrapped on the residue ledger.
+//! reaches ActiveJob::Base. A `perform` with keywords gets a wrapper
+//! with its own parameter list that forwards each keyword by name
+//! (`new.perform(article, count: count)`); a `**rest` keyword, a block
+//! or `...` forwarding stays unwrapped on the residue ledger.
 //!
 //! Structural pass on `app.library_classes` (where `app/jobs/*.rb`
 //! ingest); runs on the post-analyze hook so every target's tree
@@ -231,7 +232,11 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
                 "the generated job wrapper cannot preserve a full forwarding packet"));
             continue;
         }
-        if perform.params.iter().any(|p| p.keyword) {
+        // A job's named keywords forward by name (`count: count`), as
+        // ActiveJob's do; a `**rest` keyword bundle and a worker's
+        // keywords don't. Sidekiq passes a worker its JSON args
+        // positionally, so a worker has no keywords to forward.
+        if perform.params.iter().any(|p| p.keyword && (p.rest || is_worker)) {
             diags.push(residue(&perform, "keyword parameters do not forward positionally"));
             continue;
         }
@@ -254,12 +259,10 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
             if class_side.contains(entry) {
                 continue;
             }
-            let args: Vec<Expr> = perform
-                .params
-                .iter()
-                .zip(param_tys.iter())
-                .enumerate()
-                .map(|(i, (p, ty))| {
+            let mut args: Vec<Expr> = Vec::new();
+            let mut keywords: Vec<(Expr, Expr)> = Vec::new();
+            for (i, (p, ty)) in perform.params.iter().zip(param_tys.iter()).enumerate() {
+                let arg = {
                     let mut v = Expr::new(
                         span,
                         ExprNode::Var {
@@ -270,11 +273,26 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
                     v.ty = ty.clone();
                     if p.rest {
                         v.ty = Some(Ty::Array { elem: std::sync::Arc::new(ty.clone().unwrap_or(Ty::Untyped)) });
-                        return Expr::new(span, ExprNode::Splat { value: v });
+                        Expr::new(span, ExprNode::Splat { value: v })
+                    } else {
+                        v
                     }
-                    v
-                })
-                .collect();
+                };
+                if p.keyword {
+                    let mut key = Expr::new(
+                        span,
+                        ExprNode::Lit { value: crate::expr::Literal::Sym { value: p.name.clone() } },
+                    );
+                    key.ty = Some(Ty::Sym);
+                    keywords.push((key, arg));
+                } else {
+                    args.push(arg);
+                }
+            }
+            // `new.perform(article, count: count, label: label)`.
+            if !keywords.is_empty() {
+                args.push(Expr::new(span, ExprNode::Hash { entries: keywords, kwargs: true }));
+            }
             let mut new_call = Expr::new(
                 span,
                 ExprNode::Send {

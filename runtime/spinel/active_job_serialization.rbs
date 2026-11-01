@@ -7,6 +7,7 @@ module ActiveJob
     SERIALIZER_KEY: String
     SYMBOL_SERIALIZER: String
     TIME_SERIALIZER: String
+    RUBY2_KEYWORDS_KEY: String
 
     def self.null: () -> String
     def self.bool: (bool value) -> String
@@ -17,7 +18,9 @@ module ActiveJob
     def self.record: (String gid_uri) -> String
     def self.time: (Time value) -> String
     def self.list: (Array[String] parts) -> String
+    def self.keywords: (Array[String] names, Array[String] values) -> String
 
+    def self.keywords_at: (untyped args, Integer i, Array[String] names) -> untyped
     def self.arg_count: (untyped args) -> Integer
     def self.null_at: (untyped args, Integer i) -> bool
     def self.bool_at: (untyped args, Integer i) -> bool

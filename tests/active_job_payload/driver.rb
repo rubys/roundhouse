@@ -141,6 +141,18 @@ at = payload.index("\"enqueued_at\":\"").to_i + 15
 payload = payload[0, at] + "<enqueued_at>" + payload[at + 30, payload.length - at - 30]
 puts "job " + payload
 
+# ---- Keyword arguments: oracle.rb's three KeywordJob calls ----------
+# Each keyword name, "" for one left at its default (the second call's
+# `label`, which Rails doesn't write because the caller omitted it).
+kw_default = "touched"
+kw_label = kw_default
+kwargs = [
+  A.list([A.record(gid("Room", 7)), A.keywords(["count", "label"], [A.int(2), A.str("custom")])]),
+  A.list([A.record(gid("Room", 7)), A.keywords(["count", kw_label == kw_default ? "" : "label"], [A.int(3), kw_label == kw_default ? "" : A.str(kw_label)])]),
+  A.list([A.keywords(["at", "kind", "ids", "room"], [A.time(t), A.sym(:open), A.list([A.int(1), A.int(2)]), A.record(gid("Rooms::Open", 8))])])
+]
+puts "kwargs " + A.list(kwargs)
+
 # ---- Read: every value back through its typed reader ----------------
 args = JSON.parse(args_json)
 check("count", A.arg_count(args) == 23, A.arg_count(args).to_s)
@@ -169,6 +181,25 @@ check("string array", A.str_array_at(args, 19) == ["a", "b"], "")
 check("empty array", A.int_array_at(args, 20).length == 0, "")
 check("bool array", A.bool_array_at(args, 21) == [true, false], "")
 check("symbol array", A.sym_array_at(args, 22) == [:x, :y], "")
+
+# Keywords back by name, nil for one that wasn't written.
+kw = A.keywords_at(JSON.parse(kwargs[0]), 1, ["count", "label"])
+check("keyword int", A.int_at(kw, 0) == 2, A.int_at(kw, 0).to_s)
+check("keyword string", A.str_at(kw, 1) == "custom", A.str_at(kw, 1))
+kw = A.keywords_at(JSON.parse(kwargs[1]), 1, ["count", "label"])
+check("an unwritten keyword reads as null", A.int_at(kw, 0) == 3 && A.null_at(kw, 1), "")
+kw = A.keywords_at(JSON.parse(kwargs[2]), 0, ["room", "ids", "kind", "at"])
+check("keyword record", A.locate_room_at(kw, 0).kind == "Rooms::Open", "")
+check("keyword array", A.int_array_at(kw, 1) == [1, 2], "")
+check("keyword symbol", A.sym_at(kw, 2) == :open, "")
+check("keyword time", A.time_at(kw, 3) == t, "")
+not_keywords = begin
+  A.keywords_at(JSON.parse(kwargs[0]), 0, ["count"])
+  "no error"
+rescue ActiveJob::DeserializationError => e
+  e.message
+end
+check("a positional argument is not keywords", not_keywords == "Error while trying to deserialize arguments: expected keyword arguments", not_keywords)
 
 # An offset time is the same instant, read back in UTC.
 check("time with an offset", A.parse_time("2026-10-09T14:14:56.123456789+02:00") == t, "")

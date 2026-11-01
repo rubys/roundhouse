@@ -57,9 +57,60 @@
       }
     ]
   ],
+  "keyword_arguments": [
+    [
+      {
+        "_aj_globalid": "gid://campfire/Room/7"
+      },
+      {
+        "count": 2,
+        "label": "custom",
+        "_aj_ruby2_keywords": [
+          "count",
+          "label"
+        ]
+      }
+    ],
+    [
+      {
+        "_aj_globalid": "gid://campfire/Room/7"
+      },
+      {
+        "count": 3,
+        "_aj_ruby2_keywords": [
+          "count"
+        ]
+      }
+    ],
+    [
+      {
+        "at": {
+          "_aj_serialized": "ActiveJob::Serializers::TimeSerializer",
+          "value": "2026-10-09T12:14:56.123456789Z"
+        },
+        "kind": {
+          "_aj_serialized": "ActiveJob::Serializers::SymbolSerializer",
+          "value": "open"
+        },
+        "ids": [
+          1,
+          2
+        ],
+        "room": {
+          "_aj_globalid": "gid://campfire/Rooms::Open/8"
+        },
+        "_aj_ruby2_keywords": [
+          "at",
+          "kind",
+          "ids",
+          "room"
+        ]
+      }
+    ]
+  ],
   "job": {
     "job_class": "PushMessageJob",
-    "job_id": "a17b3ece-9bcb-486d-8212-5e4da7da40c4",
+    "job_id": "899af2a2-b0b3-4696-9034-ecb95bcf838c",
     "provider_job_id": null,
     "queue_name": "default",
     "priority": null,
@@ -124,7 +175,7 @@
     "exception_executions": {},
     "locale": "en",
     "timezone": "UTC",
-    "enqueued_at": "2026-10-09T16:15:07.497576322Z",
+    "enqueued_at": "2026-11-01T15:00:22.002141358Z",
     "scheduled_at": null
   }
 }

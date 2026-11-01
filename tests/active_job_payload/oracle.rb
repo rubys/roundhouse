@@ -46,9 +46,24 @@ values = [
   [1, 2, 3], ["a", "b"], [], [true, false], [:x, :y]
 ]
 
+# Keyword arguments: `perform_later(room, count: 2)` passes them on as
+# one Hash flagged ruby2_keywords, which ActiveJob writes with
+# `_aj_ruby2_keywords` naming its keys. A keyword the caller omits is
+# not written.
+class KeywordJob < ActiveJob::Base
+  def perform(*args, **kwargs); end
+end
+
+keyword_arguments = [
+  KeywordJob.new(Room.new(7), count: 2, label: "custom").serialize["arguments"],
+  KeywordJob.new(Room.new(7), count: 3).serialize["arguments"],
+  KeywordJob.new(at: t, kind: :open, ids: [1, 2], room: Rooms::Open.new(8)).serialize["arguments"]
+]
+
 job = PushMessageJob.new(*values)
 puts JSON.pretty_generate(
   "activejob" => ActiveJob.version.to_s,
   "arguments" => ActiveJob::Arguments.serialize(values),
+  "keyword_arguments" => keyword_arguments,
   "job" => job.serialize
 )

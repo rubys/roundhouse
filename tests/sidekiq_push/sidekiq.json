@@ -534,6 +534,144 @@
           ]
         }
       ]
+    },
+    {
+      "name": "keyword arguments",
+      "round_trips": [
+        {
+          "pipelined": true,
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "default"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:default"
+              ],
+              "envelope_keys": [
+                "retry",
+                "queue",
+                "wrapped",
+                "args",
+                "class",
+                "jid",
+                "created_at",
+                "enqueued_at"
+              ],
+              "envelope": {
+                "retry": true,
+                "queue": "default",
+                "wrapped": "KeywordJob",
+                "args": [
+                  {
+                    "job_class": "KeywordJob",
+                    "job_id": "<uuid>",
+                    "provider_job_id": null,
+                    "queue_name": "default",
+                    "priority": null,
+                    "arguments": [
+                      {
+                        "_aj_globalid": "gid://depot/Car/9"
+                      },
+                      {
+                        "count": 2,
+                        "label": "custom",
+                        "_aj_ruby2_keywords": [
+                          "count",
+                          "label"
+                        ]
+                      }
+                    ],
+                    "executions": 0,
+                    "exception_executions": {},
+                    "locale": "en",
+                    "timezone": "UTC",
+                    "enqueued_at": "<iso8601(9)>",
+                    "scheduled_at": null
+                  }
+                ],
+                "class": "Sidekiq::ActiveJob::Wrapper",
+                "jid": "<jid>",
+                "created_at": "<ms>",
+                "enqueued_at": "<ms>"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "an omitted optional keyword",
+      "round_trips": [
+        {
+          "pipelined": true,
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "default"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:default"
+              ],
+              "envelope_keys": [
+                "retry",
+                "queue",
+                "wrapped",
+                "args",
+                "class",
+                "jid",
+                "created_at",
+                "enqueued_at"
+              ],
+              "envelope": {
+                "retry": true,
+                "queue": "default",
+                "wrapped": "KeywordJob",
+                "args": [
+                  {
+                    "job_class": "KeywordJob",
+                    "job_id": "<uuid>",
+                    "provider_job_id": null,
+                    "queue_name": "default",
+                    "priority": null,
+                    "arguments": [
+                      {
+                        "_aj_globalid": "gid://depot/Car/10"
+                      },
+                      {
+                        "count": 3,
+                        "_aj_ruby2_keywords": [
+                          "count"
+                        ]
+                      }
+                    ],
+                    "executions": 0,
+                    "exception_executions": {},
+                    "locale": "en",
+                    "timezone": "UTC",
+                    "enqueued_at": "<iso8601(9)>",
+                    "scheduled_at": null
+                  }
+                ],
+                "class": "Sidekiq::ActiveJob::Wrapper",
+                "jid": "<jid>",
+                "created_at": "<ms>",
+                "enqueued_at": "<ms>"
+              }
+            }
+          ]
+        }
+      ]
     }
   ],
   "redis_after": {
@@ -544,7 +682,7 @@
     ],
     "lengths": {
       "critical": 1,
-      "default": 4,
+      "default": 6,
       "low": 1
     },
     "schedule_size": 2

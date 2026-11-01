@@ -1809,6 +1809,18 @@ and a record deleted in between raises
 `ActiveJob::DeserializationError`, which `discard_on` drops. The codecs
 come from the job's `perform_later` call sites, and
 `tests/active_job_payload.rs` holds the format to Rails' own output.
+A `perform` with named keywords (`def perform(car, count:, label:
+"x")`) gets wrappers with the same parameter list, and its keywords go
+into one trailing Hash marked `_aj_ruby2_keywords`, as ActiveJob writes
+them, and come back by name. An optional keyword whose value equals
+its literal default is left out, as Rails leaves out a keyword the
+caller omits, and reads back as that default. Two known differences
+from Rails: the keys are written in `perform`'s order, not the call
+site's, and a caller that passes the default explicitly gets no key
+where Rails would write one; `perform` receives the same values either
+way. A non-literal keyword default or a `**` splat at a call site
+keeps the job's Proc (an error under `:sidekiq`), and a `perform` with
+a `**rest` keyword still gets no wrapper.
 
 **What is still missing.**
 
