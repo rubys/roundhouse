@@ -286,13 +286,19 @@ fn controller_ivars_named_like_base_state_build() {
     assert_dotnet_build_passes("an app controller with ivars named like the base's state", &emitted);
 }
 
+const PROBES_TEST: &str = "require \"test_helper\"\n\nclass ProbesControllerTest < ActionDispatch::IntegrationTest\n  test \"show renders\" do\n    get \"/show\"\n    assert_response :success\n  end\nend\n";
+
 #[test]
 #[ignore]
 fn controller_ivars_named_like_base_state_render() {
     // The three names render on the page, and the response is as Rails
     // leaves it: 200, no Location (#1625).
-    let (emitted, errors) = ts_controller_ivars::overlay().emit(roundhouse::project::BuildTarget::CSharp);
+    // A test file, so the emit writes the `tests/` project the probe joins.
+    let (emitted, errors) = ts_controller_ivars::overlay()
+        .write("test/controllers/probes_controller_test.rb", PROBES_TEST)
+        .emit(roundhouse::project::BuildTarget::CSharp);
     assert!(errors.is_empty(), "{errors:?}");
+    assert!(emitted.join("tests").is_dir(), "no tests/ project in the emit");
     let body = serde_json::to_string(ts_controller_ivars::BODY).unwrap();
     std::fs::write(
         emitted.join("tests/ControllerIvarsProbeTest.cs"),

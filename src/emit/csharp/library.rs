@@ -1194,6 +1194,15 @@ fn wrap_return(e: &Expr) -> String {
                 indent4(&els)
             );
         }
+        // Not the assignment alone: Ruby's assignment answers the value, and a value method must return it
+        ExprNode::Assign { target: target @ (crate::expr::LValue::Var { .. } | crate::expr::LValue::Ivar { .. }), .. } => {
+            let read = match target {
+                crate::expr::LValue::Var { id, name } => ExprNode::Var { id: *id, name: name.clone() },
+                crate::expr::LValue::Ivar { name } => ExprNode::Ivar { name: name.clone() },
+                _ => unreachable!(),
+            };
+            return format!("{}\nreturn {};", emit_stmt(e), emit_expr(&Expr::new(e.span, read)));
+        }
         _ => {}
     }
     // Terminal statements take no `return` prefix.
