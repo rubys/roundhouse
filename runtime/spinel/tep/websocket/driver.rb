@@ -41,6 +41,8 @@ module Tep
         @closing        = false
         @close_complete = false
         @close_timed_out = false
+        @close_pending  = false
+        @close_payload  = +""
         @close_code     = Tep::WebSocket::CLOSE_GOING_AWAY
         @close_reason   = +""
         @wlock          = Mutex.new
@@ -74,20 +76,15 @@ module Tep
 
       def set_fd(new_fd)
         @wlock.synchronize do
-          send_fd = -1
-          body = +""
           @state_lock.synchronize do
             unless @closed
               @fd = new_fd
               if @close_timed_out
                 TepSocketControl.shutdown(@fd, 2) if @fd >= 0
-              elsif @closing
-                send_fd = @fd
-                body = Driver.encode_close_payload(@close_code, @close_reason)
               end
             end
           end
-          Driver.send_frame(send_fd, Tep::WebSocket::OPCODE_CLOSE, body) if send_fd >= 0
+          write_pending_close
         end
         0
       end
@@ -141,6 +138,8 @@ module Tep
         @state_lock.synchronize do
           unless @closing || @closed
             @closing = true
+            @close_pending = true
+            @close_payload = body
             unless @close_complete
               @close_code = code
               @close_reason = code == 0 ? "" : reason.byteslice(0, 123)
@@ -156,13 +155,25 @@ module Tep
             driver.expire_close
           end
           @wlock.synchronize do
-            send_fd = -1
-            @state_lock.synchronize do
-              send_fd = @fd unless @closed || @close_timed_out
-            end
-            Driver.send_frame(send_fd, Tep::WebSocket::OPCODE_CLOSE, body) if send_fd >= 0
+            write_pending_close
           end
         end
+        0
+      end
+
+      # Caller holds @wlock. The receiver can retire before the initiating
+      # closer acquires it; either caller must complete the one queued frame.
+      def write_pending_close
+        send_fd = -1
+        body = +""
+        @state_lock.synchronize do
+          if @close_pending && !@closed && !@close_timed_out && @fd >= 0
+            @close_pending = false
+            send_fd = @fd
+            body = @close_payload
+          end
+        end
+        Driver.send_frame(send_fd, Tep::WebSocket::OPCODE_CLOSE, body) if send_fd >= 0
         0
       end
 
@@ -255,7 +266,11 @@ module Tep
       # to exit.
       def retire
         @wlock.synchronize do
-          @state_lock.synchronize { @closed = true }
+          begin
+            write_pending_close
+          ensure
+            @state_lock.synchronize { @closed = true }
+          end
         end
         0
       end

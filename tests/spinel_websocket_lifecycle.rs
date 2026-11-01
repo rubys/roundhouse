@@ -163,7 +163,8 @@ fn run_case(mut command: Command, mode: &str) -> Vec<String> {
     }
     let mut close = None;
     if !["open_error", "message_error", "eof", "blocked_writer"].contains(&mode) {
-        let (op, payload) = frame(&mut input).unwrap();
+        let (op, payload) =
+            frame(&mut input).unwrap_or_else(|error| panic!("{mode}:close_frame: {error}"));
         check!("close_frame", op == 8);
         if mode == "client" {
             check!("peer_close_payload", payload == b"\x0f\xa1peer");
