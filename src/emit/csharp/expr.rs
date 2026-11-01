@@ -2108,8 +2108,12 @@ fn emit_discarded(e: &Expr) -> String {
         | ExprNode::StringInterp { .. }
         | ExprNode::BoolOp { .. }
         | ExprNode::Range { .. } => true,
-        // An operator (`n + 1`, `a == b`, `x[i]`), not a call.
-        ExprNode::Send { method, .. } => !method.as_str().chars().any(|c| c.is_alphanumeric() || c == '_'),
+        // An operator (`n + 1`, `a == b`, `x[i]`), not a call. `<<` and `[]=`
+        // mutate (`items.Add(1L)` is void), so they stay statements.
+        ExprNode::Send { method, .. } => {
+            !matches!(method.as_str(), "<<" | "[]=")
+                && !method.as_str().chars().any(|c| c.is_alphanumeric() || c == '_')
+        }
         _ => false,
     };
     if is_value {

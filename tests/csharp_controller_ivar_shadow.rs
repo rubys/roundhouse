@@ -154,3 +154,19 @@ fn a_discarded_value_and_a_nil_first_local_compile_as_csharp() {
         "{widget}"
     );
 }
+
+/// An append in that body is a statement, not a discarded value: C#'s
+/// `List.Add` is void, so `_ = items.Add(1L);` would not compile.
+#[test]
+fn an_append_in_a_begin_body_with_an_else_stays_a_statement() {
+    let (emitted, errors) = emit_and_run::empty_app()
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n")
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\n  def add_else\n    items = []\n    begin\n      items << 1\n    rescue\n      2\n    else\n      3\n    end\n  end\nend\n")
+        .emit(BuildTarget::CSharp);
+    assert!(errors.is_empty(), "{errors:?}");
+    let widget = std::fs::read_to_string(emitted.join("app/models/Widget.cs")).unwrap();
+    assert!(!widget.contains("_ = items"), "{widget}");
+    assert!(widget.contains("try {\n            items.Add(1L);\n            return 3L;\n        }"), "{widget}");
+}
