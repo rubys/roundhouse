@@ -70,6 +70,12 @@ const PACKER: &str = r#"class Packer
     xs
   end
 
+  def flattened_nil_level
+    xs = [[["a"]], "b"]
+    xs.flatten!(nil)
+    xs
+  end
+
   def flattened_in_a_branch(go)
     xs = [["a"], "b"]
     xs.flatten! if go
@@ -79,6 +85,12 @@ const PACKER: &str = r#"class Packer
   def flattened_in_a_block
     xs = [[["a"]]]
     2.times { xs.flatten!(1) }
+    xs
+  end
+
+  def flattened_no_level_in_a_block
+    xs = [[["a"]], "b"]
+    2.times { xs.flatten!(0) }
     xs
   end
 
@@ -105,6 +117,10 @@ const PACKER: &str = r#"class Packer
 
   def flatten_every_level
     [[["a"]]].flatten
+  end
+
+  def flatten_nil_level
+    [[["a"]]].flatten(nil)
   end
 
   def flatten_run_time_level(depth)
@@ -210,6 +226,7 @@ fn a_statement_level_flatten_bang_rebinds_its_receiver() {
     assert_same(&ret(&analyzed, "Packer", "flattened_one_level"), &arr(union(&[Ty::Str, arr(Ty::Str)])));
     assert_same(&ret(&analyzed, "Packer", "flattened_no_level"), &arr(union(&[Ty::Str, arr(Ty::Str)])));
     assert_eq!(ret(&analyzed, "Packer", "flattened_negative_level"), arr(Ty::Str));
+    assert_eq!(ret(&analyzed, "Packer", "flattened_nil_level"), arr(Ty::Str));
     assert_eq!(ret(&analyzed, "Packer", "flattened_ivar"), arr(Ty::Str));
 }
 
@@ -220,6 +237,10 @@ fn a_flatten_bang_that_may_not_run_keeps_the_nested_element() {
     assert_same(
         &ret(&analyzed, "Packer", "flattened_in_a_block"),
         &arr(union(&[Ty::Str, arr(union(&[Ty::Str, arr(Ty::Str)]))])),
+    );
+    assert_same(
+        &ret(&analyzed, "Packer", "flattened_no_level_in_a_block"),
+        &arr(union(&[Ty::Str, arr(arr(Ty::Str))])),
     );
     assert_same(
         &ret(&analyzed, "Packer", "flattened_everything_in_a_block"),
@@ -233,6 +254,7 @@ fn flatten_unwraps_as_many_levels_as_its_depth() {
     assert_same(&ret(&analyzed, "Packer", "flatten_bang_answer"), &union(&[arr(Ty::Str), Ty::Nil]));
     assert_eq!(ret(&analyzed, "Packer", "flatten_one_level"), arr(arr(Ty::Str)));
     assert_eq!(ret(&analyzed, "Packer", "flatten_every_level"), arr(Ty::Str));
+    assert_eq!(ret(&analyzed, "Packer", "flatten_nil_level"), arr(Ty::Str));
     assert_same(
         &ret(&analyzed, "Packer", "flatten_run_time_level"),
         &arr(union(&[Ty::Str, arr(union(&[Ty::Str, arr(Ty::Str)]))])),

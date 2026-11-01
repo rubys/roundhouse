@@ -4317,7 +4317,7 @@ fn flatten_elem(t: &Ty) -> Ty {
 /// argument.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum FlattenDepth {
-    /// No argument, or a negative literal: every level.
+    /// No argument, `nil`, or a negative literal: every level.
     All,
     /// A non-negative literal. `0` leaves the array as it is.
     Levels(usize),
@@ -4330,6 +4330,7 @@ impl FlattenDepth {
         match args {
             [] => FlattenDepth::All,
             [depth] => match &*depth.node {
+                ExprNode::Lit { value: crate::expr::Literal::Nil } => FlattenDepth::All,
                 ExprNode::Lit { value: crate::expr::Literal::Int { value } } => {
                     usize::try_from(*value).map_or(FlattenDepth::All, FlattenDepth::Levels)
                 }
@@ -4340,11 +4341,12 @@ impl FlattenDepth {
     }
 
     /// The depth after the same call runs any number of times, as it can
-    /// in a loop or a block: unwrapping every level is the same however
-    /// often it repeats, a fixed number of levels is not.
+    /// in a loop or a block: unwrapping every level or none is the same
+    /// however often it repeats, any other fixed number of levels is not.
     pub(super) fn repeated(self) -> FlattenDepth {
         match self {
             FlattenDepth::All => FlattenDepth::All,
+            FlattenDepth::Levels(0) => FlattenDepth::Levels(0),
             FlattenDepth::Levels(_) | FlattenDepth::Unknown => FlattenDepth::Unknown,
         }
     }
