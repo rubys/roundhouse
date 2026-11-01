@@ -1118,7 +1118,13 @@ fn rewrite_library_partial_render(
     for n in &contract.closure {
         // Not the helper's same-named param: the partial's ivar is the rendering template's, which `rewrite_helper_ivars` reaches.
         let ivar = in_helper.then(|| Expr::new(span, ExprNode::Ivar { name: Symbol::from(n.as_str()) }));
-        view_args.push(locals_lookup(n).or(ivar).or_else(|| param_lookup(n)).unwrap_or_else(nil));
+        // Nor a local of its name: Rails hands `post: other` to the partial's `post`, never its `@post`. Only a param the local shares (`shared_locals`) takes it.
+        let local = || locals_lookup(n).filter(|_| *n != contract.record);
+        let value = match contract.shared_locals.contains(n) {
+            true => local().or(ivar),
+            false => ivar.or_else(local),
+        };
+        view_args.push(value.or_else(|| param_lookup(n)).unwrap_or_else(nil));
     }
     view_args.extend(contract.extras_args(
         locals_lookup,

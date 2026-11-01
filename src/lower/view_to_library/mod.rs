@@ -2814,6 +2814,10 @@ pub struct PartialCallContract {
     /// no record passes the caller's `@<ivar>` there, as Rails shares it.
     pub record_ivar: Option<String>,
     pub closure: Vec<String>,
+    /// The closure ivars the partial also reads as a local of their name
+    /// (`local_assigns[:class]` beside `@class`). The two share one param
+    /// (`drop_closure_names`), which a caller's same-named local fills.
+    pub shared_locals: Vec<String>,
     pub extras: Vec<String>,
     /// A strict-locals partial (`<%# locals: (…) -%>`) takes its
     /// non-record locals as KEYWORD params (see the strict-locals
@@ -2934,6 +2938,7 @@ pub(crate) fn partial_call_contracts(
                     record: declared[0].clone(),
                     record_ivar: None,
                     closure,
+                    shared_locals: Vec::new(),
                     // The request-context keywords the def adds (`request_context_views`).
                     extras: declared[1..]
                         .iter()
@@ -2966,6 +2971,13 @@ pub(crate) fn partial_call_contracts(
             .map(|s| (s.as_str().to_string(), ivar_local(&ivar_locals, s.as_str())))
             .filter(|(_, local)| local != &record)
             .unzip();
+        // Before the callers' `locals:` keys join the extras: those name what a render hands, not what the partial reads.
+        let shared_locals: Vec<String> = closure
+            .iter()
+            .zip(&closure_locals)
+            .filter(|(_, local)| extras.iter().any(|k| crate::naming::safe_local(k) == **local))
+            .map(|(n, _)| n.clone())
+            .collect();
         let record_ivar = closure_raw
             .iter()
             .find(|s| ivar_local(&ivar_locals, s.as_str()) == record)
@@ -2980,7 +2992,7 @@ pub(crate) fn partial_call_contracts(
         drop_closure_names(&mut extras, &closure_locals);
         out.insert(
             spelled,
-            PartialCallContract { method, record, record_ivar, closure, extras, keyword_extras: false, declared: Vec::new() },
+            PartialCallContract { method, record, record_ivar, closure, shared_locals, extras, keyword_extras: false, declared: Vec::new() },
         );
     }
     out
