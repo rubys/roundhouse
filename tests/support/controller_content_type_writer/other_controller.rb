@@ -1,0 +1,2 @@
+class OtherMediaController < MediaController
+end

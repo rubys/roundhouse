@@ -1960,7 +1960,9 @@ impl<'a> BodyTyper<'a> {
                         return unwrap_fn_ret(&subst(ty));
                     }
                     if let Some(ty) = cls.instance_methods.get(method) {
-                        return unwrap_fn_ret(&subst(ty));
+                        if method.as_str() != "content_type=" || instance_receiver {
+                            return unwrap_fn_ret(&subst(ty));
+                        }
                     }
                     // Mixed-in modules (`include IntervalHelper`)
                     // contribute their instance methods to this class.
@@ -1968,6 +1970,9 @@ impl<'a> BodyTyper<'a> {
                     // parent — Ruby's ancestor order puts an included
                     // module between the class and its superclass.
                     for module_id in &cls.includes {
+                        if method.as_str() == "content_type=" && !instance_receiver {
+                            continue;
+                        }
                         if let Some(ty) = self.lookup_in_module(module_id, method) {
                             return subst(&ty);
                         }

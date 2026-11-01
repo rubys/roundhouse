@@ -1807,6 +1807,15 @@ impl<'a> BodyTyper<'a> {
             ExprNode::Defined { .. } => union_of(Ty::Str, Ty::Nil),
 
             ExprNode::Send { recv, method, args, block, parenthesized } => {
+                // Recompute this writer-result warning as parameter evidence
+                // settles; it is not a permanent missing-method refusal.
+                if method.as_str() == "content_type="
+                    && matches!(crate::expr::ExprCold::diagnostic(&expr.cold),
+                        Some(crate::diagnostic::DiagnosticKind::UnresolvedType { expr_kind, .. })
+                            if expr_kind.as_str() == "assignment result")
+                {
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, None);
+                }
                 // Not an unknown Kernel call: `lambda { |x| … }` is the stabby `->(x) { … }`, whose value is the block (svg-graph's `DataPoint::DEFAULT_SHAPE`).
                 // So is `proc { |x| … }`, whose value calls the same way.
                 if recv.is_none()
@@ -2292,6 +2301,7 @@ impl<'a> BodyTyper<'a> {
                 if recv.is_some()
                     && args.len() == 1
                     && crate::analyze::is_setter_name(method)
+                    && method.as_str() != "content_type="
                 {
                     if let Some(t) = args[0]
                         .ty
@@ -2387,6 +2397,25 @@ impl<'a> BodyTyper<'a> {
                     && recv_ty.as_ref().is_some_and(instance_shaped);
                 let mut dispatched =
                     self.dispatch_on(recv_ty.as_ref(), method, block_ret.as_ref(), args, instance_receiver);
+                // This writer has a registered controller surface, but the
+                // assignment still answers its argument, even when gradual
+                // or unresolved, and even if an app override returns another
+                // value. Dispatch first so an unrelated receiver cannot gain
+                // the writer merely by assigning a known literal.
+                if recv.is_some()
+                    && method.as_str() == "content_type="
+                    && args.len() == 1
+                    && !matches!(dispatched, Ty::Var { .. })
+                {
+                    let assigned = args[0].ty.clone().unwrap_or_else(unknown);
+                    if matches!(assigned, Ty::Var { .. }) {
+                        crate::expr::ExprCold::set_diagnostic(&mut expr.cold,
+                            Some(crate::diagnostic::DiagnosticKind::UnresolvedType {
+                                expr_kind: Symbol::from("assignment result"), name: None,
+                            }));
+                    }
+                    return assigned;
+                }
                 // An `app/helpers` method runs in the view, so a bare call that finds nothing on the module is the
                 // view's: the helper module that answers the name (`helpers :all`; the module itself while its own
                 // definition is untyped), else ActionView's `link_to`/`tag`/`image_tag`.

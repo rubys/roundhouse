@@ -1,5 +1,7 @@
 module ActionController
   class Base
+    CONTENT_TYPE_HEADER: Regexp
+    def content_type=: (Object? value) -> String?
     def render: (String body, ?status: Symbol | Integer, ?content_type: String?, ?location: String?) -> void
     def redirect_to: (String path, ?notice: String?, ?alert: String?, ?status: Symbol | Integer, ?flash: Hash[String | Symbol, String]?) -> void
     def resolve_status: (Symbol | Integer status) -> Integer

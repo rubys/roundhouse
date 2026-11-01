@@ -1540,6 +1540,53 @@ fn emits_namespaced_controllers(target: BuildTarget) -> bool {
     matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel)
 }
 
+/// Only the Ruby response layer normalizes the writer's charset and nil
+/// behavior. A source override is the app's method, not this runtime surface.
+fn report_controller_content_type_writers(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel) {
+        return;
+    }
+    fn owner(app: &App, id: &crate::ident::ClassId, depth: usize) -> Option<bool> {
+        if depth > 32 { return None; }
+        let (parent, includes) = if let Some(c) = app.controllers.iter().find(|c| &c.name == id) {
+            if c.actions().any(|a| a.name.as_str() == "content_type=") { return Some(false); }
+            (c.parent.as_ref(), crate::analyze::controller_includes(c))
+        } else if let Some(c) = app.library_classes.iter().find(|c| &c.name == id) {
+            if c.methods.iter().any(|m| m.name.as_str() == "content_type="
+                && m.receiver == crate::dialect::MethodReceiver::Instance) { return Some(false); }
+            (c.parent.as_ref(), c.includes.clone())
+        } else {
+            (None, Vec::new())
+        };
+        for included in includes.iter().rev() {
+            if let Some(found) = owner(app, included, depth + 1) { return Some(found); }
+        }
+        if id.0.as_str() == "ActionController::Base" { return Some(true); }
+        if let Some(parent) = parent { return owner(app, parent, depth + 1); }
+        (id.0.as_str() == "ApplicationController").then_some(true)
+    }
+    fn visit(expr: &crate::expr::Expr, app: &App, target: BuildTarget) {
+        fn uses_framework_writer(app: &App, ty: &crate::ty::Ty) -> bool {
+            match ty {
+                crate::ty::Ty::Class { id, .. } => owner(app, id, 0) == Some(true),
+                crate::ty::Ty::Union { variants } => variants.iter().any(|v| uses_framework_writer(app, v)),
+                _ => false,
+            }
+        }
+        if let crate::expr::ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node
+            && method.as_str() == "content_type="
+            && !matches!(&*recv.node, crate::expr::ExprNode::Const { .. })
+            && recv.ty.as_ref().is_some_and(|ty| uses_framework_writer(app, ty))
+        {
+            emit::diagnostics::report_unsupported(expr.span, target.as_str(),
+                "ActionController#content_type=",
+                "this target's response runtime does not implement the controller writer's charset and nil behavior; use a Ruby target");
+        }
+        expr.node.for_each_child(&mut |child| visit(child, app, target));
+    }
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, app, target));
+}
+
 /// A `t` that reads the translation table or the whole catalog when it
 /// runs (`lower::i18n_translate`): a target whose runtime carries no
 /// `I18n.translate_site` / `I18n.translate_runtime` reports each one
@@ -2821,6 +2868,7 @@ fn target_files_inner(
     // errors than the app has.
     report_unsupported_bundled_constants(app, target);
     report_i18n_table_sites(app, target);
+    report_controller_content_type_writers(app, target);
     // Snapshot the optional measurement override at the target boundary. The
     // lowerers receive a value; they never consult process-global environment.
     let param_binds = target.param_binds_enabled(
