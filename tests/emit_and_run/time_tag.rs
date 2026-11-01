@@ -99,6 +99,7 @@ fn a_time_tag_whose_text_options_or_block_rails_reads_otherwise_is_refused() {
         ("  <%= time_tag @article.created_at, false, class: \"when\" %>\n", "`nil` or `false` text"),
         ("  <%= time_tag @article.created_at, \"Posted\", format: @article.title.to_sym %>\n", "computed `format:`"),
         ("  <%= time_tag(@article.created_at) { |x| x.nil? ? \"none\" : \"present\" } %>\n", "block with parameters"),
+        ("  <%= time_tag(@article.created_at, format: :missing) { \"Posted\" } %>\n", "localizes"),
     ] {
         let errors = app(markup).check_errors();
         assert!(errors.iter().any(|e| e.contains("time_tag not supported") && e.contains(reason)), "{markup}: {errors:?}");
@@ -193,5 +194,20 @@ fn time_tag_in_an_unreachable_jbuilder_template_is_a_warning() {
     let (_, errors) = overlay()
         .edit("config/routes.rb", "Rails.application.routes.draw do\n", "Rails.application.routes.draw do\n  get \"orphan\", to: \"articles#orphan\"\n")
         .emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.iter().any(|e| e.contains("time_tag not supported")), "a routed template keeps the error: {errors:?}");
+}
+
+/// An unlowered `time_tag` (no text, no block) in an unreachable Jbuilder
+/// template with a leading `return if …` is a warning too: analysis finds
+/// the template by its name, not by its body's synthetic span.
+#[test]
+fn an_unlowered_time_tag_in_an_unreachable_jbuilder_template_is_a_warning() {
+    let orphan = "return if @skip\njson.posted time_tag(Time.now)\njson.title \"orphan\"\n";
+    let errors = emit_and_run::real_blog().write("app/views/articles/orphan.json.jbuilder", orphan).check_errors();
+    assert!(!errors.iter().any(|e| e.contains("time_tag")), "{errors:?}");
+    let errors = emit_and_run::real_blog()
+        .write("app/views/articles/orphan.json.jbuilder", orphan)
+        .edit("config/routes.rb", "Rails.application.routes.draw do\n", "Rails.application.routes.draw do\n  get \"orphan\", to: \"articles#orphan\"\n")
+        .check_errors();
     assert!(errors.iter().any(|e| e.contains("time_tag not supported")), "a routed template keeps the error: {errors:?}");
 }

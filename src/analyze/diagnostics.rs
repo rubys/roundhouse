@@ -124,21 +124,28 @@ fn unlowered_time_tags(app: &App) -> Vec<Diagnostic> {
     if crate::ingest::time_tag::app_defines_time_tag(app) {
         return Vec::new();
     }
-    fn visit(expr: &Expr, out: &mut Vec<Diagnostic>) {
+    fn visit(expr: &Expr, unreachable: bool, out: &mut Vec<Diagnostic>) {
         if !expr.span.is_synthetic()
             && let Some(Err(reason)) = crate::ingest::time_tag::lowering(expr)
         {
-            out.push(Diagnostic::unsupported(expr.span, None, "time_tag", reason));
+            let mut d = Diagnostic::unsupported(expr.span, None, "time_tag", reason);
+            if unreachable {
+                d.severity = crate::diagnostic::Severity::Warning;
+            }
+            out.push(d);
         }
-        expr.node.for_each_child(&mut |child| visit(child, out));
+        expr.node.for_each_child(&mut |child| visit(child, unreachable, out));
     }
     let mut out = Vec::new();
+    // A template no request reaches keeps its errors as warnings, found by
+    // its name: its body's own span can be synthetic (a Jbuilder template's
+    // leading `return if …` guard), which the downgrade below misses (#1689).
     for view in &app.views {
-        visit(&view.body, &mut out);
+        visit(&view.body, app.unreachable_views.contains(&view.name), &mut out);
     }
     for lc in &app.library_classes {
         for method in &lc.methods {
-            visit(&method.body, &mut out);
+            visit(&method.body, false, &mut out);
         }
     }
     out

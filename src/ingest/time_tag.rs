@@ -11,8 +11,9 @@
 //! text). A call whose options give `datetime:` (Rails still evaluates
 //! `t.iso8601` before that value wins), have a computed key or a computed
 //! `format:` value (Rails evaluates it), whose text is a literal `nil` or
-//! `false` (Rails falls back to its default text), or whose block takes
-//! parameters is left as written and refused. Analysis, the time
+//! `false` (Rails falls back to its default text), whose block takes
+//! parameters, or that has a block, no text and a `format:` (Rails still
+//! localizes with it) is left as written and refused. Analysis, the time
 //! lowerings and the tag builder then see what an app writing the builder
 //! by hand would have written.
 //!
@@ -120,6 +121,12 @@ fn as_tag_time(span: crate::span::Span, args: &[Expr], block: Option<&Expr>) -> 
     // Literal keys only: a computed one could be `:format` or `:datetime`.
     if opts.iter().any(|(k, _)| !matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { .. } | Literal::Str { .. } })) {
         return Err(NOT_MODELED);
+    }
+    // With no text, Rails still makes the default text, `I18n.l(t, format:
+    // …)`, before it captures the block; with a given `format:` that can
+    // raise (a format the locale lacks), which is not modeled.
+    if text.is_none() && opts.iter().any(|(k, _)| matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "format")) {
+        return Err("with a block and no text, Rails still localizes the time with the given `format:` (`I18n.l`), which raises for a format the locale lacks; that is not modeled");
     }
     // Rails deletes and merges Symbol keys; a String "format" or "datetime"
     // stays an attribute beside them (`datetime="…Z" datetime="2026"`),
