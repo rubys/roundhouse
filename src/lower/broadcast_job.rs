@@ -179,9 +179,13 @@ pub fn apply_ruby(lcs: &mut [LibraryClass], app: &App) {
             continue;
         };
         let Some(lc) = lcs.iter_mut().find(|lc| lc.name == model.name) else { continue };
-        let spans: Vec<Span> = decls.iter().map(|d| d.span).collect();
+        // Only the eligible declarations' calls are rewritten: an
+        // ineligible one keeps BOTH its broadcasts inline, though its
+        // update call's canonical target is a String expression.
+        let (eligible, ineligible): (Vec<&Expr>, Vec<&Expr>) = decls.iter().partition(|d| job_eligible(d));
+        let spans: Vec<Span> = eligible.iter().map(|d| d.span).collect();
         let mut html: Option<Expr> = None;
-        let mut kept: Vec<Span> = Vec::new();
+        let mut kept: Vec<Span> = ineligible.iter().map(|d| d.span).collect();
         for m in lc.methods.iter_mut() {
             if m.receiver != MethodReceiver::Instance {
                 continue;

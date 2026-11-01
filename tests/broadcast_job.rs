@@ -168,3 +168,21 @@ fn a_record_stream_stays_inline_and_out_of_the_registry() {
     let model = model_file(&app, "message");
     assert!(!model.contains("push_turbo_broadcast") && !model.contains("turbo_broadcast_html"), "{model}");
 }
+
+#[test]
+fn only_the_eligible_declaration_is_rewritten() {
+    let app = app_with(
+        "sidekiq",
+        &[(
+            "app/models/car.rb",
+            "class Car < ApplicationRecord\n  broadcasts_to ->(_car) { \"cars\" }, inserts_by: :prepend\n  broadcasts_to ->(_car) { \"fleet\" }, target: ->(c) { c.name }\nend\n",
+        )],
+    );
+    assert_eq!(broadcast_job::models(&app), vec![car()]);
+    let src = model_file(&app, "car");
+    assert!(src.contains("JobRegistry.push_turbo_broadcast(\"cars\", \"prepend\""), "{src}");
+    assert!(src.contains("JobRegistry.push_turbo_broadcast(\"cars\", \"replace\""), "{src}");
+    // The second declaration keeps both its create and update inline.
+    assert!(!src.contains("push_turbo_broadcast(\"fleet\""), "{src}");
+    assert!(src.contains("Broadcasts.replace(stream: \"fleet\""), "{src}");
+}
