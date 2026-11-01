@@ -9,6 +9,7 @@ module ActiveJob
   # the proc-argument contract; the queue keeps the typed spelling so
   # both arms stay exercised.
   PENDING: Array[^() -> nil]
+  PENDING_QUEUES: Array[String]
   DRAINED: Array[String]
   def self.enqueue_only: () -> bool
   def self.enqueue_without_running: () -> nil
@@ -16,8 +17,12 @@ module ActiveJob
   def self.drain_registered: () -> bool
   def self.register_drain: () -> nil
   def self.enqueue: (^() -> nil work) -> nil
+  def self.enqueue_on: (String queue, ^() -> nil work) -> nil
   def self.enqueue_payload: (String json) -> nil
+  def self.enqueue_payload_on: (String queue, String json) -> nil
   def self.enqueue_payload_after_commit: (String json) -> nil
+  def self.enqueue_payload_after_commit_on: (String queue, String json) -> nil
+  def self.queue_or: (String queue, String own) -> String
   def self.pending_count: () -> Integer
   def self.perform_payload: (String json) -> bool
   def self.drain: () -> Integer

@@ -210,6 +210,19 @@ pub struct ClassInfo {
     pub constants: HashMap<Symbol, Ty>,
     /// If this class maps to a database table, which one.
     pub table: Option<crate::ident::TableRef>,
+    /// Source ancestry grants ActiveRecord's query API; a table name alone does not.
+    pub active_record_model: bool,
+    /// An include already has a load-time refusal; its method ownership is unknown.
+    pub unresolved_include: bool,
+    /// Retained inclusion/extension hooks can install singleton methods.
+    pub unknown_class_side_hook: bool,
+    /// Several source declarations have no combined finder ownership contract.
+    pub finder_ownership_ambiguous: bool,
+    /// Literal, unconditional registrations on the hook's target. These
+    /// prove an emitted implementation exists, without proving its owner/type.
+    pub class_side_hook_methods: crate::det::HashSet<Symbol>,
+    /// Explicit extensions contribute instance methods to singleton dispatch.
+    pub class_method_extensions: Vec<ClassId>,
     pub primary_key: Option<Symbol>,
     /// The model declares a `default_scope` the runtime Relation applies
     /// (`lower::default_scope`): a query on it must not be folded to SQL
@@ -337,18 +350,117 @@ pub struct ClassInfo {
 }
 
 impl ClassInfo {
-    pub(crate) fn source_class_method(
-        classes: &HashMap<ClassId, ClassInfo>, model: &ClassId, method: &Symbol,
-    ) -> bool {
-        let mut current = Some(model);
-        for _ in 0..32 {
-            let Some(class) = current.and_then(|id| classes.get(id)) else { return false };
-            if class.source_class_methods.contains(method) {
-                return true;
+    pub(crate) fn class_method_implementation_exists(classes: &HashMap<ClassId, ClassInfo>, model: &ClassId, method: &Symbol) -> bool {
+        use crate::dialect::MethodReceiver::{Class, Instance};
+        let mut pending = vec![(model, Class)];
+        let mut seen = crate::det::HashSet::default();
+        while let Some((id, side)) = pending.pop() {
+            if !seen.insert((id, side)) { continue; }
+            let Some(class) = classes.get(id) else { continue };
+            if class.finder_ownership_ambiguous { return false; }
+            let methods = if side == Class { &class.source_class_methods } else { &class.source_instance_methods };
+            if methods.contains(method) || (side == Class && class.class_side_hook_methods.contains(method)) { return true; }
+            pending.extend(class.parent.iter().map(|id| (id, side)));
+            if side == Class {
+                pending.extend(class.class_method_extensions.iter().map(|id| (id, Instance)));
+            } else {
+                pending.extend(class.includes.iter().map(|id| (id, Instance)));
             }
+        }
+        false
+    }
+
+    pub(crate) fn class_method_ownership_unknown(classes: &HashMap<ClassId, ClassInfo>, model: &ClassId, method: &Symbol) -> bool {
+        use crate::dialect::MethodReceiver::{Class, Instance};
+        let mut pending = vec![(model, Class)];
+        let mut seen = crate::det::HashSet::default();
+        while let Some((id, side)) = pending.pop() {
+            if !seen.insert((id, side)) { continue; }
+            // An extension without a table may supply methods or install hooks.
+            // Known inert SDK exceptions are registered explicitly; an absent
+            // extension table therefore keeps ownership unknown.
+            let Some(class) = classes.get(id) else {
+                if side == Instance { return true; }
+                continue;
+            };
+            if class.finder_ownership_ambiguous || class.unresolved_include || class.unknown_class_side_hook { return true; }
+            let methods = if side == Class { &class.source_class_methods } else { &class.source_instance_methods };
+            if methods.contains(method) { return false; }
+            pending.extend(class.parent.iter().map(|id| (id, side)));
+            if side == Class {
+                pending.extend(class.class_method_extensions.iter().map(|id| (id, Instance)));
+            } else {
+                pending.extend(class.includes.iter().map(|id| (id, Instance)));
+            }
+        }
+        false
+    }
+    pub(crate) fn active_record_class(classes: &HashMap<ClassId, ClassInfo>, model: &ClassId) -> bool {
+        let mut current = Some(model);
+        let mut seen = crate::det::HashSet::default();
+        while let Some(id) = current {
+            if id.0.as_str() == "ActiveRecord::Base" { return true; }
+            if !seen.insert(id) { break; }
+            let Some(class) = classes.get(id) else { break; };
+            if class.active_record_model { return true; }
             current = class.parent.as_ref();
         }
         false
+    }
+
+    pub(crate) fn schema_column_owner<'a>(
+        classes: &'a HashMap<ClassId, ClassInfo>, model: &'a ClassId, name: &Symbol,
+    ) -> Option<&'a ClassId> {
+        let mut current = Some(model);
+        let mut seen = crate::det::HashSet::default();
+        while let Some(id) = current {
+            if !seen.insert(id) { break; }
+            let class = classes.get(id)?;
+            if class.has_schema_column(name) { return Some(id); }
+            current = class.parent.as_ref();
+        }
+        None
+    }
+
+    pub(crate) fn source_class_method(
+        classes: &HashMap<ClassId, ClassInfo>, model: &ClassId, method: &Symbol,
+    ) -> bool {
+        Self::source_class_method_owner(classes, model, method).is_some()
+    }
+
+    /// Singleton ancestry follows parents and explicit instance-method
+    /// extensions. Plain includes never contribute a module's singleton table.
+    pub(crate) fn source_class_method_owner(
+        classes: &HashMap<ClassId, ClassInfo>, model: &ClassId, method: &Symbol,
+    ) -> Option<(ClassId, crate::dialect::MethodReceiver)> {
+        use crate::dialect::MethodReceiver::{Class, Instance};
+        let mut pending = vec![(model, Class)];
+        let mut seen = crate::det::HashSet::default();
+        while let Some((id, side)) = pending.pop() {
+            if !seen.insert((id, side)) { continue; }
+            let Some(class) = classes.get(id) else {
+                if side == Instance { return None; }
+                continue;
+            };
+            if class.finder_ownership_ambiguous || class.unresolved_include || class.unknown_class_side_hook { return None; }
+            let methods = if side == Class { &class.source_class_methods } else { &class.source_instance_methods };
+            if methods.contains(method) {
+                return Some((id.clone(), side));
+            }
+            pending.extend(class.parent.iter().map(|id| (id, side)));
+            if side == Class {
+                pending.extend(class.class_method_extensions.iter().map(|id| (id, Instance)));
+            } else {
+                pending.extend(class.includes.iter().map(|id| (id, Instance)));
+            }
+        }
+        None
+    }
+
+    pub(crate) fn source_class_method_type<'a>(classes: &'a HashMap<ClassId, ClassInfo>, model: &ClassId, method: &Symbol) -> Option<&'a Ty> {
+        let (owner, side) = Self::source_class_method_owner(classes, model, method)?;
+        let class = classes.get(&owner)?;
+        if side == crate::dialect::MethodReceiver::Class { class.class_methods.get(method) } else { class.instance_methods.get(method) }
     }
 
     /// Whether `name` is one of this model's real SCHEMA TABLE columns.
@@ -771,7 +883,7 @@ impl<'a> BodyTyper<'a> {
         };
         expr.ty = Some(ty.clone());
         expr.decisions &= !crate::expr::CLASS_OBJECT_VALUE;
-        if self.is_class_object(expr, ctx) {
+        if self.is_class_object(expr, ctx) || self.each_branch_is_class_object(expr, ctx) {
             expr.decisions |= crate::expr::CLASS_OBJECT_VALUE;
             let runtime_class = matches!(&*expr.node, ExprNode::Send { recv, method, .. } if method.as_str() == "singleton_class"
                     && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)))
@@ -1106,6 +1218,7 @@ impl<'a> BodyTyper<'a> {
     // `x.class` is not a class reference to `is_class_object`, yet types as the same flat `Ty::Class` as an instance.
     fn is_instance(&self, expr: &Expr, ctx: &Ctx) -> bool {
         !self.is_class_object(expr, ctx)
+            && !matches!(&*expr.node, ExprNode::Var { name, .. } if ctx.query_class_objects.contains(name))
             && !matches!(&*expr.node, ExprNode::Send { method, args, .. } if method.as_str() == "class" && args.is_empty())
     }
 
@@ -2657,6 +2770,28 @@ impl<'a> BodyTyper<'a> {
                     && crate::lower::errors_add::full_message_bakes(recv.as_ref(), args, block.as_ref())
                 {
                     return Ty::Str;
+                }
+                // Kernel#proc / Kernel#lambda with a literal block answer
+                // the Proc that block becomes: the value `->(x) { … }` is,
+                // typed the same way, by the block (core `kernel.rbs`:
+                // `proc: () { (?) -> untyped } -> Proc`). A module-body
+                // `Formatter = proc do |upload| … end` was a constant with
+                // no inferred value, so every read of it (app_profiler's
+                // `mattr_reader :profile_url_formatter, default:
+                // DefaultProfileFormatter`) was "constant not supported".
+                // As for `Array`, an app method of the name has already
+                // dispatched and wins.
+                if recv.is_none() && args.is_empty() && matches!(method.as_str(), "proc" | "lambda")
+                    && (matches!(dispatched, Ty::Var { .. })
+                        || (matches!(dispatched, Ty::Untyped) && !self.app_defines(ctx.self_ty.as_ref(), method)))
+                {
+                    if let Some(block_ty @ Ty::Fn { .. }) = block
+                        .as_ref()
+                        .filter(|b| matches!(&*b.node, ExprNode::Lambda { .. }))
+                        .and_then(|b| b.ty.clone())
+                    {
+                        return block_ty;
+                    }
                 }
                 // What every object and every module answers, when the
                 // receiver's own table did not. App analyzer only.
@@ -4766,6 +4901,48 @@ mod tests {
             let mut expr = send(None, "Array", vec![nil_lit()]);
             assert_eq!(BodyTyper::new(&classes).analyze_expr(&mut expr, &ctx), ret);
         }
+    }
+
+    #[test]
+    fn kernel_proc_and_lambda_answer_their_block_unless_the_app_defines_them() {
+        // `Fmt = proc { |x| x }` / `lambda { … }`: the Proc the block
+        // becomes, typed as `->(x) { … }` is (app_profiler's
+        // `DefaultProfileFormatter = proc do |upload| … end`).
+        let block_of = |body: Expr| {
+            synth(ExprNode::Send {
+                recv: None,
+                method: Symbol::from("proc"),
+                args: vec![],
+                block: Some(lambda(vec!["x"], body)),
+                parenthesized: false,
+            })
+        };
+        let str_lit = || synth(ExprNode::Lit { value: Literal::Str { value: "p".into() } });
+        for method in ["proc", "lambda"] {
+            let mut expr = block_of(str_lit());
+            if let ExprNode::Send { method: m, .. } = &mut *expr.node {
+                *m = Symbol::from(method);
+            }
+            let ty = BodyTyper::new(&empty_classes()).analyze_expr(&mut expr, &Ctx::default());
+            assert!(matches!(&ty, Ty::Fn { ret, .. } if **ret == Ty::Str), "{method}: {ty:?}");
+        }
+        // An app method of the name (inherited here) answers instead.
+        let owner = ClassId(Symbol::from("Owner"));
+        let child = ClassId(Symbol::from("Child"));
+        let mut classes = empty_classes();
+        let mut info = ClassInfo::default();
+        info.instance_methods.insert(Symbol::from("proc"), Ty::Int);
+        classes.insert(owner.clone(), info);
+        let mut info = ClassInfo::default();
+        info.parent = Some(owner);
+        classes.insert(child.clone(), info);
+        let mut ctx = Ctx::default();
+        ctx.self_ty = Some(Ty::Class { id: child, args: vec![].into() });
+        let mut expr = block_of(str_lit());
+        assert_eq!(BodyTyper::new(&classes).analyze_expr(&mut expr, &ctx), Ty::Int);
+        // `proc(&blk)` and `proc(arg)` are not the literal-block form.
+        let mut expr = send(None, "proc", vec![nil_lit()]);
+        assert!(!matches!(BodyTyper::new(&empty_classes()).analyze_expr(&mut expr, &Ctx::default()), Ty::Fn { .. }));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build one CI test archive, then run a checked case partition without rebuilding."""
+"""Build one CI test archive, then run a checked case partition or named ignored suites without rebuilding."""
 
 from __future__ import annotations
 
@@ -221,19 +221,27 @@ def build(args: argparse.Namespace) -> int:
     return 0
 
 
-def run(args: argparse.Namespace, report: dict) -> int:
-    validate_shard(args.shard_index, args.shard_count)
+def extract(archive: Path, inventory: Path, shard_count: int | None) -> tuple[dict, dict[Case, bool], list[str]]:
+    """Check the archive against its producer inventory, extract it, and return its metadata flags."""
     target = target_directory()
-    manifest = json.loads(args.inventory.read_text())
+    manifest = json.loads(inventory.read_text())
     expected = validate_manifest(manifest, workspace=ROOT, target=target, source=source_sha(),
-                                 archive_sha256=digest(args.archive), shard_count=args.shard_count)
-    extracted = list_tests(["--archive-file", str(args.archive.resolve()), "--extract-to", str(ROOT),
+                                 archive_sha256=digest(archive),
+                                 shard_count=(manifest.get("shard_count") if isinstance(manifest, dict) else None)
+                                 if shard_count is None else shard_count)
+    extracted = list_tests(["--archive-file", str(archive.resolve()), "--extract-to", str(ROOT),
                             "--extract-overwrite"])
     actual, _selected = parse_inventory(extracted)
     if actual != expected:
         raise ContractError("extracted tests or ignored states differ from producer inventory")
     metadata = ["--cargo-metadata", str(target / "nextest/cargo-metadata.json"),
                 "--binaries-metadata", str(target / "nextest/binaries-metadata.json")]
+    return manifest, expected, metadata
+
+
+def run(args: argparse.Namespace, report: dict) -> int:
+    validate_shard(args.shard_index, args.shard_count)
+    manifest, expected, metadata = extract(args.archive, args.inventory, args.shard_count)
     partitions = []
     for index in range(args.shard_count):
         listed = list_tests([*metadata, "--partition", f"hash:{index + 1}/{args.shard_count}"])
@@ -255,6 +263,69 @@ def run(args: argparse.Namespace, report: dict) -> int:
     return 0
 
 
+SELECTOR = re.compile(r"([a-z0-9_]+)(?::([A-Za-z0-9_]+))?")
+
+
+def parse_selector(text: str) -> tuple[str, str | None]:
+    """`suite` or `suite:substring`, as `cargo test --test suite substring -- --ignored` selected them."""
+    match = SELECTOR.fullmatch(text) if isinstance(text, str) else None
+    if match is None:
+        raise ContractError(f"invalid ignored-suite selector: {text!r}")
+    return match.group(1), match.group(2)
+
+
+def ignored_selection(cases: dict[Case, bool], selectors: list[tuple[str, str | None]]) -> set[Case]:
+    """The ignored cases of the combined target that each selector names; every selector must name one."""
+    chosen: set[Case] = set()
+    for suite, substring in selectors:
+        names = {(binary, name) for (binary, name), ignored in cases.items()
+                 if ignored and binary == "roundhouse::all_tests" and name.startswith(f"{suite}::")
+                 and (substring is None or substring in name)}
+        if not names:
+            raise ContractError(f"no ignored cases in the archive for {suite}"
+                                + (f":{substring}" if substring else ""))
+        chosen |= names
+    return chosen
+
+
+def selection_filter(selectors: list[tuple[str, str | None]]) -> str:
+    clauses = []
+    for suite, substring in selectors:
+        clause = f"test(/^{suite}::/)"
+        if substring is not None:
+            clause += f" & test({substring})"
+        clauses.append(f"({clause})")
+    return "binary_id(roundhouse::all_tests) & (" + " | ".join(clauses) + ")"
+
+
+def listed_matches(data: dict) -> set[Case]:
+    if not isinstance(data, dict) or not isinstance(data.get("rust-suites"), dict):
+        raise ContractError("missing Nextest rust-suites inventory")
+    return {(binary, name) for binary, suite in data["rust-suites"].items()
+            for name, case in suite.get("testcases", {}).items()
+            if case.get("filter-match", {}).get("status") == "matches"}
+
+
+def select(args: argparse.Namespace, report: dict) -> int:
+    """Run named ignored suites from the archive instead of compiling them again."""
+    selectors = [parse_selector(text) for text in args.select]
+    manifest, expected, metadata = extract(args.archive, args.inventory, None)
+    wanted = ignored_selection(expected, selectors)
+    expression = selection_filter(selectors)
+    filters = ["--ignore-default-filter", "--run-ignored", "only", "-E", expression]
+    listed = json.loads(check_command(nextest("list", *metadata, "--profile", "ci", *filters,
+                                              "--message-format=json"), capture=True))
+    if listed_matches(listed) != wanted:
+        raise ContractError("the filter selects different cases than the inventory names")
+    report.update(coverage_verified=True, source_sha=manifest["source_sha"], selectors=args.select,
+                  selected_cases=len(wanted),
+                  selected=[{"binary": binary, "name": name} for binary, name in sorted(wanted)])
+    print(f"ignored suites: {len(wanted)} cases from {', '.join(args.select)}")
+    check_command(nextest("run", *metadata, "--profile", "ci", "--no-fail-fast", *filters,
+                          "--retries", "0", "--no-tests", "fail"))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_subparsers(dest="mode", required=True)
@@ -269,12 +340,22 @@ def main(argv: list[str] | None = None) -> int:
     consumer.add_argument("--shard-index", type=int, required=True)
     consumer.add_argument("--shard-count", type=int, required=True)
     consumer.add_argument("--report", type=Path, required=True)
+    chooser = modes.add_parser("select", help="run named ignored suites from an archive")
+    chooser.add_argument("--archive", type=Path, required=True)
+    chooser.add_argument("--inventory", type=Path, required=True)
+    chooser.add_argument("--select", action="append", required=True, metavar="SUITE[:SUBSTRING]")
+    chooser.add_argument("--report", type=Path, required=True)
     args = parser.parse_args(argv)
     report = {"status": "not-run", "coverage_verified": False}
     if args.mode == "run":
         report.update(shard_index=args.shard_index, shard_count=args.shard_count)
     try:
-        status = build(args) if args.mode == "build" else run(args, report)
+        if args.mode == "build":
+            status = build(args)
+        elif args.mode == "run":
+            status = run(args, report)
+        else:
+            status = select(args, report)
     except ChildFailure as error:
         status = error.status
     except (ContractError, OSError, ValueError, KeyError, TypeError) as error:
@@ -282,7 +363,7 @@ def main(argv: list[str] | None = None) -> int:
         report["error"] = str(error)
         status = 2
     report.update(status="passed" if status == 0 else "failed", exit=status)
-    if args.mode == "run":
+    if args.mode in {"run", "select"}:
         write_json(args.report, report)
     return status
 

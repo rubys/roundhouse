@@ -8,7 +8,7 @@ fn array_excluding_and_without_run_natively() {
             "app/models/array_excluding_probe.rb",
             array_excluding::SOURCE,
         )
-        .run_spinel(array_excluding::ASSERTIONS);
+        .run_spinel_slim(&["runtime/active_support_ext"], array_excluding::ASSERTIONS);
     run.assert_passes();
     assert!(
         run.stdout

@@ -532,6 +532,10 @@ module Rails
       true
     end
 
+    def active_job_queue_adapter
+      "async"
+    end
+
     def action_controller_page_cache_directory
       Rails.public_path.to_s
     end
