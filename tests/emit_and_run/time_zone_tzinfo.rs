@@ -111,3 +111,22 @@ fn a_tzinfo_read_is_refused_off_the_ruby_family() {
         assert!(errors.iter().any(|e| e.contains("tzinfo not supported")), "{target:?}: {errors:?}");
     }
 }
+
+/// An app whose only time-zone read is `Time.zone.tzinfo` is refused off
+/// the ruby family too: the read is grounded to
+/// `ActiveSupport.current_tzinfo` before the per-target check runs.
+#[test]
+fn a_time_zone_tzinfo_read_alone_is_refused_off_the_ruby_family() {
+    use roundhouse::project::BuildTarget;
+    let only_time_zone = || {
+        emit_and_run::real_blog().edit(
+            "app/views/articles/_form.html.erb",
+            "    <%= form.label :body %>\n",
+            "    <p id=\"zone\"><%= Time.zone.tzinfo.name %></p>\n    <%= form.label :body %>\n",
+        )
+    };
+    for target in [BuildTarget::Typescript, BuildTarget::Crystal, BuildTarget::Go, BuildTarget::Roda] {
+        let (_, errors) = only_time_zone().emit(target);
+        assert!(errors.iter().any(|e| e.contains("tzinfo not supported")), "{target:?}: {errors:?}");
+    }
+}

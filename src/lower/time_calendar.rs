@@ -602,11 +602,15 @@ fn is_date_const(e: &Expr) -> bool {
 /// `project::report_tzinfo_reads` refuses these on the other targets.
 pub(crate) fn tzinfo_reads(app: &App) -> Vec<Span> {
     fn visit(e: &Expr, out: &mut Vec<Span>) {
-        if let ExprNode::Send { recv: Some(r), method, .. } = &*e.node
-            && method.as_str() == "tzinfo"
+        if let ExprNode::Send { recv: Some(r), method, args, .. } = &*e.node
             && !e.span.is_synthetic()
-            && (is_time_zone_send(r)
-                || matches!(&r.ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveSupport::TimeZone"))
+            && ((method.as_str() == "tzinfo"
+                && (is_time_zone_send(r)
+                    || matches!(&r.ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveSupport::TimeZone")))
+                // `Time.zone.tzinfo` as this pass grounds it, which keeps the call's span.
+                || (method.as_str() == "current_tzinfo"
+                    && args.is_empty()
+                    && matches!(&*r.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "ActiveSupport")))
         {
             out.push(e.span);
         }
