@@ -109,7 +109,7 @@ pub(super) fn build<V: Vfs + ?Sized>(
                 }
             }
             // Rails runs initializers before a class body can autoload, but the emitted boot loads app/ first.
-            if written_constant(&node).is_some_and(|name| class_body_reads.contains(&name)) {
+            if written_constants(&node).iter().any(|name| class_body_reads.contains(name)) {
                 continue;
             }
             if let Some(def) = node.as_def_node() {
@@ -130,9 +130,7 @@ pub(super) fn build<V: Vfs + ?Sized>(
                 // Not the ingest error: a statement this cannot read stays on the ledger, as before.
                 let (read, _) = super::prism::scope(|| super::survey::without_recording(|| super::expr::ingest_expr(&node, &file_name)));
                 let Ok(expr) = read else { continue };
-                if let Some(name) = written_constant(&node) {
-                    defined.insert(name);
-                }
+                defined.extend(written_constants(&node));
                 app.boot_program.push(expr);
             }
             taken.insert((path.clone(), start));
@@ -168,17 +166,32 @@ fn constant_roots(node: &ruby_prism::Node<'_>) -> Vec<String> {
     roots.0
 }
 
-/// The top-level constant a statement assigns (`X = …`, `::X = …`).
-fn written_constant(node: &ruby_prism::Node<'_>) -> Option<String> {
-    if let Some(write) = node.as_constant_write_node() {
-        return Some(super::util::constant_id_str(&write.name()).to_string());
+/// The top-level constants a statement assigns (`X = …`, `::X = …`), in a
+/// conditional's branches too.
+fn written_constants(node: &ruby_prism::Node<'_>) -> Vec<String> {
+    struct Writes(Vec<String>);
+    impl<'pr> ruby_prism::Visit<'pr> for Writes {
+        fn visit_constant_write_node(&mut self, node: &ruby_prism::ConstantWriteNode<'pr>) {
+            self.0.push(super::util::constant_id_str(&node.name()).to_string());
+            ruby_prism::visit_constant_write_node(self, node);
+        }
+        fn visit_constant_or_write_node(&mut self, node: &ruby_prism::ConstantOrWriteNode<'pr>) {
+            self.0.push(super::util::constant_id_str(&node.name()).to_string());
+            ruby_prism::visit_constant_or_write_node(self, node);
+        }
+        fn visit_constant_path_write_node(&mut self, node: &ruby_prism::ConstantPathWriteNode<'pr>) {
+            let target = node.target();
+            if target.parent().is_none() {
+                if let Some(name) = target.name() {
+                    self.0.push(super::util::constant_id_str(&name).to_string());
+                }
+            }
+            ruby_prism::visit_constant_path_write_node(self, node);
+        }
     }
-    let write = node.as_constant_path_write_node()?;
-    let target = write.target();
-    if target.parent().is_some() {
-        return None;
-    }
-    target.name().map(|name| super::util::constant_id_str(&name).to_string())
+    let mut writes = Writes(Vec::new());
+    ruby_prism::Visit::visit(&mut writes, node);
+    writes.0
 }
 
 /// The constants app/ and lib/ read while their files load: outside a

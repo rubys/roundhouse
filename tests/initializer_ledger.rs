@@ -634,3 +634,13 @@ fn a_condition_on_a_rooted_or_quoted_constant_stays_on_the_ledger() {
     assert_eq!(statements(&ledger), ["if ::Gizmo.ready?", "if \"'\" == \"x\" && Widgetry.on?"]);
     assert_eq!(app.boot_program.len(), 1);
 }
+
+#[test]
+fn a_constant_a_class_body_reads_stays_on_the_ledger_when_a_conditional_assigns_it() {
+    let (app, ledger) = ingest(&[
+        ("config/initializers/settings.rb", "if ENV[\"BOOT\"]\n  SETTINGS = {}\nend\n"),
+        ("app/models/widget.rb", "class Widget < ApplicationRecord\n  DEFAULT = SETTINGS\nend\n"),
+    ]);
+    assert_eq!(statements(&ledger), ["if ENV[\"BOOT\"]"]);
+    assert!(app.boot_program.is_empty());
+}
