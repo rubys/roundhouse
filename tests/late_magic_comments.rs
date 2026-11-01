@@ -54,3 +54,14 @@ fn a_leading_block_comment_is_not_a_token() {
     let src = "=begin\nnotes\n=end\n# frozen_string_literal: true\nX = \"x\"\n";
     assert!(matches!(drop_late_magic_comments(src), std::borrow::Cow::Borrowed(_)));
 }
+
+#[test]
+fn a_byte_order_mark_is_not_a_token() {
+    // The BOM precedes the leading comment block; the directive after
+    // `# encoding:` is still in it, and Ruby honors it.
+    let src = "\u{feff}# encoding: utf-8\n# frozen_string_literal: true\nX = \"x\"\n";
+    assert!(matches!(drop_late_magic_comments(src), std::borrow::Cow::Borrowed(_)));
+    // Past a real token, the late one still goes.
+    let late = "\u{feff}# encoding: utf-8\nX = 1\n# frozen_string_literal: true\n";
+    assert_eq!(drop_late_magic_comments(late), "\u{feff}# encoding: utf-8\nX = 1\n\n");
+}

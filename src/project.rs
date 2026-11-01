@@ -3554,9 +3554,12 @@ pub fn drop_late_magic_comments(content: &str) -> std::borrow::Cow<'_, str> {
             .strip_prefix("# frozen_string_literal")
             .is_some_and(|rest| rest.starts_with(": "))
     };
+    // A UTF-8 byte-order mark precedes the first comment; it is not a
+    // token, so a directive after it is still in the leading block.
+    let bom = if content.starts_with('\u{feff}') { '\u{feff}'.len_utf8() } else { 0 };
     let mut seen_token = false;
     let mut late = false;
-    for line in content.lines() {
+    for line in content[bom..].lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             if seen_token && is_magic(line) {
@@ -3589,8 +3592,9 @@ pub fn drop_late_magic_comments(content: &str) -> std::borrow::Cow<'_, str> {
     for line in content.split_inclusive('\n') {
         let start = offset;
         offset += line.len();
-        let trimmed = line.trim();
-        let first = start + (line.len() - line.trim_start().len());
+        let body = if start == 0 { &line[bom..] } else { line };
+        let trimmed = body.trim();
+        let first = start + (line.len() - body.trim_start().len());
         // A `=begin`/`=end` block is a comment, as a `#` line is: neither
         // is the token past which Ruby ignores a magic comment.
         if !(trimmed.is_empty() || trimmed.starts_with('#') || in_comment(first)) {
