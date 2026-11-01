@@ -502,7 +502,19 @@ pub(super) fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
                 ExprNode::Seq { .. } => {
                     format!("if {}:\n{}", emit_expr(cond), emit_block_body(then_branch, void_return))
                 }
-                _ => format!("if {}: {}", emit_expr(cond), emit_stmt(then_branch, false, true)),
+                _ => {
+                    let body = emit_stmt(then_branch, false, true);
+                    // Only a simple statement may follow `if c:` on its
+                    // line; a compound one (a nested `if`, a loop, or
+                    // anything spanning lines) takes the block form.
+                    let compound = body.contains('\n')
+                        || ["if ", "for ", "while ", "with ", "try:", "def ", "class "].iter().any(|k| body.starts_with(k));
+                    if compound {
+                        format!("if {}:\n{}", emit_expr(cond), super::shared::indent_py(&body))
+                    } else {
+                        format!("if {}: {}", emit_expr(cond), body)
+                    }
+                }
             }
         }
         // General `if / elsif / else` in statement position (a non-empty
