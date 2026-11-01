@@ -313,8 +313,10 @@ ok "fixture ready ($FIXTURE)"
 
 # Always invoke Cargo so a restored rust-cache binary cannot skip a
 # source rebuild (the executable-exists check is not a freshness check).
+# --target-dir keeps the binary at COMPARE_BIN even when the caller sets
+# CARGO_TARGET_DIR (compare-ruby does, for unit-build's archive).
 step "building roundhouse-compare"
-(cd "$REPO_ROOT/tools/compare" && cargo build --release --quiet)
+(cd "$REPO_ROOT/tools/compare" && cargo build --release --quiet --target-dir "$REPO_ROOT/tools/compare/target")
 ok "compare tool ready"
 
 # -------- 3. regenerate target --------
