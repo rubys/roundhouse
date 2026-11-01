@@ -83,78 +83,137 @@ end
 "#).run_ruby(CONTRACT).assert_passes();
 }
 
-#[test]
-fn unrecognized_params_aliases_keep_upload_method_errors() {
-    for bindings in [
-        "values = prompt_params\n    copied = values",
-        "copied = prompt_params\n    copied = prompt_params",
-    ] {
-        let errors = app().write("app/controllers/prompts_controller.rb", &format!(r#"class PromptsController < ApplicationController
-  def create
-    {bindings}
-    render json: copied[:attachments].map {{ |file| file.read }}
+const BOTH_MODES: &str = r##"require "json"
+require_relative "app/controllers/prompts_controller"
+["first", "second"].each do |mode|
+  controller = PromptsController.new
+  controller.params = {"mode" => mode, "prompt" => {"body" => "hello", "title" => "hi", "attachments" => [ActionDispatch::Http::UploadedFile.new("bytes", "one.txt", "text/plain")]}}
+  controller.create
+  expected = [{"name" => "one.txt", "type" => "text/plain", "data" => "bytes"}]
+  raise "#{mode}: #{controller.body}" unless JSON.parse(controller.body) == expected
+end
+puts "PASS"
+"##;
+
+fn prompts_controller(actions: &str, helpers: &str) -> String {
+    format!(r#"class PromptsController < ApplicationController
+{actions}
+  def preview
+    render json: Array(first_filter[:attachments]).map {{ |file| file.read }}
   end
+
   private
-  def prompt_params
+{helpers}
+  def first_filter
     params.expect(prompt: [:body, {{attachments: []}}])
   end
+
+  def second_filter
+    params.expect(prompt: [:title, {{attachments: []}}])
+  end
 end
-"#)).check_errors();
-        assert!(errors.iter().any(|error| error.contains("read") && error.contains("String")), "{bindings}: {errors:?}");
-    }
+"#)
 }
 
 #[test]
-fn conditional_params_with_distinct_filters_keep_upload_method_errors() {
-    for bindings in ["values = prompt_params", r#"values = if params[:mode] == "first"
-      params.expect(prompt: [:body, {attachments: []}])
-    else
-      params.expect(prompt: [:title, {attachments: []}])
-    end"#] {
-        let errors = app().write("app/controllers/prompts_controller.rb", &format!(r#"class PromptsController < ApplicationController
-  def create
-    {bindings}
-    render json: Array(values[:attachments]).map {{ |file| {{name: file.original_filename, type: file.content_type, data: file.read}} }}
+fn every_permit_filter_keeps_uploads_of_a_field_read_as_uploads() {
+    let create = r#"  def create
+    values = prompt_params
+    render json: Array(values[:attachments]).map { |file| {name: file.original_filename, type: file.content_type, data: file.read} }
   end
-  private
-  def prompt_params
+"#;
+    let either = |second: &str| format!(r#"  def prompt_params
     if params[:mode] == "first"
       params.expect(prompt: [:body, {{attachments: []}}])
     else
-      params.expect(prompt: [:title, {{attachments: []}}])
+      {second}
     end
   end
-end
-"#)).check_errors();
-        for method in ["original_filename", "content_type", "read"] {
-            assert!(errors.iter().any(|error| error.contains(method) && error.contains("String")), "{bindings}: {errors:?}");
-        }
+"#);
+    for (case, actions, helpers) in [
+        ("distinct filters", create.to_string(), either("params.expect(prompt: [:title, {attachments: []}])")),
+        ("same filter", create.to_string(), either("params.expect(prompt: [:body, {attachments: []}])")),
+        ("zero-argument fallback", create.to_string(), either("second_filter")),
+        ("helper argument", r#"  def create
+    values = prompt_params(params[:mode])
+    render json: Array(values[:attachments]).map { |file| {name: file.original_filename, type: file.content_type, data: file.read} }
+  end
+"#.to_string(), r#"  def prompt_params(mode)
+    mode == "first" ? first_filter : second_filter
+  end
+"#.to_string()),
+        ("inline", r#"  def create
+    values = if params[:mode] == "first"
+      params.expect(prompt: [:body, {attachments: []}])
+    else
+      params.expect(prompt: [:title, {attachments: []}])
+    end
+    render json: Array(values[:attachments]).map { |file| {name: file.original_filename, type: file.content_type, data: file.read} }
+  end
+"#.to_string(), String::new()),
+        ("alias", r#"  def create
+    values = prompt_params
+    copied = values
+    render json: Array(copied[:attachments]).map { |file| {name: file.original_filename, type: file.content_type, data: file.read} }
+  end
+"#.to_string(), either("params.expect(prompt: [:title, {attachments: []}])")),
+        ("first element", r#"  def create
+    file = prompt_params[:attachments].first
+    render json: [{name: file.original_filename, type: file.content_type, data: file.read}]
+  end
+"#.to_string(), either("params.expect(prompt: [:title, {attachments: []}])")),
+    ] {
+        let run = app()
+            .write("config/routes.rb", "Rails.application.routes.draw do\n  resources :prompts, only: :create\n  post \"prompts/preview\", to: \"prompts#preview\"\nend\n")
+            .write("app/controllers/prompts_controller.rb", &prompts_controller(&actions, &helpers))
+            .run_ruby(BOTH_MODES);
+        assert!(run.errors.is_empty() && run.success, "{case}: {:?}\n{}\n{}", run.errors, run.stdout, run.stderr);
     }
 }
 
 #[test]
-fn conditional_params_with_the_same_filter_keep_upload_objects() {
+fn string_reads_of_a_field_read_as_uploads_keep_strings() {
+    let (emitted, errors) = strings_app().emit(roundhouse::project::BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:?}");
+    let fields: Vec<String> = std::fs::read_dir(emitted.join("app/models")).unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rbs"))
+        .flat_map(|path| std::fs::read_to_string(path).unwrap().lines().map(str::trim).map(String::from).collect::<Vec<_>>())
+        .filter(|line| line.starts_with("attr_reader attachments:"))
+        .collect();
+    assert_eq!(fields, ["attr_reader attachments: Array[(String | ActionDispatch::Http::UploadedFile)]"; 2], "{fields:?}");
+    strings_app().run_ruby(STRINGS).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn string_reads_of_a_field_read_as_uploads_run_with_emitted_rbs() {
+    strings_app().run_spinel_with_rbs(STRINGS).assert_passes();
+}
+
+fn strings_app() -> emit_and_run::Overlay {
     app().write("app/controllers/prompts_controller.rb", r#"class PromptsController < ApplicationController
   def create
-    values = prompt_params
-    render json: {uploads: upload_data(values[:attachments]), tags: values[:tags]}
+    values = params.expect(prompt: [:title, {attachments: []}])
+    render json: Array(values[:attachments]).map { |name| name.upcase }
   end
-  private
-  def prompt_params
-    if params[:body]
-      params.expect(prompt: [:body, {attachments: [], tags: []}])
-    else
-      params.expect(prompt: [:body, {attachments: [], tags: []}])
-    end
-  end
-  def upload_data(uploads)
-    Array(uploads).map do |file|
-      {name: file.original_filename, type: file.content_type, data: file.read}
-    end
+
+  def preview
+    values = params.expect(prompt: [:body, {attachments: []}])
+    render json: Array(values[:attachments]).map { |file| file.read }
   end
 end
-"#).run_ruby(CONTRACT).assert_passes();
+"#)
 }
+
+const STRINGS: &str = r##"require "json"
+require_relative "app/controllers/prompts_controller"
+controller = PromptsController.new
+controller.params = {"prompt" => {"title" => "hi", "attachments" => ["abc", "def"]}}
+controller.create
+raise controller.body unless JSON.parse(controller.body) == ["ABC", "DEF"]
+puts "PASS"
+"##;
 
 #[test]
 fn ordinary_array_fields_keep_string_methods_in_source_analysis() {
