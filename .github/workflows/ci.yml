@@ -515,8 +515,7 @@ jobs:
       - name: Check documentation tests
         run: |
           python3 scripts/ci-resources.py --out "$RUNNER_TEMP/unit-build-resources/docs" -- \
-            cargo test --locked --doc \
-              --config 'profile.test.package.roundhouse.opt-level=0'
+            cargo test --locked --doc
       - name: Upload current-run test bundle
         id: unit-tests
         uses: actions/upload-artifact@v7

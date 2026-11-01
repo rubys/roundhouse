@@ -199,11 +199,9 @@ def build(args: argparse.Namespace) -> int:
     archive = args.archive.resolve()
     inventory = args.inventory.resolve()
     archive.parent.mkdir(parents=True, exist_ok=True)
-    # Reduce the serial project build while keeping dependencies optimized.
-    selectors = [
-        "--locked", "--lib", "--bins", "--test", "all_tests",
-        "--config", "profile.test.package.roundhouse.opt-level=0",
-    ]
+    # The test profile's opt-level=1: the build costs more than opt-level=0,
+    # and the shards that run what it builds save several times that.
+    selectors = ["--locked", "--lib", "--bins", "--test", "all_tests"]
     command = nextest("archive", *selectors, "--profile", "ci", "--archive-file", str(archive))
     if args.timings:
         command.append("--timings")

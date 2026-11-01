@@ -218,9 +218,8 @@ the integration suites. It keeps debug assertions, overflow checks, and
 file/line backtraces. No test selection or ignored-test rule changes.
 The first build costs more; later runs reuse the optimized artifacts.
 
-Unit CI overrides optimization only for the `roundhouse` package.
-It uses `opt-level=0` for archive and documentation builds while dependencies
-stay optimized. See the [CI execution guide](../ci/README.md#unit-test-execution).
+Unit CI builds its archive and documentation tests with this same test
+profile. See the [CI execution guide](../ci/README.md#unit-test-execution).
 
 On an ARM64 macOS checkout, three runs of each built test binary gave these
 median times. These measurements exclude compilation:
