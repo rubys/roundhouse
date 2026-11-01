@@ -9,6 +9,20 @@ class LifecycleReport
     @close_code = 0
     @close_reason = +""
     @presence_calls = 0
+    @open_gate = Mutex.new
+    @open_ready = false
+  end
+  def signal_open
+    @open_gate.synchronize { @open_ready = true }
+    0
+  end
+  def await_open
+    ready = false
+    while !ready
+      @open_gate.synchronize { ready = @open_ready }
+      sleep 0.001 unless ready
+    end
+    0
   end
 end
 LIFECYCLE_REPORT = LifecycleReport.new
@@ -29,6 +43,7 @@ class LifecycleOpen < Tep::WebSocket::Handler
   end
   def handle_event(event)
     @life_ws.text("ready")
+    LIFECYCLE_REPORT.signal_open
     raise "synthetic open callback error" if @life_mode == "open_error"
     @life_ws.close(1008, "revoked") if @life_mode == "open_close"
     0
@@ -87,6 +102,8 @@ res = Tep::Response.new
 res.start_websocket("synthetic", ws)
 sender = Thread.new(ws, mode) do |driver, test_mode|
   if test_mode == "concurrent"
+    # Writers are admitted only after the upgrade and its open frame.
+    LIFECYCLE_REPORT.await_open
     a = Thread.new(driver) { |out| lifecycle_writes(out, "A") }
     b = Thread.new(driver) { |out| lifecycle_writes(out, "B") }
     a.join
