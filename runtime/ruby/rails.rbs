@@ -80,6 +80,7 @@ module Rails
     def forgery_protection_verification_strategy: () -> String
     def public_file_server_headers: () -> Hash[String, String]
     def action_controller_perform_caching: () -> bool
+    def active_job_queue_adapter: () -> String
     def action_controller_page_cache_directory: () -> String
     def action_cable_origin_listed?: (String origin) -> bool
     def action_cable_allow_same_origin_as_host: () -> bool

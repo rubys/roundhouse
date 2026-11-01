@@ -177,7 +177,7 @@ fn wrap_field_errors(
     binding: &FormBuilderBinding,
     ctx: &ViewCtx,
 ) -> Vec<Expr> {
-    if !kind.wraps_field_errors() || !ctx.i18n.has_errors(&binding.model_name) || ctx.i18n.field_error_proc().is_some() {
+    if !kind.wraps_field_errors() || !binding.metadata_class(ctx).is_some_and(|class| ctx.i18n.has_errors_for(class)) || ctx.i18n.field_error_proc().is_some() {
         return out;
     }
     let Some(field_sym) = field_symbol(field) else { return out };
@@ -251,7 +251,7 @@ fn emit_check_box(
     let checked = lit_str(" checked=\"checked\"".to_string());
     let is_bool_reader = ctx
         .bool_readers
-        .get(model_name.as_str())
+        .get(binding.metadata_class(ctx).unwrap_or(""))
         .is_some_and(|s| s.contains(field_str));
     let checked_expr = if is_bool_reader {
         let record_ref = Expr::new(
@@ -1268,7 +1268,7 @@ fn emit_fields_for(
         Span::synthetic(),
         ExprNode::Assign {
             target: super::LValue::Var { id: VarId(0), name: record_var.clone() },
-            value: record_expr,
+            value: record_expr.clone(),
         },
     )];
 
@@ -1276,6 +1276,12 @@ fn emit_fields_for(
     inner.form_records.push(FormBuilderBinding {
         form_param: nested_param_str.clone(),
         model_name: format!("{}[{}]", binding.model_name, nested.as_str()),
+        model_class: if positional.get(1).is_some() {
+            super::form_with::form_model_class(&record_expr, "", ctx)
+        } else {
+            binding.metadata_class(ctx).and_then(|owner| ctx.nested_record_classes
+                .get(&(owner.to_owned(), nested.as_str().to_owned())).cloned())
+        },
         record_var: record_var.clone(),
         // The parent's, unchanged: `form.submit`'s default text and the
         // `_method` override belong to the FORM, and `fields_for` opens
@@ -1650,7 +1656,7 @@ fn emit_label(
             }),
         },
         None => parts.push(InterpPart::Text {
-            value: html_escape_static(&ctx.i18n.label(&binding.model_name, field_sym.as_str())),
+            value: html_escape_static(&binding.metadata_class(ctx).map(|class| ctx.i18n.label_for(class, &binding.model_name, field_sym.as_str())).unwrap_or_else(|| ctx.i18n.label(&binding.model_name, field_sym.as_str()))),
         }),
     }
     parts.push(InterpPart::Text { value: "</label>".to_string() });
@@ -2207,8 +2213,8 @@ fn emit_submit_input(label_expr: Expr, opts: &[(Expr, Expr)], ctx: &ViewCtx) -> 
 /// node referencing the captured `form_method` local so per-record
 /// new/edit distinction renders correctly at runtime.
 fn default_submit_text(binding: &FormBuilderBinding, ctx: &ViewCtx) -> Expr {
-    let update_text = lit_str(ctx.i18n.submit(&binding.model_name, "update"));
-    let create_text = lit_str(ctx.i18n.submit(&binding.model_name, "create"));
+    let update_text = lit_str(binding.metadata_class(ctx).map(|class| ctx.i18n.submit_for(class, &binding.model_name, "update")).unwrap_or_else(|| ctx.i18n.submit(&binding.model_name, "update")));
+    let create_text = lit_str(binding.metadata_class(ctx).map(|class| ctx.i18n.submit_for(class, &binding.model_name, "create")).unwrap_or_else(|| ctx.i18n.submit(&binding.model_name, "create")));
     let method_var_read = Expr::new(
         Span::synthetic(),
         ExprNode::Var {
@@ -2378,7 +2384,7 @@ fn record_field_read(binding: &FormBuilderBinding, field: Symbol, ctx: &ViewCtx)
     // lives.
     let is_store_read = ctx
         .store_readers
-        .get(binding.model_name.as_str())
+        .get(binding.metadata_class(ctx).unwrap_or(""))
         .is_some_and(|names| names.contains(field.as_str()));
     if is_store_read {
         return send(Some(record_ref), field.as_str(), Vec::new(), None, false);

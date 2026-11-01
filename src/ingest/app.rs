@@ -865,6 +865,8 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
             }
         }
     }
+    app.isolated_namespaces = isolated_prefixes.keys().cloned().collect();
+    app.isolated_namespaces.sort();
     for (module, prefix) in isolated_prefixes {
         table_prefixes.entry(module).or_insert(prefix);
     }
@@ -1451,6 +1453,20 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
             let mut synth = crate::runtime_src::parse_methods(&caching).map_err(|message| IngestError::Unsupported {
                 file: "config/ (config.action_controller caching settings)".to_string(),
                 message: format!("the app's controller caching settings do not parse once synthesized: {message}"),
+            })?;
+            methods.append(&mut synth);
+        }
+        // Not refused when the replay can't read it (a comparison, say): only SolidQueue's clear reads it, and the adapter ingest already read stands in.
+        let adapter = super::active_job_config::synthesize(vfs, dir).unwrap_or_else(|_| {
+            Some(format!(
+                "def active_job_queue_adapter\n  {:?}\nend\n",
+                app.queue_adapter.as_deref().unwrap_or("async")
+            ))
+        });
+        if let Some(adapter) = adapter {
+            let mut synth = crate::runtime_src::parse_methods(&adapter).map_err(|message| IngestError::Unsupported {
+                file: "config/ (config.active_job.queue_adapter)".to_string(),
+                message: format!("the app's queue adapter setting does not parse once synthesized: {message}"),
             })?;
             methods.append(&mut synth);
         }
@@ -2929,7 +2945,7 @@ end
     super::column_accessors::rewrite_super(&mut app);
     // After the splice, so a class method a concern contributed gets
     // the same treatment as one written in the model.
-    qualify_model_class_method_ar_calls(&mut app);
+    qualify_model_class_method_ar_calls(&mut app, &const_resolver.for_sources(&sources));
     // After the splice too: the inverse `has_many …, as: :owner` may be
     // declared in a concern's `included do`.
     resolve_polymorphic_targets(&mut app);
@@ -4970,7 +4986,7 @@ fn qualify_lexical_consts(
 /// (`scope_chain::AssocClassMethods`), reading the model constant back
 /// as the implicit self it stands for; the strict targets, which have
 /// no relation to thread, keep the class-level reading.
-fn qualify_model_class_method_ar_calls(app: &mut App) {
+fn qualify_model_class_method_ar_calls(app: &mut App, resolver: &crate::analyze::ConstResolver) {
     use crate::dialect::{MethodReceiver, ModelBodyItem};
     use crate::expr::{Expr, ExprNode};
 
@@ -4980,11 +4996,10 @@ fn qualify_model_class_method_ar_calls(app: &mut App) {
     /// the runtime.
     const AR_CLASS_METHODS: &[&str] = &["all", "count", "where", "find_by", "exists?"];
 
+    // Concerns have already been spliced. Preserve class-side ownership
+    // across the complete source ancestry, including tableless parents.
+    let classes = crate::analyze::source_finder_classes(app, resolver);
     for model in &mut app.models {
-        let own: crate::det::HashSet<String> = model
-            .methods()
-            .map(|m| m.name.as_str().to_string())
-            .collect();
         let recv = Expr::new(
             crate::span::Span::synthetic(),
             ExprNode::Const { path: vec![model.name.0.clone()] },
@@ -4993,19 +5008,60 @@ fn qualify_model_class_method_ar_calls(app: &mut App) {
             fn walk(
                 expr: &mut Expr,
                 recv: &Expr,
-                own: &crate::det::HashSet<String>,
-                ar: &[&str],
+                owner: &crate::ident::ClassId,
+                classes: &crate::det::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
+                resolver: &crate::analyze::ConstResolver,
             ) {
-                expr.node.for_each_child_mut(&mut |c| walk(c, recv, own, ar));
+                expr.node.for_each_child_mut(&mut |c| walk(c, recv, owner, classes, resolver));
+                // Do this before query classification: a dynamic finder
+                // must consume the caller's threaded relation too.
+                // Only class-object syntax is proven at ingest. Chained
+                // receivers wait for the analyzer's relation type.
+                let finder_send = matches!(&*expr.node, ExprNode::Send { method, args, .. }
+                    if method.as_str().starts_with("find_by_") || matches!(method.as_str(), "find_by" | "find_by!")
+                        || (matches!(method.as_str(), "send" | "public_send" | "__send__")
+                            && match args.first().map(|a| &*a.node) {
+                                Some(ExprNode::Lit { value: crate::expr::Literal::Sym { value } }) => value.as_str().starts_with("find_by_"),
+                                Some(ExprNode::Lit { value: crate::expr::Literal::Str { value } }) => value.starts_with("find_by_"),
+                                _ => false,
+                            }));
+                let class_receiver = finder_send && match &mut *expr.node {
+                    ExprNode::Send { recv: None, .. } => true,
+                    ExprNode::Send { recv: Some(r), .. } => match &*r.node {
+                        ExprNode::SelfRef => true,
+                        ExprNode::Const { path } => {
+                            // Constant spelling alone is not ownership:
+                            // Category inside Forum can name Forum::Category.
+                            if let Some(id) = resolver.namespace(r.span, path).filter(|id| classes.contains_key(*id)) {
+                                r.ty = Some(crate::ty::Ty::Class { id: id.clone(), args: vec![].into() });
+                                true
+                            } else {
+                                path.first().is_some_and(|head| head.as_str().is_empty())
+                            }
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                };
+                if class_receiver {
+                    crate::lower::arel::normalize_dynamic_finder_send(expr, classes, Some(owner), true);
+                }
                 let ExprNode::Send { recv: r @ None, method, .. } = &mut *expr.node else {
                     return;
                 };
-                if !ar.contains(&method.as_str()) || own.contains(method.as_str()) {
+                if !AR_CLASS_METHODS.contains(&method.as_str())
+                    || crate::analyze::ClassInfo::source_class_method(classes, owner, method)
+                    || crate::analyze::ClassInfo::class_method_ownership_unknown(classes, owner, method)
+                {
                     return;
                 }
-                *r = Some(recv.clone());
+                let mut qualified = recv.clone();
+                if method.as_str() == "find_by" {
+                    qualified.decisions |= crate::expr::IMPLICIT_MODEL_FINDER_RECEIVER;
+                }
+                *r = Some(qualified);
             }
-            walk(expr, &recv, &own, AR_CLASS_METHODS);
+            walk(expr, &recv, &model.name, &classes, resolver);
         };
         for item in &mut model.body {
             let ModelBodyItem::Method { method, .. } = item else { continue };
