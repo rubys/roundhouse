@@ -1384,7 +1384,9 @@ fn build_methods(
             lower_action_body(
                 body, controller, "process_action", &privs, &params_privs,
                 /*is_public=*/ false, params_specs, assocs, &[], view_ivars, partials,
-                format_breadth, &shadows, route_id_segments, false, false, None, None, &[],
+                format_breadth, &shadows, route_id_segments,
+                /*defer_implicit_render=*/ false, preserves_result,
+                /*can_respond_via_helper=*/ false, None, None, &[],
                 /*preserve_named_layout=*/ true,
             ).0
         });

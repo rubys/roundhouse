@@ -271,6 +271,125 @@ fn run_emitted_program(files: &[(String, String)], program: &str) -> String {
     String::from_utf8(result.stdout).unwrap()
 }
 
+fn dispatcher_response_files(case: &str) -> Vec<(String, String)> {
+    let mut source = files("own", true, false);
+    let controller = match case {
+        "callback" => format!(r#"class ProbeController < ApplicationController
+  before_action do
+    mark("callback>")
+    render json: {{ stage: "callback" }}, status: :forbidden
+  end
+  before_action {{ mark("unreached>") }}
+  def index
+    mark("action>")
+    render json: {{ stage: "action" }}
+  end
+{}
+end
+"#, wrapper(true, "own", false)),
+        "rescue" => format!(r#"class ProbeController < ApplicationController
+  rescue_from ArgumentError do |failure|
+    mark("rescue>")
+    render json: {{ error: failure.message }}, status: :unprocessable_entity
+  end
+  def index
+    mark("action>")
+    raise ArgumentError, "boom"
+  end
+{}
+end
+"#, wrapper(true, "own", false)),
+        "template" => {
+            source[1].1 = APPLICATION.replace("ActionController::API", "ActionController::Base");
+            source.push(("app/views/probe/blocked.html.erb".into(), "action:<%= action_name %>".into()));
+            format!(r#"class ProbeController < ApplicationController
+  before_action do
+    mark("callback>")
+    render template: "probe/blocked"
+  end
+  def index
+    mark("action>")
+    render plain: "action ran"
+  end
+{}
+end
+"#, wrapper(true, "own", false))
+        }
+        "parent_hook" | "parent_action" => {
+            let parent_body = if case == "parent_hook" {
+                "before_action do\nmark(\"callback>\")\nrender json: { stage: \"parent_callback\" }, status: :unauthorized\nend\n"
+            } else {
+                "def index\nmark(\"parent_action>\")\nrender json: { stage: \"parent\" }\nend\n"
+            };
+            let child_body = if case == "parent_hook" {
+                "def index\nmark(\"action>\")\nrender plain: \"action ran\"\nend\n"
+            } else {
+                "def index\nmark(\"child_action>\")\nsuper\nmark(\"child_action_tail>\")\nend\n"
+            };
+            // Parent must be loaded before its child by the Rails control.
+            let child = source.pop().unwrap();
+            source.push(("app/controllers/wrapper_parent_controller.rb".into(), format!(
+                "class WrapperParentController < ApplicationController\n{parent_body}{}\nend\n", wrapper(true, "parent", false))));
+            source.push(child);
+            format!("class ProbeController < WrapperParentController\n{child_body}{}\nend\n", wrapper(true, "child", false))
+        }
+        _ => panic!("unknown dispatcher response case"),
+    };
+    source.iter_mut().find(|(p, _)| p == "app/controllers/probe_controller.rb").unwrap().1 = controller;
+    source
+}
+
+fn assert_dispatcher_response(case: &str, expected: &str) {
+    if !require_rails_oracle() { return; }
+    let files = dispatcher_response_files(case);
+    let mut script = String::from(include_str!("support/rails_oracle.rb"));
+    script.push_str(r#"
+RailsOracle.activate("actionpack")
+require "action_controller"
+require "action_dispatch/testing/test_request"
+require "action_dispatch/testing/test_response"
+require "tmpdir"
+require "fileutils"
+Dir.mktmpdir do |views|
+ActionController::Base.view_paths = [views]
+"#);
+    for (path, text) in &files {
+        if let Some(path) = path.strip_prefix("app/views/") {
+            script.push_str(&format!("FileUtils.mkdir_p(File.dirname(File.join(views, {path:?})))\nFile.write(File.join(views, {path:?}), {text:?})\n"));
+        } else if path.starts_with("app/") && path.ends_with(".rb") {
+            script.push_str(text);
+        }
+    }
+    script.push_str("c = ProbeController.new\nc.set_request!(ActionDispatch::TestRequest.create)\nc.set_response!(ActionDispatch::TestResponse.new)\nvalue = c.process(:index)\nputs [c.response.body, c.trace, value, c.response.status].join('|')\nend\n");
+    let control = ruby_command().args(["-e", &script]).output().expect("Rails dispatcher response control");
+    assert!(control.status.success(), "{}", String::from_utf8_lossy(&control.stderr));
+    let reference = String::from_utf8(control.stdout).unwrap();
+    assert_eq!(reference, expected, "Rails: {case}");
+    let actual = run_emitted_program(&files, "require_relative 'app/controllers/probe_controller'\nc = ProbeController.new\nvalue = c._roundhouse_dispatch_action(:index)\nputs [c.body, c.trace, value, c.status].join('|')\n");
+    assert_eq!(actual, reference, "emitted dispatcher response: {case}");
+}
+
+#[test]
+fn rails_oracle_json_callback_halts_inside_process_action_override() {
+    assert_dispatcher_response("callback", "{\"stage\":\"callback\"}|own>callback>own_tail>|handled|403\n");
+}
+
+#[test]
+fn rails_oracle_json_rescue_runs_inside_process_action_override() {
+    assert_dispatcher_response("rescue", "{\"error\":\"boom\"}|own>action>rescue>own_tail>|handled|422\n");
+}
+
+#[test]
+fn rails_oracle_callback_template_keeps_request_action_under_override() {
+    assert_dispatcher_response("template", "action:index|own>callback>own_tail>|handled|200\n");
+}
+
+#[test]
+fn rails_oracle_parent_override_preserves_subclass_super_and_json() {
+    assert_dispatcher_response("parent_hook", "{\"stage\":\"parent_callback\"}|child>parent>callback>parent_tail>child_tail>|handled|401\n");
+    assert_dispatcher_response("parent_action", "{\"stage\":\"parent\"}|child>parent>child_action>parent_action>child_action_tail>parent_tail>child_tail>|handled|200\n");
+}
+
 // Each declaration-order case also runs through an application's hook. The
 // unwrapped arm guards against restricting collision resolution to hooks.
 fn declaration_order_cases() -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
