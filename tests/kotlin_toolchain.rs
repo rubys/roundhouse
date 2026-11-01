@@ -256,12 +256,17 @@ fn controller_ivars_named_like_base_state_compile() {
     assert_kotlin_compiles("an app controller with ivars named like the base's state", &emitted);
 }
 
+const PROBES_TEST: &str = "require \"test_helper\"\n\nclass ProbesControllerTest < ActionDispatch::IntegrationTest\n  test \"show renders\" do\n    get \"/show\"\n    assert_response :success\n  end\nend\n";
+
 #[test]
 #[ignore]
 fn controller_ivars_named_like_base_state_render() {
     // The three names render on the page, and the response is as Rails
     // leaves it: 200, no Location (#1625).
-    let (emitted, errors) = ts_controller_ivars::overlay().emit(roundhouse::project::BuildTarget::Kotlin);
+    // A test file, so the emit writes the test sources the probe joins.
+    let (emitted, errors) = ts_controller_ivars::overlay()
+        .write("test/controllers/probes_controller_test.rb", PROBES_TEST)
+        .emit(roundhouse::project::BuildTarget::Kotlin);
     assert!(errors.is_empty(), "{errors:?}");
     let body = serde_json::to_string(ts_controller_ivars::BODY).unwrap();
     std::fs::write(
