@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   preflight:
-    if: github.event_name != 'schedule' || github.repository == 'rubys/roundhouse'
+    if: github.event_name != 'schedule' || github.repository == 'rubys/roundhouse' || github.repository == 'roundhouse-rb/roundhouse'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -37,7 +37,11 @@ jobs:
         run: |
           publish=false
           if [ "$EVENT" = schedule ] || [ "$REQUEST_PUBLISH" = true ]; then
-            test "$GITHUB_REPOSITORY" = rubys/roundhouse
+            # Either name, so a transfer to the roundhouse-rb org keeps publishing.
+            case "$GITHUB_REPOSITORY" in
+              rubys/roundhouse|roundhouse-rb/roundhouse) ;;
+              *) exit 1 ;;
+            esac
             test "$GITHUB_REF" = refs/heads/main
             publish=true
           fi
@@ -66,7 +70,7 @@ jobs:
   # PR. Extra-target failures must not hide useful broken-emit repro archives.
   deploy:
     needs: [preflight, validation]
-    if: ${{ !cancelled() && needs.preflight.outputs.publish == 'true' && needs.validation.outputs.publication-ready == 'true' && github.repository == 'rubys/roundhouse' && github.ref == 'refs/heads/main' }}
+    if: ${{ !cancelled() && needs.preflight.outputs.publish == 'true' && needs.validation.outputs.publication-ready == 'true' && (github.repository == 'rubys/roundhouse' || github.repository == 'roundhouse-rb/roundhouse') && github.ref == 'refs/heads/main' }}
     permissions:
       contents: read
       actions: read
