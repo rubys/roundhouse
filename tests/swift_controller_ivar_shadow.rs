@@ -77,19 +77,23 @@ fn a_method_ending_in_an_ivar_assignment_returns_it() {
     );
 }
 
-/// An ivar a `String` in one method and an Integer in another is a
-/// `String` property; the method ending in the Integer assignment returns
-/// `Int`, so it returns the value it assigned, not the property.
+/// The value held for the return is the one the property store coerces:
+/// a `params` read surfaces as `Any??` and goes into an `Int` property
+/// through `as! Int`, as the store alone wrote it.
 #[test]
-fn a_method_returns_the_value_it_assigned_not_the_property() {
+fn the_held_value_keeps_the_property_coercion() {
     let (emitted, errors) = emit_and_run::empty_app()
-        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n")
-        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
-        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n")
-        .write("app/models/widget.rb", "class Widget < ApplicationRecord\n  def label\n    @name_tag = \"none\"\n  end\n\n  def renumber\n    @name_tag = 2\n  end\nend\n")
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\n  get \"/show\", to: \"probes#show\"\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("app/controllers/probes_controller.rb", "class ProbesController < ApplicationController\n  before_action :pick\n\n  def show\n  end\n\n  private\n\n  def pick\n    @count = 0\n    tally\n  end\n\n  def tally\n    @count = params[:count]\n  end\nend\n")
+        .write("app/views/probes/show.html.erb", "<p><%= @count %></p>\n")
         .emit(BuildTarget::Swift);
     assert!(errors.is_empty(), "{errors:?}");
-    let widget = std::fs::read_to_string(emitted.join("Sources/App/app/models/Widget.swift")).unwrap();
-    assert!(widget.contains("var nameTag: String"), "{widget}");
-    assert!(widget.contains("func renumber() -> Int {\n        let __rhRet = 2\n        self.nameTag = __rhRet\n        return __rhRet\n    }"), "{widget}");
+    let probes = std::fs::read_to_string(emitted.join("Sources/App/app/controllers/ProbesController.swift")).unwrap();
+    assert!(probes.contains("var count: Int = 0"), "{probes}");
+    assert!(
+        probes.contains("let __rhRet = (params[\"count\"] as! Int)\n        self.count = __rhRet\n        return __rhRet"),
+        "{probes}"
+    );
 }

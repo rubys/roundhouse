@@ -2411,21 +2411,28 @@ pub(super) fn wrap_return(e: &Expr) -> String {
             )
         }
         // Not the assignment alone: Ruby's assignment answers the value, and a value method must return it
-        ExprNode::Assign { target: LValue::Var { id, name }, .. } => {
+        ExprNode::Assign { target: LValue::Var { id, name }, value } => {
+            // Not the local read back: a branch that proved it non-nil would
+            // read it as `x!`, which traps once `x = nil` has run.
+            if matches!(&*value.node, ExprNode::Lit { value: crate::expr::Literal::Nil }) {
+                return format!("{}\nreturn nil", emit_expr(e));
+            }
             let read = ExprNode::Var { id: *id, name: name.clone() };
             format!("{}\nreturn {}", emit_expr(e), emit_expr(&Expr::new(e.span, read)))
         }
         // An ivar's property can be typed apart from the method's return, so
-        // the assigned value is returned, not the property read back.
-        ExprNode::Assign { target: target @ LValue::Ivar { .. }, value } => {
+        // the assigned value is returned, not the property read back. The
+        // value is held as the property store coerces it (`coerce_for_prop`
+        // reads the value's own shape, a map read's `Any??`), then stored.
+        ExprNode::Assign { target: LValue::Ivar { name }, value } => {
             if matches!(&*value.node, ExprNode::Lit { value: crate::expr::Literal::Nil }) {
                 return format!("{}\nreturn nil", emit_expr(e));
             }
-            let mut held = Expr::new(value.span, ExprNode::Var { id: crate::ident::VarId(0), name: crate::ident::Symbol::from("__rh_ret") });
-            held.ty = value.ty.clone();
-            let read = emit_expr(&held);
-            let store = Expr::new(e.span, ExprNode::Assign { target: target.clone(), value: held });
-            format!("let {read} = {}\n{}\nreturn {read}", emit_expr(value), emit_expr(&store))
+            let sn = camel(name.as_str());
+            let held = emit_expr(&Expr::new(value.span, ExprNode::Var { id: crate::ident::VarId(0), name: crate::ident::Symbol::from("__rh_ret") }));
+            let coerced = coerce_for_prop(&sn, value, assign_value(value));
+            let store = if IN_MODULE.with(|f| *f.borrow()) { format!("{sn} = {held}") } else { format!("self.{sn} = {held}") };
+            format!("let {held} = {coerced}\n{store}\nreturn {held}")
         }
         ExprNode::Return { .. }
         | ExprNode::Raise { .. }
