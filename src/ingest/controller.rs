@@ -1308,12 +1308,18 @@ fn ir_symbol_list(e: &Expr) -> Vec<Symbol> {
     }
 }
 
-/// `ir_symbol_list`, or `None` for a value that isn't all literal symbols:
-/// an unread action list isn't an empty one.
+/// Literal action names, as Symbols or Strings, or `None` for any other
+/// value: an unread action list isn't an empty one.
 fn readable_symbol_list(e: &Expr) -> Option<Vec<Symbol>> {
+    fn name(e: &Expr) -> Option<Symbol> {
+        match &*e.node {
+            ExprNode::Lit { value: Literal::Str { value } } => Some(Symbol::from(value.as_str())),
+            _ => ir_symbol(e),
+        }
+    }
     match &*e.node {
-        ExprNode::Array { elements, .. } => elements.iter().map(ir_symbol).collect(),
-        _ => ir_symbol(e).map(|symbol| vec![symbol]),
+        ExprNode::Array { elements, .. } => elements.iter().map(name).collect(),
+        _ => name(e).map(|symbol| vec![symbol]),
     }
 }
 

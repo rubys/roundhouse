@@ -234,6 +234,25 @@ fn a_block_filter_with_an_unread_action_list_still_writes_for_the_view() {
     }
 }
 
+/// A String names an action as a Symbol does, alone or in a list.
+#[test]
+fn a_block_filter_reads_string_action_names() {
+    for (options, expected) in [
+        ("only: \"index\"", "Integer"),
+        ("only: [:show, \"index\"]", "Integer"),
+        ("only: \"show\"", "<unbound>"),
+        ("except: \"index\"", "<unbound>"),
+        ("except: [:show, \"index\"]", "<unbound>"),
+        ("except: [:show, \"new\"]", "Integer"),
+    ] {
+        let source = format!(
+            "class PostsController < ApplicationController\n  before_action({options}) {{ @x = 1 }}\n  def index; end\nend\n"
+        );
+        let app = files(&[("posts", &source)], "posts/index", "<%= @x %>");
+        assert_eq!(view_x(&app, "posts/index"), expected, "{options}");
+    }
+}
+
 #[test]
 fn empty_only_and_overlapping_except_do_not_apply_to_the_view() {
     for options in ["only: []", "only: :index, except: :index", "only: [:index], except: [:index]"] {
