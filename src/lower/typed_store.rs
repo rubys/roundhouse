@@ -301,7 +301,14 @@ fn push_store_hash_methods(methods: &mut Vec<MethodDef>, model: &Model, col: &Sy
         .filter(|a| a.is_bool)
         .map(|a| arm(a.name.as_str(), bool_cast(sp_expr(ExprNode::Var { id: VarId(0), name: value.clone() }))))
         .collect();
-    casts.push(otherwise(sp_expr(ExprNode::Var { id: VarId(0), name: value.clone() })));
+    // No boolean attribute, no cast: a `case` with only an `else` is not
+    // Ruby, so the body is the value itself.
+    let cast_body = if casts.is_empty() {
+        sp_expr(ExprNode::Var { id: VarId(0), name: value.clone() })
+    } else {
+        casts.push(otherwise(sp_expr(ExprNode::Var { id: VarId(0), name: value.clone() })));
+        case(casts)
+    };
     let private = |m: &mut Vec<MethodDef>, name: String, params: Vec<Param>, body: Expr| {
         let name = Symbol::from(name);
         push_synth_instance_method(m, model, name.clone(), params, body, None, AccessorKind::Method, false);
@@ -315,7 +322,7 @@ fn push_store_hash_methods(methods: &mut Vec<MethodDef>, model: &Model, col: &Sy
         methods,
         format!("__rh_{}_cast", col.as_str()),
         vec![Param::positional(key.clone()), Param::positional(value.clone())],
-        case(casts),
+        cast_body,
     );
 }
 

@@ -191,3 +191,41 @@ puts "PASS"
         )
         .assert_passes();
 }
+
+/// A store with no boolean attribute has no cast arm: its cast method is
+/// the value itself, not a `case` with only an `else` (a syntax error).
+#[test]
+fn a_hash_read_store_without_booleans_loads() {
+    emit_and_run::empty_app()
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table :shops do |t|\n    t.string :name\n    t.text :settings\n  end\nend\n",
+        )
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n",
+        )
+        .write(
+            "app/models/shop.rb",
+            r#"class Shop < ApplicationRecord
+  typed_store :settings do |s|
+    s.string :plan_name
+  end
+
+  def plan_name
+    settings[:plan_name] || "basic"
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"
+shop = Shop.new(name: "snow")
+raise "default plan" unless shop.plan_name == "basic"
+shop.settings[:plan_name] = "plus"
+raise "write through #{shop.plan_name.inspect}" unless shop.plan_name == "plus"
+puts "PASS"
+"#,
+        )
+        .assert_passes();
+}
