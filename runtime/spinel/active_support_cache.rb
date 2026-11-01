@@ -22,8 +22,9 @@
 #
 # NOT HERE: entry options (`expires_in:`, `version:`, `race_condition_ttl:`,
 # `namespace:`) — a call passing one raises ArgumentError rather than
-# being cached with the option ignored; `increment`/`decrement`;
-# instrumentation (`cache_read.active_support`). Non-String values are
+# being cached with the option ignored. Counters support `increment` with
+# `expires_in:` through the typed store protocol; `decrement` is not here.
+# Instrumentation (`cache_read.active_support`) is not carried. Non-String values are
 # limited to recursively copied Arrays/Hashes and immutable scalars; other
 # object types fail closed rather than being retained by reference. Rails
 # counts a Marshal dump for non-Strings; this port counts the copied value's
@@ -99,6 +100,7 @@ module ActiveSupport
         @data = {}
         @max_size = size
         @cache_size = 0
+        @counter_expires = {}
         @lock = Mutex.new
       end
 
@@ -108,13 +110,19 @@ module ActiveSupport
       def read(name, options = nil)
         MemoryStore.reject_options(options)
         key = ActiveSupport::Cache.expanded_key(name)
-        value = @lock.synchronize { @data.key?(key) ? touch_locked(key) : nil }
+        value = @lock.synchronize do
+          expire_counter_locked(key)
+          @data.key?(key) ? touch_locked(key) : nil
+        end
         MemoryStore.copy(value)
       end
 
       def exist?(name)
         key = ActiveSupport::Cache.expanded_key(name)
-        @lock.synchronize { @data.key?(key) }
+        @lock.synchronize do
+          expire_counter_locked(key)
+          @data.key?(key)
+        end
       end
 
       def write(name, value, options = nil)
@@ -122,6 +130,7 @@ module ActiveSupport
         key = ActiveSupport::Cache.expanded_key(name)
         payload = MemoryStore.copy(value)
         @lock.synchronize do
+          @counter_expires.delete(key)
           if @data.key?(key)
             @cache_size -= MemoryStore.bytes(@data[key]) - MemoryStore.bytes(payload)
             @data.delete(key)
@@ -132,6 +141,28 @@ module ActiveSupport
           prune_locked(@max_size * 3 / 4) if @cache_size > @max_size
         end
         true
+      end
+
+      # Rails::Cache#increment forwards here. Keep the integer in this
+      # store's bounded, readable table, not the inherited fragment table.
+      # The first increment starts the window; later increments retain it.
+      def increment_str(key, amount, ttl)
+        k = ActiveSupport::Cache.expanded_key(key)
+        @lock.synchronize do
+          expire_counter_locked(k)
+          if @data.key?(k)
+            old = @data.delete(k)
+            count = old.to_i + amount
+            @cache_size += MemoryStore.bytes(count) - MemoryStore.bytes(old)
+          else
+            count = amount
+            @cache_size += k.bytesize + MemoryStore.bytes(count) + PER_ENTRY_OVERHEAD
+            @counter_expires[k] = Time.now.to_f + ttl if ttl > 0
+          end
+          @data[k] = count
+          prune_locked(@max_size * 3 / 4) if @cache_size > @max_size
+          count
+        end
       end
 
       # The cached value, or the block's — which is then written.
@@ -160,6 +191,7 @@ module ActiveSupport
         names.each do |name|
           key = ActiveSupport::Cache.expanded_key(name)
           @lock.synchronize do
+            expire_counter_locked(key)
             out[name] = MemoryStore.copy(touch_locked(key)) if @data.key?(key)
           end
         end
@@ -174,13 +206,17 @@ module ActiveSupport
       def clear
         @lock.synchronize do
           @data.clear
+          @counter_expires.clear
           @cache_size = 0
         end
         super
       end
 
-      # Entries expire only by option, and options are not carried here.
+      # Only counters carry expiry; other entry options remain refused.
       def cleanup
+        @lock.synchronize do
+          @counter_expires.keys.each { |key| expire_counter_locked(key) }
+        end
         nil
       end
 
@@ -246,6 +282,7 @@ module ActiveSupport
       # Return presence separately because a cached nil is still a hit.
       # Call only while holding @lock.
       def read_locked(key)
+        expire_counter_locked(key)
         return [false, nil] unless @data.key?(key)
         [true, touch_locked(key)]
       end
@@ -260,10 +297,17 @@ module ActiveSupport
       end
 
       def delete_locked(key)
+        @counter_expires.delete(key)
         return false unless @data.key?(key)
         payload = @data.delete(key)
         @cache_size -= key.bytesize + MemoryStore.bytes(payload) + PER_ENTRY_OVERHEAD
         true
+      end
+
+      def expire_counter_locked(key)
+        expires = @counter_expires[key]
+        delete_locked(key) if expires && Time.now.to_f >= expires
+        nil
       end
 
       def prune_locked(target_size)
@@ -278,6 +322,10 @@ module ActiveSupport
     # the block, and they do not write it. A subclass of `Rails::Cache`,
     # so it can stand in for `Rails.cache`.
     class NullStore < Rails::Cache
+      def increment(key, amount = 1, expires_in: 0)
+        nil
+      end
+
       def read(name, options = nil)
         nil
       end

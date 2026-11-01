@@ -1,0 +1,2 @@
+class NamedChildController < NamedParentController
+end

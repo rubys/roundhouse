@@ -523,6 +523,19 @@ module Rails
       {}
     end
 
+    # `config.action_controller.perform_caching` (AbstractController::
+    # Caching's default) and actionpack-page_caching's
+    # `page_cache_directory` (its Railtie's `||=` with the app's
+    # `public/`). Ingest replays an app's assignments, per environment,
+    # into overrides on the reopen (`ingest::action_controller_caching_config`).
+    def action_controller_perform_caching
+      true
+    end
+
+    def action_controller_page_cache_directory
+      Rails.public_path.to_s
+    end
+
     # Action Cable's three origin settings, as the `/cable` handshake
     # check reads them (runtime/spinel/request_forgery_protection.rb):
     # Rails' defaults. Ingest lifts an app's `config.action_cable.*`

@@ -1,6 +1,6 @@
 # The browser IDE
 
-[rubys.github.io/roundhouse/ide/](https://rubys.github.io/roundhouse/ide/)
+[roundhouse-rb.dev/ide/](https://roundhouse-rb.dev/ide/)
 is the analyzer compiled to WebAssembly, running in a Web Worker
 behind a Monaco editor. It needs nothing installed: open the page,
 pick an app, hover. It is the fastest way to see what roundhouse

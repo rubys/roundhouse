@@ -1,0 +1,32 @@
+{
+  "status_stops": {
+    "case": "status_stops",
+    "error": "ArgumentError",
+    "message": "wrong number of arguments (given 0, expected 1)"
+  },
+  "redirect_stops": {
+    "case": "redirect_stops",
+    "value": [
+      303,
+      "<a href=\"http://example.org/landing\">Redirecting</a>",
+      {
+        "location": "/landing"
+      }
+    ]
+  },
+  "html_implicit": {
+    "case": "html_implicit",
+    "value": [
+      200,
+      "<h1>implicit body</h1>\n",
+      {
+        "x-before": "ran"
+      }
+    ]
+  },
+  "html_status": {
+    "case": "html_status",
+    "error": "ArgumentError",
+    "message": "wrong number of arguments (given 0, expected 1)"
+  }
+}

@@ -1,0 +1,12 @@
+first = Article.create!(title: "First")
+second = Article.create!(title: "Second")
+Comment.create!(article_id: first.id, body: "one")
+Comment.create!(article_id: first.id, body: "two")
+Comment.create!(article_id: second.id, body: "three")
+Article.create!(title: "Third")
+
+puts Article.string_keys.join(" ")
+puts Article.symbol_keys.map { |n| n.to_s }.join(" ")
+puts Article.self_reads.map { |n| n.to_s }.join(" ")
+puts Article.unselected.map { |nil_read| nil_read ? "nil" : "value" }.join(" ")
+puts Article.renamed(second.id)

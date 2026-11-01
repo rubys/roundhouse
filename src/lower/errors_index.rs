@@ -526,7 +526,10 @@ fn rewrite_render_json(expr: &mut Expr) {
 
 fn json_value(value: &mut Expr) {
     let reader = match &*value.node {
-        _ if is_errors_read(value) => Some(&*value),
+        // Not a folded `errors.full_messages`: that pass leaves the
+        // `errors` read typed as the messages it answers, an Array, and
+        // Rails writes that Array.
+        _ if is_errors_read(value) && !matches!(value.ty, Some(Ty::Array { .. })) => Some(&*value),
         ExprNode::Send { recv: Some(r), .. } if is_messages_read(value) => Some(r),
         _ => None,
     };

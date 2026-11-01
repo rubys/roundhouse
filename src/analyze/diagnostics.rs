@@ -483,6 +483,9 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     if let Some(seeds) = &app.seeds {
         diagnose_expr(seeds, &mut out);
     }
+    for stmt in &app.boot_program {
+        diagnose_expr(stmt, &mut out);
+    }
     out.extend(super::forwarding::diagnose(app));
     out.extend(super::private_calls::diagnose(app));
     out.extend(super::filter_targets::diagnose(app));

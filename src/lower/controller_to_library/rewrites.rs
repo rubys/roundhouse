@@ -164,6 +164,7 @@ pub(super) fn rewrite_render_to_views(
     current_action: &str,
     // An action's own body, whose name is the request's action; a helper's is not.
     is_action: bool,
+    preserve_named_layout: bool,
     // The Views modules of every controller that INHERITS this one —
     // where a template this controller lacks may still live. See the
     // `subclass_template_hook` arm below.
@@ -192,6 +193,29 @@ pub(super) fn rewrite_render_to_views(
             // produces the bare `Views::X.y(...)` call, which IS a
             // string. Trailing options (`layout: false`) are dropped.
             let to_string = method.as_str() == "render_to_string";
+            // Only the application layout and literal Boolean selectors
+            // are honored by this template path. Preserve every other
+            // explicit selector, including nil and computed expressions,
+            // instead of silently substituting the application layout.
+            // JSON and inline responses do not select a template.
+            if preserve_named_layout && args.iter().any(|arg| {
+                matches!(&*arg.node, ExprNode::Hash { entries, kwargs: true }
+                    if entries.iter().any(|(key, value)| {
+                        matches!(&*key.node, ExprNode::Lit { value: Literal::Sym { value } }
+                            if value.as_str() == "layout")
+                            && !(matches!(&*value.node, ExprNode::Lit { value: Literal::Str { value } }
+                                    if value == "application")
+                                || matches!(&*value.node, ExprNode::Lit { value: Literal::Bool { .. } }))
+                    }))
+            }) && !args.iter().any(|arg| {
+                matches!(&*arg.node, ExprNode::Hash { entries, kwargs: true }
+                    if entries.iter().any(|(key, _)| {
+                        matches!(&*key.node, ExprNode::Lit { value: Literal::Sym { value } }
+                            if matches!(value.as_str(), "json" | "plain" | "html" | "body"))
+                    }))
+            }) {
+                return None;
+            }
             // Controller-side partial render: `render partial:
             // "commentbox", layout: false, content_type: …, locals:
             // {comment: c}` (lobsters' reply). Bind against the
@@ -825,10 +849,30 @@ pub(super) fn rewrite_render_to_views(
                 view_args.push(flash_lookup(e.span, "notice"));
                 view_args.push(flash_lookup(e.span, "alert"));
                 if pass_action_name {
-                    view_args.push(str_lit(e.span, &current_action));
+                    view_args.push(if is_action {
+                        str_lit(e.span, &current_action)
+                    } else {
+                        Expr::new(e.span, ExprNode::Send {
+                            recv: Some(Expr::new(e.span, ExprNode::SelfRef)),
+                            method: Symbol::from("action_name"),
+                            args: vec![],
+                            block: None,
+                            parenthesized: true,
+                        })
+                    });
                 }
                 if pass_controller_name {
-                    view_args.push(str_lit(e.span, &controller_name));
+                    view_args.push(if is_action {
+                        str_lit(e.span, &controller_name)
+                    } else {
+                        Expr::new(e.span, ExprNode::Send {
+                            recv: Some(Expr::new(e.span, ExprNode::SelfRef)),
+                            method: Symbol::from("controller_name"),
+                            args: vec![],
+                            block: None,
+                            parenthesized: true,
+                        })
+                    });
                 }
                 if pass_path_parameters {
                     view_args.push(ivar("path_parameters", e.span));
@@ -2324,6 +2368,22 @@ pub(super) fn rewrite_params(expr: &Expr) -> Expr {
             let [arg] = args.as_slice() else { return None };
             let ExprNode::Hash { entries, .. } = &*arg.node else { return None };
             params_expect_array(entries, e.span)
+        }
+        // Not left to the emitter's typed key coercion: a guard or filter body spliced in after analysis reaches it with `@params` typed as the controller's ivar, not the String-keyed store.
+        ExprNode::Send { recv: Some(recv), method, args, block: None, parenthesized }
+            if method.as_str() == "[]" && args.len() == 1 && is_bare_params(recv) && sym_arg(&args[0]).is_some() =>
+        {
+            let key = sym_arg(&args[0])?;
+            Some(Expr::new(
+                e.span,
+                ExprNode::Send {
+                    recv: Some(Expr::new(recv.span, ExprNode::Ivar { name: Symbol::from("params") })),
+                    method: method.clone(),
+                    args: vec![Expr::new(args[0].span, ExprNode::Lit { value: Literal::Str { value: key } })],
+                    block: None,
+                    parenthesized: *parenthesized,
+                },
+            ))
         }
         // Bare `params` (no recv, no args, no block) → `@params`.
         ExprNode::Send { recv: None, method, args, block: None, .. }

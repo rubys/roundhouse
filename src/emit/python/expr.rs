@@ -1611,6 +1611,8 @@ fn map_builtin_method(recv: &str, method: &str, ty: Option<&Ty>, args_s: &[Strin
         // element, so non-Str elems go through `map(str, …)` (`[1, 2].join("-")`
         // is "1-2"; bare `"-".join([1, 2])` is a TypeError). Array[String]
         // stays a bare join.
+        // Ruby `Array#sort` answers a new Array; Python's `list.sort()` sorts in place and answers None.
+        "sort" if is_array && args_s.is_empty() => format!("sorted({recv})"),
         "join" if is_array => {
             let str_elems =
                 matches!(ty, Some(Ty::Array { elem }) if matches!(**elem, Ty::Str));

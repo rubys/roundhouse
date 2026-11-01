@@ -42,6 +42,7 @@ pub mod jbuilder_to_library;
 pub mod library_extras;
 pub mod model_to_library;
 pub mod routes;
+pub(crate) mod rack_mounts;
 pub mod routes_to_library;
 pub mod segment_pattern;
 pub mod scope_chain;
@@ -1418,6 +1419,9 @@ pub(crate) fn for_each_owned_hook_body(
     if let Some(seeds) = &mut app.seeds {
         f(None, seeds);
     }
+    for stmt in &mut app.boot_program {
+        f(None, stmt);
+    }
 }
 
 /// Read-only twin of [`for_each_hook_body`], for a pass that needs to
@@ -1546,6 +1550,9 @@ pub(crate) fn for_each_hook_body_ref(
     }
     if let Some(seeds) = &app.seeds {
         f(seeds);
+    }
+    for stmt in &app.boot_program {
+        f(stmt);
     }
 }
 
@@ -1713,7 +1720,7 @@ pub use importmap_to_library::lower_importmap_to_library_functions;
 pub use library_extras::{extras_from_funcs, extras_from_lcs};
 pub use routes_to_library::{
     lower_routes_to_dispatch_functions, lower_routes_to_library_functions,
-    url_options_helper_name,
+    lower_routes_to_library_functions_without_hash_query, url_options_helper_name,
 };
 pub use schema_to_library::{lower_schema_module_functions, lower_schema_to_library_functions};
 pub use seeds_to_library::lower_seeds_to_library_functions;

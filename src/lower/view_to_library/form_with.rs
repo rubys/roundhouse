@@ -728,11 +728,12 @@ fn route_helperize(url: Expr, route_helpers: &impl Fn() -> Expr, ctx: &ViewCtx) 
             };
             let member =
                 super::member_path_call(ctx, &format!("{name}_path"), member_arg);
-            let collection = super::route_helpers_call(&format!("{plural}_path"), Vec::new());
+            let collection_helper = format!("{}_path", crate::lower::routes::collection_name(name, &plural));
+            let collection = super::route_helpers_call(&collection_helper, Vec::new());
             let has_member = ctx.route_helper_names.is_empty()
                 || ctx.route_helper_names.contains(&format!("{name}_path"));
             let has_collection = ctx.route_helper_names.is_empty()
-                || ctx.route_helper_names.contains(&format!("{plural}_path"));
+                || ctx.route_helper_names.contains(&collection_helper);
             return match (has_member, has_collection) {
                 (true, false) => member,
                 (false, true) => collection,
@@ -899,7 +900,10 @@ fn classify_form_with_components(
     if let Some((record, record_singular, scope_prefix)) = scoped_record_form(&model) {
         let record_plural = crate::naming::pluralize_snake(&record_singular);
         let member_name = format!("{scope_prefix}_{record_singular}_path");
-        let collection_name = format!("{scope_prefix}_{record_plural}_path");
+        let collection_name = format!(
+            "{scope_prefix}_{}_path",
+            crate::lower::routes::collection_name(&record_singular, &record_plural)
+        );
         let persisted =
             send(Some(record.clone()), "persisted?", Vec::new(), None, false);
         let member_arg = if ctx.slug_models.contains(record_singular.as_str()) {
@@ -1036,9 +1040,10 @@ fn classify_form_with_components(
     };
     let member_path =
         super::member_path_call(ctx, &format!("{singular}_path"), member_arg);
+    let collection_helper = format!("{}_path", crate::lower::routes::collection_name(&singular, plural));
     let collection_path = send(
         Some(route_helpers()),
-        &format!("{plural}_path"),
+        &collection_helper,
         Vec::new(),
         None,
         false,
@@ -1052,7 +1057,7 @@ fn classify_form_with_components(
     let has_member = ctx.route_helper_names.is_empty()
         || ctx.route_helper_names.contains(&format!("{singular}_path"));
     let has_collection = ctx.route_helper_names.is_empty()
-        || ctx.route_helper_names.contains(&format!("{plural}_path"));
+        || ctx.route_helper_names.contains(&collection_helper);
     let action = match (has_member, has_collection) {
         (true, false) => member_path,
         (false, true) => collection_path,
@@ -1225,13 +1230,14 @@ fn nested_resource_form(
     };
     let class_name = path.last()?.as_str();
     let child_singular = snake_case(class_name);
-    let child_plural = format!("{child_singular}s"); // naïve; comments fixture only
+    let child_plural = crate::naming::pluralize_snake(&child_singular);
+    let child_collection = crate::lower::routes::collection_name(&child_singular, &child_plural);
 
-    // RouteHelpers.<parent_singular>_<child_plural>_path(parent.id)
+    // RouteHelpers.<parent_singular>_<child collection>_path(parent.id)
     let parent_id = send(Some(parent.clone()), "id", Vec::new(), None, false);
     let action = send(
         Some(route_helpers()),
-        &format!("{parent_singular}_{child_plural}_path"),
+        &format!("{parent_singular}_{child_collection}_path"),
         vec![parent_id],
         None,
         true,

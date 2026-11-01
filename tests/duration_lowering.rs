@@ -105,7 +105,7 @@ end
         "after? must ground to `>`:\n{out}",
     );
     assert!(
-        out.contains("t - ActiveSupport::Duration.hour(1).to_i < ActiveSupport::Duration.days(30).ago"),
+        out.contains("t - ActiveSupport::Duration.hour(1).value < ActiveSupport::Duration.days(30).ago"),
         "before? must ground to `<`, and Time - Duration to its seconds \
          (`-` binds tighter than `<`, so the parens are redundant):\n{out}",
     );
@@ -150,7 +150,7 @@ end
 "#,
     );
     assert!(
-        out.contains("t - ActiveSupport::Duration.hour(1).to_i"),
+        out.contains("t - ActiveSupport::Duration.hour(1).value"),
         "Time - Duration must ground to seconds:\n{out}",
     );
     assert!(
