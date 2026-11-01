@@ -116,23 +116,18 @@ fn unlowered_form_builder_calls(app: &App) -> Vec<Diagnostic> {
 
 /// A `current_page?` that `ingest::current_page` left as written: Rails
 /// answers it through `url_for(options)` (an options hash, or
-/// `check_parameters:`/`method:`), or against the request's protocol and
-/// host (a literal absolute URL), neither of which the runtime models.
+/// `check_parameters:`/`method:`), which the runtime does not model.
 fn unlowered_current_page(app: &App) -> Vec<Diagnostic> {
     // The app's own `current_page?` is a call like any other.
     if crate::ingest::current_page::app_defines_current_page(app) {
         return Vec::new();
     }
     fn visit(expr: &Expr, out: &mut Vec<Diagnostic>) {
-        if let ExprNode::Send { recv: None, method, args, .. } = &*expr.node
+        if let ExprNode::Send { recv: None, method, .. } = &*expr.node
             && method.as_str() == "current_page?"
             && !expr.span.is_synthetic()
         {
-            let reason = if args.first().is_some_and(crate::ingest::current_page::is_absolute_url) {
-                "an absolute URL is compared with the request's protocol and host, which is not modeled; pass the path"
-            } else {
-                "only a path argument is modeled (not an options hash, a splat, `check_parameters:` or `method:`)"
-            };
+            let reason = "only a path or URL argument is modeled (not an options hash, a splat, `check_parameters:` or `method:`)";
             out.push(Diagnostic::unsupported(expr.span, None, "current_page?", reason));
         }
         expr.node.for_each_child(&mut |child| visit(child, out));

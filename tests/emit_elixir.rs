@@ -125,3 +125,15 @@ fn save_primary_key_guards_are_folded_before_functionalization() {
         }
     }
 }
+
+/// Elixir has no `while`: `while_to_recursion` turns a counter loop into a
+/// recursive helper, and a loop outside its shape is emitted as a `raise`.
+/// The shared runtime's view helpers all take that shape.
+#[test]
+fn view_helper_loops_lower_to_recursion() {
+    let mut app = ingest_app(Path::new("fixtures/real-blog")).expect("ingest");
+    Analyzer::new(&app).analyze(&mut app);
+    let files = elixir::emit(&app);
+    let helpers = find(&files, "lib/view_helpers.ex");
+    assert!(!helpers.contains("While not supported"), "{}", helpers.lines().filter(|l| l.contains("not supported")).collect::<Vec<_>>().join("\n"));
+}

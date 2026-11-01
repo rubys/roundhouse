@@ -10,6 +10,9 @@ fn app() -> emit_and_run::Overlay {
         "<p id=\"index\"><%= current_page?(articles_path) %></p>\n",
         "<p id=\"slash\"><%= current_page?(\"/articles/\") %></p>\n",
         "<p id=\"query\"><%= current_page?(\"/articles?order=asc\") %></p>\n",
+        "<p id=\"url\"><%= current_page?(articles_url) %></p>\n",
+        "<p id=\"encoded-url\"><%= current_page?(\"http%3A%2F%2Fwww.example.com/articles\") %></p>\n",
+        "<p id=\"other-host\"><%= current_page?(\"http://other.example/articles\") %></p>\n",
     );
     emit_and_run::real_blog()
         .edit("app/views/articles/index.html.erb", "<%= turbo_stream_from \"articles\" %>\n", &format!("<%= turbo_stream_from \"articles\" %>\n{nav}"))
@@ -25,6 +28,9 @@ class CurrentPageControllerTest < ActionDispatch::IntegrationTest
     assert_select "p#index", "true"
     assert_select "p#slash", "true"
     assert_select "p#query", "false"
+    assert_select "p#url", "true"
+    assert_select "p#encoded-url", "true"
+    assert_select "p#other-host", "false"
   end
 
   test "a query on the request is ignored unless the path has one" do
@@ -39,6 +45,8 @@ class CurrentPageControllerTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_select "p#index", "false"
     assert_select "p#slash", "false"
+    assert_select "p#url", "false"
+    assert_select "p#encoded-url", "false"
   end
 end
 "#;
@@ -51,15 +59,13 @@ fn current_page_answers_as_rails_does() {
         .assert_passes();
 }
 
-/// The `url_for` options form, `check_parameters:`/`method:`, and an
-/// absolute URL (compared with the request's protocol and host) are not
+/// The `url_for` options form and `check_parameters:`/`method:` are not
 /// modeled.
 #[test]
 fn a_current_page_form_rails_answers_through_url_for_is_refused() {
     for call in [
         "current_page?(controller: \"articles\", action: \"index\")",
         "current_page?(articles_path, check_parameters: true)",
-        "current_page?(\"http://example.org/articles\")",
     ] {
         let errors = emit_and_run::real_blog()
             .edit("app/views/articles/index.html.erb", "<%= turbo_stream_from \"articles\" %>\n", &format!("<%= turbo_stream_from \"articles\" %>\n<%= {call} %>\n"))
@@ -151,4 +157,20 @@ fn only_views_are_rewritten() {
     assert!(errors.is_empty(), "{errors:?}");
     let pager = std::fs::read_to_string(emitted.join("app/models/pager.rb")).unwrap();
     assert!(pager.contains("current_page?(\"/\")") && !pager.contains("current_page_path?"), "{pager}");
+}
+
+/// A template no request reaches keeps its errors as warnings, as analysis
+/// does, Jbuilder's included: a leading `return if …` guard gives its body
+/// a synthetic span, so reachability goes by the view's name.
+#[test]
+fn current_page_in_an_unreachable_template_is_a_warning() {
+    use roundhouse::project::BuildTarget;
+    let orphan = "return if @skip\njson.here current_page?(\"/articles\")\njson.title \"orphan\"\n";
+    let overlay = || emit_and_run::real_blog().write("app/views/articles/orphan.json.jbuilder", orphan);
+    let (_, errors) = overlay().emit(BuildTarget::Typescript);
+    assert!(!errors.iter().any(|e| e.contains("current_page?")), "{errors:?}");
+    let (_, errors) = overlay()
+        .edit("config/routes.rb", "Rails.application.routes.draw do\n", "Rails.application.routes.draw do\n  get \"orphan\", to: \"articles#orphan\"\n")
+        .emit(BuildTarget::Typescript);
+    assert!(errors.iter().any(|e| e.contains("current_page? not supported")), "a routed template keeps the error: {errors:?}");
 }

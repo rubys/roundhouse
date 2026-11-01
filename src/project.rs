@@ -1278,20 +1278,15 @@ fn report_current_page_calls(app: &App, target: BuildTarget) {
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Futamura) {
         return;
     }
-    let unreachable: crate::det::HashSet<crate::span::FileId> = app
-        .views
-        .iter()
-        .filter(|v| app.unreachable_views.contains(&v.name))
-        .map(|v| v.body.span.file)
-        .collect();
-    for span in crate::ingest::current_page::rewritten_calls(app) {
+    for (span, unreachable) in crate::ingest::current_page::rewritten_calls(app) {
         let mut d = crate::diagnostic::Diagnostic::unsupported(
             span,
             Some(crate::ident::Symbol::from(target.as_str())),
             "current_page?",
             "it reads the request the view renders for, which this target's views don't have",
         );
-        if unreachable.contains(&span.file) {
+        // A template no request reaches keeps its errors as warnings, as analysis does.
+        if unreachable {
             d.severity = crate::diagnostic::Severity::Warning;
         }
         emit::diagnostics::push(d);
