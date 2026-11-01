@@ -23,12 +23,16 @@ fn a_class_body_reads_a_data_file_under_rails_root() {
 }
 
 #[test]
-fn credentials_keys_and_type_declarations_are_not_carried() {
+fn credentials_secrets_keys_prior_output_and_type_declarations_are_not_carried() {
     let (emitted, _) = emit_and_run::empty_app()
         .write("config/data.yml", "a: 1\n")
         .write("config/credentials.yml", "secret: x\n")
         .write("config/credentials/test.yml", "secret: x\n")
         .write("config/master.key", "x\n")
+        .write("config/secrets.yml", "secret_key_base: x\n")
+        .write("config/passwords.json", "{}\n")
+        .write("config/secrets/api.yml", "a: 1\n")
+        .write("out/ruby/config/data.yml", "a: 1\n")
         .write("config/settings.ejson", "{}\n")
         .write("config/database.yml", "test:\n  adapter: sqlite3\n  database: \":memory:\"\n")
         .write("sorbet/config.yml", "a: 1\n")
@@ -40,6 +44,10 @@ fn credentials_keys_and_type_declarations_are_not_carried() {
         "config/credentials.yml",
         "config/credentials/test.yml",
         "config/master.key",
+        "config/secrets.yml",
+        "config/passwords.json",
+        "config/secrets/api.yml",
+        "out/ruby/config/data.yml",
         "config/settings.ejson",
         "config/database.yml",
         "sorbet/config.yml",

@@ -12471,10 +12471,11 @@ fn walk_dir_into_skipping(
 /// Nothing transpiles them; whatever ERB they hold is the reading code's
 /// to render.
 ///
-/// Skipped: dev/build dirs (`SKIP_DIRS`), hidden entries, `sorbet/`
-/// (type declarations the compiler reads), `config/database.yml` (compiled
-/// into the tree as `DatabaseYml`), and anything named for credentials or
-/// keys. Encrypted material (`*.ejson`, `credentials.yml.enc`,
+/// Skipped: dev/build dirs (`SKIP_DIRS`), hidden entries, top-level
+/// `sorbet/` (type declarations the compiler reads) and `out/` (the CLI's
+/// default output root), `config/database.yml` (compiled into the tree as
+/// `DatabaseYml`), and anything named for credentials, secrets, passwords
+/// or keys. Encrypted material (`*.ejson`, `credentials.yml.enc`,
 /// `master.key`) has no data extension and is never copied.
 fn walk_data_files_into(root: &Path, out: &mut Vec<(String, String)>) -> Result<(), String> {
     fn data_file(name: &str) -> bool {
@@ -12483,8 +12484,9 @@ fn walk_data_files_into(root: &Path, out: &mut Vec<(String, String)>) -> Result<
     }
     fn secret(name: &str) -> bool {
         let lower = name.to_ascii_lowercase();
-        lower.contains("credential") || lower.contains("master.key") || lower.ends_with(".key")
+        ["credential", "secret", "password", "master.key"].iter().any(|word| lower.contains(word)) || lower.ends_with(".key")
     }
+    let canonical_root = fs::canonicalize(root).ok();
     let mut stack = vec![(root.to_path_buf(), String::new())];
     while let Some((dir, prefix)) = stack.pop() {
         let Ok(entries) = fs::read_dir(&dir) else { continue };
@@ -12497,11 +12499,20 @@ fn walk_data_files_into(root: &Path, out: &mut Vec<(String, String)>) -> Result<
             }
             let Ok(ty) = entry.file_type() else { continue };
             let rel = format!("{prefix}{name}");
+            // A symlinked data file is carried by its contents when it
+            // resolves to a regular file inside the app; a link that leaves
+            // the app (or a symlinked directory) is not followed.
+            let linked_file = ty.is_symlink()
+                && fs::metadata(entry.path()).is_ok_and(|m| m.is_file())
+                && fs::canonicalize(entry.path()).is_ok_and(|target| canonical_root.as_ref().is_some_and(|r| target.starts_with(r)));
             if ty.is_dir() {
-                if !SKIP_DIRS.contains(&name.as_str()) && !(prefix.is_empty() && name == "sorbet") {
+                // `out/` is the CLI's default output root (`out/<target>`):
+                // walking it would carry the previous emit into the next one.
+                let top_skip = prefix.is_empty() && (name == "sorbet" || name == "out");
+                if !SKIP_DIRS.contains(&name.as_str()) && !top_skip {
                     stack.push((entry.path(), format!("{rel}/")));
                 }
-            } else if ty.is_file() && data_file(&name) && rel != "config/database.yml" {
+            } else if (ty.is_file() || linked_file) && data_file(&name) && rel != "config/database.yml" {
                 // Not UTF-8: `collect_binary_assets` carries what it can.
                 if let Ok(content) = fs::read_to_string(entry.path()) {
                     out.push((rel, content));
