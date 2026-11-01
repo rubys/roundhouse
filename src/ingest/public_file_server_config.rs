@@ -61,18 +61,43 @@ enum Step {
     If { cond: String, then: Vec<Step>, other: Vec<Step> },
 }
 
-/// The `config.public_file_server.headers = <value>` value node
-/// (`config` bare, as in the Application class body and an environment
-/// file, or `Rails.application.config`, as in an initializer). None for
-/// anything else.
-fn assignment<'pr>(node: &Node<'pr>) -> Option<Node<'pr>> {
+/// One `config.<section>.<key>` setting this lift replays: the reopen
+/// method it becomes, that method's answer when nothing assigns it, and
+/// how an assigned value is read (its source, or why it cannot be typed).
+pub(super) struct Setting {
+    pub section: &'static str,
+    pub key: &'static str,
+    pub method: &'static str,
+    pub default: &'static str,
+    pub read: fn(&Node<'_>, &str) -> Result<String, String>,
+}
+
+impl Setting {
+    fn path(&self) -> String {
+        format!("{}.{}", self.section, self.key)
+    }
+}
+
+pub(super) const HEADERS: Setting = Setting {
+    section: "public_file_server",
+    key: "headers",
+    method: "public_file_server_headers",
+    default: "{}",
+    read: headers,
+};
+
+/// The `config.<section>.<key> = <value>` value node (`config` bare, as
+/// in the Application class body and an environment file, or
+/// `Rails.application.config`, as in an initializer). None for anything
+/// else.
+fn assignment<'pr>(node: &Node<'pr>, setting: &Setting) -> Option<Node<'pr>> {
     let call = node.as_call_node()?;
-    if constant_id_str(&call.name()) != "headers=" {
+    if constant_id_str(&call.name()).strip_suffix('=') != Some(setting.key) {
         return None;
     }
     let section = call.receiver()?;
     let section = section.as_call_node()?;
-    if constant_id_str(&section.name()) != "public_file_server" || section.arguments().is_some() {
+    if constant_id_str(&section.name()) != setting.section || section.arguments().is_some() {
         return None;
     }
     let config = section.receiver()?;
@@ -95,7 +120,7 @@ fn assignment<'pr>(node: &Node<'pr>) -> Option<Node<'pr>> {
     values.next().is_none().then_some(value)
 }
 
-fn text(node: &Node<'_>, src: &str) -> String {
+pub(super) fn text(node: &Node<'_>, src: &str) -> String {
     let loc = node.location();
     src[loc.start_offset()..loc.end_offset()].to_string()
 }
@@ -175,31 +200,31 @@ fn fold_durations(text: &str) -> String {
 /// The steps among `stmts`, recursing into the containers Rails' config
 /// lines live in (class and module bodies, `configure do ... end`) and
 /// into `if`/`unless` branches.
-fn steps(stmts: Vec<Node<'_>>, src: &str) -> Vec<Step> {
+fn steps(stmts: Vec<Node<'_>>, src: &str, setting: &Setting) -> Vec<Step> {
     let mut out = Vec::new();
     for stmt in stmts {
         if let Some(class) = stmt.as_class_node() {
-            out.extend(steps(class.body().map(flatten_statements).unwrap_or_default(), src));
+            out.extend(steps(class.body().map(flatten_statements).unwrap_or_default(), src, setting));
             continue;
         }
         if let Some(module) = stmt.as_module_node() {
-            out.extend(steps(module.body().map(flatten_statements).unwrap_or_default(), src));
+            out.extend(steps(module.body().map(flatten_statements).unwrap_or_default(), src, setting));
             continue;
         }
         if let Some(call) = stmt.as_call_node() {
             if constant_id_str(&call.name()) == "configure" {
                 if let Some(body) = call.block().and_then(|b| b.as_block_node()).and_then(|b| b.body()) {
-                    out.extend(steps(flatten_statements(body), src));
+                    out.extend(steps(flatten_statements(body), src, setting));
                     continue;
                 }
             }
         }
-        if let Some(step) = conditional(&stmt, src) {
+        if let Some(step) = conditional(&stmt, src, setting) {
             out.push(step);
             continue;
         }
-        if let Some(value) = assignment(&stmt) {
-            out.push(Step::Set(headers(&value, src)));
+        if let Some(value) = assignment(&stmt, setting) {
+            out.push(Step::Set((setting.read)(&value, src)));
         }
     }
     out
@@ -207,9 +232,9 @@ fn steps(stmts: Vec<Node<'_>>, src: &str) -> Vec<Step> {
 
 /// An `if`/`elsif`/`else` or `unless`/`else` statement whose branches
 /// assign the setting; None when no branch does.
-fn conditional(stmt: &Node<'_>, src: &str) -> Option<Step> {
+fn conditional(stmt: &Node<'_>, src: &str, setting: &Setting) -> Option<Step> {
     let body = |n: Option<ruby_prism::StatementsNode<'_>>| -> Vec<Step> {
-        n.map(|s| steps(s.body().iter().collect(), src)).unwrap_or_default()
+        n.map(|s| steps(s.body().iter().collect(), src, setting)).unwrap_or_default()
     };
     let (cond, then, other) = if let Some(node) = stmt.as_if_node() {
         let other = match node.subsequent() {
@@ -217,7 +242,7 @@ fn conditional(stmt: &Node<'_>, src: &str) -> Option<Step> {
             Some(next) => match next.as_else_node() {
                 Some(e) => body(e.statements()),
                 // `elsif`: a nested if, as Ruby reads it.
-                None => conditional(&next, src).into_iter().collect(),
+                None => conditional(&next, src, setting).into_iter().collect(),
             },
         };
         (format!("({})", text(&node.predicate(), src)), body(node.statements()), other)
@@ -274,7 +299,7 @@ fn replay(steps: &[Step], indent: &str) -> Result<(String, bool), String> {
 }
 
 /// One config file's steps, or a refusal naming the file.
-fn read_file<V: Vfs + ?Sized>(vfs: &V, path: &Path) -> IngestResult<Vec<Step>> {
+fn read_file<V: Vfs + ?Sized>(vfs: &V, path: &Path, setting: &Setting) -> IngestResult<Vec<Step>> {
     let Ok(source) = vfs.read(path) else { return Ok(Vec::new()) };
     let file = path.display().to_string();
     let result = super::prism::parse(&source, &file);
@@ -284,19 +309,18 @@ fn read_file<V: Vfs + ?Sized>(vfs: &V, path: &Path) -> IngestResult<Vec<Step>> {
         .as_program_node()
         .map(|p| p.statements().body().iter().collect::<Vec<_>>())
         .unwrap_or_default();
-    let found = steps(stmts, &src);
+    let found = steps(stmts, &src, setting);
+    let path_text = setting.path();
     let mentioned: usize = src
         .lines()
         .map(|line| line.split('#').next().unwrap_or(""))
-        .map(|code| code.matches("public_file_server.headers").count())
+        .map(|code| code.matches(path_text.as_str()).count())
         .sum();
     let refused = if mentioned > count(&found) {
-        Some(
-            "a `config.public_file_server.headers` setting that is not an assignment at the top \
-             level of a config body or of an `if`/`unless` inside one (Rails' static file server \
-             reads it; this lift reads only `config.public_file_server.headers = <Hash>`)"
-                .to_string(),
-        )
+        Some(format!(
+            "a `config.{path_text}` setting that is not an assignment at the top level of a config \
+             body or of an `if`/`unless` inside one (this lift reads only `config.{path_text} = <value>`)"
+        ))
     } else {
         replay(&found, "").err()
     };
@@ -312,7 +336,17 @@ fn read_file<V: Vfs + ?Sized>(vfs: &V, path: &Path) -> IngestResult<Vec<Step>> {
 /// Ruby source for the reopen's `public_file_server_headers`, None when
 /// the app assigns the key nowhere (the runtime default is Rails' then).
 pub(super) fn synthesize<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Option<String>> {
-    let application = read_file(vfs, &dir.join("config/application.rb"))?;
+    synthesize_setting(vfs, dir, &HEADERS)
+}
+
+/// Ruby source for the reopen's `setting.method`, None when the app
+/// assigns the key nowhere (the runtime default is Rails' then).
+pub(super) fn synthesize_setting<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+    setting: &Setting,
+) -> IngestResult<Option<String>> {
+    let application = read_file(vfs, &dir.join("config/application.rb"), setting)?;
     let env_dir = dir.join("config/environments");
     let mut env_files: Vec<PathBuf> = if vfs.is_dir(&env_dir) {
         vfs.read_dir(&env_dir)
@@ -327,7 +361,7 @@ pub(super) fn synthesize<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<O
     let mut environments: Vec<(String, Vec<Step>)> = Vec::new();
     for path in &env_files {
         let Some(name) = path.file_stem().and_then(|s| s.to_str()) else { continue };
-        let found = read_file(vfs, path)?;
+        let found = read_file(vfs, path, setting)?;
         if !found.is_empty() {
             environments.push((name.to_string(), found));
         }
@@ -336,7 +370,7 @@ pub(super) fn synthesize<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<O
     let mut initializers = Vec::new();
     if vfs.is_dir(&init_dir) {
         for path in super::app::read_rb_files(vfs, &init_dir)? {
-            initializers.extend(read_file(vfs, &path)?);
+            initializers.extend(read_file(vfs, &path, setting)?);
         }
     }
     if application.is_empty() && initializers.is_empty() && environments.is_empty() {
@@ -345,9 +379,9 @@ pub(super) fn synthesize<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<O
     // Each file was checked as it was read; a combined replay only
     // reaches a subset of what those checks did.
     let code = |steps: &[Step], indent: &str| replay(steps, indent).map_err(|message| {
-        IngestError::Unsupported { file: "config/ (config.public_file_server.headers)".to_string(), message }
+        IngestError::Unsupported { file: format!("config/ (config.{})", setting.path()), message }
     });
-    let mut src = String::from("def public_file_server_headers\n");
+    let mut src = format!("def {}\n", setting.method);
     let (init_code, init_done) = code(&initializers, "  ")?;
     src.push_str(&init_code);
     if !init_done {
@@ -361,7 +395,7 @@ pub(super) fn synthesize<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<O
         let (app_code, app_done) = code(&application, "  ")?;
         src.push_str(&app_code);
         if !app_done {
-            src.push_str("  return {}\n");
+            src.push_str(&format!("  return {}\n", setting.default));
         }
     }
     src.push_str("end\n");

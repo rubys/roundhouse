@@ -331,6 +331,9 @@ ActiveSupport.set_default_zone(tz_name)
 # `ActionView::ViewHelpers.fragment_read/_write`, so after every file that
 # defines them.
 require_relative "runtime/action_controller_fragment_caching"
+require_relative "runtime/public_files"
+require_relative "runtime/action_controller_page_caching"
+require_relative "runtime/integration_session_cruby"
 # Rails 8.1.4's full ActionController::Head options hash is a Ruby-family
 # feature; strict non-Ruby targets keep the bounded shared implementation.
 require_relative "runtime/action_controller_head"

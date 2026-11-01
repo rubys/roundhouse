@@ -24,9 +24,6 @@
 ///   All consumers are write-path (`markeddown_*` precomputed on save),
 ///   so the read benchmark never renders markdown. Real fix = a
 ///   Commonmarker façade over the gem's iterative `Node#walk`.
-/// - CachePageJob warms the page cache through an
-///   `ActionDispatch::Integration::Session`; `caches_page` itself is
-///   dropped, and no AOT runtime carries an integration session.
 /// - FlaggedCommenters computes flag statistics with MySQL-only SQL
 ///   (stddev(), if()) under `Rails.cache.fetch` blocks whose bodies
 ///   also carry un-modeled calls (`exec_query().first.symbolize_keys!`,
@@ -116,14 +113,6 @@ pub const EXTRAS_FACADES: &[Facade] = &[
         rb: include_str!("../runtime/spinel/facades/flagged_commenters.rb"),
         rbs: include_str!("../runtime/spinel/facades/flagged_commenters.rbs"),
         lifted_by_sql_functions: &["stddev", "if"],
-        lifted_by_constants: &[],
-    },
-    Facade {
-        stem: "app/models/cache_page_job",
-        class_name: "CachePageJob",
-        rb: include_str!("../runtime/spinel/facades/cache_page_job.rb"),
-        rbs: include_str!("../runtime/spinel/facades/cache_page_job.rbs"),
-        lifted_by_sql_functions: &[],
         lifted_by_constants: &[],
     },
     Facade {

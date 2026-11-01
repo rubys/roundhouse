@@ -1443,6 +1443,16 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
             })?;
             methods.append(&mut synth);
         }
+        // `config.action_controller.perform_caching` and
+        // `page_cache_directory` (see `action_controller_caching_config`),
+        // spliced and refused the same way.
+        if let Some(caching) = super::action_controller_caching_config::synthesize(vfs, dir)? {
+            let mut synth = crate::runtime_src::parse_methods(&caching).map_err(|message| IngestError::Unsupported {
+                file: "config/ (config.action_controller caching settings)".to_string(),
+                message: format!("the app's controller caching settings do not parse once synthesized: {message}"),
+            })?;
+            methods.append(&mut synth);
+        }
         // Session cookie name: application-derived default plus any
         // `config.session_store` declarations (see `session_config`).
         // Spliced like the cable / public-file-server settings. The
@@ -2950,6 +2960,8 @@ end
     super::class_configuration::expand(&mut app, &concern_class_method_spans, &framework_shadow_scopes)?;
     super::class_attribute::expand(&mut app, &concern_class_method_spans, &framework_shadow_scopes);
     expand_class_body_macros(&mut app)?;
+    // After the splice: a guard constant may live on an ancestor or arrive with a concern.
+    super::caches_page::expand(&mut app);
     // After the splice and the macros: a concern's action, or one a macro synthesizes, gates its permit too.
     super::conditional_permit::apply(&mut app);
     // The same idea one base over: `const` / `prop` under a class

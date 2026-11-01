@@ -1979,7 +1979,7 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
             || app.library_classes.iter().any(|class| class.methods.iter().any(|method| method.name.as_str() == name))
             || app.controllers.iter().any(|controller| controller.actions().any(|action| action.name.as_str() == name))
     };
-    let kernel: Vec<&str> = ["Rational", "Integer", "Float", "throw", "catch", "update_attribute", "attribute_in_database", "create_or_find_by", "create_or_find_by!"]
+    let kernel: Vec<&str> = ["Rational", "Integer", "Float", "throw", "catch", "update_attribute", "attribute_in_database", "create_or_find_by", "create_or_find_by!", "cache_page", "expire_page", "page_cache_directory"]
         .into_iter()
         .filter(|name| !defines(name))
         .collect();
@@ -2011,6 +2011,12 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
                 (_, "create_or_find_by!") if kernel.contains(&"create_or_find_by!") => Some("ActiveRecord::Relation#create_or_find_by!"),
                 // Not filtered by what the app defines: the model's own `_run_x_callbacks` is the generated chain, built on yield and catch.
                 (_, name) if name.starts_with("_run_") && name.ends_with("_callbacks") => Some("ActiveRecord::Base#run_callbacks"),
+                // The page cache is runtime/spinel/action_controller_page_caching.rb, which only the ruby family and spinel load.
+                (_, "cache_page") if kernel.contains(&"cache_page") => Some("ActionController::Caching::Pages#cache_page"),
+                (_, "expire_page") if kernel.contains(&"expire_page") => Some("ActionController::Caching::Pages#expire_page"),
+                (_, "page_cache_directory") if kernel.contains(&"page_cache_directory") => {
+                    Some("ActionController::Caching::Pages#page_cache_directory")
+                }
                 // Not only `= false`: the setter lives in connection.rb, which only the ruby family loads, so even `= true` calls nothing elsewhere
                 (Some(r), "record_timestamps=") if r.decisions & crate::expr::CLASS_OBJECT_VALUE != 0 => {
                     Some("ActiveRecord::Base.record_timestamps=")
@@ -7689,6 +7695,8 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         | "Net::HTTPSuccess" | "Net::HTTPBadResponse" | "Zlib::DataError" | "OpenSSL::Random"
         // `packages/strscan` and `packages/zlib` on spinel; no strict runtime carries either.
         | "StringScanner" | "Zlib::GzipWriter"
+        // runtime/spinel/integration_session.rb and the ruby tree's twin.
+        | "ActionDispatch::Integration::Session" | "ActionDispatch::TestResponse"
         // ruby-vips on the ruby family, spinel-ruby-vips on spinel.
         | "Vips::Image"
         | "Rails::HTML5::SafeListSanitizer" | "JSON" | "JSON::ParserError"
