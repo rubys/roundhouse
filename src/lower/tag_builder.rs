@@ -150,9 +150,14 @@ pub fn apply_tag_builder_lowering(
     // `tag` column, `attr_reader :tag`, a `def tag` — calls ITS reader
     // (`tag.title`), and rewriting that compiled to `"<title></title>"`.
     let owns_tag = classes_owning_tag(app, registry);
+    // An app's own `stylesheet_link_tag` (an app/helpers method or a
+    // `helper_method`) is what Rails calls; it is left to the app.
+    let stylesheet = Symbol::from("stylesheet_link_tag");
+    let own_stylesheet =
+        app.helper_method_index.contains_key(&stylesheet) || app.view_visible_controller_methods.contains(&stylesheet);
     super::for_each_owned_hook_body(app, &mut |owner, body| {
         let own_tag = owner.is_some_and(|c| owns_tag.contains(c));
-        rewrite(body, own_tag, &models, &helpers, &sti_stems, &mut diags)
+        rewrite(body, own_tag, own_stylesheet, &models, &helpers, &sti_stems, &mut diags)
     });
     diags
 }
@@ -371,13 +376,14 @@ fn is_tag_helper(recv: &Expr) -> bool {
 fn rewrite(
     expr: &mut Expr,
     own_tag: bool,
+    own_stylesheet: bool,
     models: &crate::det::HashSet<String>,
     helpers: &crate::det::HashSet<String>,
     sti_stems: &crate::det::HashMap<String, Vec<String>>,
     diags: &mut Vec<Diagnostic>,
 ) {
     expr.node.for_each_child_mut(&mut |child| {
-        rewrite(child, own_tag, models, helpers, sti_stems, diags)
+        rewrite(child, own_tag, own_stylesheet, models, helpers, sti_stems, diags)
     });
 
     if rewrite_turbo_frame_tag(expr, models) {
@@ -387,6 +393,9 @@ fn rewrite(
         return;
     }
     if rewrite_button_tag(expr) {
+        return;
+    }
+    if !own_stylesheet && rewrite_stylesheet_link_tag(expr) {
         return;
     }
     if rewrite_button_to_block(expr) {
@@ -558,6 +567,54 @@ fn rewrite_button_tag(expr: &mut Expr) -> bool {
     }
     parts.push(InterpPart::Text { value: "</button>".to_string() });
     let mut built = string_interp(parts);
+    qualify_view_helpers(&mut built);
+    *expr = html_safe(built, span);
+    true
+}
+
+/// `stylesheet_link_tag(name[, opts])` written in a HELPER body: the same
+/// `ViewHelpers.stylesheet_link_tag(name, opts)` the view walker lowers
+/// the ERB spelling to (`view_to_library::helpers`), qualified for a
+/// helper module. A helper module never reached the walker, so the call
+/// stayed bare, with no module defining it (#1593).
+///
+/// Left as written, and refused at analyze (`analyze::diagnostics::
+/// helper_stylesheet_link_tags`): a Symbol name, which in a view is a
+/// stylesheet group (`:app`, `:all`) expanded from the view's stylesheet
+/// list, which a helper body doesn't have; and arguments other than a
+/// name and an optional literal options hash (a splat, forwarded
+/// arguments, a computed options expression).
+fn rewrite_stylesheet_link_tag(expr: &mut Expr) -> bool {
+    let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
+        return false;
+    };
+    if method.as_str() != "stylesheet_link_tag" || expr.span.is_synthetic() {
+        return false;
+    }
+    let opaque = |e: &Expr| {
+        matches!(
+            &*e.node,
+            ExprNode::Splat { .. }
+                | ExprNode::KeywordSplat { .. }
+                | ExprNode::ForwardArgs
+                | ExprNode::ForwardKeywords
+                | ExprNode::ForwardKeywordsWithPairs { .. }
+        )
+    };
+    let shape_ok = match &args[..] {
+        [name] => !opaque(name) && !matches!(&*name.node, ExprNode::Hash { .. }),
+        [name, opts] => {
+            !opaque(name)
+                && matches!(&*opts.node, ExprNode::Hash { entries, .. } if !entries.iter().any(|(k, v)| opaque(k) || opaque(v)))
+        }
+        _ => false,
+    };
+    // Declined shapes are refused at analyze (`helper_stylesheet_link_tags`).
+    if !shape_ok || matches!(&*args[0].node, ExprNode::Lit { value: Literal::Sym { .. } }) {
+        return false;
+    }
+    let span = expr.span;
+    let mut built = view_helpers_call("stylesheet_link_tag", args.clone());
     qualify_view_helpers(&mut built);
     *expr = html_safe(built, span);
     true

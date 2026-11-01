@@ -114,6 +114,61 @@ fn unlowered_form_builder_calls(app: &App) -> Vec<Diagnostic> {
     out
 }
 
+/// `stylesheet_link_tag` in an `app/helpers` method that
+/// `tag_builder::rewrite_stylesheet_link_tag` leaves as written: a Symbol
+/// name (a stylesheet group a view expands from its stylesheet list, which
+/// a helper doesn't have) or arguments other than a name and an optional
+/// literal options hash. Nothing answers the bare call in a helper module.
+/// An app's own `stylesheet_link_tag` is a call like any other.
+fn helper_stylesheet_link_tags(app: &App) -> Vec<Diagnostic> {
+    let name = Symbol::from("stylesheet_link_tag");
+    if app.helper_method_index.contains_key(&name) || app.view_visible_controller_methods.contains(&name) {
+        return Vec::new();
+    }
+    fn visit(expr: &Expr, out: &mut Vec<Diagnostic>) {
+        if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node
+            && method.as_str() == "stylesheet_link_tag"
+            && !expr.span.is_synthetic()
+        {
+            let opaque = |e: &Expr| {
+                matches!(
+                    &*e.node,
+                    ExprNode::Splat { .. }
+                        | ExprNode::KeywordSplat { .. }
+                        | ExprNode::ForwardArgs
+                        | ExprNode::ForwardKeywords
+                        | ExprNode::ForwardKeywordsWithPairs { .. }
+                )
+            };
+            let shape_ok = match &args[..] {
+                [n] => !opaque(n) && !matches!(&*n.node, ExprNode::Hash { .. }),
+                [n, o] => {
+                    !opaque(n)
+                        && matches!(&*o.node, ExprNode::Hash { entries, .. } if !entries.iter().any(|(k, v)| opaque(k) || opaque(v)))
+                }
+                _ => false,
+            };
+            let symbol = args.first().is_some_and(|n| matches!(&*n.node, ExprNode::Lit { value: crate::expr::Literal::Sym { .. } }));
+            if !shape_ok || symbol {
+                let reason = if symbol {
+                    "in a helper method, a Symbol names a stylesheet group (`:app`, `:all`) that only a view expands; pass the stylesheet's name"
+                } else {
+                    "in a helper method, only a stylesheet name and an optional literal options hash are modeled"
+                };
+                out.push(Diagnostic::unsupported(expr.span, None, "stylesheet_link_tag", reason));
+            }
+        }
+        expr.node.for_each_child(&mut |child| visit(child, out));
+    }
+    let mut out = Vec::new();
+    for lc in app.library_classes.iter().filter(|lc| app.helper_modules.contains(&lc.name)) {
+        for method in &lc.methods {
+            visit(&method.body, &mut out);
+        }
+    }
+    out
+}
+
 /// Builder methods the view lowering serves outside
 /// `classify_form_builder_method`.
 const FORM_BUILDER_HANDLED_ELSEWHERE: &[&str] = &["object"];
@@ -429,6 +484,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     }
     out.extend(attribute_macro_refusals(app));
     out.extend(unlowered_form_builder_calls(app));
+    out.extend(helper_stylesheet_link_tags(app));
     out.extend(devise_refusals(app));
     out.extend(overridden_synthesized_accessors(app));
     out.extend(runtime_defined_surfaces(app));
