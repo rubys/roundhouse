@@ -28,8 +28,6 @@ const MARKUP: &str = concat!(
     "  <p id=\"text\"><%= time_tag @article.created_at, \"Posted\" %></p>\n",
     "  <p id=\"block\"><%= time_tag @article.created_at do %>In block<% end %></p>\n",
     "  <p id=\"class\"><%= time_tag @article.created_at, \"Posted\", class: \"when\" %></p>\n",
-    "  <p id=\"override\"><%= time_tag @article.created_at, \"Posted\", datetime: \"2026\" %></p>\n",
-    "  <p id=\"order\"><%= time_tag @article.created_at, \"Posted\", class: \"when\", datetime: \"2026\" %></p>\n",
     "  <p id=\"escaped\"><%= time_tag @article.created_at, \"<b>x</b>\" %></p>\n",
     "  <p id=\"format\"><%= time_tag @article.created_at, \"Posted\", format: :short %></p>\n",
     "  <p id=\"builder\"><%= tag.time \"Posted\", datetime: @article.created_at.iso8601 %></p>\n",
@@ -44,8 +42,6 @@ class TimeTagControllerTest < ActionDispatch::IntegrationTest
     assert_match(/<p id="text"><time datetime="2026-11-01T09:30:15Z">Posted<\/time><\/p>/, response.body)
     assert_match(/<p id="block"><time datetime="2026-11-01T09:30:15Z">In block<\/time><\/p>/, response.body)
     assert_match(/<p id="class"><time datetime="2026-11-01T09:30:15Z" class="when">Posted<\/time><\/p>/, response.body)
-    assert_match(/<p id="override"><time datetime="2026">Posted<\/time><\/p>/, response.body)
-    assert_match(/<p id="order"><time datetime="2026" class="when">Posted<\/time><\/p>/, response.body)
     assert_match(/<p id="escaped"><time datetime="2026-11-01T09:30:15Z">&lt;b&gt;x&lt;\/b&gt;<\/time><\/p>/, response.body)
     assert_match(/<p id="format"><time datetime="2026-11-01T09:30:15Z">Posted<\/time><\/p>/, response.body)
     assert_match(/<p id="builder"><time datetime="2026-11-01T09:30:15Z">Posted<\/time><\/p>/, response.body)
@@ -71,6 +67,24 @@ fn a_time_tag_without_text_is_refused() {
     ] {
         let errors = app(markup).check_errors();
         assert!(errors.iter().any(|e| e.contains("time_tag not supported") && e.contains("I18n.l")), "{markup}: {errors:?}");
+    }
+}
+
+/// A given `datetime:` wins over `t.iso8601`, which Rails still evaluates
+/// first (it raises for a nil time); a computed option key could be
+/// `:format` or `:datetime`; and a String `"datetime"` stays an attribute
+/// beside Rails' own (`datetime="…Z" datetime="2026"`), which the builder's
+/// attributes don't keep apart. Each is left as written and refused.
+#[test]
+fn a_time_tag_rails_evaluates_otherwise_is_refused() {
+    for markup in [
+        "  <%= time_tag @article.created_at, \"Posted\", datetime: \"2026\" %>\n",
+        "  <%= time_tag @article.created_at, \"Posted\", class: \"when\", datetime: \"2026\" %>\n",
+        "  <% key = :format %><%= time_tag @article.created_at, \"Posted\", { key => :short } %>\n",
+        "  <%= time_tag @article.created_at, \"Posted\", \"datetime\" => \"2026\" %>\n",
+    ] {
+        let errors = app(markup).check_errors();
+        assert!(errors.iter().any(|e| e.contains("time_tag not supported")), "{markup}: {errors:?}");
     }
 }
 

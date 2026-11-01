@@ -7,8 +7,10 @@
 //! ```
 //!
 //! that is `tag.time("text", datetime: t.iso8601, **opts)`, with `datetime`
-//! first unless the options give their own, and `format:` dropped (Rails
-//! deletes it; it only picks the default text). Analysis, the time
+//! first and `format:` dropped (Rails deletes it; it only picks the default
+//! text). A call whose options give `datetime:` (Rails still evaluates
+//! `t.iso8601` before that value wins) or have a computed key is left as
+//! written and refused. Analysis, the time
 //! lowerings and the tag builder then see what an app writing the builder
 //! by hand would have written.
 //!
@@ -90,21 +92,28 @@ fn as_tag_time(e: &Expr) -> Option<Expr> {
     if text.is_none() && block.is_none() {
         return None;
     }
-    let key = |k: &Expr| match &*k.node {
-        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
-        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
-        _ => None,
-    };
-    let opts: Vec<(Expr, Expr)> = opts.into_iter().filter(|(k, _)| key(k).as_deref() != Some("format")).collect();
+    // Literal keys only: a computed one could be `:format` or `:datetime`.
+    if opts.iter().any(|(k, _)| !matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { .. } | Literal::Str { .. } })) {
+        return None;
+    }
+    // Rails deletes and merges Symbol keys; a String "format" or "datetime"
+    // stays an attribute beside them (`datetime="…Z" datetime="2026"`),
+    // which the builder's attributes don't keep apart: left as written.
+    let is_sym = |k: &Expr, name: &str| matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == name);
+    if opts.iter().any(|(k, _)| matches!(&*k.node, ExprNode::Lit { value: Literal::Str { value } } if value == "datetime" || value == "format")) {
+        return None;
+    }
+    // A given `datetime:` wins over `t.iso8601`, but Rails still evaluates
+    // that first (it raises for a nil time): left as written and refused.
+    if opts.iter().any(|(k, _)| is_sym(k, "datetime")) {
+        return None;
+    }
+    let opts: Vec<(Expr, Expr)> = opts.into_iter().filter(|(k, _)| !is_sym(k, "format")).collect();
     let span = e.span;
     // `options.reverse_merge(datetime: …)` is `{ datetime: … }.merge(options)`:
-    // `datetime` first, its value the options' own when they give one.
-    let (given, opts): (Vec<(Expr, Expr)>, Vec<(Expr, Expr)>) =
-        opts.into_iter().partition(|(k, _)| key(k).as_deref() == Some("datetime"));
+    // `datetime` first.
     let mut entries = Vec::new();
-    if let Some(last) = given.into_iter().last() {
-        entries.push(last);
-    } else {
+    {
         let iso = Expr::new(
             span,
             ExprNode::Send {

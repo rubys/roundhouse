@@ -128,10 +128,17 @@ fn unlowered_time_tags(app: &App) -> Vec<Diagnostic> {
             && method.as_str() == "time_tag"
             && !expr.span.is_synthetic()
         {
+            let gives_datetime = args.last().is_some_and(|a| {
+                matches!(&*a.node, ExprNode::Hash { entries, .. } if entries.iter().any(|(k, _)| {
+                    matches!(&*k.node, ExprNode::Lit { value: crate::expr::Literal::Sym { value } } if value.as_str() == "datetime")
+                }))
+            });
             let reason = if args.len() <= 1 && block.is_none()
-                || (args.len() == 2 && block.is_none() && matches!(&*args[1].node, ExprNode::Hash { .. }))
+                || (args.len() == 2 && block.is_none() && matches!(&*args[1].node, ExprNode::Hash { .. }) && !gives_datetime)
             {
                 "with no text argument and no block, Rails' text is `I18n.l(t, format: …)`, which is not modeled; pass the text (`time_tag t, \"…\"`) or a block"
+            } else if gives_datetime {
+                "a given `datetime:` wins over the time's `iso8601`, which Rails still evaluates first; that order is not modeled"
             } else {
                 "its arguments are not a time, an optional text and a literal options hash"
             };
