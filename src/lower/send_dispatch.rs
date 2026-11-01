@@ -70,6 +70,18 @@ pub fn apply_send_static_dispatch(
     app: &mut App,
     registry: &HashMap<ClassId, ClassInfo>,
 ) -> Vec<Diagnostic> {
+    // Model bodies ground these before scope classification, and their
+    // Arel pass handles surviving typed chains. Service classes do not
+    // pass through that model lowerer; ground their direct and literal
+    // reflected finders here through the same ownership-checked rule.
+    fn finders(body: &mut Expr, registry: &HashMap<ClassId, ClassInfo>) {
+        body.node.for_each_child_mut(&mut |child| finders(child, registry));
+        super::arel::normalize_dynamic_finder_send(body, registry, None, false);
+    }
+    for class in &mut app.library_classes {
+        if registry.get(&class.name).is_some_and(|c| c.active_record_model) { continue; }
+        for method in &mut class.methods { finders(&mut method.body, registry); }
+    }
     let providers = collect_hash_providers(app);
     let defined = defined_method_name_counts(app);
     let mut diags = Vec::new();

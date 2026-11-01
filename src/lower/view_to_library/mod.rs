@@ -245,6 +245,7 @@ pub struct ViewLowerCtx<'a> {
     locals_keys: crate::det::HashMap<(String, String), Vec<String>>,
     reference_reads: std::rc::Rc<crate::det::HashSet<String>>,
     reference_targets: std::rc::Rc<crate::det::HashMap<String, String>>,
+    nested_record_classes: std::rc::Rc<crate::det::HashMap<(String, String), String>>,
     nilable_scalar_reads: std::rc::Rc<crate::det::HashSet<String>>,
     html_safe_methods: std::rc::Rc<crate::det::HashSet<String>>,
     model_singulars: std::rc::Rc<crate::det::HashSet<String>>,
@@ -275,6 +276,7 @@ pub struct ViewLowerCtx<'a> {
     /// See the ViewCtx field of the same name. Off unless the emitter
     /// opts in with [`ViewLowerCtx::observe_form_with_entry`].
     form_with_entry: bool,
+    model_param_keys: std::rc::Rc<crate::det::HashMap<String, String>>,
 }
 
 impl<'a> ViewLowerCtx<'a> {
@@ -300,6 +302,9 @@ impl<'a> ViewLowerCtx<'a> {
                 .collect();
         Self {
             app,
+            model_param_keys: std::rc::Rc::new(app.models.iter().map(|m| &m.name)
+                .chain(app.library_classes.iter().map(|c| &c.name))
+                .map(|id| (id.0.as_str().to_owned(), app.model_param_key(id.0.as_str()))).collect()),
             known_models: app
                 .models
                 .iter()
@@ -315,6 +320,7 @@ impl<'a> ViewLowerCtx<'a> {
             locals_keys: render_locals_keys(&app.views, &app.controllers, &app.library_classes),
             reference_reads: std::rc::Rc::new(reference_reader_names(app)),
             reference_targets: std::rc::Rc::new(reference_target_names(app)),
+            nested_record_classes: std::rc::Rc::new(nested_record_classes(app)),
             nilable_scalar_reads: std::rc::Rc::new(nilable_scalar_reader_names(app)),
             html_safe_methods: std::rc::Rc::new(
                 app.html_safe_methods.iter().map(|m| m.as_str().to_string()).collect(),
@@ -322,7 +328,7 @@ impl<'a> ViewLowerCtx<'a> {
             model_singulars: std::rc::Rc::new(
                 app.models
                     .iter()
-                    .map(|m| crate::naming::snake_case(m.name.0.as_str()))
+                    .map(|m| app.model_param_key(m.name.0.as_str()))
                     .collect(),
             ),
             slug_models: std::rc::Rc::new(
@@ -335,7 +341,7 @@ impl<'a> ViewLowerCtx<'a> {
                                 if method.name.as_str() == "to_param"
                         ))
                     })
-                    .map(|m| crate::naming::snake_case(m.name.0.as_str()))
+                    .map(|m| app.model_param_key(m.name.0.as_str()))
                     .collect(),
             ),
             bool_readers: std::rc::Rc::new(bool_reader_names(app)),
@@ -822,6 +828,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         nullable_locals: nullable,
         reference_reads: lx.reference_reads.clone(),
         reference_targets: lx.reference_targets.clone(),
+        nested_record_classes: lx.nested_record_classes.clone(),
         nilable_scalar_reads: lx.nilable_scalar_reads.clone(),
         html_safe_methods: lx.html_safe_methods.clone(),
         model_singulars: lx.model_singulars.clone(),
@@ -833,6 +840,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         route_helper_arity: lx.route_helper_arity.clone(),
         form_wrappers: lx.form_wrappers.clone(),
         form_with_entry: lx.form_with_entry,
+        model_param_keys: lx.model_param_keys.clone(),
         stylesheets: app.stylesheets.clone(),
         lexxy: app.gem_lock.as_ref().is_some_and(|lock| lock.has("lexxy")),
         lexxy_editor_adapter: app.gem_lock.as_ref().is_some_and(lexxy_uses_editor_adapter),
@@ -849,6 +857,12 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         strict_locals: lx.strict_locals.clone(),
         view_name: crate::lower::view::fragment_template_path(view.name.as_str(), view.format.as_str()),
         ivar_models: std::rc::Rc::new(view_ivar_models(app, &view.name)),
+        record_classes: std::rc::Rc::new(app.view_ivar_types.get(&view.name).into_iter()
+            .chain(app.partial_local_types.get(&view.name)).flat_map(|types| types.iter())
+            .filter_map(|(name, ty)| match ty.peel_nilable() {
+                crate::ty::Ty::Class { id, .. } => Some((name.as_str().to_owned(), id.0.as_str().to_owned())),
+                _ => None,
+            }).collect()),
         str_ivars: std::rc::Rc::new(view_str_ivars(app, &view.name)),
         ivar_locals: std::rc::Rc::new(ivar_locals),
         own_flash,
@@ -877,6 +891,8 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         ctx.form_records.push(FormBuilderBinding {
             form_param: binding.form_local.clone(),
             model_name: binding.model_name.clone(),
+            model_class: ctx.record_classes.get(&binding.record_local).cloned()
+                .or_else(|| ctx.i18n.model_class(&binding.model_name).map(str::to_owned)),
             record_var: record_var.clone(),
             form_method_var: form_method_var.clone(),
             id_prefix: binding.id_prefix.clone(),
@@ -4052,7 +4068,7 @@ fn view_ivar_models(app: &App, view_name: &Symbol) -> crate::det::HashMap<String
         .iter()
         .filter_map(|(name, ty)| match ty {
             crate::ty::Ty::Class { id, .. } => {
-                Some((name.as_str().to_string(), snake_case(id.0.as_str())))
+                Some((name.as_str().to_string(), app.model_param_key(id.0.as_str())))
             }
             _ => None,
         })
@@ -4671,6 +4687,8 @@ pub(super) struct FormBuilderBinding {
     /// resource dir's singular (or the child class's name for the
     /// polymorphic-array nested-resource form).
     pub(super) model_name: String,
+    /// Full class identity for metadata; independent of the field prefix.
+    pub(super) model_class: Option<String>,
     /// Local Var to dispatch attribute readers on (e.g. `article` →
     /// `article.title` for the value attr). For simple `model: <var>`
     /// shapes this reuses the source local; for complex shapes
@@ -4688,6 +4706,16 @@ pub(super) struct FormBuilderBinding {
     /// on one page don't collide. Field NAMES are untouched. Empty for
     /// the common un-namespaced form.
     pub(super) id_prefix: String,
+}
+
+impl FormBuilderBinding {
+    pub(super) fn metadata_class<'a>(&'a self, ctx: &'a ViewCtx) -> Option<&'a str> {
+        self.model_class.as_deref().or_else(|| {
+            // A nested field prefix is not a model identity. In particular,
+            // do not recover the parent's metadata for an unknown child.
+            if self.model_name.contains('[') { None } else { ctx.i18n.model_class(&self.model_name) }
+        })
+    }
 }
 
 /// The `id` Rails generates for a form field: the namespace prefix (when
@@ -4779,6 +4807,8 @@ pub(super) struct ViewCtx {
     /// `RouteHelpers.user_path(story.user)` through this.
     pub(super) reference_targets:
         std::rc::Rc<crate::det::HashMap<String, String>>,
+    /// Proven singular association targets, keyed by owner class and reader.
+    pub(super) nested_record_classes: std::rc::Rc<crate::det::HashMap<(String, String), String>>,
     /// Method names whose result is html-safe by construction —
     /// their body ends in `.html_safe` (`App::html_safe_methods`,
     /// recorded by `lower::html_safe`). A bare interpolation of one
@@ -4850,6 +4880,7 @@ pub(super) struct ViewCtx {
     /// `ActionView::Base.new.form_with` entry (Ruby family only — see
     /// `form_with::form_with_entry`).
     pub(super) form_with_entry: bool,
+    pub(super) model_param_keys: std::rc::Rc<crate::det::HashMap<String, String>>,
     /// Stylesheet logical names ingested from `app/assets/stylesheets/`
     /// + `app/assets/builds/`. Used by the `stylesheet_link_tag(:app,
     /// ...)` expansion: a `:app` symbol arg fans out to one call per
@@ -4930,6 +4961,8 @@ pub(super) struct ViewCtx {
     pub(super) view_name: String,
     pub(super) ivar_models:
         std::rc::Rc<crate::det::HashMap<String, String>>,
+    /// Full class identities for this view's ivars and partial locals.
+    pub(super) record_classes: std::rc::Rc<crate::det::HashMap<String, String>>,
     /// This view's ivars the analyzer typed `String` — markup a
     /// controller rendered ahead (`@message_html = render_to_string …`).
     /// `turbo_stream.append target, @message_html` sends it as given
@@ -4975,7 +5008,7 @@ fn nilable_scalar_reader_names(app: &App) -> crate::det::HashSet<String> {
     out
 }
 
-/// Per-model bool-reader names (model snake-singular → reader set):
+/// Per-model bool-reader names (full class identity → reader set):
 /// Boolean schema columns plus bool `typed_store` attrs. `f.check_box`
 /// grounds its checked state through these — a bool reader reduces the
 /// runtime `checked_box_attr` seam to a plain ternary on the typed
@@ -5005,8 +5038,9 @@ fn bool_reader_names(
                 set.insert(name.as_str().to_string());
             }
         }
-        out.insert(crate::naming::snake_case(m.name.0.as_str()), set);
+        out.insert(m.name.0.as_str().to_owned(), set);
     }
+    inherit_model_readers(app, &mut out);
     out
 }
 
@@ -5039,9 +5073,28 @@ fn store_reader_names(
                 set.remove(col.name.as_str());
             }
         }
-        out.insert(crate::naming::snake_case(m.name.0.as_str()), set);
+        out.insert(m.name.0.as_str().to_owned(), set);
     }
+    inherit_model_readers(app, &mut out);
     out
+}
+
+fn inherit_model_readers(app: &App, readers: &mut crate::det::HashMap<String, crate::det::HashSet<String>>) {
+    let parents: crate::det::HashMap<_, _> = app.library_classes.iter()
+        .filter_map(|class| class.parent.as_ref().map(|parent| (&class.name, parent))).collect();
+    for class in app.library_classes.iter().filter(|class| !class.is_module) {
+        if readers.contains_key(class.name.0.as_str()) { continue; }
+        let mut parent = class.parent.as_ref();
+        let mut seen = crate::det::HashSet::default();
+        while let Some(id) = parent {
+            if !seen.insert(id) { break; }
+            if let Some(inherited) = readers.get(id.0.as_str()).cloned() {
+                readers.insert(class.name.0.as_str().to_owned(), inherited);
+                break;
+            }
+            parent = parents.get(id).copied();
+        }
+    }
 }
 
 fn reference_reader_names(app: &App) -> crate::det::HashSet<String> {
@@ -5055,6 +5108,62 @@ fn reference_reader_names(app: &App) -> crate::det::HashSet<String> {
                 }
                 _ => {}
             }
+        }
+    }
+    out
+}
+
+/// Full target identity for a nested form; the field name alone is not
+/// evidence of its record class. Polymorphic and external targets stay unknown.
+fn nested_record_classes(app: &App) -> crate::det::HashMap<(String, String), String> {
+    use crate::dialect::{Association, Model};
+    use crate::ident::ClassId;
+    // A unique declaration supplies its own associations and written parent.
+    // Reopenings have no whole-class merge contract, so stay unresolved here.
+    let mut definitions: crate::det::HashMap<
+        &ClassId, Option<(Option<&ClassId>, Option<&Model>)>,
+    > = crate::det::HashMap::default();
+    for model in &app.models {
+        match definitions.entry(&model.name) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(Some((model.parent.as_ref(), Some(model))));
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => { entry.insert(None); }
+        }
+    }
+    for class in app.library_classes.iter().filter(|class| !class.is_module) {
+        match definitions.entry(&class.name) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(Some((class.parent.as_ref(), None)));
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => { entry.insert(None); }
+        }
+    }
+    let mut out = crate::det::HashMap::default();
+    for owner in definitions.keys() {
+        let mut current = Some(*owner);
+        let mut visited = crate::det::HashSet::default();
+        let mut readers = crate::det::HashSet::default();
+        while let Some(id) = current {
+            if !visited.insert(id) { break; }
+            let Some(Some((parent, model))) = definitions.get(id) else { break };
+            if let Some(model) = model {
+                for association in model.associations().collect::<Vec<_>>().into_iter().rev() {
+                    // An unknown or differently shaped local association also
+                    // shadows its parent's declaration of the same reader.
+                    if !readers.insert(association.name()) { continue; }
+                    let target = match association {
+                        Association::HasOne { target, .. }
+                        | Association::BelongsTo { target, polymorphic: false, .. }
+                            if definitions.contains_key(target) => Some(target),
+                        _ => None,
+                    };
+                    if let Some(target) = target {
+                        out.insert((owner.0.as_str().to_owned(), association.name().as_str().to_owned()), target.0.as_str().to_owned());
+                    }
+                }
+            }
+            current = *parent;
         }
     }
     out
@@ -5080,7 +5189,7 @@ fn reference_target_names(app: &App) -> crate::det::HashMap<String, String> {
                 _ => continue,
             };
             let key = name.as_str().to_string();
-            let val = crate::naming::snake_case(target.0.as_str());
+            let val = app.model_param_key(target.0.as_str());
             match out.get(&key) {
                 Some(existing) if existing != &val => {
                     ambiguous.insert(key);

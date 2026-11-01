@@ -159,6 +159,10 @@ pub fn try_build_arel_with_assocs(
     // registry; method must be one of the base AR shapes we recognize.
     let class_id = const_to_class_id(recv, registry)?;
     let info = registry.get(&class_id)?;
+    if method.as_str() == "find_by" && (ClassInfo::source_class_method(registry, &class_id, method)
+        || ClassInfo::class_method_ownership_unknown(registry, &class_id, method)) {
+        return None;
+    }
     // A default scope is applied by the runtime Relation when it is
     // built; SQL composed here would read the rows it hides.
     if info.default_scoped {

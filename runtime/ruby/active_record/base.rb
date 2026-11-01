@@ -445,6 +445,11 @@ module ActiveRecord
       table_name
     end
 
+    # A concrete STI subclass overrides this with its descendant names.
+    def self._sti_type_names
+      []
+    end
+
     def self.schema_columns
       raise NotImplementedError, "#{name}.schema_columns must be overridden"
     end

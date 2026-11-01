@@ -19,6 +19,8 @@
 //!   body defines itself was already copied by the walk; one naming a
 //!   method only a dropped macro would define raises NameError as the
 //!   class loads, so it stays dropped);
+//! * a global variable write (`$loaded = true`) whose value makes no
+//!   call the class does not answer;
 //! * any of these, or `delegate`, in the class's own `class << self`
 //!   ([`crate::expr::SINGLETON_BODY`]) of a module or of a class no
 //!   runtime base gives class methods to.
@@ -277,6 +279,8 @@ impl Check<'_> {
 
     fn statement(&self, expr: &Expr) -> bool {
         match &*expr.node {
+            // `$loaded = true`: a global's `$` name rides in `LValue::Var`.
+            ExprNode::Assign { target: LValue::Var { name, .. }, value } if name.as_str().starts_with('$') => self.walk(value),
             // `self.require_name = true`, `self.strict ||= :on`.
             ExprNode::Assign { target: LValue::Attr { recv, name }, value }
             | ExprNode::OpAssign { target: LValue::Attr { recv, name }, value, .. } => {

@@ -603,6 +603,21 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("head", Ty::Int),
         ("response", Ty::Union { variants: vec![test_response, Ty::Nil].into() }),
     ]);
+    // solid_queue's queue API over the in-process queue (runtime/spinel/solid_queue.rb).
+    let sq_queue = Ty::Class { id: ClassId(Symbol::from("SolidQueue::Queue")), args: vec![].into() };
+    register_stdlib_class(classes, "SolidQueue::Queue", &[
+        ("find_by_name", sq_queue.clone()),
+        ("new", sq_queue),
+    ], &[
+        ("name", Ty::Str),
+        ("clear", Ty::Int),
+    ]);
+    let sq_relation = Ty::Class { id: ClassId(Symbol::from("SolidQueue::Semaphore::Relation")), args: vec![].into() };
+    register_stdlib_class(classes, "SolidQueue::Semaphore", &[("where", sq_relation)], &[]);
+    register_stdlib_class(classes, "SolidQueue::Semaphore::Relation", &[], &[
+        ("delete_all", Ty::Int),
+        ("count", Ty::Int),
+    ]);
     // `ActiveSupport::Cache` — `expand_cache_key` and the bounded
     // `MemoryStore`, in runtime/spinel/active_support_cache.rb (the ruby
     // family and spinel). A cached value is whatever was written.
