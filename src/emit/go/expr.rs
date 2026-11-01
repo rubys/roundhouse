@@ -422,7 +422,7 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                 // router away from the `map[string]string` its declared
                 // return needs.
                 let value_informative = !value.is_open()
-                    && !matches!(&**value, Ty::Untyped);
+                    && !matches!(&**value, Ty::Untyped { .. });
                 if k_raw != "interface{}" || v_ty != "interface{}" || value_informative {
                     // An open key with an informative value is the
                     // refined-accumulator shape: the analyzer widens the
@@ -563,7 +563,7 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                 && matches!(e.ty.as_ref(), Some(Ty::Fn { .. })) =>
         {
             let Some(Ty::Fn { params: sig, ret, .. }) = e.ty.as_ref() else { unreachable!() };
-            let concrete = |t: &Ty| !matches!(t, Ty::Var { .. } | Ty::Untyped);
+            let concrete = |t: &Ty| !matches!(t, Ty::Var { .. } | Ty::Untyped { .. });
             let typed_params = params.len() == sig.len()
                 && sig.iter().zip(params.iter()).all(|(p, name)| p.name == *name && concrete(&p.ty))
                 && concrete(ret);
@@ -986,7 +986,7 @@ pub(super) fn emit_send(
                         let mut widened = a.clone();
                         widened.ty = Some(Ty::Hash {
                             key: std::sync::Arc::new(Ty::Str),
-                            value: std::sync::Arc::new(Ty::Untyped),
+                            value: std::sync::Arc::new(Ty::untyped()),
                         });
                         return emit_expr(ctx, &widened);
                     }
@@ -2585,7 +2585,7 @@ fn emit_cast(ctx: &EmitCtx, value: &Expr, target_ty: &Ty) -> String {
         }
     }
     if let Ty::Hash { value: tv, .. } = target_ty {
-        if matches!(tv.as_ref(), Ty::Untyped) {
+        if matches!(tv.as_ref(), Ty::Untyped { .. }) {
             let tgt = super::ty::go_ty_stub(Some(target_ty));
             let src = super::ty::go_ty_stub(value.ty.as_ref());
             if src != tgt {
@@ -3850,7 +3850,7 @@ fn bind_let(ctx: &EmitCtx, name: &str, value: &Expr) -> String {
         _ if column => OptionalRepr::Pointer,
         Some(t @ Ty::Union { .. }) if t.is_stringish() || plain_index => OptionalRepr::Present,
         // Not left to `:=` when untyped: the value is Go's interface{} then too, and a narrowed read asserts its scalar back
-        t if is_boxed_scalar(t) || matches!(t, Some(Ty::Untyped)) => {
+        t if is_boxed_scalar(t) || matches!(t, Some(Ty::Untyped { .. })) => {
             ctx.boxed_locals.borrow_mut().insert(name_s.clone());
             return format!("var {name_s} interface{{}} = {value_s}");
         }

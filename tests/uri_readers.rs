@@ -54,7 +54,7 @@ fn uri_reader_types_preserve_nil_and_parse_stays_gradual() {
     fn visit(expr: &roundhouse::expr::Expr, seen: &mut usize) {
         if let roundhouse::expr::ExprNode::Send { recv, method, .. } = &*expr.node {
             if method.as_str() == "parse" {
-                assert_eq!(expr.ty.as_ref(), Some(&Ty::Untyped));
+                assert_eq!(expr.ty.as_ref(), Some(&Ty::untyped()));
             }
             if let Some(Ty::Class { id, .. }) = recv.as_ref().and_then(|r| r.ty.as_ref()) {
                 if matches!(id.0.as_str(), "URI::Generic" | "URI::HTTP" | "URI::HTTPS")

@@ -5,6 +5,12 @@
 //! disagree: `check` is clean and the emitted program fails. Each is a
 //! complete statement of the fix: make it pass and drop the `#[ignore]`.
 
+#[path = "support/gradual_returns.rs"]
+mod gradual_returns_contract;
+#[path = "emit_and_run/gradual_returns.rs"]
+mod gradual_returns;
+#[path = "emit_and_run/reason_unwinds.rs"]
+mod reason_unwinds;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 #[path = "support/time_change_usec.rs"]
@@ -14905,7 +14911,7 @@ puts "Data factory identity, aliases, constructors, values and immutability pass
         assert!(factory.contains_key(&Symbol::from("new")), "{sidecar}");
         for reader in readers {
             let signature = &factory[&Symbol::from(reader)];
-            assert!(matches!(signature, Ty::Fn { ret, .. } if **ret == Ty::Untyped), "{sidecar}");
+            assert!(matches!(signature, Ty::Fn { ret, .. } if **ret == Ty::untyped()), "{sidecar}");
             assert!(!factory.contains_key(&Symbol::from(format!("{reader}="))), "{sidecar}");
         }
         let owner_methods = &signatures[&ClassId(Symbol::from(owner))];

@@ -164,8 +164,8 @@ fn hash_pattern_rest_is_a_hash_not_the_deconstructed_subject() {
         args: vec![].into(),
     };
     let gradual_hash = Ty::Hash {
-        key: std::sync::Arc::new(Ty::Untyped),
-        value: std::sync::Arc::new(Ty::Untyped),
+        key: std::sync::Arc::new(Ty::untyped()),
+        value: std::sync::Arc::new(Ty::untyped()),
     };
     for (pattern, subject, expected) in [
         ("{a:, **rest}", hash.clone(), hash),

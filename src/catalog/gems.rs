@@ -44,7 +44,8 @@ pub enum GemTy {
     Float,
     Sym,
     /// Gradual escape: the gem returns an object we don't model
-    /// structurally. Dispatch resolves and the choice propagates.
+    /// structurally, including opaque block results. Dispatch resolves
+    /// and the choice propagates through return stabilization.
     Untyped,
     /// An instance of the named (dotted-path) class, so a *factory*
     /// method can return another cataloged gem type and chains
@@ -61,7 +62,7 @@ impl GemTy {
             GemTy::Bool => Ty::Bool,
             GemTy::Float => Ty::Float,
             GemTy::Sym => Ty::Sym,
-            GemTy::Untyped => Ty::Untyped,
+            GemTy::Untyped => Ty::gradual_untyped(),
             GemTy::Instance(path) => Ty::Class {
                 id: ClassId(Symbol::from(path)),
                 args: vec![].into(),
@@ -528,6 +529,7 @@ pub const GEM_CATALOG: &[GemClass] = &[
     GemClass { name: "Faraday::ParsingError", class_methods: &[], instance_methods: FARADAY_ERROR },
     // Retryable — a block retried on an exception. As Faraday: the real
     // gem on ruby and jruby, refused elsewhere (`lower::ruby_family_gems`).
+    // `retryable` returns its block's value — opaque here.
     GemClass {
         name: "Retryable",
         class_methods: &[("retryable", GemTy::Untyped)],
@@ -683,3 +685,26 @@ const REST_CLIENT_ERROR: &[(&str, GemTy)] = &[
     ("http_headers", GemTy::Untyped),
     ("response", GemTy::Untyped),
 ];
+
+#[cfg(test)]
+mod reason_tests {
+    use super::*;
+
+    #[test]
+    fn unknown_catalog_returns_use_the_gradual_contract() {
+        // #964's block42 probe: an opaque result must not disappear into
+        // a concrete fallback merely because it came from a block.
+        // https://github.com/rubys/roundhouse/issues/964#issuecomment-6330115463
+        for class in GEM_CATALOG {
+            for methods in [class.class_methods, class.instance_methods] {
+                for (name, kind) in methods {
+                    let ty = kind.to_ty();
+                    match kind {
+                        GemTy::Untyped => assert!(ty.inference_eq(&Ty::gradual_untyped()), "{}.{name}", class.name),
+                        _ => assert!(ty.inference_eq(&ty.computed()), "{}.{name}", class.name),
+                    }
+                }
+            }
+        }
+    }
+}

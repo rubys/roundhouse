@@ -175,7 +175,7 @@ fn rewrite_node_inner(expr: &mut Expr, formats: &TimeFormats) {
         // post-lowering diagnostics as a method nothing defines.
         let getutc_ty = match t.ty.as_ref() {
             None | Some(Ty::Var { .. }) => None,
-            Some(Ty::Untyped) => Some(Ty::Untyped),
+            Some(t @ Ty::Untyped { .. }) => Some(t.clone()),
             Some(_) => Some(Ty::Time),
         };
         let mut getutc = Expr::new(

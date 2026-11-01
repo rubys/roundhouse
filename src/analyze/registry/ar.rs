@@ -49,8 +49,8 @@ fn register_connection_surface(classes: &mut HashMap<ClassId, ClassInfo>) {
     // result types, and the adapter objects it hands out (the transaction
     // manager, the pool, the current transaction) stay untyped.
     let str = Ty::Str;
-    let untyped_rows = Ty::Array { elem: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) }) };
-    let untyped_list = Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) };
+    let untyped_rows = Ty::Array { elem: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(Ty::untyped()) }) };
+    let untyped_list = Ty::Array { elem: std::sync::Arc::new(Ty::untyped()) };
     let cls = classes.entry(ClassId(Symbol::from("ActiveRecord::Connection"))).or_default();
     for (name, ty) in [
         ("quote_column_name", str.clone()),
@@ -67,20 +67,20 @@ fn register_connection_surface(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("open_transactions", Ty::Int),
         ("select_rows", untyped_rows),
         ("select_values", untyped_list.clone()),
-        ("select_one", Ty::Untyped),
-        ("select_value", Ty::Untyped),
+        ("select_one", Ty::untyped()),
+        ("select_value", Ty::untyped()),
         ("tables", Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
         ("columns", untyped_list.clone()),
         ("indexes", untyped_list),
-        ("insert", Ty::Untyped),
+        ("insert", Ty::untyped()),
         ("update", Ty::Int),
         ("delete", Ty::Int),
-        ("transaction", Ty::Untyped),
-        ("current_transaction", Ty::Untyped),
-        ("transaction_manager", Ty::Untyped),
-        ("pool", Ty::Untyped),
-        ("raw_connection", Ty::Untyped),
-        ("database_version", Ty::Untyped),
+        ("transaction", Ty::untyped()),
+        ("current_transaction", Ty::untyped()),
+        ("transaction_manager", Ty::untyped()),
+        ("pool", Ty::untyped()),
+        ("raw_connection", Ty::untyped()),
+        ("database_version", Ty::untyped()),
     ] {
         cls.instance_methods.entry(Symbol::from(name)).or_insert(ty);
     }
@@ -115,7 +115,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             "uncached",
             "establish_connection",
         ] {
-            base.class_methods.entry(Symbol::from(m)).or_insert(Ty::Untyped);
+            base.class_methods.entry(Symbol::from(m)).or_insert(Ty::untyped());
         }
         base.class_methods
             .entry(Symbol::from("current_transaction"))
@@ -137,8 +137,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         base.class_methods
             .entry(Symbol::from("connection"))
             .or_insert_with(connection_ty);
-        base.class_methods.entry(Symbol::from("configurations")).or_insert(Ty::Untyped);
-        base.class_methods.entry(Symbol::from("configurations=")).or_insert(Ty::Untyped);
+        base.class_methods.entry(Symbol::from("configurations")).or_insert(Ty::untyped());
+        base.class_methods.entry(Symbol::from("configurations=")).or_insert(Ty::untyped());
         for m in ["sanitize_sql", "sanitize_sql_array", "sanitize_sql_for_order", "sanitize_sql_like"] {
             base.class_methods.entry(Symbol::from(m)).or_insert(Ty::Str);
         }
@@ -167,7 +167,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         for m in ["database", "adapter", "name", "env_name", "schema_dump"] {
             config.instance_methods.entry(Symbol::from(m)).or_insert(Ty::Str);
         }
-        config.instance_methods.entry(Symbol::from("configuration_hash")).or_insert(Ty::Untyped);
+        config.instance_methods.entry(Symbol::from("configuration_hash")).or_insert(Ty::untyped());
         for m in ["seeds?", "database_tasks?"] {
             config.instance_methods.entry(Symbol::from(m)).or_insert(Ty::Bool);
         }
@@ -177,7 +177,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             .or_default()
             .instance_methods
             .entry(Symbol::from("with_connection"))
-            .or_insert(Ty::Untyped);
+            .or_insert(Ty::untyped());
         classes
             .entry(ClassId(Symbol::from("ActiveRecord::ConnectionAdapters::SQLite3Adapter")))
             .or_default()
@@ -225,7 +225,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // `() -> AdapterInterface`.
     let hash_str_untyped = Ty::Hash {
         key: std::sync::Arc::new(Ty::Str),
-        value: std::sync::Arc::new(Ty::Untyped),
+        value: std::sync::Arc::new(Ty::untyped()),
     };
     let row_ty = hash_str_untyped.clone();
     let nilable_row = Ty::Union {
@@ -393,7 +393,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
                 Symbol::from("map"),
                 super::block_fn(
                     &class_ty(&many_row_id),
-                    Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) },
+                    Ty::Array { elem: std::sync::Arc::new(Ty::untyped()) },
                 ),
             );
             many.instance_methods.insert(Symbol::from("size"), Ty::Int);
@@ -557,7 +557,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         // The file behind the part, as Rack hands it over: the Tempfile
         // (`params[:file].tempfile`) and its path on disk. The Tempfile
         // is not modelled, so it is a gradual boundary.
-        uploaded.instance_methods.insert(Symbol::from("tempfile"), Ty::Untyped);
+        uploaded.instance_methods.insert(Symbol::from("tempfile"), Ty::untyped());
         uploaded.instance_methods.insert(Symbol::from("path"), Ty::Str);
         uploaded.instance_methods.insert(Symbol::from("to_s"), Ty::Str);
         let uploaded_id = ClassId(Symbol::from("ActionDispatch::Http::UploadedFile"));
@@ -820,7 +820,7 @@ pub(in crate::analyze) fn register_action_text(classes: &mut HashMap<ClassId, Cl
     attachment.class_methods.insert(Symbol::from("from_node"), attachment_ty.clone());
     attachment.instance_methods.insert(Symbol::from("to_partial_path"), Ty::Str);
     // What the node names: a record, a blob or a content attachable, as `runtime/ruby/action_text.rb` builds it.
-    attachment.instance_methods.insert(Symbol::from("attachable"), Ty::Untyped);
+    attachment.instance_methods.insert(Symbol::from("attachable"), Ty::untyped());
     classes.insert(attachment_id, attachment);
 
     // `ActionText::Fragment` / `ActionText::Node` — the element view a
@@ -884,6 +884,6 @@ pub(in crate::analyze) fn register_action_text(classes: &mut HashMap<ClassId, Cl
     // comes back.
     content
         .instance_methods
-        .insert(Symbol::from("attachables"), Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
+        .insert(Symbol::from("attachables"), Ty::Array { elem: std::sync::Arc::new(Ty::untyped()) });
     classes.insert(ClassId(Symbol::from("ActionText::Content")), content);
 }

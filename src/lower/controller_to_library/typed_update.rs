@@ -148,7 +148,7 @@ pub(super) fn hand_update_the_attrs(
         },
         Some(Ty::Hash {
             key: std::sync::Arc::new(Ty::Sym),
-            value: std::sync::Arc::new(Ty::Untyped),
+            value: std::sync::Arc::new(Ty::untyped()),
         }),
     );
     attrs.span = span;

@@ -217,7 +217,7 @@ fn lower_slice(expr: &Expr, owner: Option<&ClassId>, ctx: &Ctx, diags: &mut Vec<
         .collect();
     let hash_ty = Ty::Hash {
         key: std::sync::Arc::new(Ty::Str),
-        value: std::sync::Arc::new(if matches!(value_ty, Ty::Bottom) { Ty::Untyped } else { value_ty }),
+        value: std::sync::Arc::new(if matches!(value_ty, Ty::Bottom) { Ty::untyped() } else { value_ty }),
     };
     let mut literal = Expr::new(span, ExprNode::Hash { entries, kwargs: false });
     literal.ty = Some(hash_ty.clone());

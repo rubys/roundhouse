@@ -131,7 +131,7 @@ fn uploaded_file_classes_do_not_use_the_json_scalar_map() {
 fn synthesized_lookup_helpers_have_typed_bodies() {
     fn assert_typed(expr: &roundhouse::expr::Expr) {
         assert!(matches!(expr.ty.as_ref(), Some(ty) if !matches!(ty,
-            roundhouse::ty::Ty::Var { .. } | roundhouse::ty::Ty::Untyped)),
+            roundhouse::ty::Ty::Var { .. } | roundhouse::ty::Ty::Untyped { .. })),
             "lookup helper contains an unresolved expression: {expr:?}");
         expr.node.for_each_child(&mut assert_typed);
     }

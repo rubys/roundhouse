@@ -274,7 +274,7 @@ pub fn lower_test_modules_with_inner_opts(
         // `type_method_body` can seed ConstScope and Value qualify keeps
         // the bare name rather than re-expanding to the helper module.
         for (name, _) in &test_modules[idx].constants {
-            info.constants.entry(name.clone()).or_insert(Ty::Untyped);
+            info.constants.entry(name.clone()).or_insert(Ty::untyped());
         }
         // Inherit Minitest::Test assertion methods so `self.assert(...)`
         // dispatch resolves through the registry.
@@ -370,7 +370,7 @@ pub fn lower_test_modules_with_inner_opts(
             }
             crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
             let Some(body_ty) = method.body.ty.clone() else { continue };
-            if matches!(body_ty, Ty::Untyped | Ty::Nil) {
+            if matches!(body_ty, Ty::Untyped { .. } | Ty::Nil) {
                 continue;
             }
             if let Some(Ty::Fn { ret, .. }) = &mut method.signature {
@@ -600,7 +600,7 @@ fn type_inner_class(
             let adopted = inherited.is_some();
             method.signature = inherited
                 .or_else(|| {
-                    Some(signature_from_params(&method.name, &method.params, classes, passed, Ty::Untyped))
+                    Some(signature_from_params(&method.name, &method.params, classes, passed, Ty::untyped()))
                 });
             crate::lower::typing::type_method_body(method, classes, &empty_ivars);
             !adopted
@@ -655,7 +655,7 @@ fn type_inner_class(
             *ret = std::sync::Arc::new(if method.name.as_str() == "initialize" {
                 Ty::Nil
             } else {
-                method.body.ty.clone().unwrap_or(Ty::Untyped)
+                method.body.ty.clone().unwrap_or(Ty::untyped())
             });
         }
     }
@@ -683,7 +683,7 @@ fn signature_from_params(
             // type when it has one.
             let mut ty = match &p.default {
                 Some(d) if !p.rest => ty_of_expr(d, classes),
-                _ => Ty::Untyped,
+                _ => Ty::untyped(),
             };
             // A keyword also takes what the module's own calls pass for
             // it: campfire's push-service `Server#hung_up?(within: 5)` is
@@ -693,10 +693,10 @@ fn signature_from_params(
             // literal) is read; anything else leaves the default's type.
             // A keyword ingest flattened to a positional
             // (`from_keyword`) is still passed by name at the call.
-            if (p.keyword || p.from_keyword) && !p.rest && !matches!(ty, Ty::Untyped) {
+            if (p.keyword || p.from_keyword) && !p.rest && !matches!(ty, Ty::Untyped { .. }) {
                 for value in passed.get(&(method.clone(), p.name.clone())).into_iter().flatten() {
                     let seen = ty_of_expr(value, classes);
-                    if !matches!(seen, Ty::Untyped | Ty::Var { .. }) {
+                    if !matches!(seen, Ty::Untyped { .. } | Ty::Var { .. }) {
                         ty = crate::analyze::union_of(ty, seen);
                     }
                 }
@@ -759,7 +759,7 @@ fn ty_of_expr(e: &Expr, classes: &HashMap<ClassId, ClassInfo>) -> Ty {
     let ctx = crate::analyze::Ctx::default();
     let mut clone = e.clone();
     typer.analyze_expr(&mut clone, &ctx);
-    clone.ty.unwrap_or(Ty::Untyped)
+    clone.ty.unwrap_or(Ty::untyped())
 }
 
 /// Harvest `self.x = v` setter calls from a method body as ivar
@@ -863,7 +863,7 @@ fn build_library_class(
                 .iter()
                 .map(|p| crate::ty::Param {
                     name: p.name.clone(),
-                    ty: Ty::Untyped.into(),
+                    ty: Ty::untyped().into(),
                     kind: p.ty_kind(),
                 })
                 .collect();
@@ -992,65 +992,65 @@ fn sanitize_test_name(name: &str) -> String {
 type SigBuilder = fn() -> Ty;
 const MINITEST_INSTANCE_METHODS: &[(&str, SigBuilder)] = &[
     // Core Minitest assertions.
-    ("assert", || fn_sig_one(Ty::Untyped, Ty::Nil)),
-    ("assert_equal", || fn_sig_two(Ty::Untyped, Ty::Untyped, Ty::Nil)),
-    ("assert_not", || fn_sig_one(Ty::Untyped, Ty::Nil)),
-    ("assert_not_equal", || fn_sig_two(Ty::Untyped, Ty::Untyped, Ty::Nil)),
-    ("assert_nil", || fn_sig_one(Ty::Untyped, Ty::Nil)),
-    ("assert_not_nil", || fn_sig_one(Ty::Untyped, Ty::Nil)),
-    ("assert_includes", || fn_sig_two(Ty::Untyped, Ty::Untyped, Ty::Nil)),
-    ("assert_match", || fn_sig_two(Ty::Untyped, Ty::Untyped, Ty::Nil)),
-    ("assert_no_match", || fn_sig_two(Ty::Untyped, Ty::Untyped, Ty::Nil)),
-    ("assert_raises", || fn_sig_one(Ty::Untyped, Ty::Untyped)),
+    ("assert", || fn_sig_one(Ty::untyped(), Ty::Nil)),
+    ("assert_equal", || fn_sig_two(Ty::untyped(), Ty::untyped(), Ty::Nil)),
+    ("assert_not", || fn_sig_one(Ty::untyped(), Ty::Nil)),
+    ("assert_not_equal", || fn_sig_two(Ty::untyped(), Ty::untyped(), Ty::Nil)),
+    ("assert_nil", || fn_sig_one(Ty::untyped(), Ty::Nil)),
+    ("assert_not_nil", || fn_sig_one(Ty::untyped(), Ty::Nil)),
+    ("assert_includes", || fn_sig_two(Ty::untyped(), Ty::untyped(), Ty::Nil)),
+    ("assert_match", || fn_sig_two(Ty::untyped(), Ty::untyped(), Ty::Nil)),
+    ("assert_no_match", || fn_sig_two(Ty::untyped(), Ty::untyped(), Ty::Nil)),
+    ("assert_raises", || fn_sig_one(Ty::untyped(), Ty::untyped())),
     // Test::Unit's spelling of the same assertion, which Rails aliases.
-    ("assert_raise", || fn_sig_one(Ty::Untyped, Ty::Untyped)),
+    ("assert_raise", || fn_sig_one(Ty::untyped(), Ty::untyped())),
     // Minitest's throw/catch assertion — answers the thrown value.
-    ("assert_throws", || fn_sig_one(Ty::Untyped, Ty::Untyped)),
-    ("assert_difference", || fn_sig_one(Ty::Untyped, Ty::Untyped)),
+    ("assert_throws", || fn_sig_one(Ty::untyped(), Ty::untyped())),
+    ("assert_difference", || fn_sig_one(Ty::untyped(), Ty::untyped())),
     // ActionCable::Channel::TestCase / Connection::TestCase — the
     // harness in runtime/spinel/test/test_helper.rb. `subscribe` is
     // rewritten to `subscribe_to` by `lower::cable_test_case`;
     // `subscription`/`connection` are the objects it built.
-    ("stub_connection", || fn_sig_one(Ty::Untyped, Ty::Nil)),
+    ("stub_connection", || fn_sig_one(Ty::untyped(), Ty::Nil)),
     ("subscribe_to", || crate::lower::typing::fn_sig(
-        vec![(Symbol::from("channel"), Ty::Str), (Symbol::from("keys"), Ty::Untyped), (Symbol::from("values"), Ty::Untyped)],
+        vec![(Symbol::from("channel"), Ty::Str), (Symbol::from("keys"), Ty::untyped()), (Symbol::from("values"), Ty::untyped())],
         Ty::Nil,
     )),
-    ("subscription", || crate::lower::typing::fn_sig(vec![], Ty::Untyped)),
+    ("subscription", || crate::lower::typing::fn_sig(vec![], Ty::untyped())),
     ("unsubscribe", || crate::lower::typing::fn_sig(vec![], Ty::Nil)),
-    ("assert_has_stream", || fn_sig_one(Ty::Untyped, Ty::Nil)),
+    ("assert_has_stream", || fn_sig_one(Ty::untyped(), Ty::Nil)),
     ("connect", || crate::lower::typing::fn_sig(vec![], Ty::Nil)),
-    ("connection", || crate::lower::typing::fn_sig(vec![], Ty::Untyped)),
+    ("connection", || crate::lower::typing::fn_sig(vec![], Ty::untyped())),
     ("assert_reject_connection", || crate::lower::typing::fn_sig(vec![], Ty::Nil)),
-    ("assert_no_difference", || fn_sig_one(Ty::Untyped, Ty::Untyped)),
-    ("refute", || fn_sig_one(Ty::Untyped, Ty::Nil)),
-    ("refute_equal", || fn_sig_two(Ty::Untyped, Ty::Untyped, Ty::Nil)),
-    ("refute_nil", || fn_sig_one(Ty::Untyped, Ty::Nil)),
+    ("assert_no_difference", || fn_sig_one(Ty::untyped(), Ty::untyped())),
+    ("refute", || fn_sig_one(Ty::untyped(), Ty::Nil)),
+    ("refute_equal", || fn_sig_two(Ty::untyped(), Ty::untyped(), Ty::Nil)),
+    ("refute_nil", || fn_sig_one(Ty::untyped(), Ty::Nil)),
     ("skip", || fn_sig_one(Ty::Str, Ty::Nil)),
     ("flunk", || fn_sig_one(Ty::Str, Ty::Nil)),
     // ActionDispatch::IntegrationTest HTTP verbs — each takes a URL
     // (and possibly opts) and dispatches through the test rack stack.
     // Return Nil; sets `response`/`@response` ivars for downstream
     // assertions.
-    ("get", || fn_sig_one(Ty::Untyped, Ty::Nil)),
-    ("post", || fn_sig_one(Ty::Untyped, Ty::Nil)),
-    ("put", || fn_sig_one(Ty::Untyped, Ty::Nil)),
-    ("patch", || fn_sig_one(Ty::Untyped, Ty::Nil)),
-    ("delete", || fn_sig_one(Ty::Untyped, Ty::Nil)),
-    ("head", || fn_sig_one(Ty::Untyped, Ty::Nil)),
+    ("get", || fn_sig_one(Ty::untyped(), Ty::Nil)),
+    ("post", || fn_sig_one(Ty::untyped(), Ty::Nil)),
+    ("put", || fn_sig_one(Ty::untyped(), Ty::Nil)),
+    ("patch", || fn_sig_one(Ty::untyped(), Ty::Nil)),
+    ("delete", || fn_sig_one(Ty::untyped(), Ty::Nil)),
+    ("head", || fn_sig_one(Ty::untyped(), Ty::Nil)),
     // A second browser (`ActionDispatch::Integration::Session`), for a
     // test that asks a question as another client; the verbs above
     // are then sent to it.
-    ("open_session", || crate::lower::typing::fn_sig(vec![], Ty::Untyped)),
+    ("open_session", || crate::lower::typing::fn_sig(vec![], Ty::untyped())),
     // Response assertions.
-    ("assert_response", || fn_sig_one(Ty::Untyped, Ty::Nil)),
-    ("assert_redirected_to", || fn_sig_one(Ty::Untyped, Ty::Nil)),
-    ("assert_select", || fn_sig_one(Ty::Untyped, Ty::Nil)),
-    ("assert_template", || fn_sig_one(Ty::Untyped, Ty::Nil)),
+    ("assert_response", || fn_sig_one(Ty::untyped(), Ty::Nil)),
+    ("assert_redirected_to", || fn_sig_one(Ty::untyped(), Ty::Nil)),
+    ("assert_select", || fn_sig_one(Ty::untyped(), Ty::Nil)),
+    ("assert_template", || fn_sig_one(Ty::untyped(), Ty::Nil)),
     // Response accessors.
-    ("response", || crate::lower::typing::fn_sig(vec![], Ty::Untyped)),
-    ("request", || crate::lower::typing::fn_sig(vec![], Ty::Untyped)),
-    ("session", || crate::lower::typing::fn_sig(vec![], Ty::Untyped)),
+    ("response", || crate::lower::typing::fn_sig(vec![], Ty::untyped())),
+    ("request", || crate::lower::typing::fn_sig(vec![], Ty::untyped())),
+    ("session", || crate::lower::typing::fn_sig(vec![], Ty::untyped())),
     // NOT Untyped, unlike its neighbours: `cookies[k]` is the receiver
     // of campfire's `assert cookies[:session_token].present?`, which
     // `sign_in` runs on the way into roughly twenty controller test
@@ -1061,7 +1061,7 @@ const MINITEST_INSTANCE_METHODS: &[(&str, SigBuilder)] = &[
     // for an instance of String`, 82 of the spinel suite lane's 288
     // tests, inside the helper that gates every authenticated request.
     ("cookies", || crate::lower::typing::fn_sig(vec![], cookie_jar_ty())),
-    ("flash", || crate::lower::typing::fn_sig(vec![], Ty::Untyped)),
+    ("flash", || crate::lower::typing::fn_sig(vec![], Ty::untyped())),
 ];
 
 /// `response` is a reader: every test runtime keeps it as a field (TypeScript's `response: any`, Python's `TestResponse`), so a call to it fails.
@@ -1114,8 +1114,8 @@ fn insert_cookie_jar_baseline(classes: &mut HashMap<ClassId, ClassInfo>) {
     use crate::lower::typing::fn_sig;
     let str_hash_arg = || Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) };
     let str_hash = str_hash_arg();
-    let key = || (Symbol::from("key"), Ty::Untyped);
-    let value = || (Symbol::from("value"), Ty::Untyped);
+    let key = || (Symbol::from("key"), Ty::untyped());
+    let value = || (Symbol::from("value"), Ty::untyped());
 
     let mut jar = ClassInfo::default();
     for (name, sig) in [
@@ -1142,7 +1142,7 @@ fn insert_cookie_jar_baseline(classes: &mut HashMap<ClassId, ClassInfo>) {
         // `Session.find_signed(cookies.signed[:session_token])` is
         // written against.
         ("[]", fn_sig(vec![key()], Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() })),
-        ("[]=", fn_sig(vec![key(), value()], Ty::Untyped)),
+        ("[]=", fn_sig(vec![key(), value()], Ty::untyped())),
         ("delete", fn_sig(vec![key()], Ty::Str)),
         ("permanent", fn_sig(vec![], signed_cookie_jar_ty())),
     ] {
@@ -1168,7 +1168,7 @@ fn insert_cookie_jar_baseline(classes: &mut HashMap<ClassId, ClassInfo>) {
     builder.class_methods.insert(
         build.clone(),
         fn_sig(
-            vec![(Symbol::from("request"), Ty::Untyped), (Symbol::from("cookies"), str_hash_arg())],
+            vec![(Symbol::from("request"), Ty::untyped()), (Symbol::from("cookies"), str_hash_arg())],
             cookie_jar_ty(),
         ),
     );

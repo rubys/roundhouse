@@ -57,7 +57,7 @@ pub(in crate::analyze) fn register(
     }
     // `form.object` is the form's model (unknown model → gradual);
     // nested `fields_for`/`fields` yield another builder.
-    form_builder.instance_methods.insert(Symbol::from("object"), Ty::Untyped);
+    form_builder.instance_methods.insert(Symbol::from("object"), Ty::untyped());
     for m in ["fields_for", "fields"] {
         form_builder
             .instance_methods
@@ -236,7 +236,7 @@ pub(in crate::analyze) fn register(
     // values are whatever the site passed, so the read is gradual.
     action_view.instance_methods.insert(
         Symbol::from("local_assigns"),
-        Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) },
+        Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::untyped()) },
     );
     // `params` is exposed to templates too (same strong-params
     // surface the controller context declares).
@@ -253,7 +253,7 @@ pub(in crate::analyze) fn register(
         action_view
             .instance_methods
             .entry(Symbol::from(m))
-            .or_insert_with(|| super::block_fn(&Ty::Untyped, Ty::Str));
+            .or_insert_with(|| super::block_fn(&Ty::untyped(), Ty::Str));
     }
     // Rails mixes app helpers into every view (`helpers :all` default).
     // Keep their includes for context, but the helper index selects each
@@ -262,7 +262,7 @@ pub(in crate::analyze) fn register(
     // another module's signature selected by the generic concern fold.
     for (name, owner) in &app.helper_method_index {
         if has_instance_helper(app, name, owner) {
-            action_view.instance_methods.insert(name.clone(), Ty::Untyped);
+            action_view.instance_methods.insert(name.clone(), Ty::untyped());
         }
     }
     let helper_modules: BTreeSet<ClassId> =

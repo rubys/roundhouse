@@ -188,7 +188,7 @@ pub fn go_ty(ty: &Ty) -> String {
         // "gradual" — both collapse to `interface{}`. The Var/Untyped
         // distinction survives in the IR and via diagnostics; Go-side
         // codegen renders both identically.
-        Ty::Untyped => "interface{}".to_string(),
+        Ty::Untyped { .. } => "interface{}".to_string(),
         // Go has no native bottom type. Functions that always
         // panic/exit return no value (or `interface{}` if the
         // surrounding context demands a value). Render as

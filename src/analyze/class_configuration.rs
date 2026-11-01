@@ -193,13 +193,13 @@ impl Analyzer {
                                     .local_bindings
                                     .get(&p.name)
                                     .cloned()
-                                    .unwrap_or(Ty::Untyped).into(),
+                                    .unwrap_or(Ty::untyped()).into(),
                             },
                             kind: p.ty_kind(),
                         })
                         .collect(),
                     block: None,
-                    ret: std::sync::Arc::new(method.body.ty.clone().unwrap_or(Ty::Untyped)),
+                    ret: std::sync::Arc::new(method.body.ty.clone().unwrap_or(Ty::untyped())),
                     effects: method.effects.clone(),
                 });
                 // Sibling class methods in this same pass call each other
@@ -225,7 +225,7 @@ impl Analyzer {
 /// wipe a concrete default or a stored hash element.
 fn is_uninformative(ty: &Ty) -> bool {
     match ty {
-        Ty::Untyped | Ty::Var { .. } | Ty::Bottom => true,
+        Ty::Untyped { .. } | Ty::Var { .. } | Ty::Bottom => true,
         Ty::Union { variants } => variants.iter().all(is_uninformative),
         _ => false,
     }

@@ -330,7 +330,7 @@ fn layout_call(site: &Site<'_>, layout: &str, format: &str, inner: Expr, span: S
 
 /// The class's defaults under the action's own headers.
 fn merged_opts(opts: Option<Expr>, defaults: &[(Expr, Expr)], span: Span) -> Expr {
-    let hash_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
+    let hash_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::untyped()) };
     let hash = |entries: Vec<(Expr, Expr)>| typed(Expr::new(span, ExprNode::Hash { entries, kwargs: false }), hash_ty.clone());
     match opts {
         Some(o) => match &*o.node {

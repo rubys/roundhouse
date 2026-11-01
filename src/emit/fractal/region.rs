@@ -68,7 +68,7 @@ impl Knowledge {
             let mut writes = false;
             walk(copy.body, &mut |expression| {
                 expressions += 1;
-                if expression.ty.as_ref().is_some_and(|ty| !matches!(ty, Ty::Var { .. } | Ty::Untyped)) {
+                if expression.ty.as_ref().is_some_and(|ty| !matches!(ty, Ty::Var { .. } | Ty::Untyped { .. })) {
                     typed += 1;
                 }
                 effects &= expression.effects.is_pure();

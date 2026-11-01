@@ -3258,7 +3258,7 @@ fn template_param_ty(name: &str, known_models: &[String]) -> crate::ty::Ty {
     if name == "params" {
         return crate::ty::Ty::Hash {
             key: std::sync::Arc::new(crate::ty::Ty::Str),
-            value: std::sync::Arc::new(crate::ty::Ty::Untyped),
+            value: std::sync::Arc::new(crate::ty::Ty::untyped()),
         };
     }
     crate::lower::view_to_library::ivar_ty(name, known_models)

@@ -530,7 +530,7 @@ puts "unsupported multiparameter parts remain guarded until removed"
 fn generated_value_methods_have_fully_typed_bodies() {
     fn assert_typed(expr: &roundhouse::expr::Expr) {
         assert!(matches!(expr.ty.as_ref(), Some(ty) if !matches!(ty,
-            roundhouse::ty::Ty::Var { .. } | roundhouse::ty::Ty::Untyped)), "{expr:#?}");
+            roundhouse::ty::Ty::Var { .. } | roundhouse::ty::Ty::Untyped { .. })), "{expr:#?}");
         expr.node.for_each_child(&mut assert_typed);
     }
     let tree = files(PERMIT).into_iter()

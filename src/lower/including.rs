@@ -85,7 +85,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     let materialized = recv.ty.as_ref().and_then(materialized_to_a);
     let elem_ty = match &materialized {
         Some(Ty::Array { elem }) => (**elem).clone(),
-        _ => Ty::Untyped,
+        _ => Ty::untyped(),
     };
     let mut elements = Expr::new(
         span,

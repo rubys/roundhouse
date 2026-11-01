@@ -87,7 +87,7 @@ impl Seeds {
     pub(super) fn fn_params(&self, params: &[Symbol]) -> Vec<crate::ty::Param> {
         let mut out = Vec::new();
         for (name, slot) in params.iter().zip(self.positional.iter()) {
-            let ty = slot.clone().unwrap_or(Ty::Untyped);
+            let ty = slot.clone().unwrap_or(Ty::untyped());
             out.push(crate::ty::Param {
                 name: name.clone(),
                 ty: std::sync::Arc::new(ty),
@@ -126,7 +126,7 @@ fn merge_positional(acc: &mut Vec<Option<Ty>>, next: &[Option<Ty>]) -> bool {
     let mut changed = false;
     for (i, slot) in next.iter().enumerate() {
         let Some(ty) = slot else { continue };
-        if matches!(ty, Ty::Var { .. } | Ty::Untyped) {
+        if matches!(ty, Ty::Var { .. } | Ty::Untyped { .. }) {
             continue;
         }
         if i >= acc.len() {
@@ -142,7 +142,7 @@ fn merge_positional(acc: &mut Vec<Option<Ty>>, next: &[Option<Ty>]) -> bool {
             }
             Some(prev) => {
                 let joined = union_of(prev.clone(), ty.clone());
-                if &joined != prev {
+                if !joined.inference_eq(prev) {
                     acc[i] = Some(joined);
                     changed = true;
                 }
@@ -153,12 +153,12 @@ fn merge_positional(acc: &mut Vec<Option<Ty>>, next: &[Option<Ty>]) -> bool {
 }
 
 fn merge_keyword(acc: &mut Vec<(Symbol, Ty)>, name: &Symbol, ty: &Ty) -> bool {
-    if matches!(ty, Ty::Var { .. } | Ty::Untyped) {
+    if matches!(ty, Ty::Var { .. } | Ty::Untyped { .. }) {
         return false;
     }
     if let Some((_, prev)) = acc.iter_mut().find(|(n, _)| n == name) {
         let joined = union_of(prev.clone(), ty.clone());
-        if &joined != prev {
+        if !joined.inference_eq(prev) {
             *prev = joined;
             return true;
         }
@@ -249,7 +249,7 @@ fn evidence(args: &[Expr]) -> Option<Evidence> {
 
 fn typed(ty: &Option<Ty>) -> Option<Ty> {
     match ty {
-        Some(Ty::Var { .. } | Ty::Untyped) | None => None,
+        Some(Ty::Var { .. } | Ty::Untyped { .. }) | None => None,
         Some(ty) => Some(ty.clone()),
     }
 }
@@ -457,5 +457,31 @@ fn push_other_local_writes(
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn positional_reason_upgrade_retypes_the_callback() {
+        let before = union_of(Ty::Sym, Ty::pending_untyped());
+        let after = union_of(Ty::Sym, Ty::gradual_untyped());
+        let mut slots = vec![Some(before)];
+        assert!(merge_positional(&mut slots, &[Some(after.clone())]));
+        assert!(slots[0].as_ref().unwrap().inference_eq(&after));
+        assert!(!merge_positional(&mut slots, &[Some(after)]));
+    }
+
+    #[test]
+    fn keyword_reason_upgrade_retypes_the_callback() {
+        let before = union_of(Ty::Sym, Ty::pending_untyped());
+        let after = union_of(Ty::Sym, Ty::gradual_untyped());
+        let key = Symbol::from("value");
+        let mut slots = vec![(key.clone(), before)];
+        assert!(merge_keyword(&mut slots, &key, &after));
+        assert!(slots[0].1.inference_eq(&after));
+        assert!(!merge_keyword(&mut slots, &key, &after));
     }
 }

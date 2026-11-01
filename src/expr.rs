@@ -197,6 +197,13 @@ pub const FINDER_IMPLEMENTATION_UNKNOWN: u64 = 1 << 50;
 /// not a Rails helper, whatever it splits into.
 pub const FORMAT_VARIANT_CALL: u64 = 1 << 37;
 
+/// An opaque source `&expr` block argument (excluding the modeled symbol
+/// adapter). Lambda shape alone does not prove the
+/// directly attached block ABI (strict arity/nonlocal returns may differ).
+/// Bit 51 leaves 40–47 for Rust's future CoerceFamily/PeepholeKind groups
+/// and 48–50 for finder dispatch; indexer flags occupy 38–39.
+pub const FORWARDED_BLOCK: u64 = 1 << 51;
+
 /// Whether `expr` is a [`SELF_BINDING`] cast.
 pub fn is_self_binding(expr: &Expr) -> bool {
     expr.decisions & SELF_BINDING != 0
@@ -1836,6 +1843,52 @@ pub fn desugar_op_assign(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn expression_decision_masks_are_distinct() {
+        let masks = [
+            RESOLVED_CLASS_REF,
+            CLASS_OBJECT_VALUE,
+            RESOLVED_OPERATOR_RECEIVER,
+            SOURCE_TYPE_ASCRIPTION,
+            GENERATED_CONST_REF,
+            RESOLVED_DATA_FACTORY,
+            FROM_PARAMS_EXPECT,
+            DISCARDED_VALUE,
+            ADMITTED_PRELOADER_CALL,
+            UNINDEXED_SCOPE_CONST_REF,
+            ERASED_KEYWORD_SPLAT,
+            SOURCE_FILE_PATH,
+            SELF_BINDING,
+            SELF_BINDING_CLASS_OBJECT,
+            REVERSE_MERGE,
+            HELPER_COPY_TRANSLATE,
+            HELPER_BODY_TRANSLATE,
+            REPLAYED_CLASS_BODY,
+            INHERITED_VISIBILITY,
+            GROUNDED_TIME_FORMAT,
+            RESOLVED_MIXIN,
+            MODULE_QUERY,
+            RUNTIME_CLASS_OBJECT,
+            BUILTIN_ALIAS,
+            BUILD_OWNER,
+            CONST_PATH,
+            BODY_STATEMENT,
+            SINGLETON_BODY,
+            SINGLETON_CONSTANT_REF,
+            KERNEL_CONVERSION,
+            INHERITED_ALIAS_COPY,
+            NATIVE_KEYWORD_ARGUMENTS,
+            FORMAT_VARIANT_CALL,
+            FORWARDED_BLOCK,
+        ];
+        let mut seen = 0;
+        for mask in masks {
+            assert!(mask.is_power_of_two());
+            assert_eq!(seen & mask, 0, "expression decision bit reused: {mask:#x}");
+            seen |= mask;
+        }
+    }
     use super::*;
     use crate::ident::VarId;
     use crate::span::FileId;

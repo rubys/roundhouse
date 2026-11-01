@@ -88,7 +88,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>, ap
             info.class_methods.insert(name.clone(), prune(ty, scope));
         }
         for name in &gem.constants {
-            info.constants.insert(name.clone(), Ty::Untyped);
+            info.constants.insert(name.clone(), Ty::gradual_untyped());
         }
         let mut is_open = gem.dynamic;
         if let Some(parent) = &gem.parent {
@@ -227,7 +227,7 @@ fn prune_ty(ty: &Ty, resolve: &dyn Fn(&ClassId) -> Option<ClassId>) -> Ty {
                 id,
                 args: args.iter().map(|a| prune_ty(a, resolve)).collect(),
             },
-            None => Ty::Untyped,
+            None => Ty::untyped(),
         },
         Ty::Array { elem } => Ty::Array { elem: std::sync::Arc::new(prune_ty(elem, resolve)) },
         Ty::Hash { key, value } => Ty::Hash {

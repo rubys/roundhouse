@@ -211,7 +211,7 @@ end
     );
     assert_eq!(
         exprs[3].ty,
-        Some(Ty::Untyped),
+        Some(Ty::untyped()),
         "unknown model stays gradual"
     );
     let lowered = roundhouse::lower::fixtures::lower_fixtures(&app);

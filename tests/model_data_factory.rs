@@ -26,7 +26,7 @@ fn model_body_factory_registers_the_nested_constructor_and_readers() {
     let class = &analyzer.class_registry()[&id];
     assert_eq!(class.class_methods.get(&Symbol::from("new")), Some(&Ty::Class { id, args: vec![].into() }));
     for member in ["assignment", "changed", "notice"] {
-        assert_eq!(class.instance_methods.get(&Symbol::from(member)), Some(&Ty::Untyped));
+        assert_eq!(class.instance_methods.get(&Symbol::from(member)), Some(&Ty::untyped()));
         assert!(!class.instance_methods.contains_key(&Symbol::from(format!("{member}="))));
     }
     roundhouse::session::analyze_and_lower(&mut app);

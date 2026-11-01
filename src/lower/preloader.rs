@@ -35,12 +35,12 @@ pub(crate) fn preloader_new<'a>(new: &'a Expr, is_model: impl Fn(&ClassId) -> bo
             Ty::Class { id, .. } => (Some(id.clone()), false),
             // A nil among them raises at run time, as Rails' preloader does on one.
             Ty::Union { variants } if variants.iter().all(|v| matches!(v, Ty::Nil) || matches!(v, Ty::Class { id, .. } if is_model(id))) => (None, false),
-            Ty::Untyped | Ty::Var { .. } => (None, false),
+            Ty::Untyped { .. } | Ty::Var { .. } => (None, false),
             _ => return None,
         },
         Ty::Relation { of } => (Some(of.clone()), true),
         // Not known to be an Array: `to_a` answers the records of a relation and an Array alike.
-        Ty::Untyped | Ty::Var { .. } => (None, true),
+        Ty::Untyped { .. } | Ty::Var { .. } => (None, true),
         _ => return None,
     };
     if model.as_ref().is_some_and(|m| !is_model(m)) {
@@ -83,7 +83,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
         records.ty = Some(array);
     }
     let mut specs = Expr::new(span, ExprNode::Array { elements: vec![call.associations.clone()], style: Default::default() });
-    specs.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
+    specs.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::untyped()) });
     let mut model = Expr::new(span, ExprNode::Const { path: receiver_class.0.as_str().split("::").map(Symbol::from).collect() });
     model.ty = Some(Ty::Class { id: receiver_class.clone(), args: vec![].into() });
     let method = if call.model.is_some() { "preload_associations" } else { "records" };

@@ -181,21 +181,21 @@ fn false_branches_remove_matching_parameterized_containers() {
 #[test]
 fn unknown_values_and_custom_container_names_do_not_gain_fake_member_types() {
     let gradual_array = Ty::Array {
-        elem: std::sync::Arc::new(Ty::Untyped),
+        elem: std::sync::Arc::new(Ty::untyped()),
     };
     let gradual_hash = Ty::Hash {
-        key: std::sync::Arc::new(Ty::Untyped),
-        value: std::sync::Arc::new(Ty::Untyped),
+        key: std::sync::Arc::new(Ty::untyped()),
+        value: std::sync::Arc::new(Ty::untyped()),
     };
-    assert_eq!(narrowed(Ty::Untyped, &["Array"]), gradual_array);
-    assert_eq!(narrowed(Ty::Untyped, &["Hash"]), gradual_hash);
+    assert_eq!(narrowed(Ty::untyped(), &["Array"]), gradual_array);
+    assert_eq!(narrowed(Ty::untyped(), &["Hash"]), gradual_hash);
     let mixed = narrowed(
         Ty::Union {
             variants: vec![
                 Ty::Array {
                     elem: std::sync::Arc::new(Ty::Str),
                 },
-                Ty::Untyped,
+                Ty::untyped(),
             ].into(),
         },
         &["Array"],

@@ -59,7 +59,7 @@ fn inferred_from(source: &str, name: &str) -> Ty {
 
 fn can_be_nil(ty: &Ty) -> bool {
     match ty {
-        Ty::Nil | Ty::Untyped | Ty::Var { .. } => true,
+        Ty::Nil | Ty::Untyped { .. } | Ty::Var { .. } => true,
         Ty::Union { variants } => variants.iter().any(can_be_nil),
         _ => false,
     }

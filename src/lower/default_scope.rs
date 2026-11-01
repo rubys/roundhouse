@@ -356,12 +356,12 @@ pub fn synth_default_scope_where(model: &Model, scope: &[(Symbol, Literal)]) -> 
         value_ty = match value_ty {
             None => Some(t),
             Some(prev) if prev == t => Some(prev),
-            Some(_) => Some(Ty::Untyped),
+            Some(_) => Some(Ty::untyped()),
         };
     }
     let hash_ty = Ty::Hash {
         key: std::sync::Arc::new(Ty::Sym),
-        value: std::sync::Arc::new(value_ty.unwrap_or(Ty::Untyped)),
+        value: std::sync::Arc::new(value_ty.unwrap_or(Ty::untyped())),
     };
     let entries = scope
         .iter()
@@ -423,17 +423,17 @@ pub fn synth_dynamic_default_scope_where(model: &Model, scope: &DynamicScope) ->
     let mut value_ty = None::<Ty>;
     if let ExprNode::Hash { entries, .. } = &*hash.node {
         for (_, v) in entries {
-            let t = v.ty.clone().unwrap_or(Ty::Untyped);
+            let t = v.ty.clone().unwrap_or(Ty::untyped());
             value_ty = match value_ty {
                 None => Some(t),
                 Some(prev) if prev == t => Some(prev),
-                Some(_) => Some(Ty::Untyped),
+                Some(_) => Some(Ty::untyped()),
             };
         }
     }
     let hash_ty = Ty::Hash {
         key: std::sync::Arc::new(Ty::Sym),
-        value: std::sync::Arc::new(value_ty.unwrap_or(Ty::Untyped)),
+        value: std::sync::Arc::new(value_ty.unwrap_or(Ty::untyped())),
     };
     let typed_hash = |mut e: Expr| {
         if let ExprNode::Hash { kwargs, .. } = &mut *e.node {

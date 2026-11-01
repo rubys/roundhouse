@@ -508,7 +508,7 @@ fn settle_ams_writers(app: &mut App, registry: &HashMap<ClassId, ClassInfo>) -> 
                     }),
                     (kind, Some(column)) => {
                         let span = e.span;
-                        let object = with_ty(Expr::new(span, ExprNode::Send { recv: None, method: Symbol::from("object"), args: vec![], block: None, parenthesized: false }), Ty::Untyped);
+                        let object = with_ty(Expr::new(span, ExprNode::Send { recv: None, method: Symbol::from("object"), args: vec![], block: None, parenthesized: false }), Ty::untyped());
                         let raw = with_ty(
                             Expr::new(span, ExprNode::Send { recv: Some(object), method: Symbol::from(format!("{column}_raw")), args: vec![], block: None, parenthesized: false }),
                             Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() },
@@ -1032,7 +1032,7 @@ fn as_json_method(owner: &ClassId, readers: &[Symbol]) -> MethodDef {
                     // what the emitted RBS says of them.
                     let mut read =
                         Expr::new(Span::synthetic(), ExprNode::Ivar { name: name.clone() });
-                    read.ty = Some(crate::ty::Ty::Untyped);
+                    read.ty = Some(crate::ty::Ty::untyped());
                     read
                 },
             )

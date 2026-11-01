@@ -34,7 +34,7 @@ end
         (
             "values",
             Ty::Array {
-                elem: std::sync::Arc::new(Ty::Untyped),
+                elem: std::sync::Arc::new(Ty::untyped()),
             },
         ),
     ] {

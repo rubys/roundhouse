@@ -74,7 +74,7 @@ fn apply_prop(e: &Expr, page: &Expr, key: &Expr, value: &Expr) -> Expr {
 
 fn may_be_runtime_prop(ty: Option<&Ty>) -> bool {
     match ty {
-        None | Some(Ty::Untyped | Ty::Var { .. } | Ty::Fn { .. } | Ty::SelfInstance) => true,
+        None | Some(Ty::Untyped { .. } | Ty::Var { .. } | Ty::Fn { .. } | Ty::SelfInstance) => true,
         Some(Ty::Class { id, .. }) => matches!(id.0.as_str(), "InertiaRails::Prop" | "Proc" | "Object" | "BasicObject"),
         Some(Ty::Union { variants }) => variants.iter().any(|v| may_be_runtime_prop(Some(v))),
         _ => false,

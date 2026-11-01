@@ -33,7 +33,7 @@ pub fn spliced_owners(app: &App) -> HashMap<Symbol, ClassId> {
 
 fn untyped_receiver(r: &Expr) -> bool {
     !matches!(&*r.node, ExprNode::Const { .. } | ExprNode::SelfRef)
-        && matches!(r.ty.as_ref(), None | Some(Ty::Untyped) | Some(Ty::Var { .. }))
+        && matches!(r.ty.as_ref(), None | Some(Ty::Untyped { .. }) | Some(Ty::Var { .. }))
 }
 
 /// Spans of the calls a target without a relation to hand on cannot run.

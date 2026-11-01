@@ -102,7 +102,7 @@ pub(super) fn narrowed_param_read(
     if is_option_of(&declared, narrowed) && !is_rebound_var(name) {
         return Some(format!("{}.clone().unwrap()", util::escape_rust_keyword(name)));
     }
-    if matches!(declared, crate::ty::Ty::Untyped) {
+    if matches!(declared, crate::ty::Ty::Untyped { .. }) {
         if let Some(coerce) = value_narrowing_coercion(narrowed) {
             return Some(format!("{}.{coerce}", util::escape_rust_keyword(name)));
         }
@@ -851,7 +851,7 @@ fn emit_expr_inner(e: &Expr) -> String {
             ) {
                 use crate::ty::Ty;
                 let declared_peeled = crate::emit::rust::expr::util::peel_nil(declared);
-                let declared_is_value = matches!(declared_peeled, Ty::Untyped | Ty::Record { .. })
+                let declared_is_value = matches!(declared_peeled, Ty::Untyped { .. } | Ty::Record { .. })
                     || matches!(
                         declared_peeled,
                         Ty::Class { id, .. } if id.0.as_str() == "Roundhouse::ParamValue"
@@ -988,8 +988,8 @@ fn emit_expr_inner(e: &Expr) -> String {
                         let value_shaped = matches!(
                             r.ty.as_ref(),
                             Some(crate::ty::Ty::Hash { key, value })
-                                if matches!(**key, crate::ty::Ty::Untyped)
-                                    && matches!(**value, crate::ty::Ty::Untyped)
+                                if matches!(**key, crate::ty::Ty::Untyped { .. })
+                                    && matches!(**value, crate::ty::Ty::Untyped { .. })
                         );
                         if value_shaped {
                             // `.as_object()` yields a serde_json `Map`,
@@ -1465,7 +1465,7 @@ fn emit_ensure_only(body: &Expr, ensure: &Expr) -> String {
         if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*st.node {
             let n = name.as_str().to_string();
             if ensure_reads.contains(&n) && !is_declared_var(&n) {
-                let ty = value.ty.clone().unwrap_or(crate::ty::Ty::Untyped);
+                let ty = value.ty.clone().unwrap_or(crate::ty::Ty::untyped());
                 lines.push(format!("let mut {n}: {} = Default::default();", super::ty::rust_ty(&ty)));
                 mark_local_var_ty(&n, ty);
                 declare_var(n);

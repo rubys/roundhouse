@@ -41,7 +41,7 @@ fn stale_object_error_has_its_parent_and_payload_readers() {
     for name in ["record", "attempted_action"] {
         assert_eq!(
             info.instance_methods.get(&Symbol::from(name)),
-            Some(&Ty::Untyped)
+            Some(&Ty::untyped())
         );
     }
     let mut diagnostics = roundhouse::session::analyze_and_lower(&mut app);

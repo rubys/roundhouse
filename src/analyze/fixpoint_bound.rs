@@ -65,7 +65,7 @@ pub(super) fn bound(ty: Ty) -> Ty {
         // A union with more leaf arms than the node bound has no nesting
         // left to cut.
         if limit == 0 {
-            return Ty::Untyped;
+            return Ty::untyped();
         }
         limit -= 1;
     }
@@ -137,7 +137,7 @@ fn cut(ty: &Ty, levels: usize) -> Ty {
         return ty.clone();
     }
     if levels == 0 {
-        return Ty::Untyped;
+        return Ty::untyped();
     }
     let inner = |t: &Ty| cut(t, levels - 1);
     match ty {
@@ -220,7 +220,7 @@ mod tests {
         while let Ty::Array { elem } = innermost {
             innermost = elem;
         }
-        assert_eq!(innermost, &Ty::Untyped);
+        assert_eq!(innermost, &Ty::untyped());
     }
 
     #[test]
@@ -240,7 +240,7 @@ mod tests {
         let classes = (0..MAX_NODES).map(|i| Ty::Class { id: ClassId(Symbol::from(format!("C{i}").as_str())), args: vec![].into() });
         let wide = body::union_many(classes.chain([arr(Ty::Int)]).collect());
         assert!(measure(&wide).1 > MAX_NODES);
-        assert_eq!(bound(wide), Ty::Untyped);
+        assert_eq!(bound(wide), Ty::untyped());
     }
 
     /// An ivar's type is carried too: the next round seeds it into every
