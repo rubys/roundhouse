@@ -394,6 +394,7 @@ fn ingest_roda_class(source: &[u8], file: &str, app: &mut App) -> IngestResult<S
                 unless_cond: None,
                 if_cond_expr: None,
                 unless_cond_expr: None,
+                unread_guard: false,
                 block: None,
                 prepend: false,
             },

@@ -7690,9 +7690,9 @@ fn view_filter_seed(
     bindings: &HashMap<Symbol, HashMap<Symbol, Ty>>,
     bodies: &HashMap<Symbol, &Expr>,
 ) -> HashMap<Symbol, Ty> {
-    let mut first: HashMap<Symbol, Ty> = HashMap::new();
+    let mut first: HashMap<Symbol, Ty> = HashMap::default();
     // `None` once a write the replay does not model has followed it.
-    let mut replayed: HashMap<Symbol, Option<Ty>> = HashMap::new();
+    let mut replayed: HashMap<Symbol, Option<Ty>> = HashMap::default();
     for (i, (filter, _, _)) in chained_filters.iter().enumerate() {
         if !matches!(filter.kind, FilterKind::Before | FilterKind::Around)
             || !before_filter_applies(filter, action_name)
