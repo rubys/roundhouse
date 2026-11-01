@@ -80,7 +80,7 @@ use render::{
 pub(crate) use body::union_of;
 pub use preload::{missing_preload_report, PreloadCoverage};
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use crate::det::{HashMap, HashSet};
 use rubydex::model::identity_maps::IdentityHashMap;
 use rubydex::model::ids::DeclarationId;
@@ -98,6 +98,7 @@ use crate::ty::{ParamKind, Row, Ty};
 
 pub struct Analyzer {
     classes: HashMap<ClassId, ClassInfo>,
+    upload_array_fields: Option<BTreeMap<ClassId, BTreeMap<(Symbol, Vec<Symbol>, Vec<String>), BTreeSet<Symbol>>>>,
     materialized_associations: crate::det::HashSet<Symbol>,
     /// Inferred parameter types per (class, method). Empty after
     /// `Analyzer::new`; populated by `unify_params_from_call_sites`
@@ -1284,6 +1285,7 @@ impl Analyzer {
         Self {
             materialized_associations: crate::lower::assoc_pluck::materialized_assoc_names(app),
             classes,
+            upload_array_fields: None,
             inferred_params: HashMap::default(),
             declared_signatures: app
                 .rbs_signatures
@@ -1385,6 +1387,7 @@ impl Analyzer {
     }
 
     fn analyze_cached(&mut self, app: &mut App) {
+        self.upload_array_fields = Some(crate::lower::controller_to_library::params::upload_array_fields(&app.controllers));
         self.fixpoint_checks = fixpoint_check::Checks::start();
         // Before any signature is copied. Anonymous `**` / `...` cannot
         // survive flattened keywords, and `check` does not lower.
@@ -2451,10 +2454,11 @@ impl Analyzer {
         global_constants: &body::ConstScope,
         dirty: Option<&crate::det::HashSet<ClassId>>,
     ) {
-        let mut upload_array_fields = crate::lower::controller_to_library::params::upload_array_fields(&app.controllers);
+        let upload_array_fields = self.upload_array_fields.get_or_insert_with(||
+            crate::lower::controller_to_library::params::upload_array_fields(&app.controllers));
         for controller in &app.controllers {
             self.classes.entry(controller.name.clone()).or_default().upload_array_fields =
-                upload_array_fields.remove(&controller.name).unwrap_or_default();
+                upload_array_fields.get(&controller.name).cloned().unwrap_or_default();
         }
         // Type the actual initializer trees, not only registry clones.
         // Their lexical class references become load-time dependencies

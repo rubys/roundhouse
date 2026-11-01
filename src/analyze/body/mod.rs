@@ -6821,7 +6821,7 @@ fn expect_hash_arg_ty(recv: Option<&Expr>, recv_ty: Option<&Ty>, method: &str, a
                         let ty = if filters.is_empty() {
                             let elem = if upload_array_fields.is_some_and(|fields| fields.contains(&name)) {
                                 Ty::Union { variants: vec![Ty::Str,
-                                    Ty::Class { id: ClassId(Symbol::from("ActionDispatch::Http::UploadedFile")), args: vec![].into() }
+                                    Ty::Class { id: crate::lower::controller_to_library::params::uploaded_file_class(), args: vec![].into() }
                                 ].into() }
                             } else { Ty::Str };
                             Ty::Array { elem: elem.into() }
