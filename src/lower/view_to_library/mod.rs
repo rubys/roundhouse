@@ -2682,7 +2682,8 @@ pub(crate) fn render_locals_keys(
 /// every render hands the partial no record, so the param can carry the
 /// caller's ivar (`caller_record_ivar`). Any other site that names the
 /// partial (`render "outer", post: other`, `object:`, `collection:`, a
-/// turbo stream's `partial:`, a controller's or a helper's render) or
+/// turbo stream's `partial:`, a controller's or a helper's render, a
+/// dynamic render's pooled entry whose `locals:` name the record) or
 /// an object render (`render @posts` into `posts/_post`) leaves it out,
 /// and such a partial takes the ivar as a param of its own
 /// (`view_ivar_locals`). Sites are matched by the partial's base name,
@@ -2760,6 +2761,18 @@ pub(crate) fn ivar_record_partials(
     for c in controllers {
         for a in c.actions() {
             scan(&a.body, None, &mut bound);
+        }
+    }
+    // A pooled entry (`@slot = {partial: "summary", locals: {post: x}}`)
+    // hands the record its `locals:` names, as a `render` would.
+    for ((dir, _), entries) in dynamic_partial_pools(controllers) {
+        for entry in entries {
+            let (target_dir, base) =
+                entry.name.rsplit_once('/').unwrap_or((dir.as_str(), entry.name.as_str()));
+            let record = singularize(&snake_case(last_segment(&camelize_path(&snake_case(target_dir)))));
+            if entry.locals.iter().any(|(k, _)| k.as_str() == record) {
+                bound.insert(base.trim_start_matches('_').to_string());
+            }
         }
     }
     for lc in library_classes {

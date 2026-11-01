@@ -280,14 +280,16 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
                 // A strict-locals target's record slot is its first
                 // declared local — bind it from the entry's locals by
                 // the DECLARED name (header default when absent). A
-                // convention target gets no record object: the caller's
+                // convention target gets no record object: the entry's
+                // local named like its record, else the caller's
                 // same-named ivar or nil, then its closure ivars
                 // (threaded as this view's params).
                 let record = match strict_decl {
                     Some(decl) => lookup(decl[0].name.as_str())
                         .or_else(|| decl[0].default.clone())
                         .unwrap_or_else(nil_lit),
-                    None => caller_record_ivar(ctx, &module_camel, &method_sym),
+                    None => lookup(&singularize(&snake_case(last_segment(&module_camel))))
+                        .unwrap_or_else(|| caller_record_ivar(ctx, &module_camel, &method_sym)),
                 };
                 let mut call_args = vec![record];
                 call_args.extend(partial_extra_args(ctx, &module_camel, &method_sym));

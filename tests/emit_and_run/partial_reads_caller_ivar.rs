@@ -4,8 +4,9 @@
 //! action's, wherever it was set: in the action, a `before_action`, a
 //! memoizing method. The partial's record param stands for that ivar, so
 //! a render that hands it nothing passes the caller's own; it used to
-//! pass nil. A partial some render does hand a record (`post: other`)
-//! keeps the two apart, and passes the ivar on, not the record.
+//! pass nil. A partial some render does hand a record (`post: other`,
+//! or a dynamic render's pooled `locals:`) keeps the two apart, and
+//! passes the ivar on, not the record.
 
 use super::emit_and_run;
 
@@ -40,6 +41,17 @@ const POSTS: &str = r#"class PostsController < ApplicationController
     @other = Post.find_by(title: "Go tips")
   end
 
+  def pooled
+    @post = Post.find_by(title: "Rails tips")
+    @other = Post.find_by(title: "Go tips")
+    @slot = { partial: "pooled", locals: { post: @other } }
+  end
+
+  def pooled_nil
+    @post = Post.find_by(title: "Rails tips")
+    @slot = { partial: "pooled_nil", locals: { post: nil } }
+  end
+
   private
 
   def set_post
@@ -68,6 +80,8 @@ const ROUTES: &str = r#"Rails.application.routes.draw do
   get "/posts/prefixed", to: "posts#prefixed"
   get "/posts/helped", to: "posts#helped"
   get "/posts/rebound", to: "posts#rebound"
+  get "/posts/pooled", to: "posts#pooled"
+  get "/posts/pooled_nil", to: "posts#pooled_nil"
   get "/reports/show", to: "reports#show"
 end
 "#;
@@ -112,6 +126,16 @@ fn app() -> emit_and_run::Overlay {
             "app/views/posts/rebound.html.erb",
             "<div><%= render \"framed\", post: @other %><%= render partial: \"framed\", locals: { post: @other } %></div>\n",
         )
+        .write(
+            "app/views/posts/_pooled.html.erb",
+            "<section>ivar=<%= @post.title %> local=<%= post.title %><%= render \"summary\" %></section>\n",
+        )
+        .write(
+            "app/views/posts/_pooled_nil.html.erb",
+            "<section>ivar=<%= @post.title %> local=<%= post.nil? ? \"none\" : post.title %></section>\n",
+        )
+        .write("app/views/posts/pooled.html.erb", "<div><%= render @slot %></div>\n")
+        .write("app/views/posts/pooled_nil.html.erb", "<div><%= render @slot %></div>\n")
         .write("app/views/reports/_box.html.erb", "<u><%= @report.title %></u>\n")
         .write("app/views/reports/show.html.erb", "<div><%= render \"posts/summary\" %><%= render \"box\" %></div>\n")
 }
@@ -141,6 +165,8 @@ missing = []
   nested: ["<section>#{summary}"],
   prefixed: ["<p class=\"prefixed\">New: Rails tips</p>"],
   helped: [summary],
+  pooled: ["<section>ivar=Rails tips local=Go tips#{summary}"],
+  pooled_nil: ["<section>ivar=Rails tips local=none</section>"],
 }.each do |action, wants|
   body = body_of(PostsController.new, action)
   missing << "posts##{action}: #{body}" unless wants.all? { |want| body.include?(want) }
