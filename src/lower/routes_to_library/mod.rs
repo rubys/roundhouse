@@ -2144,7 +2144,7 @@ fn build_path_expr(
                     parts.push(InterpPart::Text { value: std::mem::take(&mut buf) });
                 }
                 parts.push(InterpPart::Expr {
-                    expr: var_ref_slug(&ident, slug_params.contains(&ident)),
+                    expr: segment_value(var_ref_slug(&ident, slug_params.contains(&ident))),
                 });
             } else {
                 buf.push(':');
@@ -2222,7 +2222,7 @@ fn build_optional_path_expr(
             } else if !buf.is_empty() {
                 chunk.push(InterpPart::Text { value: buf.clone() });
             }
-            chunk.push(InterpPart::Expr { expr: var_ref_slug(&ident, slug_params.contains(&ident)) });
+            chunk.push(InterpPart::Expr { expr: segment_value(var_ref_slug(&ident, slug_params.contains(&ident))) });
             chunks.push((ident.clone(), chunk));
             buf.clear();
         } else {
@@ -2230,7 +2230,7 @@ fn build_optional_path_expr(
             if !buf.is_empty() {
                 base_parts.push(InterpPart::Text { value: std::mem::take(&mut buf) });
             }
-            base_parts.push(InterpPart::Expr { expr: var_ref_slug(&ident, slug_params.contains(&ident)) });
+            base_parts.push(InterpPart::Expr { expr: segment_value(var_ref_slug(&ident, slug_params.contains(&ident))) });
         }
     }
     if !buf.is_empty() {
@@ -2482,6 +2482,31 @@ fn build_query_suffix_helper(module_path: &[Symbol]) -> LibraryFunction {
 
 fn var_ref(name: &str) -> Expr {
     var_ref_slug(name, false)
+}
+
+/// A path param's value as Rails writes it into the URL: through
+/// `Journey::Router::Utils.escape_segment`, so `"a/b"` is `a%2Fb` and a
+/// `?` or `#` stays inside the segment. An Integer id needs none.
+fn segment_value(var: Expr) -> Expr {
+    if matches!(var.ty, Some(Ty::Int)) {
+        return var;
+    }
+    let span = var.span;
+    let text = with_ty(
+        Expr::new(span, ExprNode::Send { recv: Some(var), method: Symbol::from("to_s"), args: vec![], block: None, parenthesized: false }),
+        Ty::Str,
+    );
+    let helpers = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")] });
+    with_ty(
+        Expr::new(span, ExprNode::Send {
+            recv: Some(helpers),
+            method: Symbol::from("escape_segment"),
+            args: vec![text],
+            block: None,
+            parenthesized: true,
+        }),
+        Ty::Str,
+    )
 }
 
 fn var_ref_slug(name: &str, slug_id: bool) -> Expr {

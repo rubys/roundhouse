@@ -2,8 +2,9 @@
 //! program when the constant is first read.
 //!
 //! Ported from the Shopify/roundhouse-1 fork's tests, with the gem written
-//! as a PATH gem of `Gemfile.lock`. A test the compiler does not pass yet
-//! is ignored with the group of behavior it waits on (`fork spec: ...`).
+//! as a PATH gem of `Gemfile.lock`. The fork listed the autoloads in one
+//! table in app/models.rb; here the program of the file that writes each
+//! `autoload` registers it.
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -77,7 +78,6 @@ fn native(lib: &Path) -> Vec<String> {
 }
 
 #[test]
-#[ignore = "fork spec: autoload"]
 fn a_literal_gem_autoload_of_a_file_with_requires_loads_its_program() {
     let root = std::env::temp_dir().join(format!("roundhouse-gem-autoload-in-place-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -107,10 +107,14 @@ fn a_literal_gem_autoload_of_a_file_with_requires_loads_its_program() {
         run.stderr
     );
     assert_eq!(lines(run.stdout.as_bytes()), EXPECTED, "emitted boot diverges from CRuby\n{}", run.stderr);
-    // Each constant's autoload is the gem's own, and loads the file's
-    // program (which requires the superclass first).
-    let models = std::fs::read_to_string(run.emitted.join("app/models.rb")).unwrap();
-    let program = "models/roundhouse_files/vendor/gems/kafka-kit-1.0.0/lib/kafka-kit/writers/mock_writer";
-    assert!(models.contains(&format!("[:MockWriter, {program:?}, ")), "{models}");
-    assert!(models.contains("[:ClassicProducer, \"models/roundhouse_files/vendor/gems/kafka-kit-1.0.0/lib/kafka-kit/producers/classic_producer\", "), "{models}");
+    // Each constant's autoload is the gem's own, registered by the program
+    // of the file that writes it, and loads the target file's program
+    // (which requires the superclass first).
+    let programs = run.emitted.join("app/models/roundhouse_files/vendor/gems/kafka-kit-1.0.0/lib/kafka-kit");
+    let writers = std::fs::read_to_string(programs.join("writers.rb")).unwrap();
+    let mock = "models/roundhouse_files/vendor/gems/kafka-kit-1.0.0/lib/kafka-kit/writers/mock_writer";
+    assert!(writers.contains(&format!("KafkaKit::Writers.autoload(:MockWriter, RoundhouseAutoload.path({mock:?}))")), "{writers}");
+    let producers = std::fs::read_to_string(programs.join("producers.rb")).unwrap();
+    let classic = "models/roundhouse_files/vendor/gems/kafka-kit-1.0.0/lib/kafka-kit/producers/classic_producer";
+    assert!(producers.contains(&format!("KafkaKit::Producers.autoload(:ClassicProducer, RoundhouseAutoload.path({classic:?}))")), "{producers}");
 }

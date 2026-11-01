@@ -217,7 +217,7 @@ fn survey_with(note: &str, sticky: &str) -> String {
     write(&src, "app/models/sticky.rb", &format!("class Sticky < Note\n{sticky}end\n"));
     write(&src, "app/models/sticky_probe.rb", "class StickyProbe\n  def self.first_title\n    Sticky.first.title\n  end\nend\n");
     let run = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
-        .args(["--target", "ruby", "--allow-unsupported", "--survey", "-o"])
+        .args(["--target", "rust", "--allow-unsupported", "--survey", "-o"])
         .arg(&out)
         .arg(&src)
         .output()
