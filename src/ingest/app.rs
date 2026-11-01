@@ -1318,6 +1318,7 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     // not abort ingest.
     // Rails' ParamsWrapper default (see `App::wrap_parameters_by_default`).
     app.wrap_parameters_by_default = read_wrap_parameters_by_default(vfs, dir);
+    app.active_job_retry_jitter = read_active_job_retry_jitter(vfs, dir);
     // The ActiveJob queue adapter (see `App::queue_adapter`).
     app.queue_adapter = read_queue_adapter(vfs, dir);
     // Where Sidekiq pushes (see `App::sidekiq_redis`).
@@ -12171,6 +12172,59 @@ fn warn_sidekiq(detail: String) {
     let mut d = crate::diagnostic::Diagnostic::unsupported(crate::span::Span::synthetic(), None, "Sidekiq", detail);
     d.severity = crate::diagnostic::Severity::Warning;
     super::prism::push(d);
+}
+
+/// `ActiveJob::Base.retry_jitter` app-wide (`App::active_job_retry_jitter`),
+/// read by line scan in Rails' precedence: `config.load_defaults` 6.1+
+/// sets 0.15 (Rails' `new_framework_defaults_6_1`), and an explicit
+/// `config.active_job.retry_jitter = <number>` (or
+/// `ActiveJob::Base.retry_jitter = <number>`) in config/application.rb,
+/// config/environments/production.rb or an initializer wins over that.
+fn read_active_job_retry_jitter<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> f64 {
+    let code_lines = |bytes: &[u8]| -> Vec<String> {
+        String::from_utf8_lossy(bytes)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.starts_with('#'))
+            .collect()
+    };
+    let mut jitter = 0.0;
+    let mut files: Vec<Vec<String>> = Vec::new();
+    if let Ok(source) = vfs.read(&dir.join("config/application.rb")) {
+        let lines = code_lines(&source);
+        for line in &lines {
+            if let Some(v) = load_defaults_version(line) {
+                jitter = if v >= 6.1 { 0.15 } else { 0.0 };
+            }
+        }
+        files.push(lines);
+    }
+    for sub in ["config/environments/production.rb", "config/initializers"] {
+        let path = dir.join(sub);
+        let paths = if vfs.is_dir(&path) { read_rb_files(vfs, &path).unwrap_or_default() } else { vec![path] };
+        for p in paths {
+            if let Ok(source) = vfs.read(&p) {
+                files.push(code_lines(&source));
+            }
+        }
+    }
+    for line in files.iter().flatten() {
+        let Some(i) = line.find("active_job.retry_jitter").or_else(|| line.find("ActiveJob::Base.retry_jitter")) else {
+            continue;
+        };
+        let Some((_, v)) = line[i..].split_once('=') else { continue };
+        // The whole numeric literal: `0.15`, `1e-2`, `1_0.0`.
+        let v: String = v
+            .trim()
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || matches!(c, '.' | 'e' | 'E' | '-' | '+' | '_'))
+            .filter(|c| *c != '_')
+            .collect();
+        if let Ok(v) = v.parse::<f64>() {
+            jitter = v;
+        }
+    }
+    jitter
 }
 
 /// What a trimmed, non-comment config line sets the app-wide
