@@ -1836,6 +1836,7 @@ mod tests {
             nullable_locals: Default::default(),
             reference_reads: Default::default(),
             reference_targets: Default::default(),
+            nested_record_classes: Default::default(),
             nilable_scalar_reads: Default::default(),
             html_safe_methods: Default::default(),
             model_singulars: Default::default(),

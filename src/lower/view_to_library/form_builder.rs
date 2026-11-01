@@ -1270,7 +1270,12 @@ fn emit_fields_for(
     inner.form_records.push(FormBuilderBinding {
         form_param: nested_param_str.clone(),
         model_name: format!("{}[{}]", binding.model_name, nested.as_str()),
-        model_class: super::form_with::form_model_class(&record_expr, nested.as_str(), ctx),
+        model_class: if positional.get(1).is_some() {
+            super::form_with::form_model_class(&record_expr, "", ctx)
+        } else {
+            binding.metadata_class(ctx).and_then(|owner| ctx.nested_record_classes
+                .get(&(owner.to_owned(), nested.as_str().to_owned())).cloned())
+        },
         record_var: record_var.clone(),
         // The parent's, unchanged: `form.submit`'s default text and the
         // `_method` override belong to the FORM, and `fields_for` opens

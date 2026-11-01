@@ -245,6 +245,7 @@ pub struct ViewLowerCtx<'a> {
     locals_keys: crate::det::HashMap<(String, String), Vec<String>>,
     reference_reads: std::rc::Rc<crate::det::HashSet<String>>,
     reference_targets: std::rc::Rc<crate::det::HashMap<String, String>>,
+    nested_record_classes: std::rc::Rc<crate::det::HashMap<(String, String), String>>,
     nilable_scalar_reads: std::rc::Rc<crate::det::HashSet<String>>,
     html_safe_methods: std::rc::Rc<crate::det::HashSet<String>>,
     model_singulars: std::rc::Rc<crate::det::HashSet<String>>,
@@ -319,6 +320,7 @@ impl<'a> ViewLowerCtx<'a> {
             locals_keys: render_locals_keys(&app.views, &app.controllers, &app.library_classes),
             reference_reads: std::rc::Rc::new(reference_reader_names(app)),
             reference_targets: std::rc::Rc::new(reference_target_names(app)),
+            nested_record_classes: std::rc::Rc::new(nested_record_classes(app)),
             nilable_scalar_reads: std::rc::Rc::new(nilable_scalar_reader_names(app)),
             html_safe_methods: std::rc::Rc::new(
                 app.html_safe_methods.iter().map(|m| m.as_str().to_string()).collect(),
@@ -826,6 +828,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         nullable_locals: nullable,
         reference_reads: lx.reference_reads.clone(),
         reference_targets: lx.reference_targets.clone(),
+        nested_record_classes: lx.nested_record_classes.clone(),
         nilable_scalar_reads: lx.nilable_scalar_reads.clone(),
         html_safe_methods: lx.html_safe_methods.clone(),
         model_singulars: lx.model_singulars.clone(),
@@ -4707,7 +4710,11 @@ pub(super) struct FormBuilderBinding {
 
 impl FormBuilderBinding {
     pub(super) fn metadata_class<'a>(&'a self, ctx: &'a ViewCtx) -> Option<&'a str> {
-        self.model_class.as_deref().or_else(|| ctx.i18n.model_class(&self.model_name))
+        self.model_class.as_deref().or_else(|| {
+            // A nested field prefix is not a model identity. In particular,
+            // do not recover the parent's metadata for an unknown child.
+            if self.model_name.contains('[') { None } else { ctx.i18n.model_class(&self.model_name) }
+        })
     }
 }
 
@@ -4800,6 +4807,8 @@ pub(super) struct ViewCtx {
     /// `RouteHelpers.user_path(story.user)` through this.
     pub(super) reference_targets:
         std::rc::Rc<crate::det::HashMap<String, String>>,
+    /// Proven singular association targets, keyed by owner class and reader.
+    pub(super) nested_record_classes: std::rc::Rc<crate::det::HashMap<(String, String), String>>,
     /// Method names whose result is html-safe by construction —
     /// their body ends in `.html_safe` (`App::html_safe_methods`,
     /// recorded by `lower::html_safe`). A bare interpolation of one
@@ -5098,6 +5107,33 @@ fn reference_reader_names(app: &App) -> crate::det::HashSet<String> {
                     out.insert(name.as_str().to_string());
                 }
                 _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// Full target identity for a nested form; the field name alone is not
+/// evidence of its record class. Polymorphic and external targets stay unknown.
+fn nested_record_classes(app: &App) -> crate::det::HashMap<(String, String), String> {
+    use crate::dialect::Association;
+    let known: crate::det::HashSet<_> = app.models.iter().map(|m| &m.name)
+        .chain(app.library_classes.iter().filter(|c| !c.is_module).map(|c| &c.name))
+        .collect();
+    let mut out = crate::det::HashMap::default();
+    for model in &app.models {
+        for association in model.associations() {
+            let key = (model.name.0.as_str().to_owned(), association.name().as_str().to_owned());
+            let target = match association {
+                Association::HasOne { target, .. }
+                | Association::BelongsTo { target, polymorphic: false, .. }
+                    if known.contains(target) => Some(target),
+                _ => None,
+            };
+            if let Some(target) = target {
+                out.insert(key, target.0.as_str().to_owned());
+            } else {
+                out.remove(&key);
             }
         }
     }

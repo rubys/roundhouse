@@ -628,3 +628,83 @@ end
         .write("app/views/pages/bot.html.erb",template).write("app/views/pages/_fields.html.erb",fields)
         .run_ruby(&run).assert_passes();
 }
+
+
+fn nested_fields_for_association_case(kind: &str) {
+    let (nested, association, target, unresolved) = match kind {
+        "namespaced" => ("profile", "has_one :profile, class_name: 'Admin::Profile', foreign_key: :account_id, autosave: true", "Admin::Profile", false),
+        "class_name" => ("details", "has_one :details, class_name: 'Admin::Profile', foreign_key: :account_id, autosave: true", "Admin::Profile", false),
+        "ordinary" => ("profile", "has_one :profile, foreign_key: :account_id, autosave: true", "Profile", false),
+        "unresolved" => ("profile", "belongs_to :profile, polymorphic: true, optional: true", "Admin::Profile", true),
+        _ => unreachable!(),
+    };
+    let schema = if unresolved {
+        "ActiveRecord::Schema.define do\ncreate_table(:accounts) { |t| t.integer :profile_id; t.string :profile_type }\ncreate_table(:profiles) { |t| t.integer :account_id }\ncreate_table(:admin_profiles) { |t| t.integer :account_id; t.string :nickname; t.boolean :enabled }\ncreate_table(:details) { |t| t.integer :account_id }\nend\n"
+    } else {
+        "ActiveRecord::Schema.define do\ncreate_table(:accounts) { |t| t.integer :profile_id; t.string :profile_type }\ncreate_table(:profiles) { |t| t.integer :account_id }\ncreate_table(:admin_profiles) { |t| t.integer :account_id }\ncreate_table(:details) { |t| t.integer :account_id }\nend\n"
+    };
+    let profile = if kind == "ordinary" || unresolved {
+        "class Profile < ActiveRecord::Base\nattribute :nickname, :string\nattribute :enabled, :boolean\nend\n"
+    } else { "class Profile < ActiveRecord::Base\nattribute :unrelated, :string\nend\n" };
+    let admin = if unresolved { "module Admin\nclass Profile < ActiveRecord::Base\nself.table_name = 'admin_profiles'\nend\nend\n" }
+        else { "module Admin\nclass Profile < ActiveRecord::Base\nself.table_name = 'admin_profiles'\nattribute :nickname, :string\nattribute :enabled, :boolean\nend\nend\n" };
+    let details = "class Details < ActiveRecord::Base\nattribute :unrelated, :string\nend\n";
+    let parent_attributes = if unresolved { "attribute :nickname, :string\n" } else { "" };
+    let writer = if unresolved { format!("def {nested}_attributes=(attributes); end\n") }
+        else { format!("accepts_nested_attributes_for :{nested}\n") };
+    let account = format!("class Account < ActiveRecord::Base\n{parent_attributes}{association}\n{writer}end\n");
+    let setup = if unresolved {
+        format!("account=Account.new\nrecord={target}.new(nickname: 'Nested value', enabled: true)\naccount.define_singleton_method(:{nested}) {{ record }}\n")
+    } else {
+        format!("account=Account.new\naccount.{nested}={target}.new(nickname: 'Nested value', enabled: true)\n")
+    };
+    let template = format!("<%= form_with model: @account, url: '/', method: :post do |form| %><%= form.fields_for :{nested} do |child| %><%= child.text_field :nickname %><%= child.check_box :enabled %><% end %><% end %>");
+    let check = r#"
+def check_nested_values(html)
+  raise 'nested value' unless html.include?('value="Nested value"')
+  checkbox=html.scan(/<input[^>]*>/).find { |tag| tag.include?('type="checkbox"') }
+  raise 'nested boolean' unless checkbox && checkbox.include?('checked="checked"')
+end
+"#;
+    let reflection = if unresolved { String::new() }
+        else { format!("raise 'association target' unless Account.reflect_on_association(:{nested}).klass == {target}\n") };
+    native(&["activerecord", "actionview", "actionpack"], &format!(r#"{AR}
+require 'action_view'
+require 'action_controller'
+{schema}{profile}{admin}{details}{account}
+{reflection}
+ActionView::Helpers::FormHelper.form_with_generates_ids=true
+view=ActionView::Base.with_empty_template_cache.new(ActionView::LookupContext.new([]), {{}}, nil)
+view.define_singleton_method(:protect_against_forgery?) {{ false }}
+{setup}
+view.assign(account: account)
+{check}
+check_nested_values(view.render(inline: {template:?}))
+"#));
+    let run = emit_and_run::empty_app().write("db/schema.rb",schema)
+        .write("config/routes.rb","Rails.application.routes.draw do\nend\n")
+        .write("app/models/account.rb",&account).write("app/models/profile.rb",profile)
+        .write("app/models/admin/profile.rb",admin).write("app/models/details.rb",details)
+        .write("app/controllers/pages_controller.rb","class PagesController < ActionController::Base\ndef form; @account=Account.new; end\nend\n")
+        .write("app/views/pages/form.html.erb",&template)
+        .run_ruby(&format!("{check}\n{setup}\ncheck_nested_values(Views::Pages.form(account))\n"));
+    run.assert_passes();
+    let source = std::fs::read_to_string(run.emitted.join("app/views/pages/form.rb")).unwrap();
+    if unresolved {
+        assert!(!source.contains(".nickname"), "an unresolved association must not borrow a model's virtual reader metadata");
+    } else {
+        assert!(source.contains(".nickname"), "a resolved association keeps its non-column reader");
+    }
+}
+
+#[test]
+fn nested_fields_for_uses_namespaced_association_target() { nested_fields_for_association_case("namespaced"); }
+
+#[test]
+fn nested_fields_for_uses_explicit_class_name_target() { nested_fields_for_association_case("class_name"); }
+
+#[test]
+fn nested_fields_for_keeps_ordinary_association_precision() { nested_fields_for_association_case("ordinary"); }
+
+#[test]
+fn nested_fields_for_does_not_guess_unresolved_association_target() { nested_fields_for_association_case("unresolved"); }
