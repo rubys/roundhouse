@@ -2167,6 +2167,17 @@ impl<'a> BodyTyper<'a> {
                 } else {
                     None
                 };
+                // The runtime's TimeZoneInfo answers only `name`/`identifier` of Rails'
+                // TZInfo::Timezone; any other method (its `to_s` is "Asia - Tokyo") is refused.
+                if matches!(&recv_ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveSupport::TimeZoneInfo")
+                    && !matches!(method.as_str(), "name" | "identifier")
+                {
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        target: None,
+                        construct: Symbol::from("TZInfo::Timezone method"),
+                        detail: format!("`tzinfo.{method}`: only `name` and `identifier` (the IANA identifier) are modeled"),
+                    }));
+                }
                 if recv_ty.as_ref() == Some(&Ty::Str) && method.as_str() == "bytes"
                     && let Some(b) = block.as_ref()
                     && let ExprNode::Lambda { body, .. } = &*b.node

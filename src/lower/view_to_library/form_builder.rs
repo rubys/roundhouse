@@ -545,8 +545,8 @@ fn emit_select_options(
                 map_loop_options(&args[0], selected.as_ref(), multiple, field_str, parts, ctx)?;
             Some((setup, loop_var))
         }
-        // Bare `<coll>.map { |x| [...] }`.
-        ExprNode::Send { method, block: Some(_), .. } if method.as_str() == "map" => {
+        // Bare `<coll>.map { |x| [...] }` (or `collect`, its alias).
+        ExprNode::Send { method, block: Some(_), .. } if matches!(method.as_str(), "map" | "collect") => {
             let (setup, loop_var) =
                 map_loop_options(&container, selected.as_ref(), multiple, field_str, blank, ctx)?;
             Some((setup, loop_var))
@@ -717,7 +717,8 @@ fn collection_options(
     Some((setup, var))
 }
 
-/// `<coll>.map { |x| [text, value] / [text, {attrs}, value] }` — loop
+/// `<coll>.map { |x| [text, value] / [text, {attrs}, value] }` (or
+/// `collect`) — loop
 /// over the map SOURCE with the lambda's element exprs inlined (the
 /// loop rebinds the lambda's own param name, so the exprs read it
 /// directly).
@@ -733,7 +734,7 @@ fn map_loop_options(
     else {
         return None;
     };
-    if method.as_str() != "map" {
+    if !matches!(method.as_str(), "map" | "collect") {
         return None;
     }
     let ExprNode::Lambda { extra_params, params, body, .. } = &*block.node else { return None };

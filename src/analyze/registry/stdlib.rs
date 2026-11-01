@@ -160,6 +160,11 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         id: ClassId(Symbol::from("Time")),
         args: vec![].into(),
     });
+    // `Time.zone.tzinfo`, flattened like `Time.zone.now`; `lower::time_calendar` grounds it.
+    time_cls.class_methods.insert(Symbol::from("tzinfo"), Ty::Class {
+        id: ClassId(Symbol::from("ActiveSupport::TimeZoneInfo")),
+        args: vec![].into(),
+    });
     time_cls.class_methods.insert(Symbol::from("find_zone"), Ty::Union {
         variants: vec![
             Ty::Class { id: ClassId(Symbol::from("ActiveSupport::TimeZone")), args: vec![].into() },
@@ -1017,12 +1022,18 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // `ActiveSupport::TimeZone` is `runtime/ruby/active_support_ext.rb`'s port; `[]` is typed in dispatch, by its argument.
     {
         let zone = || Ty::Class { id: ClassId(Symbol::from("ActiveSupport::TimeZone")), args: vec![].into() };
+        let tzinfo = || Ty::Class { id: ClassId(Symbol::from("ActiveSupport::TimeZoneInfo")), args: vec![].into() };
         register_stdlib_class(classes, "ActiveSupport::TimeZone", &[
             ("all", Ty::Array { elem: std::sync::Arc::new(zone()) }),
             ("lookup", Ty::Union { variants: vec![zone(), Ty::Nil].into() }),
         ], &[
             ("name", Ty::Str), ("utc_offset", Ty::Int), ("formatted_offset", Ty::Str),
-            ("to_s", Ty::Str), ("now", Ty::Time),
+            ("to_s", Ty::Str), ("now", Ty::Time), ("tzinfo", tzinfo()),
+        ]);
+        // Only `name`/`identifier` of TZInfo::Timezone: the runtime's
+        // `ActiveSupport::TimeZoneInfo` answers nothing else.
+        register_stdlib_class(classes, "ActiveSupport::TimeZoneInfo", &[], &[
+            ("name", Ty::Str), ("identifier", Ty::Str),
         ]);
     }
     register_stdlib_class(classes, crate::analyze::indifferent::CLASS, &[], &[]);
