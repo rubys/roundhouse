@@ -227,6 +227,28 @@ pub fn lower_controllers_with_arel_views_and_assocs(
     )
 }
 
+/// Lower application controllers with their retained source catalogue.
+/// Source-dependent declarations must not use the ingest thread's registry:
+/// it has already been drained and may now belong to another parse.
+/// An explicit association graph preserves callers that defer eager loading.
+pub fn lower_app_controllers(
+    app: &crate::App,
+    extras: Vec<(ClassId, crate::analyze::ClassInfo)>,
+    assocs: &[crate::lower::model_associations::AssociationEdge],
+) -> Vec<LibraryClass> {
+    lower_controllers_with_arel_views_assocs_and_routes(
+        &app.controllers,
+        extras,
+        LowerControllerOptions {
+            sources: &app.sources,
+            schema: Some(&app.schema),
+            views: &app.views,
+            assocs,
+            ..Default::default()
+        },
+    )
+}
+
 /// As `lower_controllers_with_arel_views_and_assocs`, plus a per-controller
 /// map of route-reachable action names. When supplied, a public controller
 /// method is treated as a routable action (implicit render + `process_action`

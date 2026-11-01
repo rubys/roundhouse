@@ -323,6 +323,83 @@ fn unresolved_declaration_cases() -> [(&'static str, &'static str, &'static str)
     ]
 }
 
+fn controller_delegate_files() -> Vec<(String, String)> {
+    let mut files = declaration_order_files("", "\"unused\"", false);
+    files.last_mut().unwrap().1 = "class ProbeController < ApplicationController\ndef index\nrender plain: upcase\nend\ndelegate :upcase, to: :target\nprivate\ndef target; \"ab\"; end\nend\n".into();
+    files
+}
+
+#[test]
+fn non_ruby_emitters_keep_controller_delegates_after_source_registry_drain() {
+    use roundhouse::emit;
+    type Emitter = fn(&roundhouse::App) -> Vec<emit::EmittedFile>;
+    let emitters: &[(&str, Emitter, &str)] = &[
+        ("rust", emit::rust::emit, "fn upcase("),
+        ("crystal", emit::crystal::emit, "def upcase"),
+        ("kotlin", emit::kotlin::emit, "fun upcase("),
+        ("swift", emit::swift::emit, "func upcase("),
+        ("csharp", emit::csharp::emit, " Upcase("),
+        ("typescript", emit::typescript::emit, "upcase():"),
+        ("go", emit::go::emit_overlay_files, ") Upcase("),
+        ("elixir", emit::elixir::emit_overlay_files, "def upcase("),
+        ("python", emit::python::emit, "def upcase("),
+    ];
+    let files = controller_delegate_files();
+    let mut tree: HashMap<PathBuf, Vec<u8>> = files.into_iter().map(|(p, s)| (PathBuf::from(p), s.into_bytes())).collect();
+    // Go and Elixir intentionally emit their controller overlay only for
+    // apps with models; keep this test on those application paths too.
+    tree.insert("db/schema.rb".into(), b"ActiveRecord::Schema.define(version: 1) do\ncreate_table :probe_records do |t|\nt.string :name\nend\nend\n".to_vec());
+    tree.insert("app/models/probe_record.rb".into(), b"class ProbeRecord < ApplicationRecord\nend\n".to_vec());
+    let mut app = ingest_app_from_tree(tree).expect("ingest controller delegate");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let mut missing = Vec::new();
+    for reused in [false, true] {
+        for &(name, emitter, definition) in emitters {
+            // A different ingest can reuse the same FileIds. Neither an empty
+            // registry nor unrelated source text may replace App::sources.
+            roundhouse::ingest::sources::reset();
+            if reused {
+                for index in 0..app.sources.len() {
+                    roundhouse::ingest::sources::register(
+                        &format!("other{index}.rb"), "class Other; end",
+                    );
+                }
+            }
+            let files = emitter(&app);
+            if !files.iter().any(|file| {
+                let path = file.path.to_string_lossy().to_lowercase();
+                (path.contains("controller") || path.ends_with("probecontroller.ex"))
+                    && file.content.lines().any(|line| line.contains(definition))
+            }) {
+                missing.push(format!("{name}:reused={reused}"));
+            }
+        }
+    }
+    assert!(missing.is_empty(), "controller delegate missing from {missing:?}");
+}
+
+#[test]
+fn rails_oracle_controller_delegates_survive_source_registry_drain() {
+    if !require_rails_oracle() { return; }
+    use roundhouse::dialect::MethodVisibility;
+    let files = controller_delegate_files();
+    let output = "puts [c.response.body, ProbeController.public_method_defined?(:upcase)].join('|')";
+    let expected = oracle_program(&files, "ProbeController", output);
+    assert_eq!(expected, "AB|true\n");
+    let actual = run_emitted_program(&files,
+        "require_relative 'app/controllers/probe_controller'\nc = ProbeController.new\nc.process_action(:index)\nputs [c.body, ProbeController.public_method_defined?(:upcase)].join('|')\n");
+    assert_eq!(actual, expected);
+    let tree = files.into_iter().map(|(p, s)| (PathBuf::from(p), s.into_bytes())).collect();
+    let mut app = ingest_app_from_tree(tree).expect("ingest controller delegate");
+    roundhouse::session::analyze_and_lower(&mut app);
+    roundhouse::ingest::sources::reset();
+    let classes = roundhouse::emit::python::overlay::lower_overlay(&app).controllers;
+    let controller = classes.iter().find(|c| c.name.0.as_str() == "ProbeController").unwrap();
+    let forwarder = controller.methods.iter().find(|m| m.name.as_str() == "upcase")
+        .expect("delegate retained after the source registry was drained");
+    assert_eq!(forwarder.visibility, MethodVisibility::Public);
+}
+
 #[test]
 fn source_declaration_order_resolves_controller_and_sidecar_collisions() {
     for (name, declarations, expression, _) in declaration_order_cases().into_iter().chain(class_declaration_order_cases()) {

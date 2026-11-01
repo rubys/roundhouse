@@ -666,11 +666,9 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         controller_extras.extend(crate::lower::library_extras::extras_from_lcs(&view_lcs));
         controller_extras.extend(crate::lower::library_extras::extras_from_funcs(&route_helper_funcs));
         let assocs = crate::lower::model_associations::compute_association_graph(app);
-        let mut lcs = crate::lower::lower_controllers_with_arel_views_and_assocs(
-            &app.controllers,
+        let mut lcs = crate::lower::lower_app_controllers(
+            app,
             controller_extras,
-            Some(&app.schema),
-            &app.views,
             &assocs,
         );
         let registry = crate::emit::rust::decide::str_color::build_registry(&lcs, &[]);

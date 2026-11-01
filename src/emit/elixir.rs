@@ -476,11 +476,10 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
             // `compute_association_graph(app)` once the eager-load IR
             // (multi-drain + preload-each) is functionalized.
             let raw_controller_lcs =
-                crate::lower::controller_to_library::lower_controllers_with_arel_and_views(
-                    &app.controllers,
+                crate::lower::controller_to_library::lower_app_controllers(
+                    app,
                     model_extras,
-                    Some(&app.schema),
-                    &app.views,
+                    &[],
                 );
             // Materialize the AC baseline into each concrete controller
             // FIRST — the base `initialize` is what seeds the response-state

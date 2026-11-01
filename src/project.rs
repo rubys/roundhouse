@@ -8348,11 +8348,10 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
     // typed) are still ledgered on strict targets (Thomas 2B).
     // The throwaway lower is the strict-target shape whatever `target` is; its own reports belong to the target's real lower, which runs at emit.
     let (lowered_controllers, _) = emit::diagnostics::scope(|| {
-        crate::lower::controller_to_library::lower_controllers_with_arel_and_views(
-            &app.controllers,
+        crate::lower::controller_to_library::lower_app_controllers(
+            app,
             Vec::new(),
-            Some(&app.schema),
-            &app.views,
+            &[],
         )
     });
     for class in &lowered_controllers {

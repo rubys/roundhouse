@@ -301,11 +301,9 @@ func main() {\n\
         let model_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
             model_registry.into_iter().collect();
         let assocs = crate::lower::model_associations::compute_association_graph(app);
-        let controller_lcs = crate::lower::controller_to_library::lower_controllers_with_arel_views_and_assocs(
-            &app.controllers,
+        let controller_lcs = crate::lower::controller_to_library::lower_app_controllers(
+            app,
             model_extras.clone(),
-            Some(&app.schema),
-            &app.views,
             &assocs,
         );
         // Pass the lowered models as the callee-registry extras so

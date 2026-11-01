@@ -66,11 +66,9 @@ pub fn lower_overlay(app: &App) -> OverlayLcs {
     );
     let model_extras: Vec<_> = model_registry.into_iter().collect();
     let assocs = crate::lower::model_associations::compute_association_graph(app);
-    let controllers = crate::lower::lower_controllers_with_arel_views_and_assocs(
-        &app.controllers,
+    let controllers = crate::lower::lower_app_controllers(
+        app,
         model_extras.clone(),
-        Some(&app.schema),
-        &app.views,
         &assocs,
     );
     let mut views =

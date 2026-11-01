@@ -188,6 +188,7 @@ end
         &app.controllers,
         Vec::new(),
         LowerControllerOptions {
+            sources: &app.sources,
             inferred_params: Some(&inferred),
             routed_by_controller: Some(&routed),
             ..Default::default()
