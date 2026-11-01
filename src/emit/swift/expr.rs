@@ -2456,14 +2456,16 @@ pub(super) fn wrap_return(e: &Expr) -> String {
             }
             let held = temp_var(n);
             let coerced = coerce_for_prop(&sn, value, assign_value(value));
-            let store = if IN_MODULE.with(|f| *f.borrow()) { format!("{sn} = {held}") } else { format!("self.{sn} = {held}") };
             // An Integer literal held for a Float property: Swift infers the
-            // literal's `let` as `Int`, which a `Double` property won't take.
+            // literal's `let` as `Int`, which the method returns (Ruby's
+            // `@ratio = 0` answers the Integer) and which a `Double` property
+            // won't take, so the store converts it.
             let int_into_float = matches!(&*value.node, ExprNode::Lit { value: crate::expr::Literal::Int { .. } })
                 && matches!(instance_prop_ty(name.as_str()).as_ref().map(crate::ty::Ty::peel_nilable), Some(crate::ty::Ty::Float));
-            let annotation = if int_into_float { ": Double" } else { "" };
+            let stored = if int_into_float { format!("Double({held})") } else { held.clone() };
+            let store = if IN_MODULE.with(|f| *f.borrow()) { format!("{sn} = {stored}") } else { format!("self.{sn} = {stored}") };
             // Its own scope, so an app local of the same name can't collide.
-            format!("do {{\n{}\n}}", indent(&format!("let {held}{annotation} = {coerced}\n{store}\nreturn {held}")))
+            format!("do {{\n{}\n}}", indent(&format!("let {held} = {coerced}\n{store}\nreturn {held}")))
         }
         ExprNode::Return { .. }
         | ExprNode::Raise { .. }

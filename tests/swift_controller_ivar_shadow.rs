@@ -150,10 +150,12 @@ fn an_empty_collection_return_reads_the_property_past_a_same_named_param() {
     assert!(widget.contains("self.items = []\n        return self.items"), "{widget}");
 }
 
-/// An Integer literal stored in a Float property is held as a `Double`,
-/// so the held value is the property's type and the method returns it.
+/// An Integer literal stored in a Float property stays an `Int` where the
+/// method returns it (Ruby's `@ratio = 0` answers the Integer, and the
+/// method is `-> Int`); only the store converts it to the property's
+/// `Double`.
 #[test]
-fn an_integer_literal_stored_in_a_float_property_is_held_as_double() {
+fn an_integer_literal_stored_in_a_float_property_converts_at_the_store() {
     let (emitted, errors) = emit_and_run::empty_app()
         .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n")
         .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
@@ -162,6 +164,9 @@ fn an_integer_literal_stored_in_a_float_property_is_held_as_double() {
         .emit(BuildTarget::Swift);
     assert!(errors.is_empty(), "{errors:?}");
     let widget = std::fs::read_to_string(emitted.join("Sources/App/app/models/Widget.swift")).unwrap();
-    assert!(widget.contains("let __rhRet: Double = 0\n"), "{widget}");
+    assert!(widget.contains("func reset() -> Int {"), "{widget}");
+    assert!(widget.contains("let __rhRet = 0\n"), "{widget}");
+    assert!(widget.contains("self.ratio = Double(__rhRet)\n"), "{widget}");
+    assert!(!widget.contains("let __rhRet: Double"), "{widget}");
     assert!(widget.contains("let __rhRet = 1.5\n"), "{widget}");
 }
