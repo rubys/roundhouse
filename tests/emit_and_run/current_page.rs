@@ -174,3 +174,32 @@ fn current_page_in_an_unreachable_template_is_a_warning() {
         .emit(BuildTarget::Typescript);
     assert!(errors.iter().any(|e| e.contains("current_page? not supported")), "a routed template keeps the error: {errors:?}");
 }
+
+/// The rewrite runs before types: an argument analysis can't type as a
+/// String (a record, which Rails passes to `url_for`; an options Hash in
+/// a variable; a value that may be nil) is refused, and route helpers,
+/// literals and interpolated paths stay rewritten.
+#[test]
+fn a_current_page_argument_not_typed_as_a_string_is_refused() {
+    for call in [
+        "current_page?(@article)",
+        "current_page?(Article.first)",
+        "current_page?(@article.title.presence)",
+    ] {
+        let errors = emit_and_run::real_blog()
+            .edit("app/views/articles/show.html.erb", "<% content_for :title, \"Showing article\" %>\n", &format!("<% content_for :title, \"Showing article\" %>\n<%= {call} %>\n"))
+            .check_errors();
+        assert!(errors.iter().any(|e| e.contains("current_page? not supported") && e.contains("String")), "{call}: {errors:?}");
+    }
+    for call in [
+        "current_page?(articles_path)",
+        "current_page?(article_url(@article))",
+        "current_page?(\"/articles\")",
+        "current_page?(\"/articles/#{@article.id}\")",
+    ] {
+        let errors = emit_and_run::real_blog()
+            .edit("app/views/articles/show.html.erb", "<% content_for :title, \"Showing article\" %>\n", &format!("<% content_for :title, \"Showing article\" %>\n<%= {call} %>\n"))
+            .check_errors();
+        assert!(!errors.iter().any(|e| e.contains("current_page?")), "{call}: {errors:?}");
+    }
+}

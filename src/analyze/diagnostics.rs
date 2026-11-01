@@ -130,6 +130,19 @@ fn unlowered_current_page(app: &App) -> Vec<Diagnostic> {
             let reason = "only a path or URL argument is modeled (not an options hash, a splat, `check_parameters:` or `method:`)";
             out.push(Diagnostic::unsupported(expr.span, None, "current_page?", reason));
         }
+        // `ingest::current_page` rewrites before types: a path analysis
+        // can't type as a String (a record, which Rails passes to
+        // `url_for`; a Hash; a value that may be nil) would reach the
+        // runtime's `path.bytes`.
+        if let ExprNode::Send { recv: Some(r), method, args, .. } = &*expr.node
+            && method.as_str() == "current_page_path?"
+            && matches!(&*r.node, ExprNode::Const { path } if path.len() == 2 && path[0].as_str() == "ActionView" && path[1].as_str() == "ViewHelpers")
+            && args.get(1).is_some_and(|path| !matches!(path.ty, Some(crate::ty::Ty::Str)))
+            && !expr.span.is_synthetic()
+        {
+            let reason = "its argument is not known to be a String path or URL; a record or an options hash goes through Rails' `url_for`, which is not modeled";
+            out.push(Diagnostic::unsupported(expr.span, None, "current_page?", reason));
+        }
         expr.node.for_each_child(&mut |child| visit(child, out));
     }
     let mut out = Vec::new();
