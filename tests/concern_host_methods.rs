@@ -11,8 +11,8 @@
 //! 2. **Several includers that agree.** `self` stays the module, and the
 //!    module is lent the methods every includer resolves to one type.
 //! 3. **Several includers that disagree** (`Comment?` in one, `Comment`
-//!    in the other). Nothing is lent; the call stays the gradual escape
-//!    it was.
+//!    in the other). Nothing is lent to the module. A controller can
+//!    still inherit its parent's precisely typed copy of the method.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -66,22 +66,35 @@ end
 
 const BASE: &[(&str, &str)] = &[
     ("db/schema.rb", SCHEMA),
-    ("config/routes.rb", "Rails.application.routes.draw do\n  resources :notes, only: [:show]\nend\n"),
-    ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
+    (
+        "config/routes.rb",
+        "Rails.application.routes.draw do\n  resources :notes, only: [:show]\nend\n",
+    ),
+    (
+        "app/models/application_record.rb",
+        "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+    ),
     ("app/models/article.rb", ARTICLE),
     ("app/models/comment.rb", COMMENT),
     ("app/controllers/concerns/impersonation.rb", INNER),
     ("app/controllers/notes_controller.rb", NOTES),
-    ("app/views/notes/show.html.erb", "<p><%= @note.body %></p>\n"),
+    (
+        "app/views/notes/show.html.erb",
+        "<p><%= @note.body %></p>\n",
+    ),
 ];
 
-fn diagnostics(extra: &[(&str, &str)]) -> Vec<String> {
+fn app(extra: &[(&str, &str)]) -> roundhouse::App {
     let tree: HashMap<PathBuf, Vec<u8>> = BASE
         .iter()
         .chain(extra)
         .map(|(p, c)| (PathBuf::from(*p), c.as_bytes().to_vec()))
         .collect();
-    let mut app = ingest_app_from_tree(tree).expect("ingest tree");
+    ingest_app_from_tree(tree).expect("ingest tree")
+}
+
+fn diagnostics(extra: &[(&str, &str)]) -> Vec<String> {
+    let mut app = app(extra);
     roundhouse::session::analyze_and_lower(&mut app);
     diagnose(&app).into_iter().map(|d| d.to_string()).collect()
 }
@@ -116,7 +129,7 @@ fn several_includers_that_agree_lend_the_module_their_method() {
 
 #[test]
 fn several_includers_that_disagree_lend_nothing() {
-    let found = diagnostics(&[
+    let mut app = app(&[
         (
             "app/controllers/application_controller.rb",
             "class ApplicationController < ActionController::Base\n  include Impersonation\n\n  \
@@ -128,9 +141,65 @@ fn several_includers_that_disagree_lend_nothing() {
              private\n\n  def resume_comment\n    Comment.find(1)\n  end\nend\n",
         ),
     ]);
+    let mut typed = app.clone();
+    let mut analyzer = roundhouse::analyze::Analyzer::new(&typed);
+    analyzer.analyze(&mut typed);
+    let module = analyzer
+        .class_registry()
+        .iter()
+        .find(|(id, _)| id.0.as_str() == "Impersonation")
+        .unwrap()
+        .1;
     assert!(
-        found.iter().any(|d| d.contains("gradual_untyped")),
-        "the call has no single answer and must stay gradual: {found:#?}"
+        !module
+            .instance_methods
+            .contains_key(&"resume_comment".into()),
+        "disagreeing hosts must not lend their method to the concern"
     );
+    assert!(
+        module.instance_methods[&"current_article".into()].has_untyped_arm(),
+        "the module itself still has no single answer"
+    );
+
+    // A warning on the controller was only an indirect proxy for that
+    // invariant: its own inherited method can now refine before an
+    // external ancestor contributes an arbitrary return value.
+    fn current_article_calls(expr: &roundhouse::expr::Expr, types: &mut Vec<roundhouse::ty::Ty>) {
+        if let roundhouse::expr::ExprNode::Send { method, .. } = &*expr.node
+            && method.as_str() == "current_article"
+            && let Some(ty) = &expr.ty
+        {
+            types.push(ty.clone());
+        }
+        expr.node
+            .for_each_child(&mut |child| current_article_calls(child, types));
+    }
+    let controller = typed
+        .controllers
+        .iter()
+        .find(|c| c.name.0.as_str() == "NotesController")
+        .unwrap();
+    let mut calls = Vec::new();
+    for action in controller.actions() {
+        current_article_calls(&action.body, &mut calls);
+    }
+    assert_eq!(calls.len(), 1);
+    let roundhouse::ty::Ty::Union { variants } = &calls[0] else {
+        panic!("{:?}", calls[0])
+    };
+    assert_eq!(variants.len(), 2);
+    assert!(
+        variants
+            .iter()
+            .any(|ty| matches!(ty, roundhouse::ty::Ty::Nil))
+    );
+    assert!(
+        variants
+            .iter()
+            .any(|ty| matches!(ty, roundhouse::ty::Ty::Class { id, args }
+        if id.0.as_str() == "Article" && args.is_empty()))
+    );
+    roundhouse::session::analyze_and_lower(&mut app);
+    let found: Vec<_> = diagnose(&app).into_iter().map(|d| d.to_string()).collect();
     assert!(!found.iter().any(|d| d.starts_with("error")), "{found:#?}");
 }
