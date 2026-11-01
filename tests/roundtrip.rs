@@ -162,6 +162,7 @@ fn tiny_blog_round_trips() {
         gem_package_settings: Vec::new(),
         auto_source_gems: Vec::new(),
         initializer_response_headers: Vec::new(),
+        runs_after_initialize: false,
         collection_cache_store: None,
         app_requires: Vec::new(),
         sql_functions: Vec::new(),

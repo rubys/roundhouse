@@ -15,6 +15,7 @@
 //! type. The expression-level recursive descent lives in [`expr`]; small
 //! cross-cutting Prism AST helpers live in [`util`].
 
+mod after_initialize;
 mod alba;
 mod conditional_permit;
 mod unreachable_views;
