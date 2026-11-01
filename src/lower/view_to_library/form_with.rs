@@ -876,73 +876,19 @@ fn classify_form_with_components(
         }
     };
 
-    if let Some((nested_model, nested_name, nested_action)) =
-        nested_resource_form(&model, &route_helpers)
-    {
+    // `model: [prefix..., record]` — Rails' polymorphic array: scope
+    // symbols (`[:mod, tag]`) and parent records (`[article, comment]`)
+    // ahead of the record the form edits. Left unrecognized, the WHOLE
+    // array flowed into the plain-record machinery: `[article, comment]
+    // .persisted?`, `[article, comment].id`, and a helper named after the
+    // view directory (`comment_path` from `comments/`, which a route
+    // table nesting comments under articles does not have) —
+    // `check` stayed clean while the emitted form was broken.
+    if let Some(form) = prefixed_record_form(&model, ctx) {
+        let (action, method) = prefixed_record_action(&form, ctx, method_expr.clone());
         return Some(FormWithComponents {
-            model: nested_model,
-            model_name: nested_name,
-            action: nested_action,
-            method: method_expr.clone().unwrap_or_else(default_post),
-            opts_entries,
-            id_prefix: namespace.clone().unwrap_or_default(),
-        });
-    }
-
-    // `model: [:mod, tag]` — Rails' scope-prefix array (namespace
-    // symbol(s) + record). The record is the model for fields and
-    // persistence; the symbols only prefix the route helper
-    // (`mod_tag_path`/`mod_tags_path`). Left unrecognized, the WHOLE
-    // array flowed into the plain-record machinery: `[:mod, tag]
-    // .persisted?`, `[:mod, tag].id`, and (with the namespaced view
-    // dir) a literal slash in the helper name — three refusals from
-    // one hole, found on the lobsters mod forms.
-    if let Some((record, record_singular, scope_prefix)) = scoped_record_form(&model) {
-        let record_plural = crate::naming::pluralize_snake(&record_singular);
-        let member_name = format!("{scope_prefix}_{record_singular}_path");
-        let collection_name = format!(
-            "{scope_prefix}_{}_path",
-            crate::lower::routes::collection_name(&record_singular, &record_plural)
-        );
-        let persisted =
-            send(Some(record.clone()), "persisted?", Vec::new(), None, false);
-        let member_arg = if ctx.slug_models.contains(record_singular.as_str()) {
-            send(Some(record.clone()), "to_param", Vec::new(), None, false)
-        } else {
-            send(Some(record.clone()), "id", Vec::new(), None, false)
-        };
-        let member_path = super::member_path_call(ctx, &member_name, member_arg);
-        let collection_path =
-            send(Some(route_helpers()), &collection_name, Vec::new(), None, false);
-        let has_member = ctx.route_helper_names.is_empty()
-            || ctx.route_helper_names.contains(&member_name);
-        let has_collection = ctx.route_helper_names.is_empty()
-            || ctx.route_helper_names.contains(&collection_name);
-        let action = match (has_member, has_collection) {
-            (true, false) => member_path,
-            (false, true) => collection_path,
-            _ => Expr::new(
-                Span::synthetic(),
-                ExprNode::If {
-                    cond: persisted.clone(),
-                    then_branch: member_path,
-                    else_branch: collection_path,
-                },
-            ),
-        };
-        let method = method_expr.clone().unwrap_or_else(|| {
-            Expr::new(
-                Span::synthetic(),
-                ExprNode::If {
-                    cond: persisted,
-                    then_branch: lit_sym(Symbol::from("patch")),
-                    else_branch: lit_sym(Symbol::from("post")),
-                },
-            )
-        });
-        return Some(FormWithComponents {
-            model: record,
-            model_name: record_singular,
+            model: form.record,
+            model_name: form.model_name,
             action,
             method,
             opts_entries,
@@ -1150,100 +1096,158 @@ pub(super) fn str_or_sym_literal(e: &Expr) -> Option<String> {
     }
 }
 
-/// Match `model: [:scope, record]` (symbol namespace prefix(es) + an
-/// existing record — Rails' scoped-route form) and produce
-/// `(record, record_singular, scope_prefix)` where `scope_prefix` is
-/// the underscore-joined symbol chain (`[:mod, :admin]` → "mod_admin").
-/// The record must be a bare local/ivar so its singular can be read
-/// from the name; anything else returns None and falls through.
-fn scoped_record_form(model: &Expr) -> Option<(Expr, String, String)> {
-    let ExprNode::Array { elements, .. } = &*model.node else {
-        return None;
-    };
-    if elements.len() < 2 {
-        return None;
-    }
-    let (record, scopes) = elements.split_last()?;
-    let mut prefix_parts: Vec<String> = Vec::new();
-    for s in scopes {
-        let ExprNode::Lit { value: Literal::Sym { value } } = &*s.node else {
-            return None;
-        };
-        prefix_parts.push(value.as_str().to_string());
-    }
-    let record_name = match &*record.node {
-        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => name.as_str().to_string(),
-        ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
-            method.as_str().to_string()
-        }
-        _ => return None,
-    };
-    let record_singular = singularize(&snake_case(&record_name));
-    Some((record.clone(), record_singular, prefix_parts.join("_")))
+/// `model: [prefix..., record]` broken into the parts Rails'
+/// `polymorphic_path` reads: the record the form edits, and the route
+/// prefix the elements ahead of it contribute.
+struct PrefixedRecordForm {
+    record: Expr,
+    /// The record's singular route key (`comment`, `admin_note`).
+    record_key: String,
+    /// The record's `param_key`, which names the fields (`comment[body]`).
+    model_name: String,
+    /// The underscore-joined prefix (`mod`, `article`, `project_task`).
+    prefix: String,
+    /// One segment argument per parent record; scope symbols take none.
+    prefix_args: Vec<Expr>,
+    /// `Class.new(...)` — never persisted, so always the collection route.
+    new_record: bool,
 }
 
-/// Match `model: [parent, Class.new(...)]` (the polymorphic-array form
-/// Rails uses for nested resources) and produce `(child, child_singular,
-/// nested_action_expr)` where the action targets the nested collection
-/// path. Returns None for any other shape so the caller falls through
-/// to plain-record handling.
-fn nested_resource_form(
-    model: &Expr,
-    route_helpers: &dyn Fn() -> Expr,
-) -> Option<(Expr, String, Expr)> {
+/// Match `model: [prefix..., record]`, where each prefix element is a
+/// scope symbol (`:mod`) or a parent record local (`article`), and the
+/// record is a local or a `Class.new(...)`. Returns None for any other
+/// shape so the caller falls through to plain-record handling.
+fn prefixed_record_form(model: &Expr, ctx: &ViewCtx) -> Option<PrefixedRecordForm> {
     let ExprNode::Array { elements, .. } = &*model.node else {
         return None;
     };
-    if elements.len() < 2 {
+    let (record, prefixes) = elements.split_last()?;
+    if prefixes.is_empty() {
         return None;
     }
-    let parent = elements.first()?;
-    let child = elements.last()?;
-
-    // Parent local name: only support a Var receiver (e.g. `article`)
-    // for now. An ivar would have been pre-rewritten to a local.
-    let parent_local = match &*parent.node {
-        ExprNode::Var { name, .. } => name.as_str().to_string(),
-        ExprNode::Send {
-            recv: None, method, args, block: None, ..
-        } if args.is_empty() => method.as_str().to_string(),
-        _ => return None,
-    };
-    let parent_singular = singularize(&snake_case(&parent_local));
-
-    // Child class: only support `Class.new(...)` shape. Comment.new is
-    // by definition not persisted, so the action is the nested
-    // collection path with method :post.
-    let ExprNode::Send {
-        recv: Some(child_recv),
-        method: child_method,
-        ..
-    } = &*child.node
-    else {
-        return None;
-    };
-    if child_method.as_str() != "new" {
-        return None;
+    let mut prefix_parts: Vec<String> = Vec::new();
+    let mut prefix_args: Vec<Expr> = Vec::new();
+    for el in prefixes {
+        if let ExprNode::Lit { value: Literal::Sym { value } } = &*el.node {
+            prefix_parts.push(value.as_str().to_string());
+            continue;
+        }
+        let (route_key, slug_key) = polymorphic_record_keys(el, ctx)?;
+        prefix_args.push(record_segment(el, &slug_key, ctx));
+        prefix_parts.push(route_key);
     }
-    let ExprNode::Const { path } = &*child_recv.node else {
-        return None;
+    let (record_key, new_record) = match &*record.node {
+        ExprNode::Send { recv: Some(recv), method, .. } if method.as_str() == "new" => {
+            let ExprNode::Const { path } = &*recv.node else {
+                return None;
+            };
+            let class = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+            (crate::naming::underscore_words(&class), true)
+        }
+        _ => (polymorphic_record_keys(record, ctx)?.0, false),
     };
-    let class_name = path.last()?.as_str();
-    let child_singular = snake_case(class_name);
-    let child_plural = crate::naming::pluralize_snake(&child_singular);
-    let child_collection = crate::lower::routes::collection_name(&child_singular, &child_plural);
+    Some(PrefixedRecordForm {
+        model_name: record_model_name(record, ctx, &record_key),
+        record: record.clone(),
+        record_key,
+        prefix: prefix_parts.join("_"),
+        prefix_args,
+        new_record,
+    })
+}
 
-    // RouteHelpers.<parent_singular>_<child collection>_path(parent.id)
-    let parent_id = send(Some(parent.clone()), "id", Vec::new(), None, false);
-    let action = send(
-        Some(route_helpers()),
-        &format!("{parent_singular}_{child_collection}_path"),
-        vec![parent_id],
-        None,
-        true,
+/// A record local's `(singular route key, slug-model key)`. The analyzer's
+/// class wins over the binding's name, which only matches the model by
+/// convention (`comment` holding a Comment); a namespaced class keeps its
+/// namespace in the route key, as Rails' `singular_route_key` does
+/// (`Admin::Note` → `admin_note`).
+fn polymorphic_record_keys(el: &Expr, ctx: &ViewCtx) -> Option<(String, String)> {
+    let name = record_local_name(el)?;
+    if let Some(crate::ty::Ty::Class { id, .. }) = el.ty.as_ref().map(crate::ty::Ty::peel_nilable) {
+        let class = id.0.as_str();
+        return Some((crate::naming::underscore_words(class), snake_case(class)));
+    }
+    let key = ctx
+        .ivar_models
+        .get(&name)
+        .cloned()
+        .unwrap_or_else(|| singularize(&snake_case(&name)));
+    Some((key.replace("::", "_"), key))
+}
+
+/// The value Rails fills a record's `:id` segment with: `to_param` for a
+/// model that overrides it, `id` otherwise. A typed scalar either way —
+/// the whole record would widen the helper's param on strict targets.
+fn record_segment(record: &Expr, slug_key: &str, ctx: &ViewCtx) -> Expr {
+    let param = if ctx.slug_models.contains(slug_key) { "to_param" } else { "id" };
+    send(Some(record.clone()), param, Vec::new(), None, false)
+}
+
+/// The `(action, method)` of a [`PrefixedRecordForm`]: the member route
+/// with PATCH for a persisted record, the collection route with POST for
+/// a new one. An explicit `method:` wins.
+fn prefixed_record_action(
+    form: &PrefixedRecordForm,
+    ctx: &ViewCtx,
+    method_expr: Option<Expr>,
+) -> (Expr, Expr) {
+    let plural = crate::naming::pluralize_snake(&form.record_key);
+    let collection_name = format!(
+        "{}_{}_path",
+        form.prefix,
+        crate::lower::routes::collection_name(&form.record_key, &plural)
     );
-
-    Some((child.clone(), child_singular, action))
+    let collection_path = super::route_helpers_call(&collection_name, form.prefix_args.clone());
+    if form.new_record {
+        let method = method_expr.unwrap_or_else(|| lit_sym(Symbol::from("post")));
+        return (collection_path, method);
+    }
+    let member_name = format!("{}_{}_path", form.prefix, form.record_key);
+    let mut member_args = form.prefix_args.clone();
+    // A singular resource's member helper takes no segment for the record
+    // itself (`ViewCtx::route_helper_arity`); an unknown helper keeps it.
+    let takes_record = ctx
+        .route_helper_arity
+        .get(&member_name)
+        .is_none_or(|n| *n > form.prefix_args.len());
+    if takes_record {
+        let slug_key = polymorphic_record_keys(&form.record, ctx)
+            .map(|(_, slug)| slug)
+            .unwrap_or_else(|| form.record_key.clone());
+        member_args.push(record_segment(&form.record, &slug_key, ctx));
+    }
+    let member_path = super::route_helpers_call(&member_name, member_args);
+    let persisted = send(Some(form.record.clone()), "persisted?", Vec::new(), None, false);
+    // Emit only the arms whose route helper EXISTS (nested comments with
+    // only `create`/`destroy` still name both; a member-only resource does
+    // not). An empty helper set (harnesses without routes) keeps both.
+    let has_member = ctx.route_helper_names.is_empty()
+        || ctx.route_helper_names.contains(&member_name);
+    let has_collection = ctx.route_helper_names.is_empty()
+        || ctx.route_helper_names.contains(&collection_name);
+    let action = match (has_member, has_collection) {
+        (true, false) => member_path,
+        (false, true) => collection_path,
+        _ => Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: persisted.clone(),
+                then_branch: member_path,
+                else_branch: collection_path,
+            },
+        ),
+    };
+    let method = method_expr.unwrap_or_else(|| {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: persisted,
+                then_branch: lit_sym(Symbol::from("patch")),
+                else_branch: lit_sym(Symbol::from("post")),
+            },
+        )
+    });
+    (action, method)
 }
 
 /// True when the receiver is a `<x>.errors` Send — i.e. the iterable
