@@ -116,7 +116,7 @@ fn run_case(mut command: Command, mode: &str) -> Vec<String> {
         "open_frame",
         frame(&mut input).unwrap() == (1, b"ready".to_vec())
     );
-    if mode == "client" || mode == "race" {
+    if mode == "client" || mode == "client_race" || mode == "race" {
         if mode == "race" {
             thread::sleep(Duration::from_millis(150));
         }
@@ -158,7 +158,7 @@ fn run_case(mut command: Command, mode: &str) -> Vec<String> {
         close = Some(payload);
     }
     let received_reply = close.is_some() && !["server_eof", "server_silent"].contains(&mode);
-    if close.is_some() && !["client", "race"].contains(&mode) {
+    if close.is_some() && !["client", "client_race", "race"].contains(&mode) {
         thread::sleep(Duration::from_millis(100));
         check!(
             "no_callback_or_cleanup_before_peer_result",
@@ -239,12 +239,13 @@ fn run_case(mut command: Command, mode: &str) -> Vec<String> {
     failed
 }
 
-fn modes() -> [&'static str; 11] {
+fn modes() -> [&'static str; 12] {
     [
         "server",
         "server_eof",
         "server_silent",
         "client",
+        "client_race",
         "race",
         "open_close",
         "concurrent",

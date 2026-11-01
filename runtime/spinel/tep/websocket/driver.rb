@@ -121,8 +121,10 @@ module Tep
         @wlock.synchronize do
           unless @closing || @closed
             @closing = true
-            @close_code = code
-            @close_reason = code == 0 ? "" : reason.byteslice(0, 123)
+            unless @close_complete
+              @close_code = code
+              @close_reason = code == 0 ? "" : reason.byteslice(0, 123)
+            end
             begin
               if @fd >= 0
                 Driver.send_frame(@fd, Tep::WebSocket::OPCODE_CLOSE, body)

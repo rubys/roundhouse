@@ -2,6 +2,22 @@
 # registry over a real socket, including reply, EOF and silent closing peers.
 require_relative "../runtime/spinel/tep/tep"
 
+# Force a local request at the echo boundary, after the receiver has recorded
+# the peer result. The event must still describe that received result.
+class LifecycleDriver < Tep::WebSocket::Driver
+  def initialize(fd, force_local)
+    super(fd)
+    @force_local = force_local
+  end
+  def close(code, reason)
+    if @force_local && code == 4001
+      super(4000, "local")
+    else
+      super(code, reason)
+    end
+  end
+end
+
 class LifecycleReport
   attr_accessor :close_calls, :close_code, :close_reason, :presence_calls
   def initialize
@@ -90,7 +106,7 @@ $stdout.flush
 fd = Sock.sp_net_accept(listener)
 Sock.sp_net_set_nonblock(fd)
 io = IO.for_fd(fd, autoclose: false)
-ws = Tep::WebSocket::Driver.new(fd)
+ws = LifecycleDriver.new(fd, mode == "client_race")
 ws.set_on_open(LifecycleOpen.new(ws, mode))
 ws.set_on_message(LifecycleMessage.new)
 ws.set_on_close(LifecycleClose.new(mode == "close_error"))
