@@ -27,7 +27,7 @@ const FILES: &[(&str, &str)] = &[
     ("lib/paygate/gateways/bogus.rb", "module Paygate\n  class BogusGateway < Base\n    CODE = :ok\n  end\nend\n"),
     (
         "lib/paygate/gateways/card_net.rb",
-        "require \"set\"\n\nmodule Paygate\n  class CardNetGateway < Base\n    APPROVED, DECLINED = 1, \"declined\"\n    SEEN = Set.new([APPROVED])\n\n    def self.codes = [APPROVED, DECLINED, SEEN.include?(1)]\n  end\nend\n",
+        "require \"set\"\n\nmodule Paygate\n  class CardNetGateway < Base\n    APPROVED,\n      DECLINED = 1, \"DECLINED\"\n    SEEN = Set.new([APPROVED])\n\n    def self.codes = [APPROVED, DECLINED, SEEN.include?(1)]\n  end\nend\n",
     ),
 ];
 
@@ -38,7 +38,7 @@ p Paygate::Base.all
 p Paygate.autoload?(:BogusGateway)
 "#;
 
-const EXPECTED: &str = "[]\n:ok\n[1, \"declined\", true]\n[\"Paygate::BogusGateway\", \"Paygate::CardNetGateway\"]\nnil\n";
+const EXPECTED: &str = "[]\n:ok\n[1, \"DECLINED\", true]\n[\"Paygate::BogusGateway\", \"Paygate::CardNetGateway\"]\nnil\n";
 
 fn native() -> String {
     let dir = std::env::temp_dir().join(format!("rh_gem_glob_autoload_native_{}", std::process::id()));
@@ -110,6 +110,24 @@ fn a_strict_target_refuses_the_module_body_global_write_by_name() {
         errors.iter().any(|e| e.contains("class body statement") && e.contains("$paygate_loaded = true")),
         "{errors:#?}"
     );
+}
+
+#[test]
+fn a_multiple_constant_write_whose_value_calls_a_method_is_refused() {
+    // Ruby evaluates `pick` before it assigns `A`, so `pick` sees `A`
+    // undefined; writing the pairs one by one would let it see `A`.
+    // A value that runs code is not carried, and the constants it would
+    // have written are reported, not written out of order.
+    let (_tree, errors) = emit_and_run::empty_app()
+        .write("roundhouse.yml", "")
+        .write("Gemfile.lock", "PATH\n  remote: vendor/gems/paygate-1.0.0\n  specs:\n    paygate (1.0.0)\n\nGEM\n  remote: https://rubygems.org/\n  specs:\n\nDEPENDENCIES\n  paygate!\n")
+        .write("config/application.rb", "require \"paygate\"\n")
+        .write(
+            "vendor/gems/paygate-1.0.0/lib/paygate.rb",
+            "module Paygate\n  def self.pick = const_defined?(:A, false) ? :seen : :unseen\n  A, B = pick, 2\n  def self.codes = [A, B]\nend\n",
+        )
+        .emit(BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("constant not supported") && e.contains("Paygate::A")), "{errors:#?}");
 }
 
 const SYM_FILES: &[(&str, &str)] = &[

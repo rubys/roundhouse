@@ -1133,16 +1133,22 @@ fn report_replayed_class_bodies(app: &App, target: BuildTarget) {
     }
 }
 
-/// A class or module body statement the CRuby and JRuby trees write back
-/// where the source has it (`expr::BODY_STATEMENT`): Ruby runs it as the
-/// body loads. Every other target has no class body that runs it so, and
-/// refuses each one by name.
+/// A global variable write in a class or module body (`$loaded = true`),
+/// which the CRuby and JRuby trees write back where the source has it
+/// (`expr::BODY_STATEMENT`): Ruby runs it as the body loads. Every other
+/// target has no class body that runs it so, and refuses each one by
+/// name. (Other body statements, `delegate` among them, reach those
+/// targets through their own lowering.)
 fn report_body_statements(app: &App, target: BuildTarget) {
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
         return;
     }
+    let global_write = |call: &&crate::expr::Expr| {
+        call.decisions & crate::expr::BODY_STATEMENT != 0
+            && matches!(&*call.node, crate::expr::ExprNode::Assign { target: crate::expr::LValue::Var { name, .. }, .. } if name.as_str().starts_with('$'))
+    };
     for lc in &app.library_classes {
-        for call in lc.unknown_calls.iter().filter(|c| c.decisions & crate::expr::BODY_STATEMENT != 0) {
+        for call in lc.unknown_calls.iter().filter(global_write) {
             let written = crate::emit::ruby::emit_expr(call);
             emit::diagnostics::report_unsupported(
                 call.span,

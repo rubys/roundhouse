@@ -97,6 +97,14 @@ pub(super) fn glob_autoloads(
     if !pattern.starts_with('/') || !supported(&pattern) {
         return None;
     }
+    // The walk stays under the file's own directory, inside the gem,
+    // where its source tree filters symlinks; a pattern whose fixed
+    // base leaves it (`__FILE__ + "/../../.."`) is not this shape.
+    let own = cleanpath(&dirname(file));
+    let base = fixed_base(&pattern);
+    if !(base == own || base.starts_with(&format!("{}/", own.trim_end_matches('/')))) {
+        return None;
+    }
     let block = call.block()?.as_block_node()?;
     let param = block_param(&block)?;
     let body: Vec<Node<'_>> = block.body().map(flatten_statements).unwrap_or_default();
@@ -127,11 +135,17 @@ pub(super) fn glob_autoloads(
     Some(autoloads)
 }
 
-/// The files under the pattern's literal directory (its segments before
-/// the first wildcard), as absolute paths.
-fn listing(pattern: &str, list_dir: &dyn Fn(&Path) -> Vec<(String, bool)>) -> Vec<String> {
+/// The pattern's literal directory: its segments before the first
+/// wildcard.
+fn fixed_base(pattern: &str) -> String {
     let fixed: Vec<&str> = pattern.split('/').take_while(|seg| !seg.contains(['*', '?'])).collect();
     let base = fixed.join("/");
+    if base.is_empty() { "/".into() } else { base }
+}
+
+/// The files under the pattern's literal directory, as absolute paths.
+fn listing(pattern: &str, list_dir: &dyn Fn(&Path) -> Vec<(String, bool)>) -> Vec<String> {
+    let base = fixed_base(pattern);
     fn walk(at: &str, list_dir: &dyn Fn(&Path) -> Vec<(String, bool)>, out: &mut Vec<String>, depth: usize) {
         if depth > 32 {
             return;
@@ -146,7 +160,7 @@ fn listing(pattern: &str, list_dir: &dyn Fn(&Path) -> Vec<(String, bool)>) -> Ve
         }
     }
     let mut out = Vec::new();
-    walk(if base.is_empty() { "/" } else { &base }, list_dir, &mut out, 0);
+    walk(&base, list_dir, &mut out, 0);
     out
 }
 
@@ -441,5 +455,52 @@ pub(super) fn eval(node: &Node<'_>, file: &str, scope: &HashMap<String, Value>) 
                 _ => None,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::path::Path;
+
+    use super::{Locals, glob_autoloads};
+
+    const FILE: &str = "/app/vendor/gems/pay/lib/pay/gateways.rb";
+
+    /// The autoloads `source`'s single statement registers, and every
+    /// directory the glob listed.
+    fn run(source: &str) -> (Option<Vec<(String, String)>>, Vec<String>) {
+        let parsed = ruby_prism::parse(source.as_bytes());
+        let program = parsed.node();
+        let statement = program.as_program_node().unwrap().statements().body().iter().next().unwrap();
+        let listed = RefCell::new(Vec::new());
+        let list_dir = |dir: &Path| -> Vec<(String, bool)> {
+            let dir = dir.display().to_string();
+            listed.borrow_mut().push(dir.clone());
+            match dir.as_str() {
+                "/app/vendor/gems/pay/lib/pay/gateways" => vec![("bogus.rb".into(), false)],
+                "/app/vendor/gems/pay" => vec![("lib".into(), true)],
+                "/app/vendor/gems/pay/lib" => vec![("pay".into(), true)],
+                "/app/vendor/gems/pay/lib/pay" => vec![("gateways".into(), true), ("gateways.rb".into(), false)],
+                _ => Vec::new(),
+            }
+        };
+        let found = glob_autoloads(&statement, FILE, &Locals::default(), &list_dir);
+        (found, listed.into_inner())
+    }
+
+    #[test]
+    fn a_glob_under_the_files_directory_registers_each_match() {
+        let (found, _) =
+            run("Dir[File.dirname(__FILE__) + \"/gateways/*.rb\"].each { |f| autoload(File.basename(f, \".rb\").camelize, f) }");
+        assert_eq!(found, Some(vec![("Bogus".into(), "/app/vendor/gems/pay/lib/pay/gateways/bogus.rb".into())]));
+    }
+
+    #[test]
+    fn a_glob_whose_base_leaves_the_files_directory_is_not_walked() {
+        let (found, listed) =
+            run("Dir[File.dirname(__FILE__) + \"/../../**/*.rb\"].each { |f| autoload(File.basename(f, \".rb\").camelize, f) }");
+        assert_eq!(found, None);
+        assert!(listed.is_empty(), "{listed:?}");
     }
 }

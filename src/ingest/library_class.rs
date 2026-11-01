@@ -5922,11 +5922,12 @@ fn requires_files(stmt: &ruby_prism::Node<'_>) -> bool {
 }
 
 /// `A, B = x, y` in a class or module body: each target a bare constant,
-/// the value a list of as many plain elements, none naming a target.
-/// Ruby evaluates the elements left to right and then assigns the
-/// targets in order, so the pairs written one by one, in order, are the
+/// the value a list of as many elements, each one that runs no code
+/// ([`inert_value`]) and reads no target. Ruby evaluates every element
+/// before it assigns any target; with nothing in the elements able to
+/// observe a target, the pairs written one by one, in order, are the
 /// same writes. Anything else (a splat, a nested target, a value array
-/// computed as a whole) is not this shape.
+/// computed as a whole, an element that calls a method) is not this shape.
 ///
 /// Ported from Shopify/roundhouse-1, by Tobi Lütke.
 fn constant_multi_write<'a>(stmt: &ruby_prism::Node<'a>) -> Option<Vec<(Symbol, ruby_prism::Node<'a>)>> {
@@ -5944,17 +5945,49 @@ fn constant_multi_write<'a>(stmt: &ruby_prism::Node<'a>) -> Option<Vec<(Symbol, 
     if elements.len() != names.len() || elements.iter().any(|element| element.as_splat_node().is_some()) {
         return None;
     }
-    let names_a_target = |element: &ruby_prism::Node<'_>| {
-        let text = String::from_utf8_lossy(element.location().as_slice()).into_owned();
-        names.iter().any(|name| {
-            text.match_indices(name.as_str()).any(|(at, _)| {
-                let word = |c: char| c == '_' || c.is_ascii_alphanumeric();
-                !text[..at].ends_with(word) && !text[at + name.len()..].starts_with(word)
-            })
-        })
-    };
-    if elements.iter().any(names_a_target) {
+    if !elements.iter().all(|element| inert_value(element, &names)) {
         return None;
     }
     Some(names.into_iter().map(Symbol::from).zip(elements).collect())
+}
+
+/// A value whose evaluation runs no method of the app's: a literal, an
+/// array or hash of them, `.freeze` of one, or a constant read naming
+/// none of `targets`. A method call could look at a target
+/// (`const_defined?(:A)`) before Ruby has assigned any.
+fn inert_value(node: &ruby_prism::Node<'_>, targets: &[String]) -> bool {
+    let names_target = |name: &ruby_prism::ConstantId<'_>| targets.iter().any(|t| t == constant_id_str(name));
+    if node.as_integer_node().is_some()
+        || node.as_float_node().is_some()
+        || node.as_rational_node().is_some()
+        || node.as_imaginary_node().is_some()
+        || node.as_string_node().is_some()
+        || node.as_symbol_node().is_some()
+        || node.as_nil_node().is_some()
+        || node.as_true_node().is_some()
+        || node.as_false_node().is_some()
+    {
+        return true;
+    }
+    if let Some(read) = node.as_constant_read_node() {
+        return !names_target(&read.name());
+    }
+    if let Some(path) = node.as_constant_path_node() {
+        return path.name().is_some_and(|name| !names_target(&name))
+            && path.parent().is_none_or(|parent| inert_value(&parent, targets));
+    }
+    if let Some(array) = node.as_array_node() {
+        return array.elements().iter().all(|e| inert_value(&e, targets));
+    }
+    if let Some(hash) = node.as_hash_node() {
+        return hash.elements().iter().all(|e| {
+            e.as_assoc_node().is_some_and(|pair| inert_value(&pair.key(), targets) && inert_value(&pair.value(), targets))
+        });
+    }
+    node.as_call_node().is_some_and(|call| {
+        constant_id_str(&call.name()) == "freeze"
+            && call.arguments().is_none()
+            && call.block().is_none()
+            && call.receiver().is_some_and(|r| inert_value(&r, targets))
+    })
 }

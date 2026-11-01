@@ -280,9 +280,9 @@ struct FileAnswers {
     /// Each constant definition as (offset where its name ends, name,
     /// declaration), sorted by offset.
     constants: Vec<(u32, Box<str>, DeclarationId)>,
-    /// The ends of the constant names that are a multiple assignment's
-    /// targets (`A, B = 1, 2`): each followed by `,` or by `=` after one.
-    multi_targets: HashSet<u32>,
+    /// A multiple assignment's values (`A, B = 1, 2`), each keyed by
+    /// where it starts, to the end of its own target's name.
+    multi_values: HashMap<u32, u32>,
     /// Exact source declaration names, including their lexical owners.
     constant_classes: IdentityHashMap<DeclarationId, ClassId>,
     namespace_definitions: HashSet<Box<str>>,
@@ -786,13 +786,12 @@ impl ConstResolver {
             return Some(*id);
         }
         // `A, B = 1, 2`: every target precedes every value, so the value
-        // `1` follows `B`, and its own target is among the targets just
-        // before it.
-        let file = self.file(value.file)?;
-        constants[..=index]
+        // `1` follows `B`; the parsed assignment pairs it with `A`.
+        let target = *self.file(value.file)?.multi_values.get(&value.start)?;
+        let at = constants.partition_point(|(end, ..)| *end < target);
+        constants[at..]
             .iter()
-            .rev()
-            .take_while(|(end, ..)| file.multi_targets.contains(end))
+            .take_while(|(end, ..)| *end == target)
             .find(|(_, defined, _)| defined.as_ref() == name)
             .map(|(_, _, id)| *id)
     }
@@ -1019,6 +1018,35 @@ fn parenthesized_factory_receivers(text: &str) -> HashSet<u32> {
     receivers.0
 }
 
+/// Each `A, B = x, y` value's start, to the end of its own target's
+/// name: the parsed assignment, so a target written across lines, or a
+/// constant defined inside another value, does not shift the pairing.
+fn multi_write_values(text: &str) -> HashMap<u32, u32> {
+    struct Values(HashMap<u32, u32>);
+    impl<'pr> ruby_prism::Visit<'pr> for Values {
+        fn visit_multi_write_node(&mut self, node: &ruby_prism::MultiWriteNode<'pr>) {
+            if node.rest().is_none()
+                && node.rights().iter().next().is_none()
+                && let Some(array) = node.value().as_array_node()
+                && array.elements().iter().count() == node.lefts().iter().count()
+            {
+                for (target, value) in node.lefts().iter().zip(array.elements().iter()) {
+                    if target.as_constant_target_node().is_some() || target.as_constant_path_target_node().is_some() {
+                        self.0.insert(value.location().start_offset() as u32, target.location().end_offset() as u32);
+                    }
+                }
+            }
+            ruby_prism::visit_multi_write_node(self, node);
+        }
+    }
+    let parsed = ruby_prism::parse(text.as_bytes());
+    let mut values = Values(HashMap::default());
+    if parsed.errors().next().is_none() {
+        ruby_prism::Visit::visit(&mut values, &parsed.node());
+    }
+    values.0
+}
+
 fn answer_file(
     graph: &Graph,
     source: &SourceFile,
@@ -1028,6 +1056,9 @@ fn answer_file(
     let Some(document) = graph.documents().get(&UriId::from(source.path.as_str())) else {
         return answers;
     };
+    // A constant definition followed by `,` is a multiple assignment's
+    // target; only then is the file parsed for `multi_values`.
+    let mut has_multi_write = false;
     let parenthesized_receivers = if document.diagnostics().iter()
         .any(|diagnostic| *diagnostic.rule() == Rule::DynamicSingletonDefinition)
     {
@@ -1237,10 +1268,8 @@ fn answer_file(
             .and_then(|name| graph.strings().get(name.str()));
         let id = definition.and_then(|definition| graph.definition_to_declaration_id(definition));
         if let (Some(name), Some(id)) = (name, id) {
-            let after = source.text.get(offset.end() as usize..).unwrap_or("").trim_start_matches([' ', '\t']);
-            let before = source.text.get(..offset.start() as usize).unwrap_or("").trim_end_matches([' ', '\t']);
-            if after.starts_with(',') || (before.ends_with(',') && after.starts_with('=') && !after.starts_with("==")) {
-                answers.multi_targets.insert(offset.end());
+            if source.text.get(offset.end() as usize..).is_some_and(|after| after.trim_start_matches([' ', '\t']).starts_with(',')) {
+                has_multi_write = true;
             }
             answers.constants.push((offset.end(), name.as_str().into(), *id));
             if let Some(declaration) = graph.declarations().get(id) {
@@ -1249,6 +1278,9 @@ fn answer_file(
         }
     }
     answers.constants.sort_unstable_by_key(|(end, ..)| *end);
+    if has_multi_write {
+        answers.multi_values = multi_write_values(&source.text);
+    }
     answers
 }
 
