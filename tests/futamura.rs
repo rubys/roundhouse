@@ -1758,3 +1758,190 @@ end
         assert!(report.specialized.iter().any(|s| s.contains("fetch_member_service.rb:3:")), "{:?}", report.specialized);
     }
 }
+
+mod runtime_stats {
+    use std::fs;
+    use std::process::Command;
+
+    use roundhouse::emit::futamura::INITIALIZER;
+
+    // The emitted initializer carries an opt-in measurement block. It must
+    // stay inert unless FUTAMURA_STATS names a directory, and the file must
+    // stay valid Ruby with it.
+    #[test]
+    fn emitted_runtime_has_an_opt_in_stats_block_and_stays_valid_ruby() {
+        let dir = std::env::temp_dir().join(format!("roundhouse-futamura-stats-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let src = dir.join("src");
+        let out = dir.join("out");
+        fs::create_dir_all(src.join("app/models")).unwrap();
+        fs::create_dir_all(src.join("config")).unwrap();
+        fs::create_dir_all(src.join("db")).unwrap();
+        fs::write(src.join("Gemfile"), "source \"https://rubygems.org\"\ngem \"rails\"\n").unwrap();
+        fs::write(src.join("config/routes.rb"), "Rails.application.routes.draw do\nend\n").unwrap();
+        fs::write(
+            src.join("db/schema.rb"),
+            "ActiveRecord::Schema.define do\n  create_table \"pages\", force: :cascade do |t|\n    t.string \"slug\"\n  end\nend\n",
+        )
+        .unwrap();
+        fs::write(src.join("app/models/application_record.rb"), "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n").unwrap();
+        fs::write(
+            src.join("app/models/page.rb"),
+            "class Page < ApplicationRecord\n  def self.live_by(slug)\n    where(slug: slug).first\n  end\nend\n",
+        )
+        .unwrap();
+        let run = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+            .args(["--target", "futamura", "-o"])
+            .arg(&out)
+            .arg(&src)
+            .output()
+            .unwrap();
+        assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+        let init = fs::read_to_string(out.join(INITIALIZER)).unwrap();
+        // One guarded block, after the runtime module, that counts calls per
+        // site and why each fell back; FUTAMURA_STATS_AB times the chain too.
+        assert!(init.contains("if ENV[\"FUTAMURA_STATS\"].to_s != \"\""), "{init}");
+        assert!(init.contains("singleton_class.prepend(Stats::Instrument)"), "{init}");
+        assert!(init.contains("FUTAMURA_STATS_AB"), "{init}");
+        for reason in ["default_scopes", "root_not_model", "relation_needs_rails"] {
+            assert!(init.contains(reason), "{reason}: {init}");
+        }
+        // The whole file, block included, parses.
+        if let Ok(ruby) = Command::new("ruby").arg("-c").arg(out.join(INITIALIZER)).output() {
+            assert!(ruby.status.success(), "{}", String::from_utf8_lossy(&ruby.stderr));
+        }
+    }
+}
+
+mod rooted_constants {
+    use std::path::PathBuf;
+
+    use roundhouse::analyze::Analyzer;
+    use roundhouse::emit::futamura::specialize;
+    use roundhouse::ingest::ingest_app_from_tree;
+
+    #[test]
+    fn a_rooted_model_constant_roots_a_chain_like_the_bare_one() {
+        let files: Vec<(&str, &str)> = vec![
+            ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"rooms\", force: :cascade do |t|\n    t.string \"name\", null: false\n  end\nend\n"),
+            ("app/models/room.rb", "class Room < ApplicationRecord\nend\n"),
+            ("app/services/lookup/finder.rb", "module Lookup\n  class Finder\n    def self.named(x)\n      ::Room.where(name: x).to_a\n    end\n  end\nend\n"),
+        ];
+        let tree: std::collections::HashMap<PathBuf, Vec<u8>> =
+            files.iter().map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec())).collect();
+        let mut app = ingest_app_from_tree(tree).expect("ingest");
+        Analyzer::new(&app).analyze(&mut app);
+        let mut tree_files: Vec<(String, String)> = files.iter().map(|(p, c)| (p.to_string(), c.to_string())).collect();
+        let report = specialize(&app, &mut tree_files).unwrap();
+        assert_eq!(report.specialized.len(), 1, "{:?}", report.residue);
+    }
+}
+
+/// A concern's method is analyzed once for each class that includes it, but
+/// its source is one text: copies that specialize alike are spliced once,
+/// not reported as overlapping.
+mod shared_concern_sites {
+    use std::path::PathBuf;
+
+    use roundhouse::analyze::Analyzer;
+    use roundhouse::emit::futamura::specialize;
+    use roundhouse::ingest::ingest_app_from_tree;
+
+    #[test]
+    fn one_site_in_a_concern_included_twice_is_specialized_once() {
+        let files: Vec<(&str, &str)> = vec![
+            ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"things\", force: :cascade do |t|\n    t.string \"name\"\n  end\n  create_table \"others\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n"),
+            ("app/models/concerns/findable.rb", "module Findable\n  extend ActiveSupport::Concern\n  def same_named\n    Thing.where(name: name).to_a\n  end\nend\n"),
+            ("app/models/thing.rb", "class Thing < ApplicationRecord\n  include Findable\nend\n"),
+            ("app/models/other.rb", "class Other < ApplicationRecord\n  include Findable\nend\n"),
+        ];
+        let tree: std::collections::HashMap<PathBuf, Vec<u8>> =
+            files.iter().map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec())).collect();
+        let mut app = ingest_app_from_tree(tree).expect("ingest");
+        Analyzer::new(&app).analyze(&mut app);
+        let mut tree_files: Vec<(String, String)> = files.iter().map(|(p, c)| (p.to_string(), c.to_string())).collect();
+        let report = specialize(&app, &mut tree_files).unwrap();
+        assert_eq!(report.specialized.len(), 1, "{:?}", report.residue);
+        assert!(report.residue.is_empty(), "{:?}", report.residue);
+    }
+}
+
+/// One source site analyzed for several owners (a macro replayed into
+/// each model) where one copy specializes and another does not: the whole
+/// site stays Rails'. Splicing the specializing copy into the shared text
+/// would run its compiled query for the owner that could not be compiled.
+mod shared_sites_with_a_residue {
+    use std::path::PathBuf;
+
+    use roundhouse::analyze::Analyzer;
+    use roundhouse::dialect::ModelBodyItem;
+    use roundhouse::emit::futamura::specialize;
+    use roundhouse::ingest::ingest_app_from_tree;
+
+    #[test]
+    fn a_site_one_owner_cannot_specialize_is_not_spliced() {
+        // `tag_ids` is an array column on `things` (a collection bind, not
+        // specialized) and a scalar on `others` (specialized).
+        let files: Vec<(&str, &str)> = vec![
+            ("db/schema.rb", "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"things\", force: :cascade do |t|\n    t.bigint \"tag_ids\", array: true, default: [], null: false\n  end\n  create_table \"others\", force: :cascade do |t|\n    t.bigint \"tag_ids\"\n  end\n  create_table \"items\", force: :cascade do |t|\n    t.bigint \"tag_id\"\n  end\nend\n"),
+            ("app/models/concerns/tagged.rb", "module Tagged\n  def tagged_items\n    Item.where(tag_id: tag_ids).to_a\n  end\nend\n"),
+            ("app/models/item.rb", "class Item < ApplicationRecord\nend\n"),
+            ("app/models/thing.rb", "class Thing < ApplicationRecord\nend\n"),
+            ("app/models/other.rb", "class Other < ApplicationRecord\nend\n"),
+        ];
+        let tree: std::collections::HashMap<PathBuf, Vec<u8>> =
+            files.iter().map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec())).collect();
+        let mut app = ingest_app_from_tree(tree).expect("ingest");
+        Analyzer::new(&app).analyze(&mut app);
+        // The replay: the module's one method body, owned by each model.
+        let method = app.library_classes.iter().find(|l| l.name.0.as_str() == "Tagged").unwrap().methods[0].clone();
+        app.library_classes.retain(|l| l.name.0.as_str() != "Tagged");
+        for m in app.models.iter_mut().filter(|m| matches!(m.name.0.as_str(), "Thing" | "Other")) {
+            m.body.push(ModelBodyItem::Method { method: method.clone(), leading_comments: vec![], leading_blank_line: false });
+        }
+        let mut tree_files: Vec<(String, String)> = files.iter().map(|(p, c)| (p.to_string(), c.to_string())).collect();
+        let report = specialize(&app, &mut tree_files).unwrap();
+        assert!(report.specialized.is_empty(), "{:?} / {:?}", report.specialized, report.residue);
+        assert!(report.residue.iter().any(|r| r.contains("tagged.rb")), "{:?}", report.residue);
+        let tagged = &tree_files.iter().find(|(p, _)| p == "app/models/concerns/tagged.rb").unwrap().1;
+        assert!(!tagged.contains("Futamura.records"), "{tagged}");
+    }
+}
+
+/// The same shared site where one owner's receiver is not a relation at
+/// all: that copy is not a query and reports nothing, but the text is one,
+/// so the copy that specializes is not spliced into it either.
+mod shared_sites_with_a_non_relation_copy {
+    use std::path::PathBuf;
+
+    use roundhouse::analyze::Analyzer;
+    use roundhouse::dialect::ModelBodyItem;
+    use roundhouse::emit::futamura::specialize;
+    use roundhouse::ingest::ingest_app_from_tree;
+
+    #[test]
+    fn a_site_another_owner_does_not_read_as_a_query_is_not_spliced() {
+        let files: Vec<(&str, &str)> = vec![
+            ("db/schema.rb", "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"things\", force: :cascade do |t|\n    t.string \"name\"\n  end\n  create_table \"others\", force: :cascade do |t|\n    t.string \"name\"\n  end\n  create_table \"items\", force: :cascade do |t|\n    t.bigint \"thing_id\"\n  end\nend\n"),
+            ("app/models/concerns/picking.rb", "module Picking\n  def picked\n    self.items.first\n  end\nend\n"),
+            ("app/models/thing.rb", "class Thing < ApplicationRecord\n  has_many :items\nend\n"),
+            ("app/models/item.rb", "class Item < ApplicationRecord\n  belongs_to :thing\nend\n"),
+            ("app/models/other.rb", "class Other < ApplicationRecord\n  #: () -> Array[String]\n  def items\n    [\"a\"]\n  end\nend\n"),
+        ];
+        let tree: std::collections::HashMap<PathBuf, Vec<u8>> =
+            files.iter().map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec())).collect();
+        let mut app = ingest_app_from_tree(tree).expect("ingest");
+        Analyzer::new(&app).analyze(&mut app);
+        let method = app.library_classes.iter().find(|l| l.name.0.as_str() == "Picking").unwrap().methods[0].clone();
+        app.library_classes.retain(|l| l.name.0.as_str() != "Picking");
+        for m in app.models.iter_mut().filter(|m| matches!(m.name.0.as_str(), "Thing" | "Other")) {
+            m.body.push(ModelBodyItem::Method { method: method.clone(), leading_comments: vec![], leading_blank_line: false });
+        }
+        Analyzer::new(&app).analyze(&mut app);
+        let mut tree_files: Vec<(String, String)> = files.iter().map(|(p, c)| (p.to_string(), c.to_string())).collect();
+        let report = specialize(&app, &mut tree_files).unwrap();
+        assert!(report.specialized.is_empty(), "{:?} / {:?}", report.specialized, report.residue);
+        let picking = &tree_files.iter().find(|(p, _)| p == "app/models/concerns/picking.rb").unwrap().1;
+        assert!(!picking.contains("Futamura"), "{picking}");
+    }
+}

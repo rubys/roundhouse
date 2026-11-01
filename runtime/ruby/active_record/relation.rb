@@ -117,6 +117,8 @@ module ActiveRecord
       @lock_clause = ""
       @shared_lists = false
       @friendly = false
+      names = @model._sti_type_names
+      where!(type: names) unless names.empty?
       apply_default_scope! if scoped
     end
 

@@ -73,10 +73,13 @@ module SidekiqPush
 
   # One job, given its ActiveJob payload. `at` is the scheduled epoch in
   # seconds, 0.0 when the job isn't scheduled. A time that has already
-  # passed is pushed at once, as Sidekiq's `Setter#at` does.
+  # passed is pushed at once, as Sidekiq's `Setter#at` does. The job's
+  # `sidekiq_options` go where Sidekiq writes them: `retry` in place,
+  # the rest after `queue`.
   def self.enqueue(job_class, queue, at, aj_json)
-    head = "{\"retry\":true" +
+    head = "{\"retry\":" + JobRegistry.sidekiq_retry(job_class) +
       ",\"queue\":" + ActiveJob::Arguments.str(queue) +
+      JobRegistry.sidekiq_extra(job_class) +
       ",\"wrapped\":" + ActiveJob::Arguments.str(job_class) +
       ",\"args\":[" + aj_json + "]" +
       ",\"class\":\"Sidekiq::ActiveJob::Wrapper\"" +

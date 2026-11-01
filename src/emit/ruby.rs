@@ -253,7 +253,7 @@ fn materialize_models_with_param_binds(
     let assoc_scopes = crate::lower::scope_chain::assoc_query_method_names(
         &crate::lower::scope_chain::survey_assoc_class_methods(
             app,
-            &crate::lower::scope_chain::build_assoc_registry(&app.models),
+            &crate::lower::scope_chain::build_assoc_registry_for_app(app),
             &crate::lower::scope_chain::build_scope_registry(&app.models),
         )
         .0,
@@ -648,6 +648,8 @@ fn lowered_controller_lcs_with_layout_and_param_binds(app: &App, param_binds: bo
 /// them to resolve `Article.includes(...).order(...)` chain
 /// receivers to a TableRef.
 fn lower_controllers_for_spinel(app: &App, format_breadth: FormatBreadth, param_binds: bool) -> Vec<LibraryClass> {
+    let resolver = app.const_resolver.for_sources(&app.sources);
+    let finder_classes = crate::analyze::source_finder_classes(app, &resolver);
     // Use lower_models_with_registry (not lower_models_to_library_classes
     // + class_info_from_library_class) because the former returns
     // ClassInfo with `table` set — the Arel pass needs `info.table`
@@ -686,6 +688,7 @@ fn lower_controllers_for_spinel(app: &App, format_breadth: FormatBreadth, param_
             schema: Some(&app.schema),
             views: &app.views,
             library_classes: &app.library_classes,
+            finder_classes: Some(&finder_classes),
             assocs: &assocs,
             routed_by_controller: Some(&routed),
             format_breadth,

@@ -1122,12 +1122,74 @@ fn report_replayed_class_bodies(app: &App, target: BuildTarget) {
     }
     for lc in &app.library_classes {
         for expr in lc.unknown_calls.iter().filter(|e| e.decisions & crate::expr::REPLAYED_CLASS_BODY != 0) {
-            let crate::expr::ExprNode::Send { method, .. } = &*expr.node else { continue };
+            // A call by its method's name; any other statement
+            // (`self.mode ||= :live`) as it is written.
+            let written = match &*expr.node {
+                crate::expr::ExprNode::Send { method, .. } => method.as_str().to_string(),
+                _ => crate::emit::ruby::emit_expr(expr).lines().next().unwrap_or_default().trim().to_string(),
+            };
             emit::diagnostics::report_unsupported(
                 expr.span,
                 target.as_str(),
                 "class body",
-                format!("`{}` in the body of `{}` runs its own class method as it loads, which the {} emit does not carry", method.as_str(), lc.name.0.as_str(), target.as_str()),
+                format!("`{written}` in the body of `{}` runs its own class method as it loads, which the {} emit does not carry", lc.name.0.as_str(), target.as_str()),
+            );
+        }
+    }
+}
+
+/// A class or module body statement the CRuby and JRuby trees write
+/// back where the source has it (`expr::BODY_STATEMENT`), which Ruby
+/// runs as the body loads, refused by name where nothing runs it so:
+///
+/// * a global variable write (`$loaded = true`), on every other target;
+/// * a write through a class-side writer (`self.mode = :test`,
+///   `self.mode ||= :live` through an accessor an app ancestor defines),
+///   on a target outside the Ruby library emit. Spinel, Roda and
+///   Futamura ledger such a write as a dropped class-body call
+///   (`emit::ruby::library`); the rest have no class body at all.
+///
+/// Other body statements, `delegate` among them, reach those targets
+/// through their own lowering.
+fn report_body_statements(app: &App, target: BuildTarget) {
+    use crate::expr::{ExprNode, LValue};
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
+        return;
+    }
+    let ruby_library_emit = matches!(target, BuildTarget::Spinel | BuildTarget::Roda | BuildTarget::Futamura);
+    fn class_side_write(expr: &crate::expr::Expr) -> bool {
+        let on_self = |recv: &crate::expr::Expr| matches!(&*recv.node, ExprNode::SelfRef);
+        match &*expr.node {
+            ExprNode::Assign { target: LValue::Attr { recv, .. }, .. }
+            | ExprNode::OpAssign { target: LValue::Attr { recv, .. }, .. } => on_self(recv),
+            ExprNode::Send { recv, method, .. } => {
+                recv.as_ref().is_none_or(|r| on_self(r))
+                    && method.as_str().ends_with('=')
+                    && !matches!(method.as_str(), "==" | "!=" | "===" | "<=" | ">=")
+            }
+            // `self.mode ||= :live` lowered to `self.mode || (self.mode = :live)`.
+            ExprNode::BoolOp { right, .. } => class_side_write(right),
+            _ => false,
+        }
+    }
+    let refused = |call: &&crate::expr::Expr| {
+        call.decisions & crate::expr::BODY_STATEMENT != 0
+            && (matches!(&*call.node, ExprNode::Assign { target: LValue::Var { name, .. }, .. } if name.as_str().starts_with('$'))
+                || (!ruby_library_emit && class_side_write(call)))
+    };
+    for lc in &app.library_classes {
+        for call in lc.unknown_calls.iter().filter(refused) {
+            let written = crate::emit::ruby::emit_expr(call);
+            emit::diagnostics::report_unsupported(
+                call.span,
+                target.as_str(),
+                "class body statement",
+                format!(
+                    "`{}` in the body of `{}` runs where it stands when the body loads; the {} emit has no class body that runs it so, and drops it",
+                    written.lines().next().unwrap_or_default().trim(),
+                    lc.name.0.as_str(),
+                    target.as_str()
+                ),
             );
         }
     }
@@ -2836,6 +2898,7 @@ fn target_files_inner(
     report_relation_class_calls(app, target);
     report_typescript_error_class(app, target);
     report_replayed_class_bodies(app, target);
+    report_body_statements(app, target);
     report_controller_sibling_classes(app, target);
     // `validates …, uniqueness:` left out of a target with no runtime
     // Relation: reported here, where the CLI and the MCP `wont_lower`
@@ -3557,9 +3620,88 @@ pub fn copy_exec_bits(src: &Path, files: &[(String, String)], dest: &Path) -> Re
 pub fn write_to_dir(files: &[(String, String)], dest: &Path) -> Result<(), String> {
     fs::create_dir_all(dest).map_err(|e| format!("mkdir {}: {e}", dest.display()))?;
     for (path, content) in files {
+        let content = if path.ends_with(".rb") { drop_late_magic_comments(content) } else { std::borrow::Cow::Borrowed(content.as_str()) };
         write_if_changed(&dest.join(path), content.as_bytes())?;
     }
     Ok(())
+}
+
+/// A file assembled from several runtime sources (test_helper.rb, boot.rb,
+/// runtime/mime.rb, runtime/i18n_locale.rb) carries each source's
+/// `# frozen_string_literal: true` where that source began. Past the first
+/// token Ruby ignores the comment and warns ("is ignored after any
+/// tokens"), and a tree under a warnings-are-errors policy refuses to
+/// boot. The line has no effect there, so it is
+/// blanked, keeping the line count; a leading one is kept. Only an exact column-0 comment counts,
+/// and only a real comment token: the same text on a heredoc line is
+/// string data. `shareable_constant_value` is not touched: Ruby honors it
+/// anywhere in a file, for the constants after it.
+pub fn drop_late_magic_comments(content: &str) -> std::borrow::Cow<'_, str> {
+    let is_magic = |line: &str| {
+        line.trim_end()
+            .strip_prefix("# frozen_string_literal")
+            .is_some_and(|rest| rest.starts_with(": "))
+    };
+    // A UTF-8 byte-order mark precedes the first comment; it is not a
+    // token, so a directive after it is still in the leading block.
+    let bom = if content.starts_with('\u{feff}') { '\u{feff}'.len_utf8() } else { 0 };
+    let mut seen_token = false;
+    let mut late = false;
+    for line in content[bom..].lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            if seen_token && is_magic(line) {
+                late = true;
+                break;
+            }
+        } else {
+            seen_token = true;
+        }
+    }
+    if !late {
+        return std::borrow::Cow::Borrowed(content);
+    }
+    let parsed = ruby_prism::parse(content.as_bytes());
+    let comments: Vec<(usize, usize)> = parsed
+        .comments()
+        .map(|c| {
+            let loc = c.location();
+            (
+                crate::ingest::prism_api::PrismLocation::start_offset(&loc),
+                crate::ingest::prism_api::PrismLocation::end_offset(&loc),
+            )
+        })
+        .collect();
+    let in_comment = |at: usize| comments.iter().any(|&(start, end)| start <= at && at < end);
+    let mut out = String::with_capacity(content.len());
+    let mut seen_token = false;
+    let mut dropped = false;
+    let mut offset = 0;
+    for line in content.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
+        let body = if start == 0 { &line[bom..] } else { line };
+        let trimmed = body.trim();
+        let first = start + (line.len() - body.trim_start().len());
+        // A `=begin`/`=end` block is a comment, as a `#` line is: neither
+        // is the token past which Ruby ignores a magic comment.
+        if !(trimmed.is_empty() || trimmed.starts_with('#') || in_comment(first)) {
+            seen_token = true;
+        } else if seen_token && is_magic(line) && comments.iter().any(|&(s, _)| s == start) {
+            // A blank line in its place, so `__LINE__` and every later
+            // source location stay where they were.
+            if line.ends_with('\n') {
+                out.push('\n');
+            }
+            dropped = true;
+            continue;
+        }
+        out.push_str(line);
+    }
+    if !dropped {
+        return std::borrow::Cow::Borrowed(content);
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -7783,6 +7925,8 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         | "StringScanner" | "Zlib::GzipWriter"
         // runtime/spinel/integration_session.rb and the ruby tree's twin.
         | "ActionDispatch::Integration::Session" | "ActionDispatch::TestResponse"
+        // runtime/spinel/solid_queue.rb.
+        | "SolidQueue::Queue" | "SolidQueue::Semaphore" | "SolidQueue::Semaphore::Relation"
         // ruby-vips on the ruby family, spinel-ruby-vips on spinel.
         | "Vips::Image"
         | "Rails::HTML5::SafeListSanitizer" | "JSON" | "JSON::ParserError"
@@ -9328,6 +9472,11 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     if file_fixtures.exists() {
         walk_dir_into(&file_fixtures, "test/fixtures/files/", &mut files)?;
     }
+    // The app's data files, at their Rails.root-relative paths. First, so
+    // anything the emit produces at the same path wins.
+    let mut data = Vec::new();
+    walk_data_files_into(fixture, &mut data)?;
+    files.splice(0..0, data);
 
     let mut files = dedupe_last_wins(files);
     // De-blog the scaffold for whatever app was ingested: regenerate the
@@ -12500,6 +12649,82 @@ fn walk_dir_into_skipping(
     Ok(())
 }
 
+/// The app's data files (`*.yml`, `*.yaml`, `*.json`, each optionally
+/// `.erb`), carried verbatim at their Rails.root-relative paths: app code
+/// reads them by a path it builds from `Rails.root` (a class body that
+/// loads `components/regions/config/overrides.yml`), and the
+/// emitted app serves from its root (runtime `Rails.root` is "."), so a
+/// file that is not there is an Errno::ENOENT the source never raises.
+/// Nothing transpiles them; whatever ERB they hold is the reading code's
+/// to render.
+///
+/// Skipped: dev/build dirs (`SKIP_DIRS`), hidden entries, top-level
+/// `sorbet/` (type declarations the compiler reads) and `out/` (the CLI's
+/// default output root), `config/database.yml` (compiled into the tree as
+/// `DatabaseYml`), and anything named for credentials, secrets, passwords
+/// or keys. Encrypted material (`*.ejson`, `credentials.yml.enc`,
+/// `master.key`) has no data extension and is never copied.
+fn walk_data_files_into(root: &Path, out: &mut Vec<(String, String)>) -> Result<(), String> {
+    fn data_file(name: &str) -> bool {
+        let name = name.strip_suffix(".erb").unwrap_or(name);
+        [".yml", ".yaml", ".json"].iter().any(|ext| name.ends_with(ext))
+    }
+    fn secret(name: &str) -> bool {
+        let lower = name.to_ascii_lowercase();
+        ["credential", "secret", "password", "master.key"].iter().any(|word| lower.contains(word)) || lower.ends_with(".key")
+    }
+    let canonical_root = fs::canonicalize(root).ok();
+    let mut stack = vec![(root.to_path_buf(), String::new())];
+    while let Some((dir, prefix)) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || secret(&name) {
+                continue;
+            }
+            let Ok(ty) = entry.file_type() else { continue };
+            let rel = format!("{prefix}{name}");
+            // A symlinked data file is carried by its contents when it
+            // resolves to a regular file inside the app; a link that leaves
+            // the app (or a symlinked directory) is not followed.
+            // The target must pass the same exclusions as a file at its own
+            // path would: a `config/data.yml` linking to `config/secrets.yml`
+            // or `config/database.yml` is not carried.
+            let linked_file = ty.is_symlink()
+                && fs::metadata(entry.path()).is_ok_and(|m| m.is_file())
+                && fs::canonicalize(entry.path()).is_ok_and(|target| {
+                    let Some(inside) = canonical_root.as_ref().and_then(|r| target.strip_prefix(r).ok()) else {
+                        return false;
+                    };
+                    let parts: Vec<String> = inside.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+                    let excluded = parts.iter().enumerate().any(|(i, part)| {
+                        part.starts_with('.')
+                            || secret(part)
+                            || (i + 1 < parts.len() && SKIP_DIRS.contains(&part.as_str()))
+                            || (i == 0 && parts.len() > 1 && (part == "sorbet" || part == "out"))
+                    });
+                    !excluded && parts.join("/") != "config/database.yml" && parts.last().is_some_and(|last| data_file(last))
+                });
+            if ty.is_dir() {
+                // `out/` is the CLI's default output root (`out/<target>`):
+                // walking it would carry the previous emit into the next one.
+                let top_skip = prefix.is_empty() && (name == "sorbet" || name == "out");
+                if !SKIP_DIRS.contains(&name.as_str()) && !top_skip {
+                    stack.push((entry.path(), format!("{rel}/")));
+                }
+            } else if (ty.is_file() || linked_file) && data_file(&name) && rel != "config/database.yml" {
+                // Not UTF-8: `collect_binary_assets` carries what it can.
+                if let Ok(content) = fs::read_to_string(entry.path()) {
+                    out.push((rel, content));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Orchestrates the `--site` mode of the `roundhouse` binary: for
 /// every `BuildTarget`, produce `_site/browse/<lang>.{json,tgz,zip}`,
 /// and copy the static landing-page assets (`site/`) plus the
@@ -12559,6 +12784,15 @@ pub fn build_archives(fixture: &Path, out: &Path, targets: &[BuildTarget]) -> Re
             }
         };
         let name = target.as_str();
+        // The same late-magic-comment filter `write_to_dir` applies, so an
+        // archive holds the bytes the directory output does.
+        let files: Vec<(String, String)> = files
+            .into_iter()
+            .map(|(path, content)| {
+                let content = if path.ends_with(".rb") { drop_late_magic_comments(&content).into_owned() } else { content };
+                (path, content)
+            })
+            .collect();
 
         let json_path = out.join("browse").join(format!("{name}.json"));
         fs::write(&json_path, write_manifest_json(name, &files))
@@ -12716,6 +12950,27 @@ fn walk_ruby(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A symlinked data file is carried by its contents only when its
+    /// target would be carried at its own path.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_data_file_is_carried_only_when_its_target_would_be() {
+        let root = std::env::temp_dir().join(format!("rh-data-links-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("config")).unwrap();
+        fs::write(root.join("config/real.yml"), "a: 1\n").unwrap();
+        fs::write(root.join("config/secrets.yml"), "secret_key_base: x\n").unwrap();
+        fs::write(root.join("config/database.yml"), "test: {}\n").unwrap();
+        std::os::unix::fs::symlink(root.join("config/real.yml"), root.join("config/alias.yml")).unwrap();
+        std::os::unix::fs::symlink(root.join("config/secrets.yml"), root.join("config/data.yml")).unwrap();
+        std::os::unix::fs::symlink(root.join("config/database.yml"), root.join("config/db.yml")).unwrap();
+        let mut out = Vec::new();
+        walk_data_files_into(&root, &mut out).unwrap();
+        let carried: Vec<&str> = out.iter().map(|(path, _)| path.as_str()).collect();
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(carried, ["config/alias.yml", "config/real.yml"]);
+    }
 
     #[test]
     fn a_written_require_stays_below_the_files_magic_comments() {

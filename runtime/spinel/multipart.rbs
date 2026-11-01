@@ -13,6 +13,7 @@ module ActionDispatch
       def to_s: () -> String
       def self.from_params: (Hash[String, untyped] sub, String key) -> ActionDispatch::Http::UploadedFile?
       def self.provided: (Hash[String, untyped] sub, String key) -> bool
+      def self.scalar_list: (Hash[String, untyped] sub, String key) -> Array[String | ActionDispatch::Http::UploadedFile]
       def self.name_of: (ActionDispatch::Http::UploadedFile? file) -> String
     end
 

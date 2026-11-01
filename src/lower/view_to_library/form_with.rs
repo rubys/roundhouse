@@ -314,6 +314,7 @@ pub(super) fn emit_form_with_inline(
     inner_ctx.form_records.push(FormBuilderBinding {
         form_param: form_param_str.to_string(),
         model_name: comps.model_name.clone(),
+        model_class: form_model_class(&comps.model, &comps.model_name, ctx),
         record_var: record_var.clone(),
         form_method_var,
         id_prefix: comps.id_prefix.clone(),
@@ -728,11 +729,12 @@ fn route_helperize(url: Expr, route_helpers: &impl Fn() -> Expr, ctx: &ViewCtx) 
             };
             let member =
                 super::member_path_call(ctx, &format!("{name}_path"), member_arg);
-            let collection = super::route_helpers_call(&format!("{plural}_path"), Vec::new());
+            let collection_helper = format!("{}_path", crate::lower::routes::collection_name(name, &plural));
+            let collection = super::route_helpers_call(&collection_helper, Vec::new());
             let has_member = ctx.route_helper_names.is_empty()
                 || ctx.route_helper_names.contains(&format!("{name}_path"));
             let has_collection = ctx.route_helper_names.is_empty()
-                || ctx.route_helper_names.contains(&format!("{plural}_path"));
+                || ctx.route_helper_names.contains(&collection_helper);
             return match (has_member, has_collection) {
                 (true, false) => member,
                 (false, true) => collection,
@@ -899,7 +901,10 @@ fn classify_form_with_components(
     if let Some((record, record_singular, scope_prefix)) = scoped_record_form(&model) {
         let record_plural = crate::naming::pluralize_snake(&record_singular);
         let member_name = format!("{scope_prefix}_{record_singular}_path");
-        let collection_name = format!("{scope_prefix}_{record_plural}_path");
+        let collection_name = format!(
+            "{scope_prefix}_{}_path",
+            crate::lower::routes::collection_name(&record_singular, &record_plural)
+        );
         let persisted =
             send(Some(record.clone()), "persisted?", Vec::new(), None, false);
         let member_arg = if ctx.slug_models.contains(record_singular.as_str()) {
@@ -1036,9 +1041,10 @@ fn classify_form_with_components(
     };
     let member_path =
         super::member_path_call(ctx, &format!("{singular}_path"), member_arg);
+    let collection_helper = format!("{}_path", crate::lower::routes::collection_name(&singular, plural));
     let collection_path = send(
         Some(route_helpers()),
-        &format!("{plural}_path"),
+        &collection_helper,
         Vec::new(),
         None,
         false,
@@ -1052,7 +1058,7 @@ fn classify_form_with_components(
     let has_member = ctx.route_helper_names.is_empty()
         || ctx.route_helper_names.contains(&format!("{singular}_path"));
     let has_collection = ctx.route_helper_names.is_empty()
-        || ctx.route_helper_names.contains(&format!("{plural}_path"));
+        || ctx.route_helper_names.contains(&collection_helper);
     let action = match (has_member, has_collection) {
         (true, false) => member_path,
         (false, true) => collection_path,
@@ -1090,6 +1096,26 @@ fn classify_form_with_components(
     })
 }
 
+/// The typed record class used for metadata, independent of its field prefix.
+pub(super) fn form_model_class(model: &Expr, parameter: &str, ctx: &ViewCtx) -> Option<String> {
+    if let Some(crate::ty::Ty::Class { id, .. }) = model.ty.as_ref().map(crate::ty::Ty::peel_nilable) {
+        return Some(id.0.as_str().to_owned());
+    }
+    if let ExprNode::Send { recv: Some(recv), method, .. } = &*model.node {
+        if method.as_str() == "new" {
+            if let ExprNode::Const { path } = &*recv.node {
+                return Some(path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::"));
+            }
+        }
+    }
+    let name = match &*model.node {
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => Some(name.as_str()),
+        _ => None,
+    };
+    name.and_then(|name| ctx.record_classes.get(name).cloned())
+        .or_else(|| ctx.i18n.model_class(parameter).map(str::to_owned))
+}
+
 /// The form's object name — what Rails calls `param_key`. Rails names
 /// fields after the RECORD's model (`user[username]` for a User), never
 /// after the view directory; the two agree for a conventional resource
@@ -1109,14 +1135,13 @@ fn record_model_name(model: &Expr, ctx: &ViewCtx, fallback: &str) -> String {
     // named every field after the VIEW that reached the helper and the
     // composer posted `rooms_show[body]` where Rails posts
     // `message[body]`. The class is right there in the expression;
-    // Rails' `param_key` is its demodulized name, underscored, whether
-    // or not the constructor took arguments.
+    // Rails' default `param_key` underscores the complete class name,
+    // joining namespace segments with underscores too.
     if let ExprNode::Send { recv: Some(recv), method, .. } = &*model.node {
         if method.as_str() == "new" {
             if let ExprNode::Const { path } = &*recv.node {
-                if let Some(last) = path.last() {
-                    return snake_case(last.as_str());
-                }
+                let name = path.iter().map(|part| part.as_str()).filter(|part| !part.is_empty()).collect::<Vec<_>>().join("::");
+                return ctx.model_param_keys.get(&name).cloned().unwrap_or_else(|| crate::naming::model_param_key(&name));
             }
         }
     }
@@ -1225,13 +1250,14 @@ fn nested_resource_form(
     };
     let class_name = path.last()?.as_str();
     let child_singular = snake_case(class_name);
-    let child_plural = format!("{child_singular}s"); // naïve; comments fixture only
+    let child_plural = crate::naming::pluralize_snake(&child_singular);
+    let child_collection = crate::lower::routes::collection_name(&child_singular, &child_plural);
 
-    // RouteHelpers.<parent_singular>_<child_plural>_path(parent.id)
+    // RouteHelpers.<parent_singular>_<child collection>_path(parent.id)
     let parent_id = send(Some(parent.clone()), "id", Vec::new(), None, false);
     let action = send(
         Some(route_helpers()),
-        &format!("{parent_singular}_{child_plural}_path"),
+        &format!("{parent_singular}_{child_collection}_path"),
         vec![parent_id],
         None,
         true,
@@ -1549,6 +1575,7 @@ mod tests {
             nullable_locals: Default::default(),
             reference_reads: Default::default(),
             reference_targets: Default::default(),
+            nested_record_classes: Default::default(),
             nilable_scalar_reads: Default::default(),
             html_safe_methods: Default::default(),
             model_singulars: Rc::new(
@@ -1562,6 +1589,7 @@ mod tests {
             route_helper_arity: Default::default(),
             form_wrappers: Default::default(),
             form_with_entry: true,
+            model_param_keys: Default::default(),
             stylesheets: Vec::new(),
             lexxy: false,
             lexxy_editor_adapter: false,
@@ -1573,6 +1601,7 @@ mod tests {
             partial_stems: Default::default(),
             partial_extras: Default::default(),
             strict_locals: Default::default(),
+            record_classes: Default::default(),
             str_ivars: Default::default(),
             ivar_locals: Default::default(),
             own_flash: Default::default(),

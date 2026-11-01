@@ -28,7 +28,7 @@ pub(super) fn diagnose(app: &App) -> Vec<Diagnostic> {
         .any(|m| m.methods().any(|m| m.params.iter().any(|p| p.forwarding)))
     {
         let scopes = crate::lower::scope_chain::build_scope_registry(&app.models);
-        let assocs = crate::lower::scope_chain::build_assoc_registry(&app.models);
+        let assocs = crate::lower::scope_chain::build_assoc_registry_for_app(app);
         crate::lower::scope_chain::survey_assoc_class_methods(app, &assocs, &scopes).1
     } else {
         vec![]

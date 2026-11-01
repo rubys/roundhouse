@@ -36,7 +36,7 @@ module ActiveJob
   # the process lives.
   class << self
     alias_method :record_performed_for_tests, :record_performed
-    alias_method :enqueue_locked, :enqueue
+    alias_method :enqueue_locked, :enqueue_on
   end
 
   def self.record_performed(job_name)
@@ -44,9 +44,9 @@ module ActiveJob
     record_performed_for_tests(job_name)
   end
 
-  def self.enqueue(work)
+  def self.enqueue_on(queue, work)
     start_drainer if @drain_pid != Process.pid
-    enqueue_locked(work)
+    enqueue_locked(queue, work)
     @wake << true
     nil
   end

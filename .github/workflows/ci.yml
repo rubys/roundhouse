@@ -1795,6 +1795,9 @@ jobs:
     env:
       MAKEFLAGS: "-j4"
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      # run_spinel_slim probes compile alone on PRs and pushes; scheduled
+      # Full validation compiles each inside the whole blog's boot instead.
+      ROUNDHOUSE_SPINEL_SLIM: ${{ inputs.full && '0' || '1' }}
     steps:
       - uses: actions/checkout@v7
       # No setup-rust: the producer archive restores the test binaries.
@@ -2156,6 +2159,9 @@ jobs:
       - name: cargo test --test typescript_toolchain real_blog -- --ignored
         if: ${{ !cancelled() && matrix.target == 'typescript' }}
         run: cargo test --test typescript_toolchain real_blog -- --ignored --nocapture
+      - name: cargo test --test typescript_toolchain controller_ivars_named_like_base_state_compile_and_render
+        if: ${{ !cancelled() && matrix.target == 'typescript' }}
+        run: cargo test --locked --test typescript_toolchain controller_ivars_named_like_base_state_compile_and_render -- --ignored --nocapture --exact
       - name: cargo test --test emit_and_run render json writer on typescript
         if: ${{ !cancelled() && matrix.target == 'typescript' }}
         run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_typescript -- --ignored --nocapture --exact
@@ -2253,20 +2259,39 @@ jobs:
   # for tailwindcss asset compilation; no target compile step
   # (Ruby is interpreted).
   compare-ruby:
-    needs: [generate-fixture, plan]
+    # Waits for builds, never for tests: the CRuby gates run from
+    # unit-build's archive and scripts/compare emits with build-roundhouse's
+    # binary, so this job compiles no Roundhouse of its own.
+    needs: [generate-fixture, plan, unit-build, build-roundhouse]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'compare-ruby') }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      # The archive embeds the producer's checkout and target paths.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
 
     steps:
       - uses: actions/checkout@v7
+      # tools/compare (scripts/compare's HTTP differ) is still built here.
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-nextest
       - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
       - name: Extract fixture
         run: tar -xzf real-blog.tar.gz
+      - uses: actions/download-artifact@v8
+        with:
+          name: roundhouse-debug-bin
+          path: roundhouse-debug-bin
+      - *stage-roundhouse-debug-bin
+      - name: Download current-run test bundle
+        uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ needs.unit-build.outputs.unit-test-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/unit-tests
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ env.MRI_RUBY }}
@@ -2281,8 +2306,19 @@ jobs:
         with:
           node-version: '24'
       # Not a separate job: framework-tests-ruby needs this same MRI + scaffold bundle (#273).
-      - name: cargo test --test framework_tests_ruby -- --ignored
-        run: cargo test --test framework_tests_ruby -- --ignored --nocapture
+      # tiny_api: only the passing CRuby cases; tests named after an open
+      # issue are ignored too, and a blanket --ignored would select them (#321).
+      # roda_toolchain: the Roda + Sequel front-end's 19-check oracle, on the
+      # fixture and on its CRuby emit. Unscheduled until 10-26, it went red
+      # twice in October (CSRF default, `<%==`) and nothing saw it.
+      - name: Run the CRuby gates from the unit-build archive
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-ruby/selection.json" \
+            --select framework_tests_ruby --select uuid_key_ruby \
+            --select tiny_api:cruby_gate_ --select roda_toolchain
       - name: Controller dispatch against the Rails oracle
         if: ${{ !cancelled() }}
         env:
@@ -2290,21 +2326,12 @@ jobs:
         run: |
           gem install --no-document actionpack -v 8.1.4
           gem install --no-document sqlite3 -v '~> 2.9'
-          cargo test --locked --test controller_process_action_override rails_oracle_ -- --nocapture --test-threads=1
-      - name: cargo test --test uuid_key_ruby -- --ignored
-        if: ${{ !cancelled() }}
-        run: cargo test --test uuid_key_ruby -- --ignored --nocapture
-      # Only the passing CRuby cases: tests named after an open issue are
-      # ignored too, and a blanket --ignored would select them (#321).
-      - name: cargo test --test tiny_api cruby_gate_ -- --ignored
-        if: ${{ !cancelled() }}
-        run: cargo test --test tiny_api cruby_gate_ -- --ignored --nocapture
-      # The Roda + Sequel front-end's 19-check oracle, on the fixture and
-      # on its CRuby emit. Unscheduled until 10-26, it went red twice in
-      # October (CSRF default, `<%==`) and nothing saw it.
-      - name: cargo test --test roda_toolchain -- --ignored
-        if: ${{ !cancelled() }}
-        run: cargo test --test roda_toolchain -- --ignored --nocapture
+          cargo nextest run --profile ci \
+            --cargo-metadata target/nextest/cargo-metadata.json \
+            --binaries-metadata target/nextest/binaries-metadata.json \
+            --ignore-default-filter --run-ignored default --retries 0 \
+            --no-fail-fast --no-tests fail --test-threads 1 \
+            -E 'binary_id(roundhouse::all_tests) & test(/^controller_process_action_override::rails_oracle_/)'
       - name: scripts/compare ruby
         if: ${{ !cancelled() }}
         run: scripts/compare ruby
@@ -2314,33 +2341,42 @@ jobs:
   # compare-ruby, so the two lines run in parallel and a failure names
   # the Ruby version that broke. The Rails comparison stays on MRI_RUBY.
   compare-ruby-next:
-    needs: [generate-fixture, plan]
+    needs: [generate-fixture, plan, unit-build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'compare-ruby-next') }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
 
     steps:
       - uses: actions/checkout@v7
+      # Nextest runs through Cargo; nothing here compiles Roundhouse.
       - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-nextest
       - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
       - name: Extract fixture
         run: tar -xzf real-blog.tar.gz
+      - name: Download current-run test bundle
+        uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ needs.unit-build.outputs.unit-test-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/unit-tests
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ env.MRI_RUBY_NEXT }}
           bundler-cache: true
           working-directory: ./runtime/spinel/scaffold
-      - name: cargo test --test framework_tests_ruby -- --ignored
-        run: cargo test --test framework_tests_ruby -- --ignored --nocapture
-      - name: cargo test --test uuid_key_ruby -- --ignored
-        if: ${{ !cancelled() }}
-        run: cargo test --test uuid_key_ruby -- --ignored --nocapture
-      - name: cargo test --test tiny_api cruby_gate_ -- --ignored
-        if: ${{ !cancelled() }}
-        run: cargo test --test tiny_api cruby_gate_ -- --ignored --nocapture
+      - name: Run the CRuby gates from the unit-build archive
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-ruby-next/selection.json" \
+            --select framework_tests_ruby --select uuid_key_ruby \
+            --select tiny_api:cruby_gate_
 
   # compare-jruby: same emitted tree as compare-ruby but served by Puma
   # on the JVM via JRuby with the JDBC db backend (runtime/db.rb =
