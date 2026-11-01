@@ -76,3 +76,60 @@ fn a_method_ending_in_an_ivar_assignment_returns_it() {
         "{application}"
     );
 }
+
+/// `begin … rescue … else … end`: the else branch's value is the
+/// block's, so a value method returns it and the body is run as
+/// statements, whether it ends in an assignment or in a value.
+#[test]
+fn a_begin_with_an_else_returns_the_else_value() {
+    let (emitted, errors) = emit_and_run::empty_app()
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n")
+        .write("app/models/widget.rb", WIDGET)
+        .emit(BuildTarget::CSharp);
+    assert!(errors.is_empty(), "{errors:?}");
+    let widget = std::fs::read_to_string(emitted.join("app/models/Widget.cs")).unwrap();
+    assert!(widget.contains("try {\n            this.Tag = 1L;\n            return 3L;\n        }"), "{widget}");
+    assert!(widget.contains("ValueElse() {\n        try {\n            return 3L;\n        }"), "{widget}");
+}
+
+const WIDGET: &str = "class Widget < ApplicationRecord
+  def assign_else
+    begin
+      @tag = 1
+    rescue
+      2
+    else
+      3
+    end
+  end
+
+  def value_else
+    begin
+      1
+    rescue
+      2
+    else
+      3
+    end
+  end
+end
+";
+
+/// An ivar a `String` in one method and an Integer in another is a
+/// `string` property; the method ending in the Integer assignment returns
+/// `long`, so it returns the value it assigned, not the property.
+#[test]
+fn a_method_returns_the_value_it_assigned_not_the_property() {
+    let (emitted, errors) = emit_and_run::empty_app()
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n")
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\n  def label\n    @name_tag = \"none\"\n  end\n\n  def renumber\n    @name_tag = 2\n  end\nend\n")
+        .emit(BuildTarget::CSharp);
+    assert!(errors.is_empty(), "{errors:?}");
+    let widget = std::fs::read_to_string(emitted.join("app/models/Widget.cs")).unwrap();
+    assert!(widget.contains("public string NameTag"), "{widget}");
+    assert!(widget.contains("long Renumber() {\n        var __rhRet = 2L;\n        this.NameTag = __rhRet;\n        return __rhRet;\n    }"), "{widget}");
+}

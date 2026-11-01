@@ -2052,11 +2052,12 @@ pub(super) fn emit_begin_rescue(
     ensure: Option<&Expr>,
     arm: &dyn Fn(&Expr) -> String,
 ) -> String {
-    let mut try_body = arm(body);
-    if let Some(eb) = else_branch {
-        try_body.push('\n');
-        try_body.push_str(&arm(eb));
-    }
+    // With an `else`, the else branch's value is the block's: the body
+    // runs as statements, or a `return` from it skips the else.
+    let try_body = match else_branch {
+        Some(eb) => [emit_stmt(body), arm(eb)].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n"),
+        None => arm(body),
+    };
     let mut out = format!("try {{\n{}\n}}", indent(&try_body));
     if !rescues.is_empty() {
         let mut chain = String::new();
