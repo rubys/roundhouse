@@ -2411,13 +2411,21 @@ pub(super) fn wrap_return(e: &Expr) -> String {
             )
         }
         // Not the assignment alone: Ruby's assignment answers the value, and a value method must return it
-        ExprNode::Assign { target: target @ (LValue::Var { .. } | LValue::Ivar { .. }), .. } => {
-            let read = match target {
-                LValue::Var { id, name } => ExprNode::Var { id: *id, name: name.clone() },
-                LValue::Ivar { name } => ExprNode::Ivar { name: name.clone() },
-                _ => unreachable!(),
-            };
+        ExprNode::Assign { target: LValue::Var { id, name }, .. } => {
+            let read = ExprNode::Var { id: *id, name: name.clone() };
             format!("{}\nreturn {}", emit_expr(e), emit_expr(&Expr::new(e.span, read)))
+        }
+        // An ivar's property can be typed apart from the method's return, so
+        // the assigned value is returned, not the property read back.
+        ExprNode::Assign { target: target @ LValue::Ivar { .. }, value } => {
+            if matches!(&*value.node, ExprNode::Lit { value: crate::expr::Literal::Nil }) {
+                return format!("{}\nreturn nil", emit_expr(e));
+            }
+            let mut held = Expr::new(value.span, ExprNode::Var { id: crate::ident::VarId(0), name: crate::ident::Symbol::from("__rh_ret") });
+            held.ty = value.ty.clone();
+            let read = emit_expr(&held);
+            let store = Expr::new(e.span, ExprNode::Assign { target: target.clone(), value: held });
+            format!("let {read} = {}\n{}\nreturn {read}", emit_expr(value), emit_expr(&store))
         }
         ExprNode::Return { .. }
         | ExprNode::Raise { .. }

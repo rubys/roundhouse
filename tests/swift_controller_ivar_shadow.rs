@@ -30,7 +30,7 @@ fn an_app_ivar_shadowing_base_state_is_renamed_in_the_swift_controller() {
     }
     assert!(probes.contains("self.appStatus = \"app status\""), "{probes}");
     assert!(probes.contains("self.appHeaders = \"app headers\""), "{probes}");
-    assert!(application.contains("self.appLocation = \"app location\""), "{application}");
+    assert!(application.contains("self.appLocation = "), "{application}");
     assert!(probes.contains("Probes.show(appHeaders, appLocation, appStatus,"), "{probes}");
 }
 
@@ -61,13 +61,35 @@ fn an_app_ivar_is_renamed_under_a_synthesized_application_controller() {
 
 /// ApplicationController's `set_location`, a `before_action` that isn't
 /// inlined, is a value method in Swift (`func setLocation() -> Any?`). Its
-/// last statement is an ivar assignment, which in Ruby answers the value,
-/// so the method returns it; with no `return` the Swift doesn't build.
+/// last statement is an ivar assignment, which in Ruby answers the
+/// assigned value, so the method returns that value (held once, since the
+/// ivar's property can be typed apart from the method's return); with no
+/// `return` the Swift doesn't build.
 #[test]
 fn a_method_ending_in_an_ivar_assignment_returns_it() {
     let (emitted, errors) = ts_controller_ivars::overlay().emit(BuildTarget::Swift);
     assert!(errors.is_empty(), "{errors:?}");
     let application =
         std::fs::read_to_string(emitted.join("Sources/App/app/controllers/ApplicationController.swift")).unwrap();
-    assert!(application.contains("self.appLocation = \"app location\"\n        return appLocation"), "{application}");
+    assert!(
+        application.contains("let __rhRet = \"app location\"\n        self.appLocation = __rhRet\n        return __rhRet"),
+        "{application}"
+    );
+}
+
+/// An ivar a `String` in one method and an Integer in another is a
+/// `String` property; the method ending in the Integer assignment returns
+/// `Int`, so it returns the value it assigned, not the property.
+#[test]
+fn a_method_returns_the_value_it_assigned_not_the_property() {
+    let (emitted, errors) = emit_and_run::empty_app()
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n")
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\n  def label\n    @name_tag = \"none\"\n  end\n\n  def renumber\n    @name_tag = 2\n  end\nend\n")
+        .emit(BuildTarget::Swift);
+    assert!(errors.is_empty(), "{errors:?}");
+    let widget = std::fs::read_to_string(emitted.join("Sources/App/app/models/Widget.swift")).unwrap();
+    assert!(widget.contains("var nameTag: String"), "{widget}");
+    assert!(widget.contains("func renumber() -> Int {\n        let __rhRet = 2\n        self.nameTag = __rhRet\n        return __rhRet\n    }"), "{widget}");
 }
