@@ -1213,6 +1213,19 @@ impl<'a> BodyTyper<'a> {
         }
     }
 
+    pub(super) fn writer_has_missing_arm(&self, recv: &Ty, method: &Symbol,
+        block_ret: Option<&Ty>, args: &[Expr], instance_receiver: bool) -> bool
+    {
+        let Ty::Union { variants } = recv else { return false };
+        variants.iter().any(|arm| match arm {
+            Ty::Union { .. } => self.writer_has_missing_arm(arm, method, block_ret, args, instance_receiver),
+            Ty::Var { .. } | Ty::Untyped => false,
+            Ty::Class { id, .. } if self.open_classes.is_some_and(|o| o.open(id, !instance_receiver).is_some()) => false,
+            _ => matches!(self.dispatch_on(Some(arm), method, block_ret, args, instance_receiver), Ty::Var { .. })
+                && !self.defines_writer_surface(arm, method, instance_receiver),
+        })
+    }
+
     pub(super) fn dispatch(
         &self,
         recv_ty: Option<&Ty>,

@@ -60,6 +60,7 @@ class ProbesController < ActionController::Base
   def missing(value) = (self.absent_writer = value)
   def unrelated(value) = (Plain.new.content_type = value)
   def literal_unrelated = (Plain.new.content_type = "text/plain")
+  def union_unrelated(choice) = ((choice ? self : Plain.new).content_type = "text/plain")
   def class_receiver = (ActionController::Base.content_type = "text/plain")
 end
 "#),
@@ -69,7 +70,7 @@ end
     let errors: Vec<_> = diagnose(&app).into_iter().filter(|d| d.severity == Severity::Error).collect();
     assert!(errors.iter().any(|d| d.message.contains("`absent_writer=`")), "{errors:?}");
     assert!(errors.iter().any(|d| d.message.contains("`content_type=`")), "{errors:?}");
-    assert_eq!(errors.iter().filter(|d| d.message.contains("`content_type=`")).count(), 3, "{errors:?}");
+    assert_eq!(errors.iter().filter(|d| d.message.contains("`content_type=`")).count(), 4, "{errors:?}");
 }
 
 #[test]

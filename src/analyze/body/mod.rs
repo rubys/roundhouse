@@ -2397,6 +2397,14 @@ impl<'a> BodyTyper<'a> {
                     && recv_ty.as_ref().is_some_and(instance_shaped);
                 let mut dispatched =
                     self.dispatch_on(recv_ty.as_ref(), method, block_ret.as_ref(), args, instance_receiver);
+                // One controller arm cannot supply a missing writer on a
+                // different concrete receiver in the same union.
+                if method.as_str() == "content_type="
+                    && recv_ty.as_ref().is_some_and(|ty|
+                        self.writer_has_missing_arm(ty, method, block_ret.as_ref(), args, instance_receiver))
+                {
+                    return unknown();
+                }
                 // This writer has a registered controller surface, but the
                 // assignment still answers its argument, even when gradual
                 // or unresolved, and even if an app override returns another
