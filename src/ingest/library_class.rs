@@ -143,7 +143,9 @@ pub(super) fn ingest_empty_modules(source: &[u8], file: &str) -> IngestResult<Ve
 
 /// `Walk::All` walks every declaration; `NestedIn(outer)` walks only
 /// nested ones and top-level compact names under `outer`; `Beside(model)`
-/// walks every declaration but `model` and the ones under it.
+/// walks every class and module but `model` and the ones under it, and
+/// takes nothing written at file level (the model's file program carries
+/// that, as it did before the walk).
 fn ingest_library_classes_impl(
     source: &[u8],
     file: &str,
@@ -153,6 +155,7 @@ fn ingest_library_classes_impl(
         Walk::NestedIn(outer) => Some(outer),
         _ => None,
     };
+    let file_level = matches!(walk, Walk::All);
     let outside = |model: &str, name: &str| {
         name != model && !name.strip_prefix(model).is_some_and(|rest| rest.starts_with("::"))
     };
@@ -229,7 +232,7 @@ fn ingest_library_classes_impl(
             _ => true,
         }));
     }
-    if out.is_empty() {
+    if out.is_empty() && file_level {
         if let Some(lc) = file_data_class(&root, file)? {
             return Ok(vec![lc]);
         }
@@ -255,10 +258,10 @@ fn ingest_library_classes_impl(
     // classes (any of which may subclass them); a factory that subclasses
     // an in-file class follows that class — Ruby resolves the superclass
     // while defining the subclass. A file of nothing else defines just
-    // those classes. The nested walk (`nested_in`) takes no top-level
+    // those classes. The nested and beside walks take no top-level
     // declaration.
-    let made = match (nested_in, root.as_program_node()) {
-        (None, Some(program)) => {
+    let made = match (file_level, root.as_program_node()) {
+        (true, Some(program)) => {
             super::class_new_factory::constant_classes(None, Some(program.statements().as_node()), file)
         }
         _ => Vec::new(),
@@ -269,7 +272,7 @@ fn ingest_library_classes_impl(
     // Class.new-only library file drops `TIMEOUT = 5` beside the
     // factories, and a refused factory that should stay a constant has
     // nowhere to land.
-    let file_constants = if nested_in.is_none() {
+    let file_constants = if file_level {
         file_level_constants(&root, file, &made)?
     } else {
         Vec::new()

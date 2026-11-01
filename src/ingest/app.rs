@@ -1088,6 +1088,7 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                     Ok(Some(model)) => {
                         let outer = model.name.clone();
                         app.models.push(model);
+                        let mut beside_names: Vec<crate::ident::ClassId> = Vec::new();
                         // A gem's file runs more than its declaration when
                         // it loads: a require written below the class runs
                         // after it (`file_program`), a model's file as any.
@@ -1100,12 +1101,36 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                             // A declaration beside the model (`Helpers`
                             // beside `Node` in `module Tessera`) is the
                             // file's too, a library class as it was
-                            // before the file became a model's.
-                            if let Ok(beside) =
+                            // before the file became a model's, held and
+                            // registered as one. A refused alias in it
+                            // takes the file's program out with it, as
+                            // the program would name the refused class.
+                            let (beside, aliases) = super::inherited_alias::capturing(|| {
                                 super::library_class::ingest_library_classes_beside(&source, &path_str, outer.0.as_str())
-                            {
-                                carried.extend(beside.iter().map(|c| c.name.0.as_str().to_string()));
-                                app.library_classes.extend(beside);
+                            });
+                            match beside {
+                                Ok(beside) if !beside.is_empty() => {
+                                    carried.extend(beside.iter().map(|c| c.name.0.as_str().to_string()));
+                                    beside_names = beside.iter().map(|c| c.name.clone()).collect();
+                                    let conditional: crate::det::HashSet<&crate::ident::ClassId> = beside
+                                        .iter()
+                                        .flat_map(|c| c.conditional_definitions.iter().flat_map(|d| d.declared_names()))
+                                        .collect();
+                                    let unconditional =
+                                        beside_names.iter().filter(|name| !conditional.contains(name)).cloned().collect();
+                                    app.library_class_files.push((path_str.clone(), unconditional));
+                                    let start = app.library_classes.len();
+                                    app.library_classes.extend(beside);
+                                    if !aliases.is_empty() {
+                                        held_aliases.push(super::inherited_alias::Held {
+                                            path: path_str.clone(),
+                                            classes: start..app.library_classes.len(),
+                                            spans: aliases,
+                                        });
+                                    }
+                                }
+                                Ok(_) => {}
+                                Err(err) => record_library_ingest_failure(&mut app, &path_str, &err),
                             }
                             let list_dir = |dir: &Path| -> Vec<(String, bool)> {
                                 vfs.read_dir(dir)
@@ -1138,12 +1163,11 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                             for (id, name) in ingest_concern_included_redefs(&source, &path_str) {
                                 app.concern_included_redefs.entry(id).or_default().push(name);
                             }
-                            append_concern_items(&mut app, concern_items, concern_guarded, |id| {
-                                nested.iter().any(|class| class.name == *id)
-                            });
-                            concern_enums.extend(concern_enum_decls.into_iter().filter(
-                                |(id, _)| nested.iter().any(|class| class.name == *id),
-                            ));
+                            let own = |id: &crate::ident::ClassId| {
+                                nested.iter().any(|class| class.name == *id) || beside_names.contains(id)
+                            };
+                            append_concern_items(&mut app, concern_items, concern_guarded, |id| own(id));
+                            concern_enums.extend(concern_enum_decls.into_iter().filter(|(id, _)| own(id)));
                             app.library_classes.extend(nested);
                         }
                         super::on_load_reopen::ingest_on_load_reopens(&source, &path_str, &mut app);
@@ -1236,20 +1260,7 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                     append_concern_items(&mut app, concern_items, concern_guarded, |_| true);
                     concern_enums.extend(concern_enum_decls);
                 }
-                Err(err) => {
-                    if survey::is_active() {
-                        survey::record(&err);
-                    }
-                    // Left out of the IR, and named at what failed it.
-                    if let IngestError::Unsupported { message, .. } = &err {
-                        let (start, end) = super::error_site::of(&err).unwrap_or((0, 0));
-                        let file = super::sources::file_id(&path_str);
-                        app.ingest_drops.push(crate::app::IngestDrop {
-                            span: crate::span::Span { file, start: start as u32, end: end as u32 },
-                            message: message.clone(),
-                        });
-                    }
-                }
+                Err(err) => record_library_ingest_failure(&mut app, &path_str, &err),
             }
             // A reopen deferred behind `ActiveSupport.on_load` is
             // invisible to the class finder above (it skips blocks);
@@ -8535,6 +8546,22 @@ fn append_concern_items(
     }
     for (id, items) in items.into_iter().filter(|(id, _)| keep(id)) {
         app.concern_model_items.entry(id).or_default().extend(items);
+    }
+}
+
+/// A support file's library classes that failed to ingest: surveyed, and
+/// left out of the IR named at what failed them.
+fn record_library_ingest_failure(app: &mut App, path: &str, err: &IngestError) {
+    if survey::is_active() {
+        survey::record(err);
+    }
+    if let IngestError::Unsupported { message, .. } = err {
+        let (start, end) = super::error_site::of(err).unwrap_or((0, 0));
+        let file = super::sources::file_id(path);
+        app.ingest_drops.push(crate::app::IngestDrop {
+            span: crate::span::Span { file, start: start as u32, end: end as u32 },
+            message: message.clone(),
+        });
     }
 }
 

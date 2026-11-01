@@ -278,3 +278,55 @@ fn openings_whose_order_a_conditional_require_decides_keep_their_order() {
     );
     assert_eq!(lines(&run.stdout), [":z"]);
 }
+
+/// A class beside a gem model whose alias names a method of an ancestor
+/// in another gem file (`Helpers < Base`, `alias tag label`)
+/// is held until that ancestor is known, as a library file's class is.
+/// Ingested without that hold, the alias failed the walk and every class
+/// beside the model was dropped with no trace.
+#[test]
+fn a_class_beside_a_gem_model_aliasing_an_ancestor_method_is_declared() {
+    let files: &[(&str, &str)] = &[
+        ("lib/tessera.rb", "require 'tessera/base'\nrequire 'tessera/node'\n"),
+        ("lib/tessera/base.rb", "module Tessera\n  class Base\n    def label\n      :based\n    end\n  end\nend\n"),
+        (
+            "lib/tessera/node.rb",
+            "module Tessera\n  class Node\n    include ActiveModel::Validations\n\n    validate :check\n\n    def check\n    end\n  end\n\n  class Helpers < Base\n    alias tag label\n  end\nend\n",
+        ),
+    ];
+    let run = app_with(files, "require \"tessera\"\n").run_ruby("puts \"#{Tessera::Helpers.new.tag} #{Tessera::Node.new.valid?}\"\n");
+    assert!(
+        run.success,
+        "the emitted program failed in {}\n=== stdout ===\n{}\n=== stderr ===\n{}\nerrors: {:#?}",
+        run.emitted.display(),
+        run.stdout,
+        run.stderr,
+        run.errors
+    );
+    assert_eq!(lines(&run.stdout), ["based true"]);
+}
+
+/// A concern written beside the gem model that includes it runs its
+/// `included` block in the model, as a library file's concern does: the
+/// validation it declares holds.
+#[test]
+fn a_concern_beside_a_gem_model_runs_its_included_block_in_the_model() {
+    let files: &[(&str, &str)] = &[
+        ("lib/tessera.rb", "require 'tessera/node'\n"),
+        (
+            "lib/tessera/node.rb",
+            "module Tessera\n  module Named\n    extend ActiveSupport::Concern\n\n    included do\n      validates :name, presence: true\n    end\n  end\n\n  class Node\n    include ActiveModel::Model\n    include Named\n\n    attr_accessor :name\n  end\nend\n",
+        ),
+    ];
+    let run = app_with(files, "require \"tessera\"\n")
+        .run_ruby("puts \"#{Tessera::Node.new.valid?} #{Tessera::Node.new(name: 'x').valid?}\"\n");
+    assert!(
+        run.success,
+        "the emitted program failed in {}\n=== stdout ===\n{}\n=== stderr ===\n{}\nerrors: {:#?}",
+        run.emitted.display(),
+        run.stdout,
+        run.stderr,
+        run.errors
+    );
+    assert_eq!(lines(&run.stdout), ["false true"]);
+}
