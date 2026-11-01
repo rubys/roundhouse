@@ -38,14 +38,16 @@ pub fn apply_rails_cache_lowering(app: &mut App) {
     super::for_each_hook_body(app, &mut rewrite);
 }
 
-/// Is `Rails.cache` the app's own `ActiveSupport::Cache::*` store? Then
-/// `fetch_str` (a method of the runtime's store only) would be undefined
-/// on it: the pass stands down and `fetch` runs as written. Defining such
-/// a class is not enough: the app must bind it, with `config.cache_store
-/// = :custom_store` (or the class) or a `Rails.cache =` naming it, in a
-/// source or in `config/environments/*.rb`. An
-/// unbound store leaves `Rails.cache` the runtime's, whose plain `fetch`
-/// recomputes every call, so the lowering stays.
+/// Is `Rails.cache` the app's own store? Then `fetch_str` (a method of
+/// the runtime's store only) would be undefined on it: the pass stands
+/// down and `fetch` runs as written. The app binds its own store with
+/// `config.cache_store =` or `Rails.cache =`, in a source or in
+/// `config/environments/*.rb`, naming an `ActiveSupport::Cache::*` class
+/// it defines (`:custom_store`, or the class), or assigning any value that
+/// is not one of Rails' stores (`Rails.cache = MyStore.new`). Defining a
+/// store class is not enough: an unbound one leaves `Rails.cache` the
+/// runtime's, whose plain `fetch` recomputes every call, so the lowering
+/// stays.
 pub(crate) fn app_binds_cache_store(app: &App) -> bool {
     let stores: Vec<&str> = app
         .library_classes
@@ -54,9 +56,6 @@ pub(crate) fn app_binds_cache_store(app: &App) -> bool {
         .chain(app.models.iter().map(|m| &m.name))
         .filter_map(|id| id.0.as_str().strip_prefix("ActiveSupport::Cache::"))
         .collect();
-    if stores.is_empty() {
-        return false;
-    }
     let binds = |line: &str| {
         let line = line.trim();
         if line.starts_with('#') {
@@ -67,21 +66,56 @@ pub(crate) fn app_binds_cache_store(app: &App) -> bool {
             return false;
         }
         let lhs = lhs.trim();
-        if !(lhs.ends_with("cache_store") || lhs == "Rails.cache") {
+        if !(lhs.ends_with("config.cache_store") || lhs.trim_start_matches("::") == "Rails.cache") {
             return false;
         }
-        stores.iter().any(|store| {
-            rhs.contains(store)
-                || rhs
-                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':'))
-                    .filter_map(|word| word.strip_prefix(':'))
-                    .any(|sym| crate::naming::camelize(sym) == *store)
-        })
+        let rhs = rhs.trim();
+        // A store symbol (`:memory_store, …`) or a Rails store class is
+        // the runtime's unless the app defines it; anything else is an
+        // object of the app's.
+        let rails_store = rhs.starts_with(':')
+            || rhs.trim_start_matches("::").starts_with("ActiveSupport::Cache::");
+        !rails_store
+            || stores.iter().any(|store| {
+                rhs.contains(store)
+                    || rhs
+                        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':'))
+                        .filter_map(|word| word.strip_prefix(':'))
+                        .any(|sym| crate::naming::camelize(sym) == *store)
+            })
     };
     // `config/environments/*.rb` is where an app usually sets its store,
-    // and those files are not sources: ingest keeps their lines.
-    app.sources.iter().any(|source| source.text.lines().any(binds))
+    // and those files are not sources: ingest keeps their statements.
+    app.sources.iter().any(|source| cache_store_statements(&source.text).iter().any(|s| binds(s)))
         || app.environment_cache_store_lines.iter().any(|line| binds(line))
+}
+
+/// Each statement of `text` that mentions `cache_store` or `Rails.cache`,
+/// as one line: a line ending in `=`, `,`, `(` or `\` continues onto the
+/// next, so `config.cache_store =` with its value below it is whole.
+pub(crate) fn cache_store_statements(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(trimmed.trim_end_matches('\\'));
+        let continues = !trimmed.starts_with('#') && trimmed.ends_with(['=', ',', '(', '\\']);
+        if continues {
+            continue;
+        }
+        if current.contains("cache_store") || current.contains("Rails.cache") {
+            out.push(std::mem::take(&mut current));
+        } else {
+            current.clear();
+        }
+    }
+    if current.contains("cache_store") || current.contains("Rails.cache") {
+        out.push(current);
+    }
+    out
 }
 
 fn rewrite(expr: &mut Expr) {

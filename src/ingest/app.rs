@@ -7931,8 +7931,9 @@ fn boot_source_files<V: Vfs + ?Sized>(
     Ok(files)
 }
 
-/// Each `config/environments/*.rb` line that mentions `cache_store`, as
-/// written, in file order. See `App::environment_cache_store_lines`.
+/// Each `config/environments/*.rb` statement that mentions `cache_store`
+/// or `Rails.cache`, joined onto one line when its value continues below,
+/// in file order. See `App::environment_cache_store_lines`.
 fn environment_cache_store_lines<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<String> {
     let env_dir = dir.join("config/environments");
     if !vfs.is_dir(&env_dir) {
@@ -7949,7 +7950,7 @@ fn environment_cache_store_lines<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<St
     for path in files {
         let Ok(bytes) = vfs.read(&path) else { continue };
         let text = String::from_utf8_lossy(&bytes);
-        out.extend(text.lines().filter(|l| l.contains("cache_store")).map(|l| l.to_string()));
+        out.extend(crate::lower::rails_cache::cache_store_statements(&text));
     }
     out
 }
