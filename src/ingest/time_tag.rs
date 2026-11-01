@@ -22,7 +22,17 @@ use crate::App;
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::Symbol;
 
+/// The app's own `time_tag` (an `app/helpers` method, or a controller's
+/// `helper_method`), which Rails calls ahead of ActionView's.
+pub(crate) fn app_defines_time_tag(app: &App) -> bool {
+    let name = Symbol::from("time_tag");
+    app.helper_method_index.contains_key(&name) || app.view_visible_controller_methods.contains(&name)
+}
+
 pub fn lower_time_tags(app: &mut App) {
+    if app_defines_time_tag(app) {
+        return;
+    }
     let mut calls = Vec::new();
     for view in &mut app.views {
         rewrite(&mut view.body, &mut calls);
@@ -48,6 +58,22 @@ fn as_tag_time(e: &Expr) -> Option<Expr> {
     if method.as_str() != "time_tag" {
         return None;
     }
+    // A splat or forwarded keywords: not a time, a text and literal options.
+    let opaque = |a: &Expr| {
+        matches!(
+            &*a.node,
+            ExprNode::Splat { .. }
+                | ExprNode::KeywordSplat { .. }
+                | ExprNode::ForwardArgs
+                | ExprNode::ForwardKeywords
+                | ExprNode::ForwardKeywordsWithPairs { .. }
+        )
+    };
+    if args.iter().any(opaque)
+        || args.last().is_some_and(|a| matches!(&*a.node, ExprNode::Hash { entries, .. } if entries.iter().any(|(k, v)| opaque(k) || opaque(v))))
+    {
+        return None;
+    }
     let (time, rest) = args.split_first()?;
     let (positional, opts): (&[Expr], Vec<(Expr, Expr)>) = match rest.split_last() {
         Some((last, before)) => match &*last.node {
@@ -71,8 +97,14 @@ fn as_tag_time(e: &Expr) -> Option<Expr> {
     };
     let opts: Vec<(Expr, Expr)> = opts.into_iter().filter(|(k, _)| key(k).as_deref() != Some("format")).collect();
     let span = e.span;
+    // `options.reverse_merge(datetime: …)` is `{ datetime: … }.merge(options)`:
+    // `datetime` first, its value the options' own when they give one.
+    let (given, opts): (Vec<(Expr, Expr)>, Vec<(Expr, Expr)>) =
+        opts.into_iter().partition(|(k, _)| key(k).as_deref() == Some("datetime"));
     let mut entries = Vec::new();
-    if !opts.iter().any(|(k, _)| key(k).as_deref() == Some("datetime")) {
+    if let Some(last) = given.into_iter().last() {
+        entries.push(last);
+    } else {
         let iso = Expr::new(
             span,
             ExprNode::Send {

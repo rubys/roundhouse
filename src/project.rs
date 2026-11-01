@@ -1272,21 +1272,35 @@ fn is_plain_ruby_class(app: &App, lc: &crate::dialect::LibraryClass) -> bool {
 /// Measured on a datetime column through each target's own test runner,
 /// TypeScript writes `2026-11-01T09:30:15.500Z` and Python
 /// `2026-11-01T09:30:15.500000+00:00`, and Crystal's, Go's and Rust's emits
-/// of the read don't build, so off the ruby family the call is refused.
+/// of the read don't build, so off the ruby family (and on Roda, which has
+/// no ActionView) the call is refused.
 fn report_time_tag_calls(app: &App, target: BuildTarget) {
+    // Not Roda: it converts the views from their ERB source, with no
+    // ActionView behind them to answer `time_tag`.
     if matches!(
         target,
-        BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Roda | BuildTarget::Futamura
+        BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Futamura
     ) {
         return;
     }
+    // A template no request reaches keeps its errors as warnings, as analysis does.
+    let unreachable: crate::det::HashSet<crate::span::FileId> = app
+        .views
+        .iter()
+        .filter(|v| app.unreachable_views.contains(&v.name))
+        .map(|v| v.body.span.file)
+        .collect();
     for span in &app.time_tag_calls {
-        emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+        let mut d = crate::diagnostic::Diagnostic::unsupported(
             *span,
             Some(crate::ident::Symbol::from(target.as_str())),
             "time_tag",
             "its `datetime` is the time's `iso8601`, which this target writes otherwise than Rails (fraction or zone suffix)",
-        ));
+        );
+        if unreachable.contains(&span.file) {
+            d.severity = crate::diagnostic::Severity::Warning;
+        }
+        emit::diagnostics::push(d);
     }
 }
 

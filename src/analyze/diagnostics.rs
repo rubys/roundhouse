@@ -119,6 +119,10 @@ fn unlowered_form_builder_calls(app: &App) -> Vec<Diagnostic> {
 /// modeled), or options that are not a literal hash. Nothing else answers
 /// the call, so it is refused rather than reaching the emit.
 fn unlowered_time_tags(app: &App) -> Vec<Diagnostic> {
+    // The app's own `time_tag` is a call like any other.
+    if crate::ingest::time_tag::app_defines_time_tag(app) {
+        return Vec::new();
+    }
     fn visit(expr: &Expr, out: &mut Vec<Diagnostic>) {
         if let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node
             && method.as_str() == "time_tag"
