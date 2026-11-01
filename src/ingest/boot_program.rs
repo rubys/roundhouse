@@ -130,7 +130,10 @@ pub(super) fn build<V: Vfs + ?Sized>(
                 // Not the ingest error: a statement this cannot read stays on the ledger, as before.
                 let (read, _) = super::prism::scope(|| super::survey::without_recording(|| super::expr::ingest_expr(&node, &file_name)));
                 let Ok(expr) = read else { continue };
-                defined.extend(written_constants(&node));
+                // Not a conditional's: its branch may not run, and a later mutation would then pass as boot-owned.
+                if node.as_constant_write_node().is_some() || node.as_constant_path_write_node().is_some() {
+                    defined.extend(written_constants(&node));
+                }
                 app.boot_program.push(expr);
             }
             taken.insert((path.clone(), start));

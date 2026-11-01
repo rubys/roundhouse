@@ -644,3 +644,13 @@ fn a_constant_a_class_body_reads_stays_on_the_ledger_when_a_conditional_assigns_
     assert_eq!(statements(&ledger), ["if ENV[\"BOOT\"]"]);
     assert!(app.boot_program.is_empty());
 }
+
+#[test]
+fn a_constant_a_conditional_assigns_does_not_admit_a_later_mutation() {
+    let (app, ledger) = ingest(&[(
+        "config/initializers/flags.rb",
+        "if ENV[\"BOOT\"]\n  FLAGS = []\nend\nFLAGS << :late\n",
+    )]);
+    assert_eq!(statements(&ledger), ["FLAGS.<<"]);
+    assert_eq!(app.boot_program.len(), 1);
+}
