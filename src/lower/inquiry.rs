@@ -45,9 +45,10 @@
 //! `StringInquirer.new`) says nothing about a receiver-less `kind` in
 //! an unrelated class or mixin, where it resolves to that class's own
 //! `kind` (a GraphQL type's `TypeKind`, whose `interface?` is real).
-//! A receiver-less call therefore folds only when its owner class
-//! reaches a definer through its superclass / include chain, and an
-//! explicit receiver only when its typed (or written) class does.
+//! A receiver-less call therefore folds only when the method dispatch
+//! selects for its owner (the nearest definer along its include /
+//! superclass chain, by full class name) answers the inquirer, and an
+//! explicit receiver only when its typed (or written) class's does.
 //!
 //! An app defining its own `inquiry` disables the pass wholesale, the
 //! same coarse opt-out `exclude_predicate` takes beside this file: the
@@ -88,86 +89,101 @@ struct Facts {
     reach: Reach,
 }
 
-/// Which classes define an inquirer-returning method, and each class's
-/// superclass / include edges, so a receiver-less call can be checked
-/// against what its owner can actually reach. Keyed by the last name
-/// segment: includes are written relative to their lexical scope, and
-/// the over-match only widens the fold to a same-named sibling.
+/// Each app class's instance methods by name (whether the method answers
+/// an inquirer), and its ancestors in Ruby's lookup order (later includes
+/// first, then the superclass), so a call can be checked against the
+/// method dispatch actually selects for its owner. Keyed by the full class
+/// name; a written include or superclass resolves through its lexical
+/// namespace first, as Ruby's constant lookup does.
 #[derive(Default)]
 struct Reach {
-    definers: crate::det::HashMap<Symbol, crate::det::HashSet<String>>,
-    edges: crate::det::HashMap<String, Vec<String>>,
-}
-
-fn last_segment(name: &str) -> String {
-    name.rsplit("::").next().unwrap_or(name).to_string()
+    defined: crate::det::HashMap<String, crate::det::HashMap<Symbol, bool>>,
+    ancestors: crate::det::HashMap<String, Vec<String>>,
 }
 
 impl Reach {
     fn collect(app: &App) -> Reach {
         let mut r = Reach::default();
-        let define = |r: &mut Reach, owner: &crate::ident::ClassId, method: &Symbol| {
-            r.definers.entry(method.clone()).or_default().insert(last_segment(owner.0.as_str()));
+        let mut known: crate::det::HashSet<String> = crate::det::HashSet::default();
+        known.extend(app.models.iter().map(|m| m.name.0.as_str().to_string()));
+        known.extend(app.library_classes.iter().map(|lc| lc.name.0.as_str().to_string()));
+        known.extend(app.controllers.iter().map(|c| c.name.0.as_str().to_string()));
+        let resolve = |owner: &str, written: &crate::ident::ClassId| -> String {
+            let name = written.0.as_str().trim_start_matches("::");
+            if written.0.as_str().starts_with("::") {
+                return name.to_string();
+            }
+            let mut scope: Vec<&str> = owner.split("::").collect();
+            scope.pop();
+            while !scope.is_empty() {
+                let candidate = format!("{}::{name}", scope.join("::"));
+                if known.contains(&candidate) {
+                    return candidate;
+                }
+                scope.pop();
+            }
+            name.to_string()
         };
-        let edge = |r: &mut Reach, owner: &crate::ident::ClassId, to: &crate::ident::ClassId| {
-            r.edges.entry(last_segment(owner.0.as_str())).or_default().push(last_segment(to.0.as_str()));
+        let define = |r: &mut Reach, owner: &str, method: &Symbol, inquiry: bool| {
+            let slot = r.defined.entry(owner.to_string()).or_default().entry(method.clone()).or_insert(false);
+            *slot |= inquiry;
         };
         for model in &app.models {
-            for m in model.methods() {
-                if crate::analyze::inquiry::tail_is_inquiry(&m.body) {
-                    define(&mut r, &model.name, &m.name);
-                }
+            let owner = model.name.0.as_str();
+            for m in model.methods().filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance) {
+                define(&mut r, owner, &m.name, crate::analyze::inquiry::tail_is_inquiry(&m.body));
             }
-            if let Some(p) = &model.parent {
-                edge(&mut r, &model.name, p);
-            }
-            for i in crate::analyze::model_includes(model) {
-                edge(&mut r, &model.name, &i);
-            }
+            let mut up: Vec<String> = crate::analyze::model_includes(model).iter().rev().map(|i| resolve(owner, i)).collect();
+            up.extend(model.parent.iter().map(|p| resolve(owner, p)));
+            r.ancestors.entry(owner.to_string()).or_default().extend(up);
         }
         for lc in &app.library_classes {
-            for m in &lc.methods {
-                if crate::analyze::inquiry::tail_is_inquiry(&m.body) {
-                    define(&mut r, &lc.name, &m.name);
-                }
+            let owner = lc.name.0.as_str();
+            for m in lc.methods.iter().filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance) {
+                define(&mut r, owner, &m.name, crate::analyze::inquiry::tail_is_inquiry(&m.body));
             }
-            if let Some(p) = &lc.parent {
-                edge(&mut r, &lc.name, p);
-            }
-            for i in &lc.includes {
-                edge(&mut r, &lc.name, i);
-            }
+            let mut up: Vec<String> = lc.includes.iter().rev().map(|i| resolve(owner, i)).collect();
+            up.extend(lc.parent.iter().map(|p| resolve(owner, p)));
+            r.ancestors.entry(owner.to_string()).or_default().extend(up);
         }
         for c in &app.controllers {
+            let owner = c.name.0.as_str();
             for item in &c.body {
                 if let crate::dialect::ControllerBodyItem::Action { action, .. } = item {
-                    if crate::analyze::inquiry::tail_is_inquiry(&action.body) {
-                        define(&mut r, &c.name, &action.name);
-                    }
+                    define(&mut r, owner, &action.name, crate::analyze::inquiry::tail_is_inquiry(&action.body));
                 }
             }
             if let Some(p) = &c.parent {
-                edge(&mut r, &c.name, p);
+                let parent = resolve(owner, p);
+                r.ancestors.entry(owner.to_string()).or_default().push(parent);
             }
         }
         r
     }
 
-    /// Does `owner`, through its superclass / include chain, reach a
-    /// class that defines the inquirer-returning `method`?
+    /// Does the `method` that dispatch selects for an instance of `owner`
+    /// (the nearest definer in its lookup order) answer an inquirer? A
+    /// nearer override that answers anything else decides it, as Ruby's
+    /// lookup does.
     fn owner_reaches(&self, owner: &crate::ident::ClassId, method: &Symbol) -> bool {
-        let Some(definers) = self.definers.get(method) else { return false };
-        let mut stack = vec![last_segment(owner.0.as_str())];
+        let mut order = vec![owner.0.as_str().trim_start_matches("::").to_string()];
         let mut seen = crate::det::HashSet::default();
-        while let Some(cur) = stack.pop() {
-            if definers.contains(&cur) {
-                return true;
-            }
+        let mut i = 0;
+        while i < order.len() {
+            let cur = order[i].clone();
+            i += 1;
             if !seen.insert(cur.clone()) {
                 continue;
             }
-            if let Some(next) = self.edges.get(&cur) {
-                stack.extend(next.iter().cloned());
+            if let Some(inquiry) = self.defined.get(&cur).and_then(|methods| methods.get(method)) {
+                return *inquiry;
+            }
+            if let Some(up) = self.ancestors.get(&cur) {
+                // Depth-first in lookup order: this class's ancestors come
+                // before the next sibling's.
+                for (k, next) in up.iter().enumerate() {
+                    order.insert(i + k, next.clone());
+                }
             }
         }
         false

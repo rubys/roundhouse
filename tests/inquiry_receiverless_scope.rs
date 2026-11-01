@@ -38,6 +38,18 @@ fn emitted(file: &str) -> String {
             b"class TypedMemberHost < Client\n  def host_internal?\n    kind.internal?\n  end\nend\n".to_vec(),
         ),
         (
+            PathBuf::from("app/models/overriding_host.rb"),
+            b"class OverridingHost < Client\n  def kind\n    KindValue.new\n  end\n\n  def overridden_internal?\n    kind.internal?\n  end\nend\n".to_vec(),
+        ),
+        (
+            PathBuf::from("app/models/kind_value.rb"),
+            b"class KindValue\n  def internal?\n    false\n  end\nend\n".to_vec(),
+        ),
+        (
+            PathBuf::from("app/models/storefront/client.rb"),
+            b"module Storefront\n  class Client\n    def storefront_internal?\n      kind.internal?\n    end\n  end\nend\n".to_vec(),
+        ),
+        (
             PathBuf::from("app/models/concerns/flavored.rb"),
             b"module Flavored\n  extend ActiveSupport::Concern\n\n  def flavor\n    @flavor.inquiry\n  end\nend\n".to_vec(),
         ),
@@ -69,7 +81,7 @@ fn a_receiverless_predicate_in_an_unrelated_mixin_is_left_alone() {
 
 #[test]
 fn a_receiverless_predicate_folds_in_the_class_that_defines_the_inquirer() {
-    let src = emitted("client.rb");
+    let src = emitted("models/client.rb");
     assert!(src.contains("kind == \"internal\""), "{src}");
     assert!(!src.contains(".internal?"), "{src}");
 }
@@ -89,7 +101,7 @@ fn an_explicit_receiver_of_unknown_class_is_left_alone() {
 
 #[test]
 fn an_explicit_receiver_typed_as_the_definer_folds() {
-    let src = emitted("client.rb");
+    let src = emitted("models/client.rb");
     assert!(src.contains("Client.new.kind == \"internal\""), "{src}");
 }
 
@@ -97,4 +109,18 @@ fn an_explicit_receiver_typed_as_the_definer_folds() {
 fn a_receiverless_predicate_folds_in_a_model_that_includes_the_definer() {
     let src = emitted("gadget.rb");
     assert!(src.contains("flavor == \"sweet\""), "{src}");
+}
+
+#[test]
+fn a_nearer_override_that_answers_no_inquirer_is_left_alone() {
+    let src = emitted("overriding_host.rb");
+    assert!(src.contains("kind.internal?"), "{src}");
+    assert!(!src.contains("kind == \"internal\""), "{src}");
+}
+
+#[test]
+fn a_same_named_class_in_another_namespace_is_left_alone() {
+    let src = emitted("storefront/client.rb");
+    assert!(src.contains("kind.internal?"), "{src}");
+    assert!(!src.contains("kind == \"internal\""), "{src}");
 }
