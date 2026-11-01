@@ -57,6 +57,8 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         classes
     })
     .expect("kotlin runtime transpile failed (Ruby source error)");
+    let runtime_classes: Vec<crate::dialect::LibraryClass> =
+        runtime_units.iter().flat_map(|u| u.classes.iter().cloned()).collect();
     for unit in runtime_units {
         files.push(EmittedFile { path: unit.out_path, content: unit.content });
     }
@@ -140,13 +142,26 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut controller_extras = view_lower_extras;
     controller_extras.extend(crate::lower::extras_from_lcs(&view_lcs));
     let assocs = crate::lower::model_associations::compute_association_graph(app);
-    let controller_lcs = crate::lower::lower_controllers_with_arel_views_and_assocs(
+    let mut controller_lcs = crate::lower::lower_controllers_with_arel_views_and_assocs(
         &app.controllers,
         controller_extras,
         Some(&app.schema),
         &app.views,
         &assocs,
     );
+    // A property and a method share one Kotlin namespace, both camelCased:
+    // `performed?` is `performedPred`, `save!` is `saveBang`, so an app
+    // `@save_bang` (`saveBang`) meets the runtime's `save!`.
+    // The ApplicationController this emit synthesizes (below) extends
+    // nothing, so it implies no link to the runtime base.
+    super::controller_ivars::rename_ivars_shadowing_controller_base(&mut controller_lcs, &runtime_classes, |name| {
+        let kotlin = match name.as_str() {
+            "[]" => "get".to_string(),
+            "[]=" => "set".to_string(),
+            other => naming::camel(other),
+        };
+        vec![name.clone(), crate::ident::Symbol::from(crate::naming::snake_case(&kotlin))]
+    }, &[]);
     // Synthesize `ApplicationController` when a controller extends it but the
     // app doesn't define one (Rails scaffolds assume it; minimal fixtures
     // skip it).
