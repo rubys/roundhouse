@@ -3544,7 +3544,7 @@ pub fn write_to_dir(files: &[(String, String)], dest: &Path) -> Result<(), Strin
 /// token Ruby ignores the comment and warns ("is ignored after any
 /// tokens"), and a tree under a warnings-are-errors policy refuses to
 /// boot. The line has no effect there, so it is
-/// dropped; a leading one is kept. Only an exact column-0 comment counts,
+/// blanked, keeping the line count; a leading one is kept. Only an exact column-0 comment counts,
 /// and only a real comment token: the same text on a heredoc line is
 /// string data. `shareable_constant_value` is not touched: Ruby honors it
 /// anywhere in a file, for the constants after it.
@@ -3571,23 +3571,42 @@ pub fn drop_late_magic_comments(content: &str) -> std::borrow::Cow<'_, str> {
         return std::borrow::Cow::Borrowed(content);
     }
     let parsed = ruby_prism::parse(content.as_bytes());
-    let comment_starts: std::collections::HashSet<usize> =
-        parsed.comments().map(|c| crate::ingest::prism_api::PrismLocation::start_offset(&c.location())).collect();
+    let comments: Vec<(usize, usize)> = parsed
+        .comments()
+        .map(|c| {
+            let loc = c.location();
+            (
+                crate::ingest::prism_api::PrismLocation::start_offset(&loc),
+                crate::ingest::prism_api::PrismLocation::end_offset(&loc),
+            )
+        })
+        .collect();
+    let in_comment = |at: usize| comments.iter().any(|&(start, end)| start <= at && at < end);
     let mut out = String::with_capacity(content.len());
     let mut seen_token = false;
+    let mut dropped = false;
     let mut offset = 0;
     for line in content.split_inclusive('\n') {
         let start = offset;
         offset += line.len();
         let trimmed = line.trim();
-        if !(trimmed.is_empty() || trimmed.starts_with('#')) {
+        let first = start + (line.len() - line.trim_start().len());
+        // A `=begin`/`=end` block is a comment, as a `#` line is: neither
+        // is the token past which Ruby ignores a magic comment.
+        if !(trimmed.is_empty() || trimmed.starts_with('#') || in_comment(first)) {
             seen_token = true;
-        } else if seen_token && is_magic(line) && comment_starts.contains(&start) {
+        } else if seen_token && is_magic(line) && comments.iter().any(|&(s, _)| s == start) {
+            // A blank line in its place, so `__LINE__` and every later
+            // source location stay where they were.
+            if line.ends_with('\n') {
+                out.push('\n');
+            }
+            dropped = true;
             continue;
         }
         out.push_str(line);
     }
-    if out.len() == content.len() {
+    if !dropped {
         return std::borrow::Cow::Borrowed(content);
     }
     std::borrow::Cow::Owned(out)
@@ -12502,9 +12521,24 @@ fn walk_data_files_into(root: &Path, out: &mut Vec<(String, String)>) -> Result<
             // A symlinked data file is carried by its contents when it
             // resolves to a regular file inside the app; a link that leaves
             // the app (or a symlinked directory) is not followed.
+            // The target must pass the same exclusions as a file at its own
+            // path would: a `config/data.yml` linking to `config/secrets.yml`
+            // or `config/database.yml` is not carried.
             let linked_file = ty.is_symlink()
                 && fs::metadata(entry.path()).is_ok_and(|m| m.is_file())
-                && fs::canonicalize(entry.path()).is_ok_and(|target| canonical_root.as_ref().is_some_and(|r| target.starts_with(r)));
+                && fs::canonicalize(entry.path()).is_ok_and(|target| {
+                    let Some(inside) = canonical_root.as_ref().and_then(|r| target.strip_prefix(r).ok()) else {
+                        return false;
+                    };
+                    let parts: Vec<String> = inside.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+                    let excluded = parts.iter().enumerate().any(|(i, part)| {
+                        part.starts_with('.')
+                            || secret(part)
+                            || (i + 1 < parts.len() && SKIP_DIRS.contains(&part.as_str()))
+                            || (i == 0 && parts.len() > 1 && (part == "sorbet" || part == "out"))
+                    });
+                    !excluded && parts.join("/") != "config/database.yml" && parts.last().is_some_and(|last| data_file(last))
+                });
             if ty.is_dir() {
                 // `out/` is the CLI's default output root (`out/<target>`):
                 // walking it would carry the previous emit into the next one.
@@ -12748,6 +12782,27 @@ fn walk_ruby(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A symlinked data file is carried by its contents only when its
+    /// target would be carried at its own path.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_data_file_is_carried_only_when_its_target_would_be() {
+        let root = std::env::temp_dir().join(format!("rh-data-links-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("config")).unwrap();
+        fs::write(root.join("config/real.yml"), "a: 1\n").unwrap();
+        fs::write(root.join("config/secrets.yml"), "secret_key_base: x\n").unwrap();
+        fs::write(root.join("config/database.yml"), "test: {}\n").unwrap();
+        std::os::unix::fs::symlink(root.join("config/real.yml"), root.join("config/alias.yml")).unwrap();
+        std::os::unix::fs::symlink(root.join("config/secrets.yml"), root.join("config/data.yml")).unwrap();
+        std::os::unix::fs::symlink(root.join("config/database.yml"), root.join("config/db.yml")).unwrap();
+        let mut out = Vec::new();
+        walk_data_files_into(&root, &mut out).unwrap();
+        let carried: Vec<&str> = out.iter().map(|(path, _)| path.as_str()).collect();
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(carried, ["config/alias.yml", "config/real.yml"]);
+    }
 
     #[test]
     fn a_written_require_stays_below_the_files_magic_comments() {

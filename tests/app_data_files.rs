@@ -1,9 +1,8 @@
 //! The app's data files reach the emitted tree at their Rails.root-
 //! relative paths, so app code that reads one by a path it builds runs
-//! as it does on the source tree. a large app's `RegionDefaults`
-//! loads `components/regions/config/countries_for_currency_overrides.yml`
-//! in its class body; the emitted tree had no data files at all, and
-//! boot died with Errno::ENOENT.
+//! as it does on the source tree. A class body that loads
+//! `components/regions/config/overrides.yml` died at boot with
+//! Errno::ENOENT: the emitted tree had no data files at all.
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
