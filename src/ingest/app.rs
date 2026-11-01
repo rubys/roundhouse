@@ -1067,11 +1067,20 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
             // validations and scopes — replayed by the ruby emitter,
             // dropped by a strict target.
             //
+            // So is a gem's own ActiveModel class (`include
+            // ActiveModel::Validations` with no superclass): no runtime
+            // port defines the module to include, and the gem's
+            // validations compile as a model's do. An app `lib/` class
+            // keeps `lower::active_model_model`'s treatment (it may reopen
+            // a framework class).
+            //
             // Only an explicit `Model` classification routes this way.
             // `None` — a file with no class, a bare module — stays a
             // library class here, unlike under `app/models` where the
             // directory itself is the app saying what the file is.
-            if super::library_class::has_active_record_base(&source, &model_bases) {
+            if super::library_class::has_active_record_base(&source, &model_bases)
+                || (gem_libs.iter().any(|lib| entry.starts_with(lib)) && super::library_class::is_tableless_active_model(&source))
+            {
                 match ingest_model_with_enum_constants(
                     &source, &path_str, &app.schema, &table_prefixes, &base_prefixes, &enum_constants,
                     &model_bases,
@@ -1079,6 +1088,29 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                     Ok(Some(model)) => {
                         let outer = model.name.clone();
                         app.models.push(model);
+                        // A gem's file runs more than its declaration when
+                        // it loads: a require written below the class runs
+                        // after it (`file_program`), a model's file as any.
+                        if gem_libs.iter().any(|lib| entry.starts_with(lib)) {
+                            let mut carried: crate::det::HashSet<String> = Default::default();
+                            carried.insert(outer.0.as_str().to_string());
+                            if let Ok(nested) = ingest_nested_library_classes(&source, &path_str, outer.0.as_str()) {
+                                carried.extend(nested_under(&outer, nested).iter().map(|c| c.name.0.as_str().to_string()));
+                            }
+                            let list_dir = |dir: &Path| -> Vec<(String, bool)> {
+                                vfs.read_dir(dir)
+                                    .map(|entries| {
+                                        entries
+                                            .into_iter()
+                                            .filter_map(|e| Some((e.file_name()?.to_str()?.to_string(), vfs.is_dir(&e))))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default()
+                            };
+                            if let Some(program) = super::file_program::file_program(&source, &path_str, &carried, &list_dir) {
+                                app.file_programs.push(program);
+                            }
+                        }
                         // Classes nested in the model's body are classes
                         // of their own, exactly as under `app/models` —
                         // and, same as there, the plain (non-nested)

@@ -4467,6 +4467,21 @@ pub fn has_active_record_base(source: &[u8], bases: &ModelBases) -> bool {
         .is_some_and(|p| bases.contains(&bases.resolve_superclass(&scope, &p)))
 }
 
+/// A file whose primary class has no superclass and includes
+/// `ActiveModel::Model` or `ActiveModel::Validations`, as
+/// `classify_class_file` reads a tableless model under `app/models`. A
+/// gem's `class Node; include ActiveModel::Validations; validate :check`
+/// carried as a library class emitted the include of a module no runtime
+/// port defines, a NameError as the file loaded.
+pub fn is_tableless_active_model(source: &[u8]) -> bool {
+    let result = parse(source);
+    let root = result.node();
+    let Some((_, class)) = super::util::primary_class_with_scope(&root) else {
+        return false;
+    };
+    class.superclass().is_none() && includes_active_model(&class)
+}
+
 pub fn classify_class_file(source: &[u8], bases: &ModelBases) -> Option<ClassKind> {
     let result = parse(source);
     let root = result.node();
