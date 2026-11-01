@@ -3458,6 +3458,31 @@ impl<'a> BodyTyper<'a> {
                             }
                         }
                     }
+                    // `xs.flatten!` replaces the array's contents, so a
+                    // later read of `xs` sees the flattened element, not
+                    // the one it was bound with. A statement that is the
+                    // call itself certainly ran it, and the binding is
+                    // replaced: widening it instead would keep the nested
+                    // element, and a parameter fed back its own flattened
+                    // value would gain an Array level every round. A call
+                    // nested in a branch, loop or block may run never or
+                    // many times, so there the flattened element only
+                    // joins the old one.
+                    for (is_ivar, name, depth, certain) in collect_flatten_bangs(&exprs[i]) {
+                        let bindings = if is_ivar {
+                            &mut local_ctx.ivar_bindings
+                        } else {
+                            &mut local_ctx.local_bindings
+                        };
+                        if let Some(Ty::Array { elem }) = bindings.get(&name) {
+                            let new_elem = if certain {
+                                send::flatten_to(elem, depth)
+                            } else {
+                                union_of((**elem).clone(), send::flatten_to(elem, depth.repeated()))
+                            };
+                            bindings.insert(name, Ty::Array { elem: std::sync::Arc::new(new_elem) });
+                        }
+                    }
                     // Nil-seeded scalar refinement — the `size = nil` …
                     // `size = v` pair, where the write is usually nested
                     // in a block and so invisible to this statement walk.
@@ -4234,6 +4259,40 @@ fn collect_array_pushes(expr: &Expr, out: &mut Vec<(bool, Symbol, Ty)>) {
         }
     }
     expr.node.for_each_child(&mut |child| collect_array_pushes(child, out));
+}
+
+/// Every `flatten!` in statement `stmt` whose receiver is a plain local or
+/// ivar, as `(is_ivar, name, depth, certain)`, in the order they apply.
+/// `certain` only for the statement itself: a call nested in its subtree
+/// may sit in a branch, loop or block. Like [`collect_array_pushes`], a
+/// block parameter shadowing the name at worst widens the outer binding.
+fn collect_flatten_bangs(stmt: &Expr) -> Vec<(bool, Symbol, send::FlattenDepth, bool)> {
+    fn flatten_bang(expr: &Expr) -> Option<(bool, Symbol, send::FlattenDepth)> {
+        let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*expr.node else {
+            return None;
+        };
+        if method.as_str() != "flatten!" {
+            return None;
+        }
+        let depth = send::FlattenDepth::of(args);
+        match &*recv.node {
+            ExprNode::Ivar { name } => Some((true, name.clone(), depth)),
+            ExprNode::Var { name, .. } => Some((false, name.clone(), depth)),
+            _ => None,
+        }
+    }
+    fn nested(expr: &Expr, out: &mut Vec<(bool, Symbol, send::FlattenDepth, bool)>) {
+        if let Some((is_ivar, name, depth)) = flatten_bang(expr) {
+            out.push((is_ivar, name, depth, false));
+        }
+        expr.node.for_each_child(&mut |child| nested(child, out));
+    }
+    let mut out = Vec::new();
+    stmt.node.for_each_child(&mut |child| nested(child, &mut out));
+    if let Some((is_ivar, name, depth)) = flatten_bang(stmt) {
+        out.push((is_ivar, name, depth, true));
+    }
+    out
 }
 
 /// Every container index-write in `expr`'s subtree whose receiver is a

@@ -2440,6 +2440,14 @@ impl<'a> BodyTyper<'a> {
                         return t;
                     }
                 }
+                // `flatten(depth)` unwraps `depth` levels, not all of them,
+                // and `flatten!` answers nil when nothing was nested.
+                if matches!(method.as_str(), "flatten" | "flatten!") && block_ret.is_none() {
+                    let flat = Ty::Array {
+                        elem: std::sync::Arc::new(flatten_to(elem, FlattenDepth::of(args))),
+                    };
+                    return if method.as_str() == "flatten!" { union_of(flat, Ty::Nil) } else { flat };
+                }
                 // `a[start, length]` and `a[range]` answer a slice (nil past the end), not an element
                 if matches!(method.as_str(), "[]" | "slice")
                     && (args.len() == 2 || args.first().is_some_and(|a| matches!(a.ty, Some(Ty::Class { ref id, .. }) if id.0.as_str() == "Range") || matches!(&*a.node, crate::expr::ExprNode::Range { .. })))
@@ -4302,6 +4310,85 @@ fn flatten_elem(t: &Ty) -> Ty {
             .map(flatten_elem)
             .fold(Ty::Bottom, union_of),
         other => other.clone(),
+    }
+}
+
+/// How many levels a `flatten` / `flatten!` call unwraps, read off its
+/// argument.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum FlattenDepth {
+    /// No argument, or a negative literal: every level.
+    All,
+    /// A non-negative literal. `0` leaves the array as it is.
+    Levels(usize),
+    /// A depth only known at run time: any of the above.
+    Unknown,
+}
+
+impl FlattenDepth {
+    pub(super) fn of(args: &[Expr]) -> FlattenDepth {
+        match args {
+            [] => FlattenDepth::All,
+            [depth] => match &*depth.node {
+                ExprNode::Lit { value: crate::expr::Literal::Int { value } } => {
+                    usize::try_from(*value).map_or(FlattenDepth::All, FlattenDepth::Levels)
+                }
+                _ => FlattenDepth::Unknown,
+            },
+            _ => FlattenDepth::Unknown,
+        }
+    }
+
+    /// The depth after the same call runs any number of times, as it can
+    /// in a loop or a block: unwrapping every level is the same however
+    /// often it repeats, a fixed number of levels is not.
+    pub(super) fn repeated(self) -> FlattenDepth {
+        match self {
+            FlattenDepth::All => FlattenDepth::All,
+            FlattenDepth::Levels(_) | FlattenDepth::Unknown => FlattenDepth::Unknown,
+        }
+    }
+}
+
+/// The element type of an Array of `elem` flattened to `depth`.
+pub(super) fn flatten_to(elem: &Ty, depth: FlattenDepth) -> Ty {
+    match depth {
+        FlattenDepth::All => flatten_elem(elem),
+        FlattenDepth::Levels(n) => flatten_levels(elem, n),
+        // Every level Ruby could stop at, from none to all.
+        FlattenDepth::Unknown => {
+            let mut all = elem.clone();
+            let mut level = elem.clone();
+            while splices(&level) {
+                level = flatten_levels(&level, 1);
+                all = union_of(all, level.clone());
+            }
+            all
+        }
+    }
+}
+
+fn flatten_levels(t: &Ty, n: usize) -> Ty {
+    if n == 0 {
+        return t.clone();
+    }
+    match t {
+        Ty::Array { elem } => flatten_levels(elem, n - 1),
+        Ty::Relation { of } => Ty::Class { id: of.clone(), args: vec![].into() },
+        Ty::Union { variants } => variants
+            .iter()
+            .map(|v| flatten_levels(v, n))
+            .fold(Ty::Bottom, union_of),
+        other => other.clone(),
+    }
+}
+
+/// Whether flattening an element of type `t` one level changes it.
+fn splices(t: &Ty) -> bool {
+    match t {
+        Ty::Array { .. } | Ty::Relation { .. } => true,
+        Ty::Union { variants } => variants.iter().any(splices),
+        _ => false,
     }
 }
 
