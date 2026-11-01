@@ -83,6 +83,11 @@ fn rails_cache_assignments(text: &str) -> Vec<String> {
     let mut current = String::new();
     for line in text.lines() {
         let trimmed = line.trim();
+        // A comment or blank line between `Rails.cache =` and its value
+        // is not the value.
+        if !current.is_empty() && (trimmed.is_empty() || trimmed.starts_with('#')) {
+            continue;
+        }
         if !current.is_empty() {
             current.push(' ');
         }

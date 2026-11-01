@@ -166,3 +166,10 @@ fn rails_cache_bound_to_a_rails_store_keeps_the_lowering() {
     let body = with_store(Some(("test/test_helper.rb", helper)));
     assert!(body.contains("fetch_str"), "a Rails store is the runtime's:\n{body}");
 }
+
+#[test]
+fn a_comment_between_rails_cache_and_its_value_is_not_the_value() {
+    let helper = "Rails.cache =\n  # the runtime's own store\n  ActiveSupport::Cache::MemoryStore.new\n";
+    let body = with_store(Some(("test/test_helper.rb", helper)));
+    assert!(body.contains("fetch_str"), "a Rails store is the runtime's:\n{body}");
+}
