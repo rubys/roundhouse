@@ -69,7 +69,7 @@ pub fn ingest_library_classes(
     source: &[u8],
     file: &str,
 ) -> IngestResult<Vec<LibraryClass>> {
-    ingest_library_classes_impl(source, file, None)
+    ingest_library_classes_impl(source, file, Walk::All)
 }
 
 /// Like [`ingest_library_classes`], but only classes/modules NESTED
@@ -99,7 +99,28 @@ pub fn ingest_nested_library_classes(
     file: &str,
     outer: &str,
 ) -> IngestResult<Vec<LibraryClass>> {
-    ingest_library_classes_impl(source, file, Some(outer))
+    ingest_library_classes_impl(source, file, Walk::NestedIn(outer))
+}
+
+/// Every declaration in a gem model's file except the model's own class
+/// and what nests under it, which the model ingest and
+/// [`ingest_nested_library_classes`] take: a sibling written beside the
+/// model (`Tessera::Helpers` beside `Tessera::Node`) is a library class
+/// the file declares and loads like any other. The model's class is left
+/// out so its synthesized methods are not needed to walk it.
+pub fn ingest_library_classes_beside(
+    source: &[u8],
+    file: &str,
+    model: &str,
+) -> IngestResult<Vec<LibraryClass>> {
+    ingest_library_classes_impl(source, file, Walk::Beside(model))
+}
+
+#[derive(Clone, Copy)]
+enum Walk<'a> {
+    All,
+    NestedIn(&'a str),
+    Beside(&'a str),
 }
 
 /// The modules a file declares with an empty body (`module MarkA; end`):
@@ -120,18 +141,29 @@ pub(super) fn ingest_empty_modules(source: &[u8], file: &str) -> IngestResult<Ve
     Ok(out)
 }
 
-/// `nested_in`: `None` walks every declaration; `Some(outer)` walks
-/// only nested ones and top-level compact names under `outer`.
+/// `Walk::All` walks every declaration; `NestedIn(outer)` walks only
+/// nested ones and top-level compact names under `outer`; `Beside(model)`
+/// walks every declaration but `model` and the ones under it.
 fn ingest_library_classes_impl(
     source: &[u8],
     file: &str,
-    nested_in: Option<&str>,
+    walk: Walk<'_>,
 ) -> IngestResult<Vec<LibraryClass>> {
-    let walked = |scope: &[String], path: Option<Vec<String>>| match nested_in {
-        None => true,
-        Some(_) if !scope.is_empty() => true,
-        Some(outer) => path.is_some_and(|path| {
+    let nested_in = match walk {
+        Walk::NestedIn(outer) => Some(outer),
+        _ => None,
+    };
+    let outside = |model: &str, name: &str| {
+        name != model && !name.strip_prefix(model).is_some_and(|rest| rest.starts_with("::"))
+    };
+    let walked = |scope: &[String], path: Option<Vec<String>>| match walk {
+        Walk::All => true,
+        Walk::NestedIn(_) if !scope.is_empty() => true,
+        Walk::NestedIn(outer) => path.is_some_and(|path| {
             path.join("::").strip_prefix(outer).is_some_and(|rest| rest.starts_with("::"))
+        }),
+        Walk::Beside(model) => path.is_some_and(|path| {
+            outside(model, &scope.iter().chain(&path).cloned().collect::<Vec<_>>().join("::"))
         }),
     };
     super::sources::register(file, &String::from_utf8_lossy(source));
@@ -191,7 +223,11 @@ fn ingest_library_classes_impl(
     // module body declares (`ConditionalArm::declarations`), which the
     // finders above do not reach: each loads only where its branch runs.
     if nested_in.is_none() {
-        out.extend(conditional_declaration_classes(&root, file)?);
+        let conditional = conditional_declaration_classes(&root, file)?;
+        out.extend(conditional.into_iter().filter(|lc| match walk {
+            Walk::Beside(model) => outside(model, lc.name.0.as_str()),
+            _ => true,
+        }));
     }
     if out.is_empty() {
         if let Some(lc) = file_data_class(&root, file)? {

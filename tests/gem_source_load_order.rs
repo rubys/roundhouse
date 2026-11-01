@@ -224,3 +224,57 @@ fn a_require_written_below_a_gem_class_does_not_re_enter_the_loading_file() {
     let circular: Vec<&str> = run.stderr.lines().filter(|l| l.contains("circular require")).collect();
     assert!(circular.is_empty(), "a require re-entered a loading file: {circular:#?}");
 }
+
+/// A gem file whose class becomes a model (`Node`, an ActiveModel class)
+/// still declares what is written beside it: `Helpers` in the same
+/// `module Tessera` is a library class the file loads, as it was while
+/// the whole file was one.
+#[test]
+fn a_class_beside_a_gem_model_in_its_file_is_still_declared() {
+    let files: &[(&str, &str)] = &[
+        ("lib/tessera.rb", "require 'tessera/node'\n"),
+        (
+            "lib/tessera/node.rb",
+            "module Tessera\n  class Node\n    include ActiveModel::Validations\n\n    validate :check\n\n    def check\n    end\n\n    def kind\n      Helpers.label\n    end\n  end\n\n  class Helpers\n    def self.label\n      :helped\n    end\n  end\nend\n",
+        ),
+    ];
+    let run = app_with(files, "require \"tessera\"\n").run_ruby("puts \"#{Tessera::Node.new.kind} #{Tessera::Helpers.label}\"\n");
+    assert!(
+        run.success,
+        "the emitted program failed in {}\n=== stdout ===\n{}\n=== stderr ===\n{}\nerrors: {:#?}",
+        run.emitted.display(),
+        run.stdout,
+        run.stderr,
+        run.errors
+    );
+    assert_eq!(lines(&run.stdout), ["helped helped"]);
+}
+
+/// A class opened in two gem files, one required in each arm of a
+/// file-level `if`, and the other file required after it. Ruby loads
+/// only the arm that runs (`b.rb`, then `z.rb` below the `if`), so
+/// `z.rb`'s `who` is the one left. Which arm runs is not known
+/// statically, so the openings keep their ingest order (`b.rb` before
+/// `z.rb`, which here matches the load). Ranking the `then` arm's
+/// require as run put `z.rb` first and left `b.rb`'s `who`.
+#[test]
+fn openings_whose_order_a_conditional_require_decides_keep_their_order() {
+    let files: &[(&str, &str)] = &[
+        (
+            "lib/tessera.rb",
+            "if RUBY_VERSION < \"1\"\n  module Tessera\n    FLAG = :old\n  end\n  require 'tessera/z'\nelse\n  require 'tessera/b'\nend\nrequire 'tessera/z'\n",
+        ),
+        ("lib/tessera/b.rb", "module Tessera\n  class Thing\n    def self.who\n      :b\n    end\n  end\nend\n"),
+        ("lib/tessera/z.rb", "module Tessera\n  class Thing\n    def self.who\n      :z\n    end\n  end\nend\n"),
+    ];
+    let run = app_with(files, "require \"tessera\"\n").run_ruby("p Tessera::Thing.who\n");
+    assert!(
+        run.success,
+        "the emitted program failed in {}\n=== stdout ===\n{}\n=== stderr ===\n{}\nerrors: {:#?}",
+        run.emitted.display(),
+        run.stdout,
+        run.stderr,
+        run.errors
+    );
+    assert_eq!(lines(&run.stdout), [":z"]);
+}

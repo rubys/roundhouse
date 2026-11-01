@@ -1097,6 +1097,16 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                             if let Ok(nested) = ingest_nested_library_classes(&source, &path_str, outer.0.as_str()) {
                                 carried.extend(nested_under(&outer, nested).iter().map(|c| c.name.0.as_str().to_string()));
                             }
+                            // A declaration beside the model (`Helpers`
+                            // beside `Node` in `module Tessera`) is the
+                            // file's too, a library class as it was
+                            // before the file became a model's.
+                            if let Ok(beside) =
+                                super::library_class::ingest_library_classes_beside(&source, &path_str, outer.0.as_str())
+                            {
+                                carried.extend(beside.iter().map(|c| c.name.0.as_str().to_string()));
+                                app.library_classes.extend(beside);
+                            }
                             let list_dir = |dir: &Path| -> Vec<(String, bool)> {
                                 vfs.read_dir(dir)
                                     .map(|entries| {

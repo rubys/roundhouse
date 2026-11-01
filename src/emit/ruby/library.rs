@@ -260,6 +260,8 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
 /// `error.rb`, so `client.rb`'s `extend Collocated` runs after the
 /// constants `collocated.rb` writes. Ingest order is the directory walk's;
 /// each group of openings is put in load order here, the rest unmoved.
+/// A group with an opening whose file's place a file-level `if` decides
+/// keeps the ingest order: which arm runs is not known here.
 fn order_openings_by_load(lcs: &mut [LibraryClass], app: &App) {
     let mut by_name: HashMap<&str, Vec<usize>> = HashMap::default();
     for (i, lc) in lcs.iter().enumerate() {
@@ -281,11 +283,18 @@ fn order_openings_by_load(lcs: &mut [LibraryClass], app: &App) {
         Some(normalize_path(&source.path))
     };
     for group in groups {
-        let mut keyed: Vec<(usize, usize)> = group
+        // `None` (a conditional decides the file's place) leaves the group as is.
+        let Some(mut keyed) = group
             .iter()
             .enumerate()
-            .map(|(at, &i)| (file_of(&lcs[i]).and_then(|f| ranks.get(&f).copied()).unwrap_or(usize::MAX), at))
-            .collect();
+            .map(|(at, &i)| match file_of(&lcs[i]).and_then(|f| ranks.get(&f).copied()) {
+                Some(rank) => rank.map(|rank| (rank, at)),
+                None => Some((usize::MAX, at)),
+            })
+            .collect::<Option<Vec<(usize, usize)>>>()
+        else {
+            continue;
+        };
         if keyed.iter().all(|(rank, _)| *rank == usize::MAX) {
             continue;
         }
@@ -300,7 +309,10 @@ fn order_openings_by_load(lcs: &mut [LibraryClass], app: &App) {
 /// Each gem file's place in the order its declarations run: a depth-first
 /// walk of the file programs from the boot's gem entries, a file's
 /// requires followed where they stand, its declarations ranked as reached.
-fn file_load_ranks(app: &App) -> HashMap<String, usize> {
+/// Inside a file-level `if`/`unless` only one arm runs, so a file first
+/// reached there, or whose first declaration is there, has no rank
+/// (`None`): its place depends on the condition.
+fn file_load_ranks(app: &App) -> HashMap<String, Option<usize>> {
     use crate::app::ProgramItem;
     let programs: HashMap<String, &crate::app::FileProgram> =
         app.file_programs.iter().map(|p| (normalize_path(&p.source), p)).collect();
@@ -327,7 +339,8 @@ fn file_load_ranks(app: &App) -> HashMap<String, usize> {
         programs: &HashMap<String, &'a crate::app::FileProgram>,
         resolve: &dyn Fn(&str, &str, bool) -> Option<String>,
         seen: &mut crate::det::HashSet<String>,
-        ranks: &mut HashMap<String, usize>,
+        ranks: &mut HashMap<String, Option<usize>>,
+        certain: bool,
     ) {
         for item in items {
             match item {
@@ -335,25 +348,25 @@ fn file_load_ranks(app: &App) -> HashMap<String, usize> {
                     if let Some(target) = resolve(file, feature, *relative) {
                         if let Some(program) = programs.get(&target) {
                             if seen.insert(target.clone()) {
-                                walk(&target, &program.items, programs, resolve, seen, ranks);
+                                walk(&target, &program.items, programs, resolve, seen, ranks, certain);
                             }
                         }
                     }
                 }
                 ProgramItem::Declared(_) => {
                     let next = ranks.len();
-                    ranks.entry(file.to_string()).or_insert(next);
+                    ranks.entry(file.to_string()).or_insert(certain.then_some(next));
                 }
                 ProgramItem::Branch { then_items, else_items, .. } => {
-                    walk(file, then_items, programs, resolve, seen, ranks);
-                    walk(file, else_items, programs, resolve, seen, ranks);
+                    walk(file, then_items, programs, resolve, seen, ranks, false);
+                    walk(file, else_items, programs, resolve, seen, ranks, false);
                 }
                 _ => {}
             }
         }
     }
     let mut seen: crate::det::HashSet<String> = Default::default();
-    let mut ranks: HashMap<String, usize> = HashMap::default();
+    let mut ranks: HashMap<String, Option<usize>> = HashMap::default();
     let mut roots: Vec<String> = app.boot_gem_entries.iter().map(|e| normalize_path(e)).collect();
     let mut rest: Vec<String> = programs.keys().cloned().collect();
     rest.sort();
@@ -361,7 +374,7 @@ fn file_load_ranks(app: &App) -> HashMap<String, usize> {
     for root in roots {
         let Some(program) = programs.get(&root) else { continue };
         if seen.insert(root.clone()) {
-            walk(&root, &program.items, &programs, &resolve, &mut seen, &mut ranks);
+            walk(&root, &program.items, &programs, &resolve, &mut seen, &mut ranks, true);
         }
     }
     ranks
