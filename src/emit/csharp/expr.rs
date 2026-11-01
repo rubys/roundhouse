@@ -2099,28 +2099,32 @@ fn emit_discarded(e: &Expr) -> String {
     if let ExprNode::Seq { exprs } = &*e.node {
         return exprs.iter().map(emit_discarded).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n");
     }
-    let is_value = match &*e.node {
+    let is_value = matches!(
+        &*e.node,
         ExprNode::Var { .. }
-        | ExprNode::Ivar { .. }
-        | ExprNode::Const { .. }
-        | ExprNode::Array { .. }
-        | ExprNode::Hash { .. }
-        | ExprNode::StringInterp { .. }
-        | ExprNode::BoolOp { .. }
-        | ExprNode::Range { .. } => true,
-        // An operator (`n + 1`, `a == b`, `x[i]`), not a call. `<<` and `[]=`
-        // mutate (`items.Add(1L)` is void), so they stay statements.
-        ExprNode::Send { method, .. } => {
-            !matches!(method.as_str(), "<<" | "[]=")
-                && !method.as_str().chars().any(|c| c.is_alphanumeric() || c == '_')
-        }
-        _ => false,
-    };
+            | ExprNode::Ivar { .. }
+            | ExprNode::Const { .. }
+            | ExprNode::Array { .. }
+            | ExprNode::Hash { .. }
+            | ExprNode::StringInterp { .. }
+            | ExprNode::BoolOp { .. }
+            | ExprNode::Range { .. }
+    );
     if is_value {
-        format!("_ = {};", emit_expr(e))
-    } else {
-        emit_stmt(e)
+        return format!("_ = {};", emit_expr(e));
     }
+    // A send is classified by the C# it emits, not its Ruby name: `n + 1`
+    // and `items.empty?` (`(items.Count == 0)`) are values, while
+    // `items << 1` (`items.Add(1L)`, void) is a call. A call ends in its
+    // argument list and doesn't open with a parenthesis.
+    if let ExprNode::Send { .. } = &*e.node {
+        let emitted = emit_expr(e);
+        let text = emitted.trim();
+        if text.starts_with('(') || !text.ends_with(')') {
+            return format!("_ = {text};");
+        }
+    }
+    emit_stmt(e)
 }
 
 pub(super) fn emit_stmt(e: &Expr) -> String {

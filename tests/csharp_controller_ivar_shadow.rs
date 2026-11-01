@@ -170,3 +170,19 @@ fn an_append_in_a_begin_body_with_an_else_stays_a_statement() {
     assert!(!widget.contains("_ = items"), "{widget}");
     assert!(widget.contains("try {\n            items.Add(1L);\n            return 3L;\n        }"), "{widget}");
 }
+
+/// A send is classified by the C# it emits: `items.empty?` is
+/// `(items.Count == 0)`, a value, so it is discarded (`_ = …;`); C# takes
+/// no bare comparison as a statement.
+#[test]
+fn a_predicate_in_a_begin_body_with_an_else_is_discarded() {
+    let (emitted, errors) = emit_and_run::empty_app()
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n")
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\n  def check_else\n    items = [1]\n    begin\n      items.empty?\n    rescue\n      2\n    else\n      3\n    end\n  end\nend\n")
+        .emit(BuildTarget::CSharp);
+    assert!(errors.is_empty(), "{errors:?}");
+    let widget = std::fs::read_to_string(emitted.join("app/models/Widget.cs")).unwrap();
+    assert!(widget.contains("try {\n            _ = (items.Count == 0);\n            return 3L;\n        }"), "{widget}");
+}
