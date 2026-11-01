@@ -469,6 +469,28 @@ fn module_has_direct_def(m: &ruby_prism::ModuleNode<'_>) -> bool {
         || body_has_route_helpers_include(m.body())
         || body_runs_module_code(m.body())
         || body_includes_into_constant(m.body())
+        || body_registers_autoloads(m.body())
+}
+
+/// A namespace whose body only registers its children's autoloads,
+/// literally (`autoload :Paypal, "payoff/integrations/paypal"`) or by a
+/// `Dir[…].each` loop (`ingest::glob_autoload`): Ruby defines the module
+/// as the body runs, and code reads it (`Integrations.const_get(name)`).
+fn body_registers_autoloads(body: Option<Node<'_>>) -> bool {
+    let Some(body) = body else { return false };
+    flatten_statements(body).iter().any(|stmt| {
+        let Some(call) = stmt.as_call_node() else { return false };
+        let own = call.receiver().is_none_or(|r| r.as_self_node().is_some());
+        if own && constant_id_str(&call.name()) == "autoload" && call.block().is_none() {
+            return true;
+        }
+        constant_id_str(&call.name()) == "each"
+            && call.block().is_some()
+            && call.receiver().and_then(|r| r.as_call_node()).is_some_and(|glob| {
+                matches!(constant_id_str(&glob.name()), "[]" | "glob")
+                    && glob.receiver().is_some_and(|r| r.as_constant_read_node().is_some_and(|c| constant_id_str(&c.name()) == "Dir"))
+            })
+    })
 }
 
 /// A namespace whose body includes one constant into another:

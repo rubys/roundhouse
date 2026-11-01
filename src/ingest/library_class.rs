@@ -2769,6 +2769,23 @@ fn walk_decl_body_with_visibility<'pr>(
             out.constants.push((name, value));
             continue;
         }
+        // `APPROVED, DECLINED = 1, "declined"`: one constant per target, in
+        // order, as the single writes above.
+        if let Some(writes) = constant_multi_write(&stmt) {
+            for (name, value) in writes {
+                out.constants.push((name, ingest_expr(&value, file)?));
+            }
+            continue;
+        }
+        // `$loaded = true`: a global write runs where it stands as the
+        // body loads (`ingest::body_statements` marks it for the Ruby
+        // family; every other target refuses it by name).
+        if stmt.as_global_variable_write_node().is_some() {
+            if let Ok(e) = ingest_expr(&stmt, file) {
+                out.unknown_calls.push(e);
+            }
+            continue;
+        }
         // A direct write initializes this class/module object. Inside
         // `class << self` the receiver is its singleton class instead.
         if !mode.is_class_side()
@@ -5902,4 +5919,42 @@ fn requires_files(stmt: &ruby_prism::Node<'_>) -> bool {
     let mut found = Requires(false);
     ruby_prism::Visit::visit(&mut found, stmt);
     found.0
+}
+
+/// `A, B = x, y` in a class or module body: each target a bare constant,
+/// the value a list of as many plain elements, none naming a target.
+/// Ruby evaluates the elements left to right and then assigns the
+/// targets in order, so the pairs written one by one, in order, are the
+/// same writes. Anything else (a splat, a nested target, a value array
+/// computed as a whole) is not this shape.
+///
+/// Ported from Shopify/roundhouse-1, by Tobi Lütke.
+fn constant_multi_write<'a>(stmt: &ruby_prism::Node<'a>) -> Option<Vec<(Symbol, ruby_prism::Node<'a>)>> {
+    let write = stmt.as_multi_write_node()?;
+    if write.rest().is_some() || !write.rights().is_empty() {
+        return None;
+    }
+    let names: Vec<String> = write
+        .lefts()
+        .iter()
+        .map(|left| left.as_constant_target_node().map(|target| constant_id_str(&target.name()).to_string()))
+        .collect::<Option<_>>()?;
+    let array = write.value().as_array_node()?;
+    let elements: Vec<ruby_prism::Node<'a>> = array.elements().iter().collect();
+    if elements.len() != names.len() || elements.iter().any(|element| element.as_splat_node().is_some()) {
+        return None;
+    }
+    let names_a_target = |element: &ruby_prism::Node<'_>| {
+        let text = String::from_utf8_lossy(element.location().as_slice()).into_owned();
+        names.iter().any(|name| {
+            text.match_indices(name.as_str()).any(|(at, _)| {
+                let word = |c: char| c == '_' || c.is_ascii_alphanumeric();
+                !text[..at].ends_with(word) && !text[at + name.len()..].starts_with(word)
+            })
+        })
+    };
+    if elements.iter().any(names_a_target) {
+        return None;
+    }
+    Some(names.into_iter().map(Symbol::from).zip(elements).collect())
 }

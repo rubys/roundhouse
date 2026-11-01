@@ -280,6 +280,9 @@ struct FileAnswers {
     /// Each constant definition as (offset where its name ends, name,
     /// declaration), sorted by offset.
     constants: Vec<(u32, Box<str>, DeclarationId)>,
+    /// The ends of the constant names that are a multiple assignment's
+    /// targets (`A, B = 1, 2`): each followed by `,` or by `=` after one.
+    multi_targets: HashSet<u32>,
     /// Exact source declaration names, including their lexical owners.
     constant_classes: IdentityHashMap<DeclarationId, ClassId>,
     namespace_definitions: HashSet<Box<str>>,
@@ -779,7 +782,19 @@ impl ConstResolver {
             .partition_point(|(end, ..)| *end <= value.start)
             .checked_sub(1)?;
         let (_, defined, id) = &constants[index];
-        (defined.as_ref() == name).then_some(*id)
+        if defined.as_ref() == name {
+            return Some(*id);
+        }
+        // `A, B = 1, 2`: every target precedes every value, so the value
+        // `1` follows `B`, and its own target is among the targets just
+        // before it.
+        let file = self.file(value.file)?;
+        constants[..=index]
+            .iter()
+            .rev()
+            .take_while(|(end, ..)| file.multi_targets.contains(end))
+            .find(|(_, defined, _)| defined.as_ref() == name)
+            .map(|(_, _, id)| *id)
     }
 
     pub(crate) fn constant_class(&self, value: Span, name: &str) -> Option<ClassId> {
@@ -1222,6 +1237,11 @@ fn answer_file(
             .and_then(|name| graph.strings().get(name.str()));
         let id = definition.and_then(|definition| graph.definition_to_declaration_id(definition));
         if let (Some(name), Some(id)) = (name, id) {
+            let after = source.text.get(offset.end() as usize..).unwrap_or("").trim_start_matches([' ', '\t']);
+            let before = source.text.get(..offset.start() as usize).unwrap_or("").trim_end_matches([' ', '\t']);
+            if after.starts_with(',') || (before.ends_with(',') && after.starts_with('=') && !after.starts_with("==")) {
+                answers.multi_targets.insert(offset.end());
+            }
             answers.constants.push((offset.end(), name.as_str().into(), *id));
             if let Some(declaration) = graph.declarations().get(id) {
                 answers.constant_classes.insert(*id, ClassId(Symbol::from(hoisted_name(declaration.name()).as_ref())));

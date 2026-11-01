@@ -73,7 +73,6 @@ fn overlay() -> emit_and_run::Overlay {
 }
 
 #[test]
-#[ignore = "fork spec: autoload"]
 fn a_gem_glob_autoload_loop_registers_each_constant_as_native() {
     assert_eq!(native(), EXPECTED, "native control");
     let run = overlay().run_ruby(SCRIPT);
@@ -85,7 +84,7 @@ fn a_gem_glob_autoload_loop_registers_each_constant_as_native() {
 fn global_write_overlay() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
         .write("roundhouse.yml", "")
-        .write("Gemfile.lock", "PATH\n  remote: vendor/gems/payoff-1.0.0\n  specs:\n    payoff (1.0.0)\n\nGEM\n  remote: https://rubygems.org/\n  specs:\n\nDEPENDENCIES\n  paygate!\n")
+        .write("Gemfile.lock", "PATH\n  remote: vendor/gems/paygate-1.0.0\n  specs:\n    paygate (1.0.0)\n\nGEM\n  remote: https://rubygems.org/\n  specs:\n\nDEPENDENCIES\n  paygate!\n")
         .write("config/application.rb", "require \"paygate\"\n")
         .write(
             "vendor/gems/paygate-1.0.0/lib/paygate.rb",
@@ -94,7 +93,6 @@ fn global_write_overlay() -> emit_and_run::Overlay {
 }
 
 #[test]
-#[ignore = "fork spec: autoload"]
 fn a_module_body_global_write_runs_in_place() {
     // A global write in a module body is a body statement: the Ruby
     // family writes it back where it stands (it was dropped and reported
@@ -106,7 +104,6 @@ fn a_module_body_global_write_runs_in_place() {
 }
 
 #[test]
-#[ignore = "fork spec: autoload"]
 fn a_strict_target_refuses_the_module_body_global_write_by_name() {
     let (_tree, errors) = global_write_overlay().emit(BuildTarget::Spinel);
     assert!(
@@ -136,7 +133,6 @@ p Payoff::Integrations::Mollie::API.host
 const SYM_EXPECTED: &str = "[:BitPay, :Mollie, :Paypal]\n\"https://paypal.test\"\n:crypto\nnil\n\"api.mollie.test\"\n";
 
 #[test]
-#[ignore = "fork spec: autoload"]
 fn a_gem_glob_autoload_loop_naming_symbols_registers_each_constant_as_native() {
     let dir = std::env::temp_dir().join(format!("rh_gem_glob_autoload_sym_native_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -158,7 +154,7 @@ fn a_gem_glob_autoload_loop_naming_symbols_registers_each_constant_as_native() {
 
     let mut overlay = emit_and_run::empty_app()
         .write("roundhouse.yml", "")
-        .write("Gemfile.lock", "GEM\n  remote: https://rubygems.org/\n  specs:\n\nDEPENDENCIES\n  payoff!\n")
+        .write("Gemfile.lock", "PATH\n  remote: vendor/gems/payoff-1.0.0\n  specs:\n    payoff (1.0.0)\n\nGEM\n  remote: https://rubygems.org/\n  specs:\n\nDEPENDENCIES\n  payoff!\n")
         .write("config/application.rb", "require \"payoff\"\n");
     for (path, text) in SYM_FILES {
         overlay = overlay.write(&format!("vendor/gems/payoff-1.0.0/{path}"), text);
