@@ -97,21 +97,23 @@ fn an_unresolved_assignment_value_is_not_changed_into_gradual_or_string() {
     use roundhouse::ident::{ClassId, Symbol, TyVar, VarId};
     use roundhouse::span::Span;
     let id = ClassId(Symbol::from("ActionController::Base"));
-    let mut info = ClassInfo::default();
-    info.instance_methods.insert(Symbol::from("content_type="), Ty::Untyped);
-    let classes = [(id.clone(), info)].into_iter().collect();
     let mut expression = Expr::new(Span::synthetic(), ExprNode::Send {
         recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
         method: Symbol::from("content_type="),
         args: vec![Expr::new(Span::synthetic(), ExprNode::Var { name: Symbol::from("value"),
             id: VarId(0) })], block: None, parenthesized: false,
     });
-    for value in [Ty::Var { var: TyVar(42) }, Ty::Untyped, Ty::Str, Ty::Nil] {
-        let mut context = Ctx { self_ty: Some(Ty::Class { id: id.clone(), args: vec![].into() }),
-            instance_body: true, ..Ctx::default() };
-        context.local_bindings.insert(Symbol::from("value"), value.clone());
-        assert_eq!(BodyTyper::new(&classes).analyze_expr(&mut expression, &context), value);
-        assert_eq!(expression.diagnostic().is_some(), matches!(value, Ty::Var { .. }));
+    for writer_result in [Ty::Untyped, Ty::Var { var: TyVar(13) }] {
+        let mut info = ClassInfo::default();
+        info.instance_methods.insert(Symbol::from("content_type="), writer_result);
+        let classes = [(id.clone(), info)].into_iter().collect();
+        for value in [Ty::Var { var: TyVar(42) }, Ty::Untyped, Ty::Str, Ty::Nil] {
+            let mut context = Ctx { self_ty: Some(Ty::Class { id: id.clone(), args: vec![].into() }),
+                instance_body: true, ..Ctx::default() };
+            context.local_bindings.insert(Symbol::from("value"), value.clone());
+            assert_eq!(BodyTyper::new(&classes).analyze_expr(&mut expression, &context), value);
+            assert_eq!(expression.diagnostic().is_some(), matches!(value, Ty::Var { .. }));
+        }
     }
 }
 

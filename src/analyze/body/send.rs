@@ -1192,6 +1192,27 @@ impl<'a> BodyTyper<'a> {
         false
     }
 
+    // Method existence is separate evidence from its return type. In
+    // particular, an app writer may exist while its body is unresolved.
+    pub(super) fn defines_writer_surface(&self, recv: &Ty, method: &Symbol, instance_receiver: bool) -> bool {
+        match recv {
+            Ty::Union { variants } => !variants.is_empty()
+                && variants.iter().all(|ty| self.defines_writer_surface(ty, method, instance_receiver)),
+            Ty::Class { id, .. } if instance_receiver => self.defines_instance_method(id, method),
+            Ty::Class { id, .. } => {
+                let mut current = Some(id.clone());
+                for _ in 0..32 {
+                    let Some(id) = current else { return false };
+                    let Some(cls) = self.classes().get(&id) else { return false };
+                    if cls.class_methods.contains_key(method) { return true; }
+                    current = cls.parent.clone();
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
     pub(super) fn dispatch(
         &self,
         recv_ty: Option<&Ty>,

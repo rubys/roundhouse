@@ -2405,7 +2405,9 @@ impl<'a> BodyTyper<'a> {
                 if recv.is_some()
                     && method.as_str() == "content_type="
                     && args.len() == 1
-                    && !matches!(dispatched, Ty::Var { .. })
+                    && (!matches!(dispatched, Ty::Var { .. })
+                        || recv_ty.as_ref().is_some_and(|ty|
+                            self.defines_writer_surface(ty, method, instance_receiver)))
                 {
                     let assigned = args[0].ty.clone().unwrap_or_else(unknown);
                     if matches!(assigned, Ty::Var { .. }) {
