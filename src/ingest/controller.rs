@@ -772,6 +772,7 @@ pub(super) fn parse_filter_call(
     let mut unless_cond: Option<Symbol> = None;
     let mut if_cond_expr: Option<Expr> = None;
     let mut unless_cond_expr: Option<Expr> = None;
+    let mut unread_guard = false;
 
     for arg in args.arguments().iter() {
         if let Some(sym) = symbol_value(&arg) {
@@ -807,14 +808,17 @@ pub(super) fn parse_filter_call(
                     except_style = symbol_list_style(&value);
                 }
                 // Symbol-form guards carry the predicate name;
-                // lambda/proc guards carry their body expression.
+                // lambda/proc guards carry their body expression. Any
+                // other value is a guard this cannot read.
                 "if" => {
                     if_cond = symbol_value(&value).map(|s| Symbol::from(s.as_str()));
                     if_cond_expr = lambda_body_expr(&value, file);
+                    unread_guard |= if_cond.is_none() && if_cond_expr.is_none();
                 }
                 "unless" => {
                     unless_cond = symbol_value(&value).map(|s| Symbol::from(s.as_str()));
                     unless_cond_expr = lambda_body_expr(&value, file);
+                    unread_guard |= unless_cond.is_none() && unless_cond_expr.is_none();
                 }
                 _ => {}
             }
@@ -841,6 +845,7 @@ pub(super) fn parse_filter_call(
                 unless_cond: unless_cond.clone(),
                 if_cond_expr: if_cond_expr.clone(),
                 unless_cond_expr: unless_cond_expr.clone(),
+                unread_guard,
                 block: None,
                 prepend,
             })
@@ -982,6 +987,7 @@ fn parse_forgery_macro(
         unless_cond,
         if_cond_expr,
         unless_cond_expr,
+        unread_guard: false,
         block: None,
         prepend: false,
     }]))
@@ -1224,6 +1230,8 @@ pub(crate) struct LambdaFilterTarget {
     pub unless_cond: Option<Symbol>,
     pub if_cond_expr: Option<Expr>,
     pub unless_cond_expr: Option<Expr>,
+    /// An `if:`/`unless:` this could not read; see `Filter::unread_guard`.
+    pub unread_guard: bool,
 }
 
 impl LambdaFilterTarget {
@@ -1467,6 +1475,7 @@ pub(crate) fn lambda_filter_target(expr: &Expr) -> Option<LambdaFilterTarget> {
     let mut unless_cond: Option<Symbol> = None;
     let mut if_cond_expr: Option<Expr> = None;
     let mut unless_cond_expr: Option<Expr> = None;
+    let mut unread_guard = false;
     for a in option_args {
         // A concern macro's `before_action(**kwargs) { ... }` substitutes
         // the call's options Hash under a `**` splat rather than the
@@ -1490,10 +1499,12 @@ pub(crate) fn lambda_filter_target(expr: &Expr) -> Option<LambdaFilterTarget> {
                 "if" => {
                     if_cond = ir_symbol(v);
                     if_cond_expr = ir_lambda_body(v);
+                    unread_guard |= if_cond.is_none() && if_cond_expr.is_none();
                 }
                 "unless" => {
                     unless_cond = ir_symbol(v);
                     unless_cond_expr = ir_lambda_body(v);
+                    unread_guard |= unless_cond.is_none() && unless_cond_expr.is_none();
                 }
                 _ => {}
             }
@@ -1508,6 +1519,7 @@ pub(crate) fn lambda_filter_target(expr: &Expr) -> Option<LambdaFilterTarget> {
         unless_cond,
         if_cond_expr,
         unless_cond_expr,
+        unread_guard,
     })
 }
 
@@ -1723,6 +1735,7 @@ pub(super) fn around_block_filter(
         unless_cond,
         if_cond_expr,
         unless_cond_expr,
+        unread_guard: false,
         block: None,
         prepend: false,
     };

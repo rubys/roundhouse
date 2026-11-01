@@ -2294,6 +2294,7 @@ fn default_forgery_protection() -> Filter {
         unless_cond: None,
         if_cond_expr: None,
         unless_cond_expr: None,
+        unread_guard: false,
         block: None,
         prepend: false,
     }
