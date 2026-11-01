@@ -152,8 +152,19 @@ impl Names<'_> {
     /// may load after this one) is only there once its file has run.
     /// Binding the prefix statically read `Billing::Rails::Railtie`, a
     /// NameError at boot. The written name stays.
+    ///
+    /// Nor for a name Ruby's core or standard library defines whole
+    /// (`Logger::Formatter` inside `module Tessera`, once a later file
+    /// opens `Tessera::Logger`): until that file loads, Ruby's lexical
+    /// lookup finds the top-level `Logger`, and after it the app's
+    /// namespace, which declares no `Formatter`, is a NameError. The
+    /// written name is the only answer that loads.
     fn resolved_prefix(&self, span: Span, path: &[Symbol], text: &str) -> Option<ClassId> {
         if path.first().is_some_and(|head| super::app::FRAMEWORK_ROOTS.contains(&head.as_str())) {
+            return None;
+        }
+        let written = path.iter().map(Symbol::as_str).collect::<Vec<_>>().join("::");
+        if crate::emit::audit::CORE_CONSTANTS.binary_search(&written.as_str()).is_ok() {
             return None;
         }
         let written_len: usize = path.iter().map(|s| s.as_str().len()).sum::<usize>() + 2 * (path.len() - 1);
