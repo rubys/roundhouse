@@ -302,9 +302,19 @@ fn reshapes_the_program(node: &ruby_prism::Node<'_>, defined: &crate::det::HashS
 /// A boot hook call (`Rails.application.config.after_initialize do … end`):
 /// its block runs at a point in boot this program does not reproduce.
 fn is_hook(node: &ruby_prism::Node<'_>) -> bool {
-    node.as_call_node().is_some_and(|c| {
-        HOOKS.contains(&super::util::constant_id_str(&c.name()).as_ref()) && c.block().is_some()
-    })
+    // Not the statement's own node alone: a hook under a guard (`if defined?(Rails::Server)`) is the same hook.
+    struct Hooks(bool);
+    impl<'pr> ruby_prism::Visit<'pr> for Hooks {
+        fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+            if HOOKS.contains(&super::util::constant_id_str(&node.name()).as_ref()) && node.block().is_some() {
+                self.0 = true;
+            }
+            ruby_prism::visit_call_node(self, node);
+        }
+    }
+    let mut hooks = Hooks(false);
+    ruby_prism::Visit::visit(&mut hooks, node);
+    hooks.0
 }
 
 /// Point each receiverless call to an initializer `def` at [`MODULE`], in

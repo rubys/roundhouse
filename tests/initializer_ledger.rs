@@ -654,3 +654,13 @@ fn a_constant_a_conditional_assigns_does_not_admit_a_later_mutation() {
     assert_eq!(statements(&ledger), ["FLAGS.<<"]);
     assert_eq!(app.boot_program.len(), 1);
 }
+
+#[test]
+fn a_hook_under_a_guard_stays_on_the_ledger() {
+    let (app, ledger) = ingest(&[(
+        "config/initializers/recover_exports.rb",
+        "if defined?(Rails::Server)\n  Rails.application.config.after_initialize do\n    BootProbe.recover_pending!\n  end\nend\n",
+    )]);
+    assert!(!ledger.is_empty(), "the guarded hook is reported");
+    assert!(app.boot_program.is_empty(), "{:?}", app.boot_program);
+}
