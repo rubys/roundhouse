@@ -120,9 +120,9 @@ fn run_case(mut command: Command, mode: &str) -> Vec<String> {
         if mode == "race" {
             thread::sleep(Duration::from_millis(150));
         }
-        let mut bytes = masked(8, b"\x03\xe8peer");
+        let mut bytes = masked(8, b"\x0f\xa1peer");
         // Two frames already in the accumulator must still dispatch one close.
-        bytes.extend(masked(8, b"\x03\xe8peer"));
+        bytes.extend(masked(8, b"\x0f\xa1peer"));
         let _ = socket.write_all(&bytes);
     } else if mode == "message_error" {
         socket.write_all(&masked(1, b"explode")).unwrap();
@@ -151,28 +151,56 @@ fn run_case(mut command: Command, mode: &str) -> Vec<String> {
         let (op, payload) = frame(&mut input).unwrap();
         check!("close_frame", op == 8);
         if mode == "client" {
-            check!("peer_close_payload", payload == b"\x03\xe8peer");
+            check!("peer_close_payload", payload == b"\x0f\xa1peer");
         } else if mode != "race" {
-            check!("server_close_payload", payload == b"\x03\xf0revoked");
+            check!("server_close_payload", payload == b"\x0f\xa0local");
         }
         close = Some(payload);
     }
-    // The receiver gets no close reply and no EOF until after this snapshot.
-    let deadline = Instant::now() + Duration::from_millis(500);
+    let received_reply = close.is_some() && !["server_eof", "server_silent"].contains(&mode);
+    if close.is_some() && !["client", "race"].contains(&mode) {
+        thread::sleep(Duration::from_millis(100));
+        check!(
+            "no_callback_or_cleanup_before_peer_result",
+            !lines
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|s| s.starts_with("CALLBACK ") || s.starts_with("RETIRED "))
+        );
+        if mode == "server_eof" {
+            let _ = socket.shutdown(std::net::Shutdown::Write);
+        } else if mode != "server_silent" {
+            // Application messages while closing are ignored; the following
+            // close still supplies the received handshake result.
+            let mut bytes = masked(1, b"late application message");
+            bytes.extend(masked(8, b"\x0f\xa1peer"));
+            let _ = socket.write_all(&bytes);
+        }
+    }
+    // A silent peer stays open throughout the bounded retirement check.
+    let deadline = Instant::now() + Duration::from_secs(8);
     while Instant::now() < deadline && !contains("NEXT") {
         thread::sleep(Duration::from_millis(5));
     }
-    check!("receiver_woke_and_cleanup_once", contains("RETIRED 1 1 0"));
-    if ["server", "close_error", "open_close"].contains(&mode) {
+    check!("cleanup_after_peer_result_once", contains("RETIRED 1 1 0"));
+    if [
+        "server",
+        "server_eof",
+        "server_silent",
+        "close_error",
+        "open_close",
+    ]
+    .contains(&mode)
+    {
         check!("later_sends_refused", contains("AFTER_CLOSE -1 -1"));
     }
-    if let Some(payload) = close {
-        if payload.len() >= 2 {
-            let code = u16::from_be_bytes([payload[0], payload[1]]);
-            let event = format!("CALLBACK {code} {}", String::from_utf8_lossy(&payload[2..]));
-            check!("close_event_matches_wire", contains(&event));
-        }
-    }
+    let event = if received_reply {
+        "CALLBACK 4001 peer"
+    } else {
+        "CALLBACK 1006 "
+    };
+    check!("close_event_describes_received_result", contains(event));
     drop(input);
     drop(socket);
     check!("connection_finishes", until(|| contains("NEXT")));
@@ -211,9 +239,11 @@ fn run_case(mut command: Command, mode: &str) -> Vec<String> {
     failed
 }
 
-fn modes() -> [&'static str; 9] {
+fn modes() -> [&'static str; 11] {
     [
         "server",
+        "server_eof",
+        "server_silent",
         "client",
         "race",
         "open_close",
@@ -228,17 +258,20 @@ fn modes() -> [&'static str; 9] {
 #[test]
 fn rails_close_lifecycle_when_available() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let output = Command::new("ruby")
-        .arg(root.join("tests/spinel_websocket_lifecycle_rails.rb"))
-        .output()
-        .expect("run optional Rails oracle");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        output.status.success()
-            && (stdout.contains("PASS Rails close lifecycle")
-                || stdout.contains("SKIP Rails 8.1.4 Action Cable unavailable")),
-        "Rails close oracle failed"
-    );
+    for defaults in ["7.0", "8.1"] {
+        let output = Command::new("ruby")
+            .arg(root.join("tests/spinel_websocket_lifecycle_rails.rb"))
+            .env("RH_RAILS_DEFAULTS", defaults)
+            .output()
+            .expect("run optional Rails oracle");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success()
+                && (stdout.contains("PASS Rails close lifecycle")
+                    || stdout.contains("SKIP Rails 8.1.4 Action Cable unavailable")),
+            "Rails close oracle failed for defaults {defaults}"
+        );
+    }
 }
 
 #[test]

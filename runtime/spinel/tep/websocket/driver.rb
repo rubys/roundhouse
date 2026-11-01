@@ -25,6 +25,9 @@
 module Tep
   module WebSocket
     class Driver
+      # Rails/websocket-driver has no closing-handshake deadline. Tep chooses
+      # five seconds so a silent peer cannot retain a parked receiver forever.
+      CLOSE_TIMEOUT_SECONDS = 5
       attr_accessor :fd, :max_frame_size, :subprotocol
       # Callback slots. Each holds a subclass of Tep::WebSocket::Handler
       # (or the base) that gets `handle_event(event)` called when the
@@ -36,6 +39,8 @@ module Tep
         @fd             = fd
         @closed         = false
         @closing        = false
+        @close_complete = false
+        @close_timed_out = false
         @close_code     = Tep::WebSocket::CLOSE_GOING_AWAY
         @close_reason   = +""
         @wlock          = Mutex.new
@@ -64,7 +69,7 @@ module Tep
           if @closing && !@closed
             Driver.send_frame(@fd, Tep::WebSocket::OPCODE_CLOSE,
               Driver.encode_close_payload(@close_code, @close_reason))
-            TepSocketControl.shutdown(@fd, 2)
+            TepSocketControl.shutdown(@fd, 2) if @close_timed_out
           end
         end
       end
@@ -109,7 +114,8 @@ module Tep
       # Send a close frame with code + reason. Reason capped at
       # 123 bytes so the 2-byte code + reason fits in a control
       # frame's 125-byte payload limit. The first close wins; it refuses
-      # later frames and wakes the receiver without closing its descriptor.
+      # later application frames. Keep reading for the peer's close or EOF;
+      # only the bounded fallback shuts down the socket to wake its owner.
       def close(code, reason)
         body = Driver.encode_close_payload(code, reason)
         @wlock.synchronize do
@@ -117,11 +123,16 @@ module Tep
             @closing = true
             @close_code = code
             @close_reason = code == 0 ? "" : reason.byteslice(0, 123)
-            if @fd >= 0
-              begin
+            begin
+              if @fd >= 0
                 Driver.send_frame(@fd, Tep::WebSocket::OPCODE_CLOSE, body)
-              ensure
-                TepSocketControl.shutdown(@fd, 2)
+              end
+            ensure
+              unless @close_complete
+                Thread.new(self) do |driver|
+                  sleep Driver::CLOSE_TIMEOUT_SECONDS
+                  driver.expire_close
+                end
               end
             end
           end
@@ -131,6 +142,37 @@ module Tep
 
       def closing?
         @wlock.synchronize { @closing || @closed }
+      end
+
+      # Called by the receiver for the peer's close, or a protocol failure.
+      # The close event describes that result, not our outbound request.
+      def finish_close(code, reason)
+        @wlock.synchronize do
+          unless @closed || @close_timed_out
+            @close_code = code
+            @close_reason = reason
+            @close_complete = true
+          end
+        end
+        0
+      end
+
+      def close_complete?
+        @wlock.synchronize { @close_complete }
+      end
+
+      def close_finished?
+        @wlock.synchronize { @closed || @close_complete || @close_timed_out }
+      end
+
+      def expire_close
+        @wlock.synchronize do
+          unless @closed || @close_complete
+            @close_timed_out = true
+            TepSocketControl.shutdown(@fd, 2) if @fd >= 0
+          end
+        end
+        0
       end
 
       def close_code

@@ -1,5 +1,5 @@
 # Exercise the shipped threaded upgrade, driver, receive loop and broadcast
-# registry over a real socket. The client deliberately does not echo CLOSE.
+# registry over a real socket, including reply, EOF and silent closing peers.
 require_relative "../runtime/spinel/tep/tep"
 
 class LifecycleReport
@@ -45,7 +45,7 @@ class LifecycleOpen < Tep::WebSocket::Handler
     @life_ws.text("ready")
     LIFECYCLE_REPORT.signal_open
     raise "synthetic open callback error" if @life_mode == "open_error"
-    @life_ws.close(1008, "revoked") if @life_mode == "open_close"
+    @life_ws.close(4000, "local") if @life_mode == "open_close"
     0
   end
 end
@@ -108,12 +108,12 @@ sender = Thread.new(ws, mode) do |driver, test_mode|
     b = Thread.new(driver) { |out| lifecycle_writes(out, "B") }
     a.join
     b.join
-    driver.close(1008, "revoked")
-  elsif test_mode == "server" || test_mode == "race" || test_mode == "close_error"
+    driver.close(4000, "local")
+  elsif test_mode == "server" || test_mode == "server_eof" || test_mode == "server_silent" || test_mode == "race" || test_mode == "close_error"
     sleep 0.15
-    driver.close(1008, "revoked")
+    driver.close(4000, "local")
   end
-  if test_mode == "server" || test_mode == "close_error" || test_mode == "open_close"
+  if test_mode == "server" || test_mode == "server_eof" || test_mode == "server_silent" || test_mode == "close_error" || test_mode == "open_close"
     sleep 0.02 if test_mode == "open_close"
     puts "AFTER_CLOSE " + driver.text("late-one").to_s + " " + driver.text("late-two").to_s
     $stdout.flush
