@@ -186,3 +186,32 @@ fn a_predicate_in_a_begin_body_with_an_else_is_discarded() {
     let widget = std::fs::read_to_string(emitted.join("app/models/Widget.cs")).unwrap();
     assert!(widget.contains("try {\n            _ = (items.Count == 0);\n            return 3L;\n        }"), "{widget}");
 }
+
+/// Candidates are compared by their C# names. `@status` shadows the
+/// base's `Status`; `app_status` is the app's own `@app_status`, and
+/// `app_status_2` would emit `AppStatus2`, which is the app's own
+/// `@appStatus2`. The renamed `@status` takes the next name C# keeps
+/// apart from both, as on Kotlin (#1654).
+#[test]
+fn a_renamed_ivar_takes_no_csharp_name_another_ivar_emits() {
+    let controller = "class ProbesController < ApplicationController\n  def show\n    @status = \"s\"\n    @app_status = \"a\"\n    @appStatus2 = \"b\"\n  end\nend\n";
+    let view = "<p><%= @status %></p>\n<p><%= @app_status %></p>\n<p><%= @appStatus2 %></p>\n";
+    let (emitted, errors) = emit_and_run::empty_app()
+        .write("db/schema.rb", "ActiveRecord::Schema[8.1].define(version: 1) do\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("app/controllers/probes_controller.rb", controller)
+        .write("app/views/probes/show.html.erb", view)
+        .write("config/routes.rb", "Rails.application.routes.draw do\n  get \"probe\", to: \"probes#show\"\nend\n")
+        .emit(BuildTarget::CSharp);
+    assert!(errors.is_empty(), "{errors:?}");
+    let probes = std::fs::read_to_string(emitted.join("app/controllers/ProbesController.cs")).unwrap();
+    let assigns: Vec<&str> = probes.lines().map(str::trim).filter(|l| l.starts_with("this.") && l.contains(" = \"")).collect();
+    assert_eq!(assigns.len(), 3, "{probes}");
+    let mut targets: Vec<&str> = assigns.iter().map(|l| l.split(" = ").next().unwrap()).collect();
+    targets.sort();
+    targets.dedup();
+    assert_eq!(targets.len(), 3, "two ivars share one C# property: {assigns:?}");
+    assert!(probes.contains("this.AppStatus2 = \"b\""), "{probes}");
+    assert!(probes.contains("this.AppStatus = \"a\""), "{probes}");
+    assert!(!probes.contains("this.Status = "), "{probes}");
+}

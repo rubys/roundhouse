@@ -166,7 +166,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             other => naming::pascal(other),
         };
         vec![name.clone(), crate::ident::Symbol::from(crate::naming::snake_case(&csharp))]
-    }, implied);
+    }, |name| crate::ident::Symbol::from(naming::pascal(name.as_str())), implied);
 
     // Synthesize `ApplicationController` when a controller extends it but the
     // app doesn't define one (Rails scaffolds assume it).
