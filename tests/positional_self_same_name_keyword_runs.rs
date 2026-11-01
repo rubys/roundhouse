@@ -1,10 +1,11 @@
 //! `Klass.to_entity(self)` from an instance method `to_entity(load_associations: true)`.
 //!
-//! a large app's `Rollouts::Record#to_entity` delegates to the class
-//! side `to_entity(rollout_record)`, which takes one POSITIONAL record. The
+//! A record's `#to_entity` delegates to the class side
+//! `to_entity(rollout_record)`, which takes one POSITIONAL record. The
 //! instance method of the same name takes a keyword. The emit wrote the
-//! call `Klass.to_entity(**self)` and CRuby raised
-//! `TypeError: no implicit conversion of Rollouts::Record into Hash`.
+//! call `Klass.to_entity(**self)` and CRuby raised `TypeError: no implicit
+//! conversion of Optimizing::RolloutRecord into Hash`. The same holds for
+//! `self.to_entity(record)` in a `def self.` body, where `self` is the class.
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
@@ -35,6 +36,11 @@ const MODEL: &str = "module Optimizing
       end
     end
 
+    #: (RolloutRecord) -> String
+    def self.entity_for(record)
+      self.to_entity(record)
+    end
+
     #: (?load_associations: bool) -> String
     def to_entity(load_associations: true)
       return RolloutRecord.to_entity(self) if load_associations
@@ -54,6 +60,7 @@ fn a_positional_self_is_not_written_as_a_double_splat() {
 e = Optimizing::RolloutRecord.new(title: "a")
 raise e.to_entity.inspect unless e.to_entity == "entity:a"
 raise e.to_entity(load_associations: false).inspect unless e.to_entity(load_associations: false) == "bare:a"
+raise "class self" unless Optimizing::RolloutRecord.entity_for(e) == "entity:a"
 puts "positional self ok"
 "##,
         )

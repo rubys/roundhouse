@@ -135,6 +135,12 @@ struct Signatures {
     /// Superclass links, so a call landing on an inherited `initialize`
     /// still resolves.
     parents: HashMap<ClassId, ClassId>,
+    /// The source spans of `self` inside class-side (`def self.`) method
+    /// bodies: a class object there, though typed as the class's instance,
+    /// so an instance method of the same name is not its callee.
+    class_self: crate::det::HashSet<crate::span::Span>,
+    /// Each class's and module's includes, for a method a mixin supplies.
+    includes: HashMap<ClassId, Vec<ClassId>>,
 }
 
 pub fn apply_kwsplat_expansion(app: &mut App) -> Vec<Diagnostic> {
@@ -348,6 +354,33 @@ fn collect_signatures(app: &App) -> Signatures {
             }
         }
     }
+    for lc in &app.library_classes {
+        if !lc.includes.is_empty() {
+            sigs.includes.entry(lc.name.clone()).or_default().extend(lc.includes.iter().cloned());
+        }
+    }
+    for model in &app.models {
+        let included = crate::analyze::model_includes(model);
+        if !included.is_empty() {
+            sigs.includes.entry(model.name.clone()).or_default().extend(included);
+        }
+    }
+    fn class_selves(e: &Expr, out: &mut crate::det::HashSet<crate::span::Span>) {
+        if matches!(&*e.node, ExprNode::SelfRef) && !e.span.is_synthetic() {
+            out.insert(e.span);
+        }
+        e.node.for_each_child(&mut |c| class_selves(c, out));
+    }
+    for lc in &app.library_classes {
+        for m in lc.methods.iter().filter(|m| matches!(m.receiver, MethodReceiver::Class)) {
+            class_selves(&m.body, &mut sigs.class_self);
+        }
+    }
+    for model in &app.models {
+        for m in model.methods().filter(|m| matches!(m.receiver, MethodReceiver::Class)) {
+            class_selves(&m.body, &mut sigs.class_self);
+        }
+    }
     for controller in &app.controllers {
         if let Some(parent) = &controller.parent {
             sigs.parents.insert(controller.name.clone(), parent.clone());
@@ -397,17 +430,21 @@ fn rewrite(expr: &mut Expr, sigs: &Signatures, diags: &mut Vec<Diagnostic>) {
 /// `{ **attrs, k: v }` where `attrs` is an object of an app class: Ruby
 /// splats it through its `to_hash`. The ingest desugar wrote the merge
 /// chain `attrs.merge({ k: v })`, which asks the object for a `merge` it
-/// does not define (a log-attributes wrapper with only `to_hash`). A `merge` whose receiver is typed as an app class that
-/// defines `to_hash` and no `merge` of its own could only have been
-/// written as that splat, so the receiver is read through `to_hash`.
+/// does not define (a log-attributes wrapper with only `to_hash`). A
+/// `merge` whose receiver is typed as an app class that defines `to_hash`
+/// and no `merge` of its own, its ancestors' or an included module's,
+/// could only have been written as that splat, so the receiver is read
+/// through `to_hash`.
 fn convert_splatted_object(expr: &mut Expr, sigs: &Signatures) {
     let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &mut *expr.node else { return };
     if method.as_str() != "merge" || args.len() != 1 {
         return;
     }
     let Some(ty) = recv.ty.as_ref() else { return };
+    // A `merge` the class gets from an included module is a real call too.
     if !matches!(ty, Ty::Class { .. })
         || callee_params(ty, method, sigs).is_some()
+        || mixin_defines(ty, method, sigs)
         || callee_params(ty, &Symbol::from("to_hash"), sigs).is_none()
     {
         return;
@@ -639,7 +676,10 @@ fn erased_splat(expr: &Expr, sigs: &Signatures) -> Option<ErasedSplat> {
     // side `to_entity(rollout_record)`) would read the one positional
     // argument as an erased `**x` and write it back as `to_entity(**self)`.
     // `new` is the one class-side send that resolves to an instance method.
-    if matches!(&*recv.node, ExprNode::Const { .. }) && method.as_str() != "new" {
+    // `self` in a `def self.` body is the class object too.
+    let class_side = matches!(&*recv.node, ExprNode::Const { .. })
+        || (matches!(&*recv.node, ExprNode::SelfRef) && sigs.class_self.contains(&recv.span));
+    if class_side && method.as_str() != "new" {
         return None;
     }
     let params = callee_params(recv.ty.as_ref()?, method, sigs)?;
@@ -716,6 +756,33 @@ fn unique_instance_params<'s>(method: &Symbol, sigs: &'s Signatures) -> Option<&
 /// The callee's parameter list, walking the inheritance chain the way
 /// `normalize_trailing_kwargs` does — including its `new` → `initialize`
 /// hop, since Ruby auto-generates `new` to forward to the constructor.
+/// Does a module the receiver's class (or an ancestor) includes, directly
+/// or through another module, define the instance method `method`?
+fn mixin_defines(recv_ty: &Ty, method: &Symbol, sigs: &Signatures) -> bool {
+    let Ty::Class { id, .. } = recv_ty else { return false };
+    let mut classes = vec![id.clone()];
+    let mut current = sigs.parents.get(id).cloned();
+    for _ in 0..32 {
+        let Some(cid) = current else { break };
+        current = sigs.parents.get(&cid).cloned();
+        classes.push(cid);
+    }
+    let mut stack: Vec<ClassId> = classes.iter().filter_map(|c| sigs.includes.get(c)).flatten().cloned().collect();
+    let mut seen = crate::det::HashSet::default();
+    while let Some(module) = stack.pop() {
+        if !seen.insert(module.clone()) {
+            continue;
+        }
+        if sigs.methods.contains_key(&(module.clone(), method.clone())) {
+            return true;
+        }
+        if let Some(more) = sigs.includes.get(&module) {
+            stack.extend(more.iter().cloned());
+        }
+    }
+    false
+}
+
 fn callee_params<'s>(
     recv_ty: &Ty,
     method: &Symbol,
