@@ -131,6 +131,7 @@ pub(crate) mod rake_tasks;
 pub mod util;
 pub mod view;
 pub mod vite;
+pub mod current_page;
 mod visibility;
 
 pub use app::{ingest_app, ingest_app_from_tree, ingest_app_with_vfs};

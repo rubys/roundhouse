@@ -114,6 +114,37 @@ fn unlowered_form_builder_calls(app: &App) -> Vec<Diagnostic> {
     out
 }
 
+/// A `current_page?` that `ingest::current_page` left as written: Rails
+/// answers it through `url_for(options)` (an options hash, or
+/// `check_parameters:`/`method:`), or against the request's protocol and
+/// host (a literal absolute URL), neither of which the runtime models.
+fn unlowered_current_page(app: &App) -> Vec<Diagnostic> {
+    fn visit(expr: &Expr, out: &mut Vec<Diagnostic>) {
+        if let ExprNode::Send { recv: None, method, args, .. } = &*expr.node
+            && method.as_str() == "current_page?"
+            && !expr.span.is_synthetic()
+        {
+            let reason = if args.first().is_some_and(crate::ingest::current_page::is_absolute_url) {
+                "an absolute URL is compared with the request's protocol and host, which is not modeled; pass the path"
+            } else {
+                "only a path argument is modeled (not an options hash, `check_parameters:` or `method:`)"
+            };
+            out.push(Diagnostic::unsupported(expr.span, None, "current_page?", reason));
+        }
+        expr.node.for_each_child(&mut |child| visit(child, out));
+    }
+    let mut out = Vec::new();
+    for view in &app.views {
+        visit(&view.body, &mut out);
+    }
+    for lc in &app.library_classes {
+        for method in &lc.methods {
+            visit(&method.body, &mut out);
+        }
+    }
+    out
+}
+
 /// Builder methods the view lowering serves outside
 /// `classify_form_builder_method`.
 const FORM_BUILDER_HANDLED_ELSEWHERE: &[&str] = &["object"];
@@ -429,6 +460,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     }
     out.extend(attribute_macro_refusals(app));
     out.extend(unlowered_form_builder_calls(app));
+    out.extend(unlowered_current_page(app));
     out.extend(devise_refusals(app));
     out.extend(overridden_synthesized_accessors(app));
     out.extend(runtime_defined_surfaces(app));

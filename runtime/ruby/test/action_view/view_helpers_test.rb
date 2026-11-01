@@ -435,6 +435,36 @@ class ViewHelpersTest < Minitest::Test
     assert_equal "", ViewHelpers.optional_value_attr("")
   end
 
+  # Rails 8.1.4's `current_page?(path)` answers (actionview url_helper.rb),
+  # on the request's method, path and fullpath.
+  def test_current_page_match_answers_a_get_or_head_only
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events", "/events")
+    assert_equal true, ViewHelpers.current_page_match?("HEAD", "/events", "/events", "/events")
+    assert_equal false, ViewHelpers.current_page_match?("POST", "/events", "/events", "/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events/1", "/events/1", "/events")
+  end
+
+  def test_current_page_match_reads_the_query_only_when_the_path_has_one
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events?order=asc", "/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", "/events?order=asc")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events?order=asc", "/events?order=asc")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events?order=desc", "/events?order=asc")
+  end
+
+  def test_current_page_match_drops_a_trailing_slash
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events/", "/events/", "/events")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events", "/events/")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/", "/", "/")
+  end
+
+  def test_current_page_match_percent_decodes_both_sides
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/caf%C3%A9", "/caf%C3%A9", "/café")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/caf%C3%A9", "/caf%C3%A9", "/caf%C3%A9")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/a+b", "/a+b", "/a+b")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/a%2Bb", "/a%2Bb", "/a+b")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/a%20b", "/a%20b", "/a b")
+  end
+
   def test_escape_or_empty_returns_escaped_value
     assert_equal "hello", ViewHelpers.escape_or_empty("hello")
     assert_equal "&lt;b&gt;hi&lt;/b&gt;", ViewHelpers.escape_or_empty("<b>hi</b>")

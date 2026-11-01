@@ -1267,6 +1267,37 @@ fn is_plain_ruby_class(app: &App, lc: &crate::dialect::LibraryClass) -> bool {
     true
 }
 
+/// `current_page?` reads the request a view renders for. The ruby
+/// family's views reach it (`ActionController::Current.request`); measured
+/// through each target's own test runner, TypeScript's (`request is not
+/// defined`), Crystal's, Python's and Rust's views have none, and Roda
+/// converts views from their ERB with no ActionView, so the call is refused
+/// there. In a template no request reaches it is a warning, as analysis
+/// makes its errors there.
+fn report_current_page_calls(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Futamura) {
+        return;
+    }
+    let unreachable: crate::det::HashSet<crate::span::FileId> = app
+        .views
+        .iter()
+        .filter(|v| app.unreachable_views.contains(&v.name))
+        .map(|v| v.body.span.file)
+        .collect();
+    for span in crate::ingest::current_page::rewritten_calls(app) {
+        let mut d = crate::diagnostic::Diagnostic::unsupported(
+            span,
+            Some(crate::ident::Symbol::from(target.as_str())),
+            "current_page?",
+            "it reads the request the view renders for, which this target's views don't have",
+        );
+        if unreachable.contains(&span.file) {
+            d.severity = crate::diagnostic::Severity::Warning;
+        }
+        emit::diagnostics::push(d);
+    }
+}
+
 /// A non-integer primary key (`create_table …, id: :uuid`,
 /// `primary_key: "identifier", id: :string`) is carried end to end by
 /// the ruby-shape emit — CRuby, JRuby and Spinel: the analyzer types
@@ -2894,6 +2925,7 @@ fn target_files_inner(
     reject_unsupported_dates(app, target)?;
     reject_unsupported_forwarded_procs(app, target)?;
     report_unsupported_keys(app, target);
+    report_current_page_calls(app, target);
     report_unemitted_library_classes(app, target);
     report_relation_class_calls(app, target);
     report_typescript_error_class(app, target);
