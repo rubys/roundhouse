@@ -54,6 +54,14 @@ fn emitted(file: &str) -> String {
             b"module Flavored\n  extend ActiveSupport::Concern\n\n  def flavor\n    @flavor.inquiry\n  end\nend\n".to_vec(),
         ),
         (
+            PathBuf::from("app/controllers/kinded.rb"),
+            b"module Kinded\n  def kind\n    @kind.inquiry\n  end\nend\n".to_vec(),
+        ),
+        (
+            PathBuf::from("app/controllers/things_controller.rb"),
+            b"class ThingsController < ApplicationController\n  include Kinded\n\n  def show\n    @internal = kind.internal?\n  end\nend\n".to_vec(),
+        ),
+        (
             PathBuf::from("app/models/gadget.rb"),
             b"class Gadget < ApplicationRecord\n  include Flavored\n\n  def sweet?\n    flavor.sweet?\n  end\nend\n".to_vec(),
         ),
@@ -64,6 +72,7 @@ fn emitted(file: &str) -> String {
     roundhouse::session::analyze_and_lower(&mut app);
     let mut files = ruby::emit_lowered_models(&app);
     files.extend(ruby::emit_library(&app));
+    files.extend(ruby::emit_lowered_controllers(&app));
     files
         .iter()
         .find(|f| f.path.ends_with(file))
@@ -123,4 +132,12 @@ fn a_same_named_class_in_another_namespace_is_left_alone() {
     let src = emitted("storefront/client.rb");
     assert!(src.contains("kind.internal?"), "{src}");
     assert!(!src.contains("kind == \"internal\""), "{src}");
+}
+
+#[test]
+fn a_receiverless_predicate_folds_in_a_controller_that_includes_the_definer() {
+    // Ingest copies an included module's methods into the controller, so
+    // `kind` is the controller's own by the time the fold runs.
+    let src = emitted("things_controller.rb");
+    assert!(src.contains("kind == \"internal\""), "{src}");
 }

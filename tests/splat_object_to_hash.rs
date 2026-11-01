@@ -111,3 +111,53 @@ puts "passed"
         )
         .assert_passes();
 }
+
+const SHOP_MERGEABLE: &str = r##"# frozen_string_literal: true
+
+module Shop
+  module Mergeable
+    #: (Hash[Symbol, untyped]) -> String
+    def merge(other)
+      "merged:#{other.keys.join(",")}"
+    end
+  end
+end
+"##;
+
+const SHOP_ORDER: &str = r##"# frozen_string_literal: true
+
+module Shop
+  class Order < ApplicationRecord
+    include Mergeable
+
+    def to_hash
+      { a: 1 }
+    end
+
+    #: () -> String
+    def combined
+      Order.new.merge({ b: 2 })
+    end
+  end
+end
+"##;
+
+#[test]
+fn a_merge_a_relatively_named_module_defines_is_called_as_written() {
+    // A model's `include Mergeable` inside `Shop` names `Shop::Mergeable`:
+    // ingest writes the include as Rubydex resolves it, so the mixin's
+    // `merge` is found and the call stays as written.
+    emit_and_run::empty_app()
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"shop_orders\" do |t|\n    t.string \"name\"\n  end\nend\n")
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n")
+        .write("app/models/shop/mergeable.rb", SHOP_MERGEABLE)
+        .write("app/models/shop/order.rb", SHOP_ORDER)
+        .run_ruby(
+            r#"
+got = Shop::Order.new.combined
+raise got.inspect unless got == "merged:b"
+puts "passed"
+"#,
+        )
+        .assert_passes();
+}
