@@ -143,7 +143,7 @@ module Tep
       end
 
       def closing?
-        @wlock.synchronize { @closing || @closed }
+        @wlock.synchronize { @closing || @closed || @close_complete || @close_timed_out }
       end
 
       # Called by the receiver for the peer's close, or a protocol failure.
@@ -202,7 +202,7 @@ module Tep
       def write_frame(opcode, payload)
         r = -1
         @wlock.synchronize do
-          if !@closed && !@closing && @fd >= 0
+          if !@closed && !@closing && !@close_complete && !@close_timed_out && @fd >= 0
             r = Driver.send_frame(@fd, opcode, payload)
           end
         end

@@ -11,6 +11,8 @@ class LifecycleDriver < Tep::WebSocket::Driver
   end
   def close(code, reason)
     if @force_local && code == 4001
+      puts "RACE_WRITE " + text("late at peer close").to_s
+      $stdout.flush
       super(4000, "local")
     else
       super(code, reason)

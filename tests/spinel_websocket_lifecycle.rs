@@ -195,6 +195,12 @@ fn run_case(mut command: Command, mode: &str) -> Vec<String> {
     {
         check!("later_sends_refused", contains("AFTER_CLOSE -1 -1"));
     }
+    if mode == "client_race" {
+        check!(
+            "application_frame_refused_after_peer_result",
+            contains("RACE_WRITE -1")
+        );
+    }
     let event = if received_reply {
         "CALLBACK 4001 peer"
     } else {
