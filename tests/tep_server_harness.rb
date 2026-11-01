@@ -10,7 +10,11 @@
 # CRuby that declaration is a no-op and the scripted socket below
 # supplies the primitives, so the Ruby wrappers above them run as shipped.
 class Module
-  def ffi_func(*); end
+  def ffi_lib(*); end
+  def ffi_func(name, *)
+    # The scripted socket has no parked OS receiver to wake.
+    define_singleton_method(name) { |*| 0 } if name == :shutdown
+  end
 end
 
 module Tep

@@ -187,3 +187,10 @@ module Crypto
   ffi_func :sp_crypto_sha1_hex,             [:str],             :str
   ffi_func :sp_crypto_websocket_accept,     [:str],             :str
 end
+
+# shutdown wakes a parked receiver without releasing its fd number. The
+# threaded server remains the only owner that closes the descriptor.
+module TepSocketControl
+  ffi_lib "c"
+  ffi_func :shutdown, [:int, :int], :int
+end

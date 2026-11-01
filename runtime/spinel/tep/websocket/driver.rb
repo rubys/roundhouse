@@ -35,6 +35,9 @@ module Tep
       def initialize(fd)
         @fd             = fd
         @closed         = false
+        @closing        = false
+        @close_code     = Tep::WebSocket::CLOSE_GOING_AWAY
+        @close_reason   = +""
         @wlock          = Mutex.new
         @max_frame_size = Tep::WebSocket::DEFAULT_MAX_FRAME
         @subprotocol    = +""
@@ -56,7 +59,14 @@ module Tep
       # time), and the write_response branch sets the real fd here
       # right before constructing the Connection.
       def set_fd(new_fd)
-        @fd = new_fd
+        @wlock.synchronize do
+          @fd = new_fd
+          if @closing && !@closed
+            Driver.send_frame(@fd, Tep::WebSocket::OPCODE_CLOSE,
+              Driver.encode_close_payload(@close_code, @close_reason))
+            TepSocketControl.shutdown(@fd, 2)
+          end
+        end
       end
 
       def set_subprotocol(name)
@@ -98,10 +108,37 @@ module Tep
 
       # Send a close frame with code + reason. Reason capped at
       # 123 bytes so the 2-byte code + reason fits in a control
-      # frame's 125-byte payload limit.
+      # frame's 125-byte payload limit. The first close wins; it refuses
+      # later frames and wakes the receiver without closing its descriptor.
       def close(code, reason)
         body = Driver.encode_close_payload(code, reason)
-        write_frame(Tep::WebSocket::OPCODE_CLOSE, body)
+        @wlock.synchronize do
+          unless @closing || @closed
+            @closing = true
+            @close_code = code
+            @close_reason = code == 0 ? "" : reason.byteslice(0, 123)
+            if @fd >= 0
+              begin
+                Driver.send_frame(@fd, Tep::WebSocket::OPCODE_CLOSE, body)
+              ensure
+                TepSocketControl.shutdown(@fd, 2)
+              end
+            end
+          end
+        end
+        0
+      end
+
+      def closing?
+        @wlock.synchronize { @closing || @closed }
+      end
+
+      def close_code
+        @close_code
+      end
+
+      def close_reason
+        @close_reason
       end
 
       # ONE WRITER AT A TIME, AND NONE AFTER RETIREMENT. Every frame this
@@ -117,11 +154,11 @@ module Tep
       # The ping thread did exactly that -- a ping frame ahead of a new
       # connection's 101 is ERR_INVALID_HTTP_RESPONSE in the browser, and
       # a subscribe that never confirms. Returns the write's result, or
-      # -1 once retired.
+      # -1 once closing or retired.
       def write_frame(opcode, payload)
         r = -1
         @wlock.synchronize do
-          if !@closed
+          if !@closed && !@closing && @fd >= 0
             r = Driver.send_frame(@fd, opcode, payload)
           end
         end

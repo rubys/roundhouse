@@ -63,6 +63,19 @@ def git_repository():
 
 
 class Routing(unittest.TestCase):
+    def test_websocket_lifecycle_sources_and_helpers_run_the_native_suite(self):
+        for path in [
+            "runtime/spinel/tep/net.rb", "runtime/spinel/tep/server_threaded.rb",
+            "runtime/spinel/tep/websocket.rb", "runtime/spinel/tep/websocket/connection.rb",
+            "runtime/spinel/tep/websocket/driver.rb", "tests/spinel_websocket_lifecycle.rs",
+            "tests/spinel_websocket_lifecycle_native.rb", "tests/spinel_websocket_lifecycle_cruby.rb",
+            "tests/spinel_websocket_lifecycle_rails.rb",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("spinel_websocket_lifecycle", plan["spinel_tests"])
+
     def extras(self, plan):
         return set(plan["jobs"]) - set(ci.BASE)
 

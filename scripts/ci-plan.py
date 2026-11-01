@@ -74,6 +74,7 @@ JRUBY_BIND_INPUTS = {
 }
 PARAM_BIND_TESTS = ["param_binds", "param_binds_values", "param_binds_planner", "param_binds_cleanup"]
 SPINEL_TESTS = [
+    "spinel_websocket_lifecycle",
     "select_alias_index",
     "date_columns_spinel",
     "temporal_initialize_spinel",
@@ -508,6 +509,10 @@ def native_coverage(path):
     focused = re.fullmatch(r"tests/([^/]+)\.(?:rs|rb)", path)
     if focused and focused[1] in SPINEL_TESTS:
         suites.add(focused[1])
+    if path.startswith(("tests/spinel_websocket_lifecycle", "runtime/spinel/tep/websocket")) or path in {
+        "runtime/spinel/tep/net.rb", "runtime/spinel/tep/server_threaded.rb",
+    }:
+        suites.add("spinel_websocket_lifecycle")
     if path == "tests/support/db_concurrency_spinel.rb":
         suites.add("db_sqlite_concurrency")
     # The fixture app beside its harness selects the same suite.
