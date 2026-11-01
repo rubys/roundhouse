@@ -80,13 +80,17 @@ pub fn specialize(app: &App, files: &mut Vec<(String, String)>) -> Result<Report
         // A concern's method body is analyzed once per class that includes
         // it, so one source site can arrive several times. When every copy
         // specializes the same way it is spliced once; copies that differ
-        // cannot share the one text, so none is.
+        // cannot share the one text, so none is. A copy that did not
+        // specialize at all (a residue at the same span: a scoped
+        // association in one includer) is a copy that differs.
         let mut copies: BTreeMap<(u32, u32), Vec<query::Site>> = BTreeMap::new();
         for site in sites.drain(..) {
             copies.entry((site.span.start, site.span.end)).or_default().push(site);
         }
         for (_, mut group) in copies {
-            if group.iter().all(|s| s.call == group[0].call && s.define == group[0].define) {
+            let span = group[0].span;
+            let unspecialized = residue.iter().any(|r| r.span.file == span.file && r.span.start == span.start && r.span.end == span.end);
+            if !unspecialized && group.iter().all(|s| s.call == group[0].call && s.define == group[0].define) {
                 sites.push(group.swap_remove(0));
             } else {
                 report.residue.push(format!("{}: specializes differently for the classes sharing its source", location(group[0].span)));

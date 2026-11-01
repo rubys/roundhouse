@@ -1865,3 +1865,45 @@ mod shared_concern_sites {
         assert!(report.residue.is_empty(), "{:?}", report.residue);
     }
 }
+
+/// One source site analyzed for several owners (a macro replayed into
+/// each model) where one copy specializes and another does not: the whole
+/// site stays Rails'. Splicing the specializing copy into the shared text
+/// would run its compiled query for the owner that could not be compiled.
+mod shared_sites_with_a_residue {
+    use std::path::PathBuf;
+
+    use roundhouse::analyze::Analyzer;
+    use roundhouse::dialect::ModelBodyItem;
+    use roundhouse::emit::futamura::specialize;
+    use roundhouse::ingest::ingest_app_from_tree;
+
+    #[test]
+    fn a_site_one_owner_cannot_specialize_is_not_spliced() {
+        // `tag_ids` is an array column on `things` (a collection bind, not
+        // specialized) and a scalar on `others` (specialized).
+        let files: Vec<(&str, &str)> = vec![
+            ("db/schema.rb", "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"things\", force: :cascade do |t|\n    t.bigint \"tag_ids\", array: true, default: [], null: false\n  end\n  create_table \"others\", force: :cascade do |t|\n    t.bigint \"tag_ids\"\n  end\n  create_table \"items\", force: :cascade do |t|\n    t.bigint \"tag_id\"\n  end\nend\n"),
+            ("app/models/concerns/tagged.rb", "module Tagged\n  def tagged_items\n    Item.where(tag_id: tag_ids).to_a\n  end\nend\n"),
+            ("app/models/item.rb", "class Item < ApplicationRecord\nend\n"),
+            ("app/models/thing.rb", "class Thing < ApplicationRecord\nend\n"),
+            ("app/models/other.rb", "class Other < ApplicationRecord\nend\n"),
+        ];
+        let tree: std::collections::HashMap<PathBuf, Vec<u8>> =
+            files.iter().map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec())).collect();
+        let mut app = ingest_app_from_tree(tree).expect("ingest");
+        Analyzer::new(&app).analyze(&mut app);
+        // The replay: the module's one method body, owned by each model.
+        let method = app.library_classes.iter().find(|l| l.name.0.as_str() == "Tagged").unwrap().methods[0].clone();
+        app.library_classes.retain(|l| l.name.0.as_str() != "Tagged");
+        for m in app.models.iter_mut().filter(|m| matches!(m.name.0.as_str(), "Thing" | "Other")) {
+            m.body.push(ModelBodyItem::Method { method: method.clone(), leading_comments: vec![], leading_blank_line: false });
+        }
+        let mut tree_files: Vec<(String, String)> = files.iter().map(|(p, c)| (p.to_string(), c.to_string())).collect();
+        let report = specialize(&app, &mut tree_files).unwrap();
+        assert!(report.specialized.is_empty(), "{:?} / {:?}", report.specialized, report.residue);
+        assert!(report.residue.iter().any(|r| r.contains("tagged.rb")), "{:?}", report.residue);
+        let tagged = &tree_files.iter().find(|(p, _)| p == "app/models/concerns/tagged.rb").unwrap().1;
+        assert!(!tagged.contains("Futamura.records"), "{tagged}");
+    }
+}

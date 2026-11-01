@@ -433,14 +433,19 @@ if ENV["FUTAMURA_STATS"].to_s != ""
           started = Stats.now
           first = !Stats.instance_variable_get(:@seen_keys).include?(key)
           Stats.instance_variable_get(:@seen_keys) << key
-          orig_first = Stats::AB && site.calls.odd?
+          # The A/B leg runs the original chain first on odd calls, but only
+          # where this call will specialize: a site that has specialized
+          # before, with binds the guards accept. Otherwise Futamura.records
+          # falls back itself and the chain would run twice.
+          orig_first = Stats::AB && site.calls.odd? && site.specialized.positive? &&
+                       binds.none? { |value| ActiveRecord::StatementCache.unsupported_value?(value) }
           if orig_first
             t = Stats.now
             fallback.call
             orig_s = Stats.now - t
             started = Stats.now
           end
-          result = super(key, binds, owner: owner, association: association, root: root, &timed_fallback)
+          result = super(key, binds, owner: owner, association: association, &timed_fallback)
           total = Stats.now - started
           if fell
             site.fallback[fell] += 1
