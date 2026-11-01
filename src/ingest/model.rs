@@ -36,6 +36,7 @@ pub use table_prefix::{
 mod validations;
 mod with_options;
 use validations::{and_guard, context_guard, parse_validates_call, validation_items, ParsedValidates, ValidatesKind};
+pub(super) use validations::dropped_rule_note;
 
 /// Parse a single model file. The first class definition is treated as the
 /// model; any schema-derived attributes are filled in from `schema`.
@@ -567,11 +568,11 @@ pub(super) fn ingest_model_body_items(
                     }
                     // The lowered rules, and the call itself for its custom
                     // keys (`ingest::each_validator` lowers or reports them).
-                    ParsedValidates::Custom(parsed, keys) => {
+                    ParsedValidates::Custom(parsed, keys, kept) => {
                         let mut items = validation_items(parsed, leading_comments, span);
                         let expr = ingest_expr(stmt, file)?;
                         let text = String::from_utf8_lossy(call.location().as_slice()).into_owned();
-                        super::each_validator::note(expr.span, text, keys);
+                        super::each_validator::note(expr.span, text, keys, kept);
                         items.push(ModelBodyItem::Unknown { expr, leading_comments: Vec::new(), leading_blank_line: false });
                         return Ok(items);
                     }

@@ -11,9 +11,9 @@
 //! `unless:` / `on:`.
 //!
 //! Ingest keeps such a call's built-in rules and the call itself
-//! (`ParsedValidates::Custom`); [`resolve`] then reports the call as
-//! before, and drops it whole, when a key names no app class inheriting
-//! `ActiveModel::EachValidator` (a gem's validator, say). On the ruby
+//! (`ParsedValidates::Custom`); [`resolve`] then reports and drops each
+//! key that names no app class inheriting `ActiveModel::EachValidator`
+//! (a gem's validator, say), and the call keeps its other rules. On the ruby
 //! family ([`expand`]) each key becomes model source, as `validates_with`
 //! does (`ingest::validates_with`):
 //!
@@ -31,7 +31,8 @@
 //! options without the conditions and `allow_nil:` / `allow_blank:`.
 //! A shape this doesn't take (`strict:`, a non-literal `allow_nil:`, a key
 //! whose value is a constant or a call, which Rails classifies by its class)
-//! keeps the call the reported gap, as do strict targets ([`refuse`]).
+//! keeps the call's keys the reported gap, as do strict targets
+//! ([`refuse`]). Its built-in rules run either way.
 
 use std::cell::RefCell;
 
@@ -43,8 +44,8 @@ use crate::span::Span;
 thread_local! {
     /// The `validates` calls ingest kept for their custom keys: the call's
     /// span, its source text (a `with_options` call is merged source, not
-    /// the file's), and the keys.
-    static NOTED: RefCell<Vec<(Span, String, Vec<String>)>> = const { RefCell::new(Vec::new()) };
+    /// the file's), the keys, and its lowered built-in rules' keys.
+    static NOTED: RefCell<Vec<(Span, String, Vec<String>, Vec<String>)>> = const { RefCell::new(Vec::new()) };
 }
 
 const DETAIL: &str = "validation option not lowered; Rails rejects records this build saves";
@@ -53,46 +54,57 @@ pub(super) fn reset() {
     NOTED.with(|n| n.borrow_mut().clear());
 }
 
-pub(super) fn note(span: Span, text: String, keys: Vec<String>) {
-    NOTED.with(|n| n.borrow_mut().push((span, text, keys)));
+pub(super) fn note(span: Span, text: String, keys: Vec<String>, kept: Vec<String>) {
+    NOTED.with(|n| n.borrow_mut().push((span, text, keys, kept)));
 }
 
-/// After ingest: each noted call whose every key names an app
-/// `EachValidator` is kept for the target ([`expand`] or [`refuse`]);
-/// any other is dropped whole and reported, as a gap at ingest is.
+/// After ingest: each noted call's keys that name an app `EachValidator`
+/// are kept for the target ([`expand`] or [`refuse`]); any other key is
+/// dropped and reported, as a rule's gap at ingest is.
 pub(super) fn resolve(app: &mut App) {
     let noted = NOTED.with(|n| std::mem::take(&mut *n.borrow_mut()));
     if noted.is_empty() {
         return;
     }
-    let mut gaps: Vec<(Span, String)> = Vec::new();
+    let mut gaps: Vec<(Span, String, String)> = Vec::new();
     let mut calls: Vec<EachValidatorCall> = Vec::new();
     for mi in 0..app.models.len() {
         let model = &app.models[mi];
         let mut dropped: Vec<Span> = Vec::new();
         for item in &model.body {
             let ModelBodyItem::Unknown { expr, .. } = item else { continue };
-            let Some((span, text, keys)) = noted.iter().find(|(span, ..)| *span == expr.span) else { continue };
-            let resolved: Vec<(String, Option<String>)> =
-                keys.iter().map(|key| (key.clone(), validator_class(app, mi, key))).collect();
-            if resolved.iter().all(|(_, class)| class.is_some()) {
+            if !validates_call(expr) {
+                continue;
+            }
+            let Some((span, text, keys, kept)) = noted.iter().find(|(span, ..)| *span == expr.span) else { continue };
+            let mut found: Vec<(String, String)> = Vec::new();
+            let mut unresolved: Vec<String> = Vec::new();
+            for key in keys {
+                match validator_class(app, mi, key) {
+                    Some(class) => found.push((key.clone(), class)),
+                    None => unresolved.push(key.clone()),
+                }
+            }
+            let others: Vec<String> = kept.iter().cloned().chain(found.iter().map(|(key, _)| key.clone())).collect();
+            gaps.extend(key_gaps(*span, text, &unresolved, &others));
+            if found.is_empty() {
+                dropped.push(*span);
+            } else {
                 calls.push(EachValidatorCall {
                     model: model.name.clone(),
                     span: *span,
                     text: text.clone(),
-                    keys: resolved.into_iter().map(|(key, class)| (key, class.unwrap_or_default())).collect(),
+                    keys: found,
+                    kept: kept.clone(),
                 });
-            } else {
-                let unresolved: Vec<String> =
-                    resolved.into_iter().filter(|(_, class)| class.is_none()).map(|(key, _)| key).collect();
-                gaps.extend(constructs(text, &unresolved).into_iter().map(|c| (*span, c)));
-                dropped.push(*span);
             }
         }
         drop_calls(&mut app.models[mi], &dropped);
     }
     app.each_validator_calls = calls;
-    super::app::report_validates_gaps(app, gaps, DETAIL);
+    for (span, construct, detail) in gaps {
+        super::app::report_validates_gaps(app, vec![(span, construct)], &detail);
+    }
 }
 
 /// The ruby family: each kept call becomes its generated methods and
@@ -100,7 +112,7 @@ pub(super) fn resolve(app: &mut App) {
 /// dropped and reported for `target`.
 pub(crate) fn expand(app: &mut App, target: &str) -> Vec<crate::diagnostic::Diagnostic> {
     let calls = std::mem::take(&mut app.each_validator_calls);
-    let mut gaps: Vec<(Span, String)> = Vec::new();
+    let mut gaps: Vec<(Span, String, String)> = Vec::new();
     // One count for the app, as `validates_with` keeps.
     let mut counter = 0usize;
     for model in &mut app.models {
@@ -109,7 +121,7 @@ pub(crate) fn expand(app: &mut App, target: &str) -> Vec<crate::diagnostic::Diag
         let mut dropped: Vec<Span> = Vec::new();
         for item in std::mem::take(&mut model.body) {
             let call = match &item {
-                ModelBodyItem::Unknown { expr, .. } => {
+                ModelBodyItem::Unknown { expr, .. } if validates_call(expr) => {
                     calls.iter().find(|c| c.model == model.name && c.span == expr.span)
                 }
                 _ => None,
@@ -129,7 +141,7 @@ pub(crate) fn expand(app: &mut App, target: &str) -> Vec<crate::diagnostic::Diag
                 Some(items) => body.extend(items),
                 None => {
                     let keys: Vec<String> = call.keys.iter().map(|(key, _)| key.clone()).collect();
-                    gaps.extend(constructs(&call.text, &keys).into_iter().map(|c| (call.span, c)));
+                    gaps.extend(key_gaps(call.span, &call.text, &keys, &call.kept));
                     dropped.push(call.span);
                 }
             }
@@ -137,35 +149,66 @@ pub(crate) fn expand(app: &mut App, target: &str) -> Vec<crate::diagnostic::Diag
         model.body = body;
         drop_calls(model, &dropped);
     }
-    super::app::validates_gap_diagnostics(app, target, gaps, DETAIL)
+    gap_diagnostics(app, target, gaps)
 }
 
-/// A target without the expansion: every kept call is dropped and
-/// reported for `target`, with the built-in rules beside its keys.
+/// A target without the expansion: every kept call's keys are dropped and
+/// reported for `target`, and its built-in rules run.
 pub(crate) fn refuse(app: &mut App, target: &str) -> Vec<crate::diagnostic::Diagnostic> {
     let calls = std::mem::take(&mut app.each_validator_calls);
-    let mut gaps: Vec<(Span, String)> = Vec::new();
+    let mut gaps: Vec<(Span, String, String)> = Vec::new();
     for model in &mut app.models {
         let mine: Vec<&EachValidatorCall> = calls.iter().filter(|c| c.model == model.name).collect();
         for call in &mine {
             let keys: Vec<String> = call.keys.iter().map(|(key, _)| key.clone()).collect();
-            gaps.extend(constructs(&call.text, &keys).into_iter().map(|c| (call.span, c)));
+            gaps.extend(key_gaps(call.span, &call.text, &keys, &call.kept));
         }
         let spans: Vec<Span> = mine.iter().map(|c| c.span).collect();
         drop_calls(model, &spans);
     }
-    super::app::validates_gap_diagnostics(app, target, gaps, DETAIL)
+    gap_diagnostics(app, target, gaps)
 }
 
-/// Every item a dropped call produced: its rules' `Validation` items and
-/// the call itself, which share its span.
+fn gap_diagnostics(app: &App, target: &str, gaps: Vec<(Span, String, String)>) -> Vec<crate::diagnostic::Diagnostic> {
+    gaps.into_iter()
+        .flat_map(|(span, construct, detail)| super::app::validates_gap_diagnostics(app, target, vec![(span, construct)], &detail))
+        .collect()
+}
+
+/// The call's own item, and the rule-less `Validation` items a call of
+/// only custom keys produced. Its built-in rules' items, which share its
+/// span, stay: Rails runs each validator on its own. So does the
+/// `attr_accessor` ingest puts ahead of an acceptance rule on an
+/// undeclared attribute, which also carries the call's span.
 fn drop_calls(model: &mut crate::dialect::Model, spans: &[Span]) {
     if spans.is_empty() {
         return;
     }
     model.body.retain(|item| {
-        !matches!(item, ModelBodyItem::Validation { .. } | ModelBodyItem::Unknown { .. }) || !spans.contains(&item.span())
+        let call_item = match item {
+            ModelBodyItem::Unknown { expr, .. } => validates_call(expr),
+            ModelBodyItem::Validation { validation, .. } => validation.rules.is_empty(),
+            _ => false,
+        };
+        !call_item || !spans.contains(&item.span())
     });
+}
+
+/// The `validates` statement itself, not an item another pass made with
+/// its span.
+fn validates_call(expr: &crate::expr::Expr) -> bool {
+    matches!(&*expr.node, crate::expr::ExprNode::Send { recv: None, method, .. } if method.as_str() == "validates")
+}
+
+/// Each dropped key's constructs, with the detail naming the rules the
+/// call keeps (`kept`).
+fn key_gaps(span: Span, text: &str, keys: &[String], kept: &[String]) -> Vec<(Span, String, String)> {
+    keys.iter()
+        .flat_map(|key| {
+            let detail = format!("{DETAIL}{}", super::model::dropped_rule_note(key, kept));
+            constructs(text, std::slice::from_ref(key)).into_iter().map(move |c| (span, c, detail.clone()))
+        })
+        .collect()
 }
 
 /// `validates :a, key:` per attribute and key, as an ingest gap names it.
