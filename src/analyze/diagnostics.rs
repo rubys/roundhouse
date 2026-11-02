@@ -114,6 +114,43 @@ fn unlowered_form_builder_calls(app: &App) -> Vec<Diagnostic> {
     out
 }
 
+/// A `time_tag` that `ingest::time_tag` left as written, with the reason
+/// its `lowering` gives (no text argument and no block, whose text Rails
+/// makes with `I18n.l(t, format: …)`, or a shape it does not model).
+/// Nothing else answers the call, so it is refused rather than reaching
+/// the emit.
+fn unlowered_time_tags(app: &App) -> Vec<Diagnostic> {
+    // The app's own `time_tag` is a call like any other.
+    if crate::ingest::time_tag::app_defines_time_tag(app) {
+        return Vec::new();
+    }
+    fn visit(expr: &Expr, unreachable: bool, out: &mut Vec<Diagnostic>) {
+        if !expr.span.is_synthetic()
+            && let Some(Err(reason)) = crate::ingest::time_tag::lowering(expr)
+        {
+            let mut d = Diagnostic::unsupported(expr.span, None, "time_tag", reason);
+            if unreachable {
+                d.severity = crate::diagnostic::Severity::Warning;
+            }
+            out.push(d);
+        }
+        expr.node.for_each_child(&mut |child| visit(child, unreachable, out));
+    }
+    let mut out = Vec::new();
+    // A template no request reaches keeps its errors as warnings, found by
+    // its name: its body's own span can be synthetic (a Jbuilder template's
+    // leading `return if …` guard), which the downgrade below misses (#1689).
+    for view in &app.views {
+        visit(&view.body, app.unreachable_views.contains(&view.name), &mut out);
+    }
+    for lc in &app.library_classes {
+        for method in &lc.methods {
+            visit(&method.body, false, &mut out);
+        }
+    }
+    out
+}
+
 /// Builder methods the view lowering serves outside
 /// `classify_form_builder_method`.
 const FORM_BUILDER_HANDLED_ELSEWHERE: &[&str] = &["object"];
@@ -429,6 +466,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     }
     out.extend(attribute_macro_refusals(app));
     out.extend(unlowered_form_builder_calls(app));
+    out.extend(unlowered_time_tags(app));
     out.extend(devise_refusals(app));
     out.extend(overridden_synthesized_accessors(app));
     out.extend(runtime_defined_surfaces(app));
