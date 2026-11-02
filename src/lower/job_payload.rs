@@ -1202,8 +1202,27 @@ fn arguments_list(plan: &JobPlan) -> String {
 /// `perform_later` calls instead of queueing in process: the payload,
 /// with `scheduled_at` when `at` is set, handed to `SidekiqPush`.
 pub fn registry_source(plans: &[JobPlan], sidekiq: bool) -> String {
+    registry_source_with_broadcasts(plans, sidekiq, &[])
+}
+
+/// [`registry_source`], with the `Turbo::Streams::ActionBroadcastJob`
+/// half (`lower::broadcast_job`) for the models whose `broadcasts_to`
+/// enqueues it: its push, its `perform` arm, and its place in the
+/// discard table (the job says `discard_on ActiveJob::DeserializationError`).
+pub fn registry_source_with_broadcasts(
+    plans: &[JobPlan],
+    sidekiq: bool,
+    broadcasts: &[crate::lower::broadcast_job::BroadcastModel],
+) -> String {
+    let broadcasts = if sidekiq { broadcasts } else { &[] };
     let payload: Vec<&JobPlan> = plans.iter().filter(|p| p.is_payload()).collect();
     let mut s = String::new();
+    let turbo = crate::lower::broadcast_job::JOB_CLASS;
+    let turbo_source = crate::lower::broadcast_job::registry_source(broadcasts);
+    if !turbo_source.is_empty() {
+        s.push_str(&turbo_source);
+        s.push('\n');
+    }
 
     for plan in &payload {
         let list = arguments_list(plan);
@@ -1237,10 +1256,13 @@ pub fn registry_source(plans: &[JobPlan], sidekiq: bool) -> String {
     }
 
     s.push_str("  def self.perform(job_class, args)\n");
-    if payload.is_empty() {
+    if payload.is_empty() && broadcasts.is_empty() {
         s.push_str("    false\n");
     } else {
         s.push_str("    case job_class\n");
+        if !broadcasts.is_empty() {
+            s.push_str(&format!("    when {}\n      perform_turbo_broadcast(args)\n      true\n", ruby_str(turbo)));
+        }
         for plan in &payload {
             s.push_str(&format!("    when {}\n", ruby_str(&plan.job)));
             let mut call_args: Vec<String> = Vec::new();
@@ -1265,10 +1287,13 @@ pub fn registry_source(plans: &[JobPlan], sidekiq: bool) -> String {
     s.push_str("  def self.discards_deserialization_error(job_class)\n");
     let discarding: Vec<&&JobPlan> =
         payload.iter().filter(|p| p.discards_deserialization_error).collect();
-    if discarding.is_empty() {
+    if discarding.is_empty() && broadcasts.is_empty() {
         s.push_str("    false\n");
     } else {
-        let names: Vec<String> = discarding.iter().map(|p| format!("job_class == {}", ruby_str(&p.job))).collect();
+        let mut names: Vec<String> = discarding.iter().map(|p| format!("job_class == {}", ruby_str(&p.job))).collect();
+        if !broadcasts.is_empty() {
+            names.push(format!("job_class == {}", ruby_str(turbo)));
+        }
         s.push_str(&format!("    {}\n", names.join(" || ")));
     }
     s.push_str("  end\n");

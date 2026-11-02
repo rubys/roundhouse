@@ -250,6 +250,12 @@ module JobRegistry
   def self.discards_deserialization_error(job_class)
     false
   end
+
+  # The app's `Sidekiq.configure_client` `url:`, which a tree on
+  # :sidekiq must give: the worker has no localhost fallback.
+  def self.sidekiq_redis_url
+    "redis://localhost:6379/0"
+  end
 end
 
 def check(name, ok, detail)
