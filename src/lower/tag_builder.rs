@@ -156,7 +156,10 @@ pub fn apply_tag_builder_lowering(
     let stylesheet = Symbol::from("stylesheet_link_tag");
     let app_stylesheet =
         app.helper_method_index.contains_key(&stylesheet) || app.view_visible_controller_methods.contains(&stylesheet);
-    let owns_stylesheet = classes_owning(app, registry, "stylesheet_link_tag");
+    // Not a helper module a class includes: in a view, Rails' helper
+    // answers the helper's call (one defining it is `app_stylesheet`).
+    let mut owns_stylesheet = classes_owning(app, registry, "stylesheet_link_tag");
+    owns_stylesheet.retain(|c| !app.helper_modules.contains(c));
     super::for_each_owned_hook_body(app, &mut |owner, body| {
         let own_tag = owner.is_some_and(|c| owns_tag.contains(c));
         let own_stylesheet = app_stylesheet || owner.is_some_and(|c| owns_stylesheet.contains(c));

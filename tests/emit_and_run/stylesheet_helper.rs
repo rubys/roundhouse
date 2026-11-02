@@ -111,3 +111,19 @@ fn a_helper_stylesheet_link_tag_with_a_block_or_in_a_default_is_refused() {
         assert!(errors.iter().any(|e| e.contains("stylesheet_link_tag not supported")), "{helper}: {errors:?}");
     }
 }
+
+/// A helper module a class includes doesn't take that class's own
+/// `stylesheet_link_tag`: in a view, Rails' helper answers the helper's
+/// call (review, tag_builder.rs:159).
+#[test]
+fn a_helper_included_by_a_class_owning_stylesheet_link_tag_is_still_rewritten() {
+    let (emitted, errors) = app(THEME_HELPER)
+        .write(
+            "app/models/badge.rb",
+            "class Badge\n  include ThemeHelper\n\n  def stylesheet_link_tag(name, opts = {})\n    \"own:\" + name\n  end\nend\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:?}");
+    let helper = std::fs::read_to_string(emitted.join("app/models/theme_helper.rb")).unwrap();
+    assert!(helper.contains("ViewHelpers.stylesheet_link_tag"), "{helper}");
+}
