@@ -1567,6 +1567,7 @@ mod tests {
     fn ctx_with(model_singulars: &[&str], ivar_models: &[(&str, &str)]) -> ViewCtx {
         ViewCtx {
             locals: Vec::new(),
+            ivar_params: Vec::new(),
             arg_name: String::new(),
             resource_dir: String::new(),
             view_name: String::new(),

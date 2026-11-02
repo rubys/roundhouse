@@ -665,6 +665,8 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
 
     let mut locals: Vec<String> = typed.iter().map(|(n, _)| n.clone()).collect();
     locals.extend(extra_params.iter().cloned());
+    let mut ivar_params: Vec<String> =
+        closure_ivars.iter().filter(|iv| is_action_view || **iv != arg_name).cloned().collect();
 
     // Nullable-for-predicates: the `nil`-default extras (notice/alert) PLUS
     // any Untyped param. `present?`/`blank?` are defined to handle nil
@@ -815,10 +817,12 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
                     .map(str::to_string),
             )
             .collect();
+        ivar_params = closure;
     }
 
     let mut ctx = ViewCtx {
         locals,
+        ivar_params,
         // Only layouts consult arg_name (emit_yield → the `body` local);
         // action views don't yield, so an empty name is fine for them.
         arg_name: if is_action_view { String::new() } else { arg_name.clone() },
@@ -4775,6 +4779,10 @@ fn sanitize_object_name(name: &str) -> String {
 #[allow(dead_code)] // arg_name + resource_dir read in follow-on slices.
 pub(super) struct ViewCtx {
     pub(super) locals: Vec<String>,
+    /// The `locals` that are only a closure ivar under its local name
+    /// (`@post` threaded in as `post`), not a local Rails binds: the
+    /// bare name still calls the method it names (`ViewCtx::binds_local`).
+    pub(super) ivar_params: Vec<String>,
     pub(super) arg_name: String,
     pub(super) resource_dir: String,
     /// Name of the local that accumulates output via `<<`. The
@@ -5217,6 +5225,12 @@ impl ViewCtx {
     pub(super) fn is_local(&self, n: &str) -> bool {
         self.locals.iter().any(|x| x == n)
     }
+    /// True when `n` is a local Rails binds here (a declared or handed
+    /// partial local, the record, a block param), not a closure ivar
+    /// that only took the name.
+    pub(super) fn binds_local(&self, n: &str) -> bool {
+        self.is_local(n) && !self.ivar_params.iter().any(|x| x == n)
+    }
     /// True when `@<n>` is assigned a partial-options value in some
     /// controller action (a bare partial-name string or a `{partial: …}`
     /// hash), so a bare `render @<n>` should dispatch over the pool
@@ -5229,6 +5243,7 @@ impl ViewCtx {
         let mut next = self.clone();
         for n in more {
             next.shadow_flash(&n);
+            next.ivar_params.retain(|x| x != &n);
             if !next.locals.iter().any(|x| x == &n) {
                 next.locals.push(n);
             }
