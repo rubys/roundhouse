@@ -4102,7 +4102,12 @@ pub(crate) fn record_arg_ty(dir: &str, is_layout: bool, known_models: &[String])
         return Ty::Str;
     }
     let model_class = camelize_path(&crate::naming::singularize_last(dir));
-    if known_models.iter().any(|m| m == &model_class) {
+    // Active Storage's Attachment, whose partial an app can override
+    // without declaring the model. Not the Blob: Action Text renders an
+    // app's `active_storage/blobs/_blob` with the `ActionText::Attachment`
+    // (`project::apply_content_layout`), so its record stays untyped.
+    let framework_model = model_class == "ActiveStorage::Attachment";
+    if framework_model || known_models.iter().any(|m| m == &model_class) {
         Ty::Class {
             id: crate::ident::ClassId(crate::ident::Symbol::from(model_class.as_str())),
             args: vec![].into(),
