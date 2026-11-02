@@ -132,6 +132,7 @@ pub mod util;
 pub mod view;
 pub mod vite;
 pub mod current_page;
+pub mod time_tag;
 mod visibility;
 
 pub use app::{ingest_app, ingest_app_from_tree, ingest_app_with_vfs};

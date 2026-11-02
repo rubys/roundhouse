@@ -1196,6 +1196,63 @@ impl<'a> BodyTyper<'a> {
         false
     }
 
+    // The controller writer is the only setter whose assignment path
+    // moves past dispatch. Leave other Ruby writers on their existing path.
+    pub(super) fn controller_writer_receiver(&self, recv: &Ty) -> bool {
+        match recv {
+            Ty::Union { variants } => variants.iter().any(|ty| self.controller_writer_receiver(ty)),
+            Ty::Class { id, .. } => {
+                let mut current = Some(id.clone());
+                for _ in 0..32 {
+                    let Some(id) = current else { return false };
+                    if id.0.as_str() == "ActionController::Base" { return true; }
+                    current = self.classes().get(&id).and_then(|cls| cls.parent.clone());
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    // Method existence is separate evidence from its return type. In
+    // particular, an app writer may exist while its body is unresolved.
+    pub(super) fn defines_writer_surface(&self, recv: &Ty, method: &Symbol, instance_receiver: bool) -> bool {
+        match recv {
+            Ty::Union { variants } => !variants.is_empty()
+                && variants.iter().all(|ty| self.defines_writer_surface(ty, method, instance_receiver)),
+            Ty::Class { id, .. } if instance_receiver => self.defines_instance_method(id, method),
+            Ty::Class { id, .. } => {
+                let mut current = Some(id.clone());
+                for _ in 0..32 {
+                    let Some(id) = current else { return false };
+                    let Some(cls) = self.classes().get(&id) else { return false };
+                    if cls.class_methods.contains_key(method) { return true; }
+                    current = cls.parent.clone();
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    pub(super) fn writer_has_missing_arm(&self, recv: &Ty, method: &Symbol,
+        block_ret: Option<&Ty>, args: &[Expr], receiver_is_instance: bool) -> bool
+    {
+        let Ty::Union { variants } = recv else { return false };
+        variants.iter().any(|arm| {
+            // An unknown arm cannot turn a known instance into a class
+            // receiver. Apply the shape check to this arm independently.
+            let instance_receiver = receiver_is_instance && super::instance_shaped(arm);
+            match arm {
+                Ty::Union { .. } => self.writer_has_missing_arm(arm, method, block_ret, args, receiver_is_instance),
+                Ty::Var { .. } | Ty::Untyped => false,
+                Ty::Class { id, .. } if self.open_classes.is_some_and(|o| o.open(id, !instance_receiver).is_some()) => false,
+                _ => matches!(self.dispatch_on(Some(arm), method, block_ret, args, instance_receiver), Ty::Var { .. })
+                    && !self.defines_writer_surface(arm, method, instance_receiver),
+            }
+        })
+    }
+
     pub(super) fn dispatch(
         &self,
         recv_ty: Option<&Ty>,
@@ -1222,6 +1279,8 @@ impl<'a> BodyTyper<'a> {
             if ClassInfo::class_method_ownership_unknown(self.classes(), id, method) { return Ty::Untyped; }
             if let Some(ty) = ClassInfo::source_class_method_type(self.classes(), id, method) { return unwrap_fn_ret(ty); }
         }
+        let controller_writer = method.as_str() == "content_type="
+            && recv_ty.is_some_and(|ty| self.controller_writer_receiver(ty));
         // Not the stdlib's String form too: the port reads `other.octets`, which a String lacks.
         if let Some(Ty::Class { id, .. }) = recv_ty
             && id.0.as_str() == "IPAddr"
@@ -1992,7 +2051,10 @@ impl<'a> BodyTyper<'a> {
                         return unwrap_fn_ret(&subst(ty));
                     }
                     if !class_dynamic_finder && let Some(ty) = cls.instance_methods.get(method) {
-                        return unwrap_fn_ret(&subst(ty));
+                        if !controller_writer || instance_receiver {
+                            return unwrap_fn_ret(&subst(ty));
+                        }
+
                     }
                     // Mixed-in modules (`include IntervalHelper`)
                     // contribute their instance methods to this class.
@@ -2000,6 +2062,10 @@ impl<'a> BodyTyper<'a> {
                     // parent — Ruby's ancestor order puts an included
                     // module between the class and its superclass.
                     for module_id in cls.includes.iter().filter(|_| !class_dynamic_finder) {
+                        if controller_writer && !instance_receiver {
+                            continue;
+                        }
+
                         if let Some(ty) = self.lookup_in_module(module_id, method) {
                             return subst(&ty);
                         }
