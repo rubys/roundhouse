@@ -119,6 +119,16 @@ every = a.list([
 push("EveryArgumentJob", "default", 0.0, every)
 show("every Phase 1 argument type")
 
+# Keyword arguments: one trailing Hash marked `_aj_ruby2_keywords`, as
+# `lower::job_payload` writes it; an optional keyword at its default is
+# left out, as Rails leaves out one the caller omits.
+push("KeywordJob", "default", 0.0, a.list([a.record("gid://depot/Car/9"),
+  a.keywords(["count", "label"], [a.int(2), a.str("custom")])]))
+show("keyword arguments")
+push("KeywordJob", "default", 0.0, a.list([a.record("gid://depot/Car/10"),
+  a.keywords(["count", ""], [a.int(3), ""])]))
+show("an omitted optional keyword")
+
 # The after-commit hold: nothing is pushed while the transaction is
 # open, everything at COMMIT in order, nothing after a ROLLBACK.
 ActiveJob.transaction_began

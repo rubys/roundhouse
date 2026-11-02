@@ -8,7 +8,10 @@
 //! `tests/active_job_payload/rails.json`, which
 //! `tests/active_job_payload/oracle.rb` prints from real activejob 8.1.3:
 //! the arguments must be the same JSON, and the payload must have Rails'
-//! keys and values, apart from `job_id` and `enqueued_at`.
+//! keys and values, apart from `job_id` and `enqueued_at`. Keyword
+//! arguments are held the same way, to what ActiveJob writes for
+//! `perform_later(room, count: 2)`: one trailing Hash marked
+//! `_aj_ruby2_keywords`.
 //!
 //! The spinel test runs the same driver compiled by spinel and requires
 //! the same output as CRuby. Marked `#[ignore]`, as the other spinel
@@ -89,6 +92,22 @@ fn payloads_match_rails_and_read_back() {
     for (i, (g, e)) in got.iter().zip(expected).enumerate() {
         assert_eq!(g, e, "argument {i} differs from Rails'");
     }
+
+    let kwargs = parse(line(&stdout, "kwargs "), "the keyword arguments");
+    assert_eq!(kwargs, rails["keyword_arguments"], "keyword arguments differ from Rails'");
+    // Key order is part of the text Sidekiq stores, and serde_json
+    // sorts keys: hold the line to Ruby's own `JSON.generate` of the
+    // oracle's value, which keeps them in Rails' order.
+    let generated = Command::new("ruby")
+        .args(["-rjson", "-e", "puts JSON.generate(JSON.parse(File.read(ARGV[0]))[\"keyword_arguments\"])"])
+        .arg(root().join("tests/active_job_payload/rails.json"))
+        .output()
+        .expect("ruby is on PATH");
+    assert_eq!(
+        line(&stdout, "kwargs "),
+        String::from_utf8_lossy(&generated.stdout).trim_end(),
+        "keyword arguments' text differs from Rails' (key order?)"
+    );
 
     let mut job = parse(line(&stdout, "job "), "the payload");
     let mut rails_job = rails["job"].clone();
