@@ -149,15 +149,26 @@ pub fn apply_tag_builder_lowering(
     // answers it. A class with its own `tag` — `belongs_to :tag`, a
     // `tag` column, `attr_reader :tag`, a `def tag` — calls ITS reader
     // (`tag.title`), and rewriting that compiled to `"<title></title>"`.
-    let owns_tag = classes_owning_tag(app, registry);
+    let owns_tag = classes_owning(app, registry, "tag");
+    // An app's own `stylesheet_link_tag` (an app/helpers method or a
+    // `helper_method`) is what Rails calls; it is left to the app. So is
+    // a class's own, which its bare call reaches, found as `tag`'s is.
+    let stylesheet = Symbol::from("stylesheet_link_tag");
+    let app_stylesheet =
+        app.helper_method_index.contains_key(&stylesheet) || app.view_visible_controller_methods.contains(&stylesheet);
+    // Not a helper module a class includes: in a view, Rails' helper
+    // answers the helper's call (one defining it is `app_stylesheet`).
+    let mut owns_stylesheet = classes_owning(app, registry, "stylesheet_link_tag");
+    owns_stylesheet.retain(|c| !app.helper_modules.contains(c));
     super::for_each_owned_hook_body(app, &mut |owner, body| {
         let own_tag = owner.is_some_and(|c| owns_tag.contains(c));
-        rewrite(body, own_tag, &models, &helpers, &sti_stems, &mut diags)
+        let own_stylesheet = app_stylesheet || owner.is_some_and(|c| owns_stylesheet.contains(c));
+        rewrite(body, own_tag, own_stylesheet, &models, &helpers, &sti_stems, &mut diags)
     });
     diags
 }
 
-/// Classes whose bodies read a bare `tag` as their own method: APP
+/// Classes whose bodies read a bare `method` (`tag`) as their own: APP
 /// classes with a `tag` instance method — the registry's
 /// `instance_methods` already hold associations, columns and `attr_*`
 /// readers alongside `def`s — directly or through an app module they
@@ -172,7 +183,7 @@ pub fn apply_tag_builder_lowering(
 /// `include ActionView::Helpers::TagHelper` is dropped by the analyzer
 /// as a view-helper marker, so a model that really uses the builder
 /// keeps the rewrite.
-fn classes_owning_tag(app: &App, registry: &HashMap<ClassId, ClassInfo>) -> HashSet<ClassId> {
+fn classes_owning(app: &App, registry: &HashMap<ClassId, ClassInfo>, method: &str) -> HashSet<ClassId> {
     let app_classes: HashSet<&ClassId> = app
         .models
         .iter()
@@ -180,7 +191,7 @@ fn classes_owning_tag(app: &App, registry: &HashMap<ClassId, ClassInfo>) -> Hash
         .chain(app.library_classes.iter().map(|lc| &lc.name))
         .chain(app.controllers.iter().map(|c| &c.name))
         .collect();
-    let tag = Symbol::from("tag");
+    let tag = Symbol::from(method);
     let has_tag = |class: &ClassId| {
         // Self, then app ancestors (includes and parents), each once.
         let mut stack = vec![class];
@@ -365,19 +376,20 @@ fn is_tag_helper(recv: &Expr) -> bool {
 }
 
 /// `own_tag`: the body's class answers `tag` itself, so neither `tag.x`
-/// nor `tag(:x)` is the builder there (see [`classes_owning_tag`]). The
+/// nor `tag(:x)` is the builder there (see [`classes_owning`]). The
 /// other helpers this pass expands have names of their own and still
 /// apply.
 fn rewrite(
     expr: &mut Expr,
     own_tag: bool,
+    own_stylesheet: bool,
     models: &crate::det::HashSet<String>,
     helpers: &crate::det::HashSet<String>,
     sti_stems: &crate::det::HashMap<String, Vec<String>>,
     diags: &mut Vec<Diagnostic>,
 ) {
     expr.node.for_each_child_mut(&mut |child| {
-        rewrite(child, own_tag, models, helpers, sti_stems, diags)
+        rewrite(child, own_tag, own_stylesheet, models, helpers, sti_stems, diags)
     });
 
     if rewrite_turbo_frame_tag(expr, models) {
@@ -387,6 +399,9 @@ fn rewrite(
         return;
     }
     if rewrite_button_tag(expr) {
+        return;
+    }
+    if !own_stylesheet && rewrite_stylesheet_link_tag(expr) {
         return;
     }
     if rewrite_button_to_block(expr) {
@@ -558,6 +573,54 @@ fn rewrite_button_tag(expr: &mut Expr) -> bool {
     }
     parts.push(InterpPart::Text { value: "</button>".to_string() });
     let mut built = string_interp(parts);
+    qualify_view_helpers(&mut built);
+    *expr = html_safe(built, span);
+    true
+}
+
+/// `stylesheet_link_tag(name[, opts])` written in a HELPER body: the same
+/// `ViewHelpers.stylesheet_link_tag(name, opts)` the view walker lowers
+/// the ERB spelling to (`view_to_library::helpers`), qualified for a
+/// helper module. A helper module never reached the walker, so the call
+/// stayed bare, with no module defining it (#1593).
+///
+/// Left as written, and refused at analyze (`analyze::diagnostics::
+/// helper_stylesheet_link_tags`): a Symbol name, which in a view is a
+/// stylesheet group (`:app`, `:all`) expanded from the view's stylesheet
+/// list, which a helper body doesn't have; and arguments other than a
+/// name and an optional literal options hash (a splat, forwarded
+/// arguments, a computed options expression).
+fn rewrite_stylesheet_link_tag(expr: &mut Expr) -> bool {
+    let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
+        return false;
+    };
+    if method.as_str() != "stylesheet_link_tag" || expr.span.is_synthetic() {
+        return false;
+    }
+    let opaque = |e: &Expr| {
+        matches!(
+            &*e.node,
+            ExprNode::Splat { .. }
+                | ExprNode::KeywordSplat { .. }
+                | ExprNode::ForwardArgs
+                | ExprNode::ForwardKeywords
+                | ExprNode::ForwardKeywordsWithPairs { .. }
+        )
+    };
+    let shape_ok = match &args[..] {
+        [name] => !opaque(name) && !matches!(&*name.node, ExprNode::Hash { .. }),
+        [name, opts] => {
+            !opaque(name)
+                && matches!(&*opts.node, ExprNode::Hash { entries, .. } if !entries.iter().any(|(k, v)| opaque(k) || opaque(v)))
+        }
+        _ => false,
+    };
+    // Declined shapes are refused at analyze (`helper_stylesheet_link_tags`).
+    if !shape_ok || matches!(&*args[0].node, ExprNode::Lit { value: Literal::Sym { .. } }) {
+        return false;
+    }
+    let span = expr.span;
+    let mut built = view_helpers_call("stylesheet_link_tag", args.clone());
     qualify_view_helpers(&mut built);
     *expr = html_safe(built, span);
     true

@@ -30,6 +30,8 @@ mod session_cookie_key;
 mod inertia_runtime_props;
 #[path = "emit_and_run/form_builder_fields.rs"]
 mod form_builder_fields;
+#[path = "emit_and_run/stylesheet_helper.rs"]
+mod stylesheet_helper;
 #[path = "emit_and_run/time_tag.rs"]
 mod time_tag;
 #[path = "emit_and_run/multiparameter_params.rs"]
