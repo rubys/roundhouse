@@ -132,11 +132,13 @@ fn emit_test_expr_go(e: &Expr, ctx: GoTestCtx) -> String {
     match &*e.node {
         ExprNode::Lit { value } => emit_literal(value),
         ExprNode::Var { name, .. } => name.to_string(),
+        // The Go type name, as the model emit and the test shims spell it
+        // (`Admin::Note` → `AdminNote`, `library::sanitize_type_name`).
         ExprNode::Const { path } => path
             .iter()
             .map(|s| s.to_string())
             .collect::<Vec<_>>()
-            .join("."),
+            .concat(),
         ExprNode::Send { recv, method, args, block, .. } => {
             emit_test_send_go(recv.as_ref(), method.as_str(), args, block.as_ref(), ctx)
         }
@@ -405,9 +407,12 @@ fn rewrite_ruby_dot_call_go(expr: &str) -> Option<String> {
             && s.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
             && s.chars().all(|c| c.is_alphanumeric() || c == '_')
     };
-    if !is_ident(lhs) || !is_ident(rhs) {
+    // A namespaced class (`Admin::Note.count`) is its Go type name, `AdminNote`.
+    if !lhs.split("::").all(is_ident) || !is_ident(rhs) {
         return None;
     }
+    let lhs = lhs.replace("::", "");
+    let lhs = lhs.as_str();
     let is_class = lhs.chars().next().is_some_and(|c| c.is_uppercase());
     if is_class {
         Some(format!("{lhs}{}()", go_field_name(rhs)))

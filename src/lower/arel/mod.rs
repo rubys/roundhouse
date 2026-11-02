@@ -455,7 +455,7 @@ fn normalize_polymorphic_finder(
         let Some(owner) = self_class.cloned().or_else(|| match receiver.ty.as_ref() {
             Some(Ty::Class { id, .. }) => Some(id.clone()), _ => None,
         }) else { return false };
-        let mut constant = Expr::new(expr.span, ExprNode::Const { path: vec![owner.0.clone()] });
+        let mut constant = Expr::new(expr.span, ExprNode::Const { path: owner.const_path() });
         constant.ty = Some(Ty::Class { id: owner, args: vec![].into() });
         constant.decisions |= crate::expr::CLASS_OBJECT_VALUE | crate::expr::RESOLVED_CLASS_REF | crate::expr::GENERATED_CONST_REF;
         if let ExprNode::Send { recv, .. } = &mut *fallback.node { *recv = Some(constant); }
@@ -464,7 +464,7 @@ fn normalize_polymorphic_finder(
         fallback.decisions |= crate::expr::FINDER_DISPATCH_FALLBACK;
     }
     for (i, id) in arms.iter().enumerate().rev() {
-        let mut constant = Expr::new(expr.span, ExprNode::Const { path: vec![id.0.clone()] });
+        let mut constant = Expr::new(expr.span, ExprNode::Const { path: id.const_path() });
         constant.ty = Some(Ty::Class { id: id.clone(), args: vec![].into() });
         constant.decisions |= crate::expr::CLASS_OBJECT_VALUE | crate::expr::RESOLVED_CLASS_REF | crate::expr::GENERATED_CONST_REF;
         let mut call = expr.clone();
