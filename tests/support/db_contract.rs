@@ -323,6 +323,9 @@ pub fn run_lane(lane: &Lane) {
             )
         }
         Runtime::Spinel => {
+            if std::env::var_os("RH_SPINEL_BUNDLE_COLLECT").is_some() {
+                panic!("spinel bundle collect: not bundled");
+            }
             let compiler = std::env::var("SPINEL").unwrap_or_else(|_| "spinel".into());
             let mut compile = Command::new(compiler);
             if let Some(include) = &include {

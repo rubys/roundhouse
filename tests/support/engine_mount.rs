@@ -163,6 +163,9 @@ puts "literal engine mount CRuby HTTP contract passed"
 /// Build the same generic fixture as a native Spinel app and exercise its
 /// actual HTTP server on an ephemeral loopback port.
 pub fn spinel_http_witness() {
+    if std::env::var_os("RH_SPINEL_BUNDLE_COLLECT").is_some() {
+        panic!("spinel bundle collect: not bundled");
+    }
     let (emitted, errors) = overlay().emit(BuildTarget::Spinel);
     assert!(errors.is_empty(), "analysis or emission reported errors:\n{}", errors.join("\n"));
     let spin = std::env::var("SPIN").unwrap_or_else(|_| "spin".into());
