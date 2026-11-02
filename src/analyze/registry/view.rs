@@ -301,6 +301,13 @@ pub(in crate::analyze) fn register(
             args: vec![].into(),
         };
         for (m, ty) in [
+            ("to_session_value", Ty::Union { variants: vec![Ty::Hash {
+                key: std::sync::Arc::new(Ty::Str),
+                value: std::sync::Arc::new(Ty::Union { variants: vec![
+                    Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
+                    Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) },
+                ].into() }),
+            }, Ty::Nil].into() }),
             ("[]", Ty::Str),
             ("[]=", Ty::Nil),
             ("store", Ty::Nil),

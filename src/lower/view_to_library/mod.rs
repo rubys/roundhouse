@@ -1967,6 +1967,16 @@ pub(crate) fn insert_framework_stubs(
         fn_sig(vec![], Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) }),
     );
     flash_cls.instance_methods.insert(
+        Symbol::from("to_session_value"),
+        fn_sig(vec![], Ty::Union { variants: vec![Ty::Hash {
+            key: std::sync::Arc::new(Ty::Str),
+            value: std::sync::Arc::new(Ty::Union { variants: vec![
+                Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
+                Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) },
+            ].into() }),
+        }, Ty::Nil].into() }),
+    );
+    flash_cls.instance_methods.insert(
         Symbol::from("notice"),
         fn_sig(vec![], nullable_str.clone()),
     );
