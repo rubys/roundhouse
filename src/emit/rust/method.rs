@@ -79,13 +79,9 @@ pub(super) fn emit_module_method(m: &MethodDef) -> Result<String, String> {
         ));
     }
     let mut out = String::new();
-    let params = render_params(m);
-    let ret_clause = render_return(m);
-    let fn_name = super::expr::sanitize_ident(m.name.as_str());
-    writeln!(out, "pub fn {fn_name}{params}{ret_clause} {{").unwrap();
     let return_ty = effective_return_ty(m);
     let param_types = collect_param_types(m);
-    let body = super::expr::with_param_types(param_types, || super::expr::with_current_return_ty(return_ty.clone(), || super::expr::with_class_method_scope(|| {
+    let (body, mut_params) = super::expr::with_iter_mut_params(|| super::expr::with_param_types(param_types, || super::expr::with_current_return_ty(return_ty.clone(), || super::expr::with_class_method_scope(|| {
         super::expr::with_method_scope(&m.body, || {
             // Same as emit_instance_method: enable the return-tail
             // flag so the body's top-level expression (Seq tail / If
@@ -94,7 +90,11 @@ pub(super) fn emit_module_method(m: &MethodDef) -> Result<String, String> {
             // for Option<T>-returning class methods, etc.).
             super::expr::with_return_tail(true, || super::expr::emit_expr_tail(&m.body))
         })
-    })));
+    }))));
+    let params = render_params(m, &mut_params);
+    let ret_clause = render_return(m);
+    let fn_name = super::expr::sanitize_ident(m.name.as_str());
+    writeln!(out, "pub fn {fn_name}{params}{ret_clause} {{").unwrap();
     // Function-tail Some(...) wrap — same logic as emit_instance_method.
     // Class methods that return Option<T> need their last expression
     // wrapped in `Some(...)` when the body-typer typed it as T.
@@ -124,7 +124,7 @@ pub(super) fn emit_module_method(m: &MethodDef) -> Result<String, String> {
     Ok(out)
 }
 
-fn render_params(m: &MethodDef) -> String {
+fn render_params(m: &MethodDef, mut_params: &crate::det::HashSet<String>) -> String {
     // Pull positional + kwarg sig params (filter Block — handled separately).
     // The Ruby `def` syntax omits `&block` from `m.params` but the
     // RBS-derived signature appends a `Block` Param at the end. Without
@@ -161,9 +161,10 @@ fn render_params(m: &MethodDef) -> String {
         .enumerate()
         .map(|(i, p)| {
             let name = super::expr::util::escape_rust_keyword(p.name.as_str());
+            let mutability = if mut_params.contains(p.name.as_str()) { "mut " } else { "" };
             match sig_params.and_then(|sp| sp.get(i)) {
-                Some(sig_p) => format!("{name}: {}", rust_param_ty(&sig_p.ty)),
-                None => format!("{name}: ()"),
+                Some(sig_p) => format!("{mutability}{name}: {}", rust_param_ty(&sig_p.ty)),
+                None => format!("{mutability}{name}: ()"),
             }
         })
         .collect();
@@ -523,13 +524,6 @@ pub(super) fn emit_instance_method(
                 .as_ref()
                 .map(|bp| render_block_param_placeholder(bp.name.as_str()))
         });
-    let params = render_instance_params(m, receiver, block_param.as_deref());
-    let ret_clause = if is_init {
-        " -> Self".to_string()
-    } else {
-        render_return(m)
-    };
-    writeln!(out, "pub fn {fn_name}{params}{ret_clause} {{").unwrap();
     // Thread the method's RBS-declared return type through to the
     // Return arm in `emit_expr` so `return nil` in a method typed
     // `-> T?` emits as `return None` instead of bare `return` (the
@@ -540,7 +534,7 @@ pub(super) fn emit_instance_method(
     // Option-ness from RBS to Var reads inside the body, so this is
     // the authoritative source for "is this param Option-typed".
     let param_types = collect_param_types(m);
-    let body = super::expr::with_param_types(param_types, || super::expr::with_current_return_ty(return_ty.clone(), || super::expr::with_method_scope(&m.body, || {
+    let (body, mut_params) = super::expr::with_iter_mut_params(|| super::expr::with_param_types(param_types, || super::expr::with_current_return_ty(return_ty.clone(), || super::expr::with_method_scope(&m.body, || {
         if is_init {
             let fields: Vec<String> = ivars.iter().map(|(n, _)| n.clone()).collect();
             // Constructor mode renders field writes as `let` bindings
@@ -567,7 +561,14 @@ pub(super) fn emit_instance_method(
                 super::expr::emit_expr_tail(&m.body)
             })
         }
-    })));
+    }))));
+    let params = render_instance_params(m, receiver, block_param.as_deref(), &mut_params);
+    let ret_clause = if is_init {
+        " -> Self".to_string()
+    } else {
+        render_return(m)
+    };
+    writeln!(out, "pub fn {fn_name}{params}{ret_clause} {{").unwrap();
     // Function-tail Some(...) wrap: if the method returns Option<T>
     // and the body's tail expression is T-typed (non-Option), wrap
     // the last line in `Some(...)`. The Ruby idiom returns the last
@@ -817,6 +818,7 @@ fn render_instance_params(
     m: &MethodDef,
     receiver: Option<&'static str>,
     block_param: Option<&str>,
+    mut_params: &crate::det::HashSet<String>,
 ) -> String {
     let sig_params = match m.signature.as_ref() {
         Some(Ty::Fn { params, .. }) if params.len() == m.params.len() => Some(params),
@@ -828,9 +830,10 @@ fn render_instance_params(
     }
     for (i, p) in m.params.iter().enumerate() {
         let name = super::expr::util::escape_rust_keyword(p.name.as_str());
+        let mutability = if mut_params.contains(p.name.as_str()) { "mut " } else { "" };
         let rendered = match sig_params.and_then(|sp| sp.get(i)) {
-            Some(sig_p) => format!("{name}: {}", rust_param_ty(&sig_p.ty)),
-            None => format!("{name}: ()"),
+            Some(sig_p) => format!("{mutability}{name}: {}", rust_param_ty(&sig_p.ty)),
+            None => format!("{mutability}{name}: ()"),
         };
         parts.push(rendered);
     }

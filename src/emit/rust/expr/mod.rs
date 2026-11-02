@@ -50,6 +50,24 @@ pub(super) fn param_ty(name: &str) -> Option<crate::ty::Ty> {
     current_emit_ctx().and_then(|ctx| ctx.param_types.borrow().get(name).cloned())
 }
 
+/// Run a method-body emit and return, alongside its result, the params
+/// it borrowed with `iter_mut()` (see `EmitCtx::iter_mut_params`).
+pub(super) fn with_iter_mut_params<F, R>(f: F) -> (R, crate::det::HashSet<String>)
+where
+    F: FnOnce() -> R,
+{
+    let ctx = current_emit_ctx().expect("with_iter_mut_params called outside with_emit_ctx");
+    let prev = std::mem::take(&mut *ctx.iter_mut_params.borrow_mut());
+    let r = f();
+    let used = std::mem::replace(&mut *ctx.iter_mut_params.borrow_mut(), prev);
+    (r, used)
+}
+
+fn mark_iter_mut_param(name: &str) {
+    let ctx = current_emit_ctx().expect("mark_iter_mut_param called outside with_emit_ctx");
+    ctx.iter_mut_params.borrow_mut().insert(name.to_string());
+}
+
 fn is_rebound_var(name: &str) -> bool {
     current_emit_ctx()
         .map(|ctx| ctx.rebound_vars.borrow().contains(name))
@@ -1101,6 +1119,19 @@ fn emit_expr_inner(e: &Expr) -> String {
                             // borrowed mutably; the block only reads it.
                             ".iter()"
                         };
+                        // No clone to borrow from (a single read, or a
+                        // mutating block): the param binding itself is
+                        // borrowed mutably, so the signature must
+                        // declare it `mut`.
+                        if iter_chain == ".iter_mut()" {
+                            if let ExprNode::Var { name, .. } = &*r.node {
+                                if recv_s == util::escape_rust_keyword(name.as_str())
+                                    && param_ty(name.as_str()).is_some()
+                                {
+                                    mark_iter_mut_param(name.as_str());
+                                }
+                            }
+                        }
                         return format!("{recv_s}{iter_chain}.for_each({closure})");
                     }
                 }

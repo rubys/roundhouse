@@ -136,6 +136,13 @@ pub struct EmitCtx {
     /// reference (which fails Display).
     pub param_types: RefCell<HashMap<String, Ty>>,
 
+    /// Params of the method being emitted that the `recv.each { … }`
+    /// bridge borrows directly with `iter_mut()` (no defensive clone
+    /// in between). `method.rs` declares them `mut` in the signature
+    /// — Rust params are immutable bindings, and a single-read view
+    /// param (`<%= render @posts %>`) would otherwise be E0596.
+    pub iter_mut_params: RefCell<HashSet<String>>,
+
     /// Per-Seq tracking of local-var declared types. Populated by
     /// `Assign { LValue::Var, value }` sites with known `value.ty`.
     /// Read by the narrowing-aware Var emit so a local `params =
