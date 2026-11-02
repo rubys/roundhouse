@@ -157,9 +157,11 @@ module ActiveJob
 
     # `keywords_at` for a job whose keywords all have defaults: a call
     # that passed none has no Hash at `args[i]` (Rails writes none), and
-    # reads as every keyword absent.
+    # reads as every keyword absent. Only when the array ends exactly
+    # there: a shorter one is missing a positional argument, which
+    # `keywords_at` rejects.
     def self.optional_keywords_at(args, i, names)
-      return names.map { |name| nil } if args.length <= i
+      return names.map { |name| nil } if args.length == i
       keywords_at(args, i, names)
     end
 

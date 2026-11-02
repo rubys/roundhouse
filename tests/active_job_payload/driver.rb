@@ -199,6 +199,13 @@ kw = A.optional_keywords_at(JSON.parse(kwargs[3]), 1, ["count", "label"])
 check("no keyword Hash reads as every keyword absent", kw.length == 2 && A.null_at(kw, 0) && A.null_at(kw, 1), "")
 kw = A.optional_keywords_at(JSON.parse(kwargs[1]), 1, ["count", "label"])
 check("optional keywords still read a Hash", A.int_at(kw, 0) == 3 && A.null_at(kw, 1), "")
+short_error = begin
+  A.optional_keywords_at(JSON.parse("[]"), 1, ["count"])
+  "no error"
+rescue ActiveJob::DeserializationError => e
+  e.message
+end
+check("a payload missing a positional argument is not read as no keywords", short_error == "Error while trying to deserialize arguments: expected keyword arguments", short_error)
 not_keywords = begin
   A.keywords_at(JSON.parse(kwargs[0]), 0, ["count"])
   "no error"
