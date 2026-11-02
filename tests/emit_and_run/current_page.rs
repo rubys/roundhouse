@@ -156,7 +156,7 @@ fn only_views_are_rewritten() {
         .emit(roundhouse::project::BuildTarget::Ruby);
     assert!(errors.is_empty(), "{errors:?}");
     let pager = std::fs::read_to_string(emitted.join("app/models/pager.rb")).unwrap();
-    assert!(pager.contains("current_page?(\"/\")") && !pager.contains("current_page_path?"), "{pager}");
+    assert!(pager.contains("current_page?(\"/\")") && !pager.contains("current_page_match?"), "{pager}");
 }
 
 /// A template no request reaches keeps its errors as warnings, as analysis
@@ -201,5 +201,35 @@ fn a_current_page_argument_not_typed_as_a_string_is_refused() {
             .edit("app/views/articles/show.html.erb", "<% content_for :title, \"Showing article\" %>\n", &format!("<% content_for :title, \"Showing article\" %>\n<%= {call} %>\n"))
             .check_errors();
         assert!(!errors.iter().any(|e| e.contains("current_page?")), "{call}: {errors:?}");
+    }
+}
+
+/// The runtime helper the rewrite calls takes the request's parts as
+/// Strings. It is emitted with the shared runtime on every target, and
+/// these have no request type for a parameter to name: on 1f7957428 the
+/// Rust tree's `current_page_path_pred(request: Request, …)` failed with
+/// `cannot find type Request`, in an app with no `current_page?`.
+#[test]
+fn the_runtime_helper_names_no_request_type() {
+    use roundhouse::project::BuildTarget;
+    fn visit(dir: &std::path::Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                visit(&path, out);
+            } else if let Ok(text) = std::fs::read_to_string(&path) {
+                out.extend(
+                    text.lines()
+                        .filter(|l| l.to_lowercase().replace('_', "").contains("currentpage") && l.contains("Request"))
+                        .map(|l| format!("{}: {}", path.display(), l.trim())),
+                );
+            }
+        }
+    }
+    for target in [BuildTarget::Rust, BuildTarget::Go, BuildTarget::Kotlin, BuildTarget::Swift, BuildTarget::CSharp] {
+        let (emitted, _) = emit_and_run::real_blog().emit(target);
+        let mut found = Vec::new();
+        visit(&emitted, &mut found);
+        assert!(found.is_empty(), "{target:?}: {found:#?}");
     }
 }

@@ -237,7 +237,6 @@ module ActionView
     def self.form_with: (?Hash[Symbol, untyped] opts) -> String
     # Schema column union (plus nil). Bodies nil-check and stringify.
     def self.optional_value_attr: (String | Integer | Float | bool | nil value) -> String
-    def self.current_page_path?: (ActionDispatch::Request request, String path) -> bool
     def self.current_page_match?: (String request_method, String request_path, String request_fullpath, String request_origin, String path) -> bool
     def self.scheme_at_line_start?: (Array[Integer] bytes) -> bool
     def self.word_byte?: (Integer byte) -> bool

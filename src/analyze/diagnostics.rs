@@ -135,9 +135,9 @@ fn unlowered_current_page(app: &App) -> Vec<Diagnostic> {
         // `url_for`; a Hash; a value that may be nil) would reach the
         // runtime's `path.bytes`.
         if let ExprNode::Send { recv: Some(r), method, args, .. } = &*expr.node
-            && method.as_str() == "current_page_path?"
+            && method.as_str() == "current_page_match?"
             && matches!(&*r.node, ExprNode::Const { path } if path.len() == 2 && path[0].as_str() == "ActionView" && path[1].as_str() == "ViewHelpers")
-            && args.get(1).is_some_and(|path| !matches!(path.ty, Some(crate::ty::Ty::Str)))
+            && args.get(4).is_some_and(|path| !matches!(path.ty, Some(crate::ty::Ty::Str)))
             && !expr.span.is_synthetic()
         {
             let reason = "its argument is not known to be a String path or URL; a record or an options hash goes through Rails' `url_for`, which is not modeled";

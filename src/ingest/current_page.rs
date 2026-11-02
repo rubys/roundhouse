@@ -1,10 +1,14 @@
 //! `current_page?(path)` is rewritten to the runtime's
-//! `ActionView::ViewHelpers.current_page_path?(request, path)`, which does
+//! `ActionView::ViewHelpers.current_page_match?(request.request_method,
+//! request.path, request.fullpath, request.protocol +
+//! request.host_with_port, path)`, which does
 //! what Rails 8.1.4's helper does for a path or a URL: a GET or HEAD
 //! request, both sides percent-decoded, the request's fullpath when the
 //! path has a query, trailing `/` dropped, compared as bytes; a decoded
 //! `scheme://…` (a literal, a computed `*_url`, or a percent-encoded one)
-//! against the request's protocol and host in front of that path.
+//! against the request's protocol and host in front of that path. The
+//! runtime takes the request's parts as Strings: the shared runtime is
+//! emitted on every target, and most have no request type for it to name.
 //!
 //! Left as written, and refused by `analyze::diagnostics`: the `url_for`
 //! options form (`current_page?(controller: …)`), `check_parameters:` and
@@ -50,7 +54,7 @@ pub fn lower_current_page(app: &mut App) {
     }
 }
 
-/// The `current_page_path?` calls this pass wrote, by span, each with
+/// The `current_page_match?` calls this pass wrote, by span, each with
 /// whether its view is one no request reaches (`App::unreachable_views`):
 /// `project::report_current_page_calls` refuses them on the targets whose
 /// views have no request. Reachability goes by the view's name, as a
@@ -59,7 +63,7 @@ pub fn lower_current_page(app: &mut App) {
 pub(crate) fn rewritten_calls(app: &App) -> Vec<(crate::span::Span, bool)> {
     fn visit(e: &Expr, unreachable: bool, out: &mut Vec<(crate::span::Span, bool)>) {
         if let ExprNode::Send { recv: Some(r), method, .. } = &*e.node
-            && method.as_str() == "current_page_path?"
+            && method.as_str() == "current_page_match?"
             && matches!(&*r.node, ExprNode::Const { path } if path.len() == 2 && path[0].as_str() == "ActionView" && path[1].as_str() == "ViewHelpers")
         {
             out.push((e.span, unreachable));
@@ -99,17 +103,18 @@ fn as_path_check(e: &Expr) -> Option<Expr> {
         return None;
     }
     let span = e.span;
-    let request = Expr::new(
-        span,
-        ExprNode::Send { recv: None, method: Symbol::from("request"), args: Vec::new(), block: None, parenthesized: false },
-    );
+    let send = |recv: Option<Expr>, method: &str, args: Vec<Expr>| {
+        Expr::new(span, ExprNode::Send { recv, method: Symbol::from(method), args, block: None, parenthesized: false })
+    };
+    let request = |method: &str| send(Some(send(None, "request", Vec::new())), method, Vec::new());
+    let origin = send(Some(request("protocol")), "+", vec![request("host_with_port")]);
     let helpers = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")] });
     Some(Expr::new(
         span,
         ExprNode::Send {
             recv: Some(helpers),
-            method: Symbol::from("current_page_path?"),
-            args: vec![request, path.clone()],
+            method: Symbol::from("current_page_match?"),
+            args: vec![request("request_method"), request("path"), request("fullpath"), origin, path.clone()],
             block: None,
             parenthesized: true,
         },

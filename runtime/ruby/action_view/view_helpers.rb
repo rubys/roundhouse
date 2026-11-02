@@ -1405,13 +1405,10 @@ module ActionView
     # its query or at its end. A decoded `scheme://…` is compared with the
     # request's protocol and host (with port) in front of that path.
     # Compared as bytes, as Rails compares the unescaped strings in
-    # BINARY. `ingest::current_page` writes the call.
-    def self.current_page_path?(request, path)
-      current_page_match?(request.request_method, request.path, request.fullpath, request.protocol + request.host_with_port, path)
-    end
-
-    # `current_page_path?` on the request's parts, as Strings; `request_origin`
-    # is its protocol and host with port (`http://example.org:8080`).
+    # BINARY. `ingest::current_page` writes the call with the request's
+    # parts, as Strings, so no target needs a request type here:
+    # `request_origin` is its protocol and host with port
+    # (`http://example.org:8080`).
     def self.current_page_match?(request_method, request_path, request_fullpath, request_origin, path)
       return false unless request_method == "GET" || request_method == "HEAD"
       url = percent_decoded(path.bytes)
