@@ -734,6 +734,8 @@ def select(
     wasm = site = spinel = False
     reasons = []
     for path in paths:
+        if path.startswith("tests/support/controller_content_type_writer/"):
+            reasons.append(f"{path}: unit (controller_content_type_writer)")
         if path == "src/project.rs" and project_scope in PROJECT_BUILDERS.values():
             targets.update(("ruby", "jruby"))
             smoke.update(("ruby", "jruby"))

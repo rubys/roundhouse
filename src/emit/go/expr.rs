@@ -517,7 +517,13 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                 BoolOpKind::Or => "||",
                 BoolOpKind::And => "&&",
             };
-            format!("{} {} {}", emit_expr(ctx, left), op_s, emit_expr(ctx, right))
+            // `&&` binds tighter than `||` here as in Ruby, so an `||`
+            // operand under `&&` keeps its parentheses.
+            let operand = |e: &Expr| match &*e.node {
+                ExprNode::BoolOp { op: BoolOpKind::Or, .. } if matches!(op, BoolOpKind::And) => format!("({})", emit_expr(ctx, e)),
+                _ => emit_expr(ctx, e),
+            };
+            format!("{} {} {}", operand(left), op_s, operand(right))
         }
         ExprNode::StringInterp { parts } => {
             use crate::expr::InterpPart;

@@ -208,6 +208,7 @@ fn tiny_blog_round_trips() {
         load_hook_class_macros: Vec::new(),
         load_hook_extended_macros: Vec::new(),
         spliced_class_methods: Default::default(),
+        time_tag_calls: Vec::new(),
         partial_local_types: roundhouse::det::HashMap::default(),
         view_ivar_types: roundhouse::det::HashMap::default(),
         html_safe_methods: std::collections::BTreeSet::new(),
