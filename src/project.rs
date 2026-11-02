@@ -1267,6 +1267,50 @@ fn is_plain_ruby_class(app: &App, lc: &crate::dialect::LibraryClass) -> bool {
     true
 }
 
+/// `time_tag`'s `datetime` is the time's `iso8601`, which Rails 8.1.4
+/// writes without a fraction and with `Z` for UTC (`2026-11-01T09:30:15Z`).
+/// Measured on a datetime column through each target's own test runner,
+/// TypeScript writes `2026-11-01T09:30:15.500Z` and Python
+/// `2026-11-01T09:30:15.500000+00:00`, and Crystal's, Go's and Rust's emits
+/// of the read don't build, so off the ruby family (and on Roda, which has
+/// no ActionView) the call is refused.
+fn report_time_tag_calls(app: &App, target: BuildTarget) {
+    // Not Roda: it converts the views from their ERB source, with no
+    // ActionView behind them to answer `time_tag`.
+    if matches!(
+        target,
+        BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Futamura
+    ) {
+        return;
+    }
+    // A template no request reaches keeps its errors as warnings, as analysis
+    // does. By the view's name: a view body's own span can be synthetic (a
+    // Jbuilder template's leading `return if …` guard).
+    fn collect(e: &crate::expr::Expr, calls: &crate::det::HashSet<crate::span::Span>, out: &mut crate::det::HashSet<crate::span::Span>) {
+        if calls.contains(&e.span) {
+            out.insert(e.span);
+        }
+        e.node.for_each_child(&mut |c| collect(c, calls, out));
+    }
+    let calls: crate::det::HashSet<crate::span::Span> = app.time_tag_calls.iter().copied().collect();
+    let mut unreachable = crate::det::HashSet::default();
+    for v in app.views.iter().filter(|v| app.unreachable_views.contains(&v.name)) {
+        collect(&v.body, &calls, &mut unreachable);
+    }
+    for span in &app.time_tag_calls {
+        let mut d = crate::diagnostic::Diagnostic::unsupported(
+            *span,
+            Some(crate::ident::Symbol::from(target.as_str())),
+            "time_tag",
+            "its `datetime` is the time's `iso8601`, which this target writes otherwise than Rails (fraction or zone suffix)",
+        );
+        if unreachable.contains(span) {
+            d.severity = crate::diagnostic::Severity::Warning;
+        }
+        emit::diagnostics::push(d);
+    }
+}
+
 /// A non-integer primary key (`create_table …, id: :uuid`,
 /// `primary_key: "identifier", id: :string`) is carried end to end by
 /// the ruby-shape emit — CRuby, JRuby and Spinel: the analyzer types
@@ -2952,6 +2996,7 @@ fn target_files_inner(
     reject_unsupported_dates(app, target)?;
     reject_unsupported_forwarded_procs(app, target)?;
     report_unsupported_keys(app, target);
+    report_time_tag_calls(app, target);
     report_unemitted_library_classes(app, target);
     report_relation_class_calls(app, target);
     report_typescript_error_class(app, target);
