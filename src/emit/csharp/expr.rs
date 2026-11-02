@@ -1149,7 +1149,11 @@ fn escape_str(s: &str) -> String {
             '\t' => out.push_str("\\t"),
             '\u{08}' => out.push_str("\\b"),
             '\u{0C}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04X}", c as u32)),
+            // C# ends a line at U+0085, U+2028 and U+2029 too, which a
+            // regular literal can't hold raw (CS1010).
+            c if (c as u32) < 0x20 || matches!(c, '\u{85}' | '\u{2028}' | '\u{2029}') => {
+                out.push_str(&format!("\\u{:04X}", c as u32))
+            }
             _ => out.push(c),
         }
     }
@@ -1171,7 +1175,11 @@ fn escape_interp_text(s: &str) -> String {
             '\u{0C}' => out.push_str("\\f"),
             '{' => out.push_str("{{"),
             '}' => out.push_str("}}"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04X}", c as u32)),
+            // C# ends a line at U+0085, U+2028 and U+2029 too, which a
+            // regular literal can't hold raw (CS1010).
+            c if (c as u32) < 0x20 || matches!(c, '\u{85}' | '\u{2028}' | '\u{2029}') => {
+                out.push_str(&format!("\\u{:04X}", c as u32))
+            }
             _ => out.push(c),
         }
     }
@@ -2414,5 +2422,16 @@ fn nilable_prop_conversion(base: &str, value: &Expr) -> Option<String> {
         Ty::Float => Some(format!("({v} is null ? (double?)null : Convert.ToDouble({v}))")),
         Ty::Bool => Some(format!("({v} is null ? (bool?)null : Convert.ToBoolean({v}))")),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod escape_tests {
+    use super::{escape_interp_text, escape_str};
+
+    #[test]
+    fn line_terminators_are_escaped_in_string_literals() {
+        assert_eq!(escape_str("a\u{85}b\u{2028}c\u{2029}d"), "a\\u0085b\\u2028c\\u2029d");
+        assert_eq!(escape_interp_text("a\u{2028}{b}"), "a\\u2028{{b}}");
     }
 }
