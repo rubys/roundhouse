@@ -2140,6 +2140,12 @@ jobs:
       - name: cargo test --test kotlin_toolchain real_blog_i18n_locales_run
         if: ${{ !cancelled() && matrix.target == 'kotlin' }}
         run: cargo test --locked --test kotlin_toolchain real_blog_i18n_locales_run -- --ignored --nocapture --exact
+      - name: cargo test --test kotlin_toolchain controller_ivars_named_like_base_state_compile
+        if: ${{ !cancelled() && matrix.target == 'kotlin' }}
+        run: cargo test --locked --test kotlin_toolchain controller_ivars_named_like_base_state_compile -- --ignored --nocapture --exact
+      - name: cargo test --test kotlin_toolchain controller_ivars_named_like_base_state_render
+        if: ${{ !cancelled() && matrix.target == 'kotlin' }}
+        run: cargo test --locked --test kotlin_toolchain controller_ivars_named_like_base_state_render -- --ignored --nocapture --exact
       - name: cargo test --test framework_tests_swift
         if: ${{ !cancelled() && matrix.target == 'swift' }}
         run: |

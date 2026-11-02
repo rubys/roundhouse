@@ -1731,6 +1731,8 @@ pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
     let mut out = Expr::new(e.span, new_node);
     // `f.object.class::X` stays a path (`expr::CONST_PATH`).
     out.decisions |= e.decisions & crate::expr::CONST_PATH;
+    // A grounded `iso8601` (`to_rfc3339`) stays one: the Ruby emit prints `iso8601` by this flag.
+    out.decisions |= e.decisions & crate::expr::GROUNDED_TIME_FORMAT;
     // Not a fresh, untyped node: a rebuilt `[]` the i18n lowering typed `Array[String]` would read as `Array[untyped]`
     out.ty = e.ty.clone();
     out
