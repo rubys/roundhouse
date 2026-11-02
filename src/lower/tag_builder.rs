@@ -149,20 +149,23 @@ pub fn apply_tag_builder_lowering(
     // answers it. A class with its own `tag` — `belongs_to :tag`, a
     // `tag` column, `attr_reader :tag`, a `def tag` — calls ITS reader
     // (`tag.title`), and rewriting that compiled to `"<title></title>"`.
-    let owns_tag = classes_owning_tag(app, registry);
+    let owns_tag = classes_owning(app, registry, "tag");
     // An app's own `stylesheet_link_tag` (an app/helpers method or a
-    // `helper_method`) is what Rails calls; it is left to the app.
+    // `helper_method`) is what Rails calls; it is left to the app. So is
+    // a class's own, which its bare call reaches, found as `tag`'s is.
     let stylesheet = Symbol::from("stylesheet_link_tag");
-    let own_stylesheet =
+    let app_stylesheet =
         app.helper_method_index.contains_key(&stylesheet) || app.view_visible_controller_methods.contains(&stylesheet);
+    let owns_stylesheet = classes_owning(app, registry, "stylesheet_link_tag");
     super::for_each_owned_hook_body(app, &mut |owner, body| {
         let own_tag = owner.is_some_and(|c| owns_tag.contains(c));
+        let own_stylesheet = app_stylesheet || owner.is_some_and(|c| owns_stylesheet.contains(c));
         rewrite(body, own_tag, own_stylesheet, &models, &helpers, &sti_stems, &mut diags)
     });
     diags
 }
 
-/// Classes whose bodies read a bare `tag` as their own method: APP
+/// Classes whose bodies read a bare `method` (`tag`) as their own: APP
 /// classes with a `tag` instance method — the registry's
 /// `instance_methods` already hold associations, columns and `attr_*`
 /// readers alongside `def`s — directly or through an app module they
@@ -177,7 +180,7 @@ pub fn apply_tag_builder_lowering(
 /// `include ActionView::Helpers::TagHelper` is dropped by the analyzer
 /// as a view-helper marker, so a model that really uses the builder
 /// keeps the rewrite.
-fn classes_owning_tag(app: &App, registry: &HashMap<ClassId, ClassInfo>) -> HashSet<ClassId> {
+fn classes_owning(app: &App, registry: &HashMap<ClassId, ClassInfo>, method: &str) -> HashSet<ClassId> {
     let app_classes: HashSet<&ClassId> = app
         .models
         .iter()
@@ -185,7 +188,7 @@ fn classes_owning_tag(app: &App, registry: &HashMap<ClassId, ClassInfo>) -> Hash
         .chain(app.library_classes.iter().map(|lc| &lc.name))
         .chain(app.controllers.iter().map(|c| &c.name))
         .collect();
-    let tag = Symbol::from("tag");
+    let tag = Symbol::from(method);
     let has_tag = |class: &ClassId| {
         // Self, then app ancestors (includes and parents), each once.
         let mut stack = vec![class];
@@ -370,7 +373,7 @@ fn is_tag_helper(recv: &Expr) -> bool {
 }
 
 /// `own_tag`: the body's class answers `tag` itself, so neither `tag.x`
-/// nor `tag(:x)` is the builder there (see [`classes_owning_tag`]). The
+/// nor `tag(:x)` is the builder there (see [`classes_owning`]). The
 /// other helpers this pass expands have names of their own and still
 /// apply.
 fn rewrite(

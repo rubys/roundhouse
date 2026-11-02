@@ -126,7 +126,7 @@ fn helper_stylesheet_link_tags(app: &App) -> Vec<Diagnostic> {
         return Vec::new();
     }
     fn visit(expr: &Expr, out: &mut Vec<Diagnostic>) {
-        if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node
+        if let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node
             && method.as_str() == "stylesheet_link_tag"
             && !expr.span.is_synthetic()
         {
@@ -149,7 +149,8 @@ fn helper_stylesheet_link_tags(app: &App) -> Vec<Diagnostic> {
                 _ => false,
             };
             let symbol = args.first().is_some_and(|n| matches!(&*n.node, ExprNode::Lit { value: crate::expr::Literal::Sym { .. } }));
-            if !shape_ok || symbol {
+            // A block: Rails' helper takes none, and the lowering leaves it.
+            if !shape_ok || symbol || block.is_some() {
                 let reason = if symbol {
                     "in a helper method, a Symbol names a stylesheet group (`:app`, `:all`) that only a view expands; pass the stylesheet's name"
                 } else {
@@ -163,6 +164,9 @@ fn helper_stylesheet_link_tags(app: &App) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for lc in app.library_classes.iter().filter(|lc| app.helper_modules.contains(&lc.name)) {
         for method in &lc.methods {
+            for default in method.params.iter().filter_map(|p| p.default.as_ref()) {
+                visit(default, &mut out);
+            }
             visit(&method.body, &mut out);
         }
     }

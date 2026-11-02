@@ -81,3 +81,33 @@ fn a_helper_stylesheet_link_tag_renders_on_spinel() {
         ))
         .assert_passes();
 }
+
+/// A class's own `stylesheet_link_tag` (here a model method, not exposed
+/// as a `helper_method`) is what its bare call reaches: neither
+/// rewritten nor refused (review, tag_builder.rs:157).
+#[test]
+fn a_class_owned_stylesheet_link_tag_is_left_to_the_class() {
+    let (emitted, errors) = app(THEME_HELPER)
+        .write(
+            "app/models/badge.rb",
+            "class Badge\n  def stylesheet_link_tag(name)\n    \"own:\" + name\n  end\n\n  def styled\n    stylesheet_link_tag(\"theme\")\n  end\nend\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:?}");
+    let badge = std::fs::read_to_string(emitted.join("app/models/badge.rb")).unwrap();
+    assert!(badge.contains("stylesheet_link_tag(\"theme\")") && !badge.contains("ViewHelpers.stylesheet_link_tag"), "{badge}");
+}
+
+/// A block (Rails' helper takes none) and a parameter default are refused
+/// like the body's other unlowered shapes (review, diagnostics.rs:131
+/// and :167).
+#[test]
+fn a_helper_stylesheet_link_tag_with_a_block_or_in_a_default_is_refused() {
+    for helper in [
+        "module ThemeHelper\n  def theme_stylesheet(name)\n    stylesheet_link_tag(name) { name }\n  end\nend\n",
+        "module ThemeHelper\n  def theme_stylesheet(name = stylesheet_link_tag(:app))\n    name\n  end\nend\n",
+    ] {
+        let errors = app(helper).check_errors();
+        assert!(errors.iter().any(|e| e.contains("stylesheet_link_tag not supported")), "{helper}: {errors:?}");
+    }
+}
