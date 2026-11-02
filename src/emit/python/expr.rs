@@ -983,7 +983,15 @@ pub(super) fn emit_expr(e: &Expr) -> String {
                 BoolOpKind::Or => "or",
                 BoolOpKind::And => "and",
             };
-            format!("{} {op_s} {}", emit_expr(left), emit_expr(right))
+            // `and` binds tighter than `or`, and a conditional expression
+            // looser than both: an `or` under an `and`, or a conditional
+            // on either side, keeps its parentheses.
+            let operand = |e: &Expr| match &*e.node {
+                ExprNode::BoolOp { op: BoolOpKind::Or, .. } if matches!(op, BoolOpKind::And) => format!("({})", emit_expr(e)),
+                ExprNode::If { .. } => format!("({})", emit_expr(e)),
+                _ => emit_expr(e),
+            };
+            format!("{} {op_s} {}", operand(left), operand(right))
         }
         ExprNode::Array { elements, .. } => {
             let parts: Vec<String> = elements.iter().map(emit_expr).collect();

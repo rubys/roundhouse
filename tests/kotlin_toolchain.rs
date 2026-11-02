@@ -25,6 +25,9 @@ mod i18n_locales_app;
 #[path = "support/record_slice_app.rs"]
 #[allow(dead_code)]
 mod record_slice_app;
+#[path = "support/ts_controller_ivars.rs"]
+#[allow(dead_code)]
+mod ts_controller_ivars;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -230,6 +233,51 @@ class RecordSliceProbeTest {
 "#).expect("write probe test");
     let mut cmd = Command::new("gradle");
     cmd.args(["test", "--tests", "roundhouse.RecordSliceProbeTest", "--console=plain", "--no-daemon", "-q"]).current_dir(&emitted);
+    if let Ok(jh) = std::env::var("KOTLIN_JAVA_HOME").or_else(|_| std::env::var("JAVA_HOME")) {
+        cmd.env("JAVA_HOME", jh);
+    }
+    let output = cmd.output().expect("run gradle test");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore]
+fn controller_ivars_named_like_base_state_compile() {
+    // An app controller's `@status`, `@location` and `@headers` (its own,
+    // ApplicationController's and a concern's) compile next to the runtime
+    // base's members of those names (#1625).
+    let (emitted, errors) = ts_controller_ivars::overlay().emit(roundhouse::project::BuildTarget::Kotlin);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_kotlin_compiles("an app controller with ivars named like the base's state", &emitted);
+}
+
+const PROBES_TEST: &str = "require \"test_helper\"\n\nclass ProbesControllerTest < ActionDispatch::IntegrationTest\n  test \"show renders\" do\n    get \"/show\"\n    assert_response :success\n  end\nend\n";
+
+#[test]
+#[ignore]
+fn controller_ivars_named_like_base_state_render() {
+    // The three names render on the page, and the response is as Rails
+    // leaves it: 200, no Location (#1625).
+    // A test file, so the emit writes the test sources the probe joins.
+    let (emitted, errors) = ts_controller_ivars::overlay()
+        .write("test/controllers/probes_controller_test.rb", PROBES_TEST)
+        .emit(roundhouse::project::BuildTarget::Kotlin);
+    assert!(errors.is_empty(), "{errors:?}");
+    let body = serde_json::to_string(ts_controller_ivars::BODY).unwrap();
+    std::fs::write(
+        emitted.join("src/test/kotlin/ControllerIvarsProbeTest.kt"),
+        format!(
+            "package roundhouse\n\nclass ControllerIvarsProbeTest {{\n    @org.junit.jupiter.api.Test\n    fun rendersAsRails() {{\n        val c = ProbesController()\n        c.requestMethod = \"GET\"\n        c.processAction(\"show\")\n        if (c.status != 200L) throw AssertionError(\"status: ${{c.status}}\")\n        if (c.location != null) throw AssertionError(\"location: ${{c.location}}\")\n        if (c.body != {body}) throw AssertionError(\"body: ${{c.body}}\")\n    }}\n}}\n"
+        ),
+    )
+    .expect("write probe test");
+    let mut cmd = Command::new("gradle");
+    cmd.args(["test", "--tests", "roundhouse.ControllerIvarsProbeTest", "--console=plain", "--no-daemon", "-q"]).current_dir(&emitted);
     if let Ok(jh) = std::env::var("KOTLIN_JAVA_HOME").or_else(|_| std::env::var("JAVA_HOME")) {
         cmd.env("JAVA_HOME", jh);
     }
