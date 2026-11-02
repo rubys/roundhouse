@@ -43,7 +43,7 @@ controller.params = {"id" => article.id.to_s}
 controller.process_action(:show)
 expected = '{"id":' + article.id.to_s + ',"title":"HELLO","summary":"Rails i","missing":null,"headline":"Hello!","comments":[{"commenter":"Ada","text":"First!"},{"commenter":"Linus","text":"Second"}]}'
 raise controller.body.inspect unless controller.body == expected
-raise controller.content_type.inspect unless controller.content_type == "application/json"
+raise controller.content_type.inspect unless controller.content_type == "application/json; charset=utf-8"
 hash = ArticleRepresenter.new(article).to_hash
 raise hash.inspect unless hash["title"] == "HELLO" && !hash.key?("skipped") && hash.key?("missing")
 puts "Representable decorator OK"

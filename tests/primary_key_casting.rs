@@ -58,7 +58,7 @@ require_relative "app/controllers/articles_controller"
   controller.process_action(:show)
   raise "controller status" unless controller.status == 200
   raise "controller body" unless controller.body == expected
-  raise "controller content type" unless controller.content_type == "text/plain"
+  raise "controller content type" unless controller.content_type == "text/plain; charset=utf-8"
 end
 "#;
 
