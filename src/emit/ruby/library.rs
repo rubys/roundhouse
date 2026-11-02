@@ -1096,9 +1096,6 @@ fn rewrite_library_partial_render(
             Expr::new(span, ExprNode::Var { id: VarId(0), name: p.clone() })
         })
     };
-    let lookup = |name: &str| -> Option<Expr> {
-        locals_lookup(name).or_else(|| param_lookup(name))
-    };
     let caller_flash = [
         crate::lower::view_to_library::flash_param_in_scope(in_scope, "notice"),
         crate::lower::view_to_library::flash_param_in_scope(in_scope, "alert"),
@@ -1108,11 +1105,27 @@ fn rewrite_library_partial_render(
         _ => None,
     };
     let mut view_args: Vec<Expr> = Vec::new();
-    view_args.push(lookup(&contract.record).unwrap_or_else(nil));
+    let record_ivar = contract
+        .record_ivar
+        .as_deref()
+        .filter(|_| in_helper)
+        .map(|n| Expr::new(span, ExprNode::Ivar { name: Symbol::from(n) }));
+    view_args.push(
+        locals_lookup(&contract.record)
+            .or(record_ivar)
+            .or_else(|| param_lookup(&contract.record))
+            .unwrap_or_else(nil),
+    );
     for n in &contract.closure {
         // Not the helper's same-named param: the partial's ivar is the rendering template's, which `rewrite_helper_ivars` reaches.
         let ivar = in_helper.then(|| Expr::new(span, ExprNode::Ivar { name: Symbol::from(n.as_str()) }));
-        view_args.push(locals_lookup(n).or(ivar).or_else(|| param_lookup(n)).unwrap_or_else(nil));
+        // Nor a local of its name: Rails hands `post: other` to the partial's `post`, never its `@post`. Only a param the local shares (`shared_locals`) takes it.
+        let local = || locals_lookup(n).filter(|_| *n != contract.record);
+        let value = match contract.shared_locals.contains(n) {
+            true => local().or(ivar),
+            false => ivar.or_else(local),
+        };
+        view_args.push(value.or_else(|| param_lookup(n)).unwrap_or_else(nil));
     }
     view_args.extend(contract.extras_args(
         locals_lookup,
@@ -3613,7 +3626,7 @@ fn helper_read_ivars(app: &App) -> std::collections::BTreeSet<Symbol> {
         );
         for key in &rendered {
             if let Some(contract) = contracts.get(key) {
-                out.extend(contract.closure.iter().map(|n| Symbol::from(n.as_str())));
+                out.extend(contract.closure.iter().chain(&contract.record_ivar).map(|n| Symbol::from(n.as_str())));
             }
         }
     }

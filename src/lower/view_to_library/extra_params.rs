@@ -31,6 +31,25 @@ pub(super) fn rewritten_extras(
     (rewritten, extras)
 }
 
+/// The partial locals `view` reads by name: the extras its body earns
+/// (`local_assigns[:x]`, `defined?(x)`, a reserved-word local, a bare
+/// flash read `flash_locals` left under its name, which a handed local
+/// answers), without the flash pair every view takes. Walked before the
+/// ivar rewrite, so an `@notice` read, which leaves the local `notice`
+/// behind, is not one.
+pub(super) fn local_reads(
+    view: &View,
+    ivar_locals: &IvarLocals,
+    record: &str,
+    keys: Option<&[String]>,
+) -> Vec<String> {
+    let (body, _) = flash_locals(view, ivar_locals, record, keys);
+    let mut out = Vec::new();
+    let bound = [record.to_string(), "_buf".to_string(), "io".to_string()];
+    walk_for_extra(&body, &bound, &mut out);
+    out
+}
+
 /// The names `view`'s flash params go by, and its body with its flash
 /// reads renamed to match.
 ///
