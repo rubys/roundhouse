@@ -1,0 +1,66 @@
+{
+  "turbo-rails": "2.0.23",
+  "create": [
+    "cars",
+    {
+      "action": {
+        "_aj_serialized": "ActiveJob::Serializers::SymbolSerializer",
+        "value": "prepend"
+      },
+      "target": "cars",
+      "targets": null,
+      "attributes": {
+        "_aj_symbol_keys": []
+      },
+      "locals": {
+        "car": {
+          "_aj_globalid": "gid://caboose/Car/1"
+        },
+        "_aj_symbol_keys": [
+          "car"
+        ]
+      },
+      "partial": "cars/car",
+      "_aj_ruby2_keywords": [
+        "action",
+        "target",
+        "targets",
+        "attributes",
+        "locals",
+        "partial"
+      ]
+    }
+  ],
+  "update": [
+    "cars",
+    {
+      "action": {
+        "_aj_serialized": "ActiveJob::Serializers::SymbolSerializer",
+        "value": "replace"
+      },
+      "target": "car_1",
+      "targets": null,
+      "attributes": {
+        "_aj_symbol_keys": []
+      },
+      "locals": {
+        "car": {
+          "_aj_globalid": "gid://caboose/Car/1"
+        },
+        "_aj_symbol_keys": [
+          "car"
+        ]
+      },
+      "partial": "cars/car",
+      "_aj_ruby2_keywords": [
+        "action",
+        "target",
+        "targets",
+        "attributes",
+        "locals",
+        "partial"
+      ]
+    }
+  ],
+  "queue_name": "default"
+}

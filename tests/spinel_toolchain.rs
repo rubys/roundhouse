@@ -192,7 +192,7 @@ mod request_id_runtime;
 fn custom_data_factories_run_natively() {
     let run = emit_and_run::real_blog()
         .write("app/services/factory_examples.rb", data_factory::CUSTOM_DECLARATIONS)
-        .run_spinel(data_factory::CUSTOM_ASSERTIONS);
+        .run_spinel_slim(&[], data_factory::CUSTOM_ASSERTIONS);
     run.assert_passes();
     assert!(run.stdout.contains("custom Data factory contract passed"));
 }

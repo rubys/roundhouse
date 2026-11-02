@@ -1288,6 +1288,30 @@ fn scheduler_preflight_executes_publication_guards_and_unknown_input_fallback() 
             Some(("true", "master")),
         ),
         (
+            "schedule",
+            "roundhouse-rb/roundhouse",
+            "refs/heads/main",
+            "false",
+            spinel_sha,
+            Some(("true", spinel_sha)),
+        ),
+        (
+            "workflow_dispatch",
+            "roundhouse-rb/roundhouse",
+            "refs/heads/main",
+            "true",
+            spinel_sha,
+            Some(("true", spinel_sha)),
+        ),
+        (
+            "workflow_dispatch",
+            "contributor/roundhouse",
+            "refs/heads/main",
+            "true",
+            spinel_sha,
+            None,
+        ),
+        (
             "workflow_dispatch",
             "contributor/roundhouse",
             "refs/heads/topic",
@@ -1349,7 +1373,7 @@ fn scheduler_preflight_executes_publication_guards_and_unknown_input_fallback() 
             .unwrap()
             .lines()
             .count(),
-        5
+        7
     );
     fs::remove_dir_all(root).unwrap();
 }

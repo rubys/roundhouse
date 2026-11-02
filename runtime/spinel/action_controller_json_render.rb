@@ -87,13 +87,11 @@ module ActionController
 
     JSON_ESCAPES = {
       "\"" => "\\\"", "\\" => "\\\\", "\b" => "\\b", "\f" => "\\f",
-      "\n" => "\\n", "\r" => "\\r", "\t" => "\\t",
-      "<" => "\\u003c", ">" => "\\u003e", "&" => "\\u0026",
-      "\u2028" => "\\u2028", "\u2029" => "\\u2029"
+      "\n" => "\\n", "\r" => "\\r", "\t" => "\\t"
     }.freeze
 
     def self.quote_json(s)
-      escaped = s.gsub(/["\\\x00-\x1f<>&\u2028\u2029]/) do |c|
+      escaped = s.gsub(/["\\\x00-\x1f]/) do |c|
         JSON_ESCAPES[c] || format("\\u%04x", c.ord)
       end
       "\"#{escaped}\""

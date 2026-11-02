@@ -1809,6 +1809,9 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
             crate::lower::job_payload::push_model_to_gid_uri(&mut lc.methods, model);
         }
     }
+    // `broadcasts_to` on `:sidekiq`: the create and update broadcasts
+    // enqueue Turbo::Streams::ActionBroadcastJob, as turbo-rails does.
+    crate::lower::broadcast_job::apply_ruby(lcs, app);
     let scopes = crate::lower::scope_chain::build_scope_registry(&app.models);
     let assocs = crate::lower::scope_chain::build_assoc_registry_for_app(app);
     let query_arguments = crate::lower::scope_chain::query_arguments::QueryArguments::build(app);
