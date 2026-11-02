@@ -323,9 +323,10 @@ pub struct App {
     pub queue_adapter: Option<String>,
     /// The Redis the app's `Sidekiq.configure_client` block names
     /// (`config.redis = { url: …, password: … }`), read at ingest from
-    /// `config/initializers`. It is the source of truth for where jobs
-    /// are pushed; `REDIS_PROVIDER`, `REDIS_URL` and localhost are only
-    /// the fallback when it names no URL. Other keys are not read.
+    /// `config/initializers`. It is the only source of where jobs are
+    /// pushed: a tree on `:sidekiq` without a `url:` here is an ingest
+    /// error, with no fallback to `REDIS_PROVIDER`, `REDIS_URL` or
+    /// localhost. Other keys are not read.
     #[serde(default, skip_serializing_if = "SidekiqRedisConfig::is_empty")]
     pub sidekiq_redis: SidekiqRedisConfig,
     /// The worker's defaults from `config/sidekiq.yml` (concurrency,
@@ -371,6 +372,11 @@ pub struct App {
     /// (`ingest::extend_splice`), by name.
     #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
     pub spliced_class_methods: crate::det::HashSet<Symbol>,
+    /// The `time_tag` calls `ingest::time_tag` rewrote to the `tag.time`
+    /// builder, by span: `project::report_time_tag_calls` refuses them on the
+    /// targets whose `iso8601` of a record's time differs from Rails'.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub time_tag_calls: Vec<crate::span::Span>,
     /// Partial → local name → type, harvested by the analyzer from the
     /// RENDER SITES that pass each local (`render partial: "form",
     /// locals: { new_message: @new_message }` with `@new_message` typed
@@ -1221,6 +1227,7 @@ impl App {
             load_hook_class_macros: Vec::new(),
             load_hook_extended_macros: Vec::new(),
             spliced_class_methods: Default::default(),
+            time_tag_calls: Vec::new(),
             partial_local_types: HashMap::default(),
             view_ivar_types: HashMap::default(),
             html_safe_methods: BTreeSet::new(),

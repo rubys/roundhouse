@@ -7,6 +7,8 @@
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "emit_and_run/controller_content_type_writer.rs"]
+mod controller_content_type_writer;
 #[path = "support/time_change_usec.rs"]
 mod time_change_usec_contract;
 #[path = "emit_and_run/time_change_usec.rs"]
@@ -30,6 +32,8 @@ mod inertia_runtime_props;
 mod form_builder_fields;
 #[path = "emit_and_run/stylesheet_helper.rs"]
 mod stylesheet_helper;
+#[path = "emit_and_run/time_tag.rs"]
+mod time_tag;
 #[path = "emit_and_run/multiparameter_params.rs"]
 mod multiparameter_params;
 #[path = "emit_and_run/session_options_key.rs"]

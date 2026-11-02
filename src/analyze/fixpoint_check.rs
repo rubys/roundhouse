@@ -697,6 +697,9 @@ end
                 unless_cond: None,
                 if_cond_expr: Some(expr.clone()),
                 unless_cond_expr: Some(expr.clone()),
+                unread_guard: false,
+                unread_options: false,
+                only_present: false,
                 block: Some(expr),
                 prepend: false,
             };

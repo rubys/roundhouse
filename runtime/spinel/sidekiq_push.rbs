@@ -1,6 +1,5 @@
 # Typing for runtime/spinel/sidekiq_push.rb.
 module SidekiqPush
-  DEFAULT_URL: String
   URL: Array[String]
   URL_PID: Array[Integer]
   RECORDING: Array[bool]

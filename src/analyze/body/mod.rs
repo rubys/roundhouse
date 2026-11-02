@@ -1930,6 +1930,15 @@ impl<'a> BodyTyper<'a> {
             ExprNode::Defined { .. } => union_of(Ty::Str, Ty::Nil),
 
             ExprNode::Send { recv, method, args, block, parenthesized } => {
+                // Recompute this writer-result warning as parameter evidence
+                // settles; it is not a permanent missing-method refusal.
+                if method.as_str() == "content_type="
+                    && matches!(crate::expr::ExprCold::diagnostic(&expr.cold),
+                        Some(crate::diagnostic::DiagnosticKind::UnresolvedType { expr_kind, .. })
+                            if expr_kind.as_str() == "assignment result")
+                {
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, None);
+                }
                 // Not an unknown Kernel call: `lambda { |x| … }` is the stabby `->(x) { … }`, whose value is the block (svg-graph's `DataPoint::DEFAULT_SHAPE`).
                 // So is `proc { |x| … }`, whose value calls the same way.
                 if recv.is_none()
@@ -2280,6 +2289,19 @@ impl<'a> BodyTyper<'a> {
                 } else {
                     None
                 };
+                // `filter_map` drops the false an `l && r` block answers, so
+                // the result holds only `r`'s values, not the Bool of `l`.
+                // Not an app's own `filter_map`, which may answer the false.
+                let owner_ty = if recv.is_some() { recv_ty.as_ref() } else { ctx.self_ty.as_ref() };
+                let block_ret = match block.as_ref().map(|b| &*b.node) {
+                    Some(ExprNode::Lambda { body, .. })
+                        if method.as_str() == "filter_map"
+                            && !self.owns_operator(owner_ty, method, class_object_receiver) =>
+                    {
+                        filter_map_and_value(body).or(block_ret)
+                    }
+                    _ => block_ret,
+                };
                 if recv_ty.as_ref() == Some(&Ty::Str) && method.as_str() == "bytes"
                     && let Some(b) = block.as_ref()
                     && let ExprNode::Lambda { body, .. } = &*b.node
@@ -2412,9 +2434,12 @@ impl<'a> BodyTyper<'a> {
                 // registered answer does not say better — campfire's
                 // `self.join_code = generate_join_code` keeps the
                 // column's String rather than the generator's untyped.
+                let controller_writer = method.as_str() == "content_type="
+                    && recv_ty.as_ref().is_some_and(|ty| self.controller_writer_receiver(ty));
                 if recv.is_some()
                     && args.len() == 1
                     && crate::analyze::is_setter_name(method)
+                    && !controller_writer
                 {
                     if let Some(t) = args[0]
                         .ty
@@ -2506,10 +2531,40 @@ impl<'a> BodyTyper<'a> {
                 {
                     return Ty::Untyped;
                 }
-                let instance_receiver = recv.as_ref().map_or(ctx.instance_body, |r| self.is_instance(r, ctx))
+                let receiver_is_instance = recv.as_ref().map_or(ctx.instance_body, |r| self.is_instance(r, ctx));
+                let instance_receiver = receiver_is_instance
                     && recv_ty.as_ref().is_some_and(instance_shaped);
                 let mut dispatched =
                     self.dispatch_on(recv_ty.as_ref(), method, block_ret.as_ref(), args, instance_receiver);
+                // One controller arm cannot supply a missing writer on a
+                // different concrete receiver in the same union.
+                if controller_writer
+                    && recv_ty.as_ref().is_some_and(|ty|
+                        self.writer_has_missing_arm(ty, method, block_ret.as_ref(), args, receiver_is_instance))
+                {
+                    return unknown();
+                }
+                // This writer has a registered controller surface, but the
+                // assignment still answers its argument, even when gradual
+                // or unresolved, and even if an app override returns another
+                // value. Dispatch first so an unrelated receiver cannot gain
+                // the writer merely by assigning a known literal.
+                if recv.is_some()
+                    && controller_writer
+                    && args.len() == 1
+                    && (!matches!(dispatched, Ty::Var { .. })
+                        || recv_ty.as_ref().is_some_and(|ty|
+                            self.defines_writer_surface(ty, method, instance_receiver)))
+                {
+                    let assigned = args[0].ty.clone().unwrap_or_else(unknown);
+                    if matches!(assigned, Ty::Var { .. }) {
+                        crate::expr::ExprCold::set_diagnostic(&mut expr.cold,
+                            Some(crate::diagnostic::DiagnosticKind::UnresolvedType {
+                                expr_kind: Symbol::from("assignment result"), name: None,
+                            }));
+                    }
+                    return assigned;
+                }
                 // An `app/helpers` method runs in the view, so a bare call that finds nothing on the module is the
                 // view's: the helper module that answers the name (`helpers :all`; the module itself while its own
                 // definition is untyped), else ActionView's `link_to`/`tag`/`image_tag`.
@@ -6841,6 +6896,64 @@ mod tests {
                 value.ty.is_none(),
                 "{method} block return must not inherit the enclosing Hash return"
             );
+        }
+    }
+}
+
+/// The type a `filter_map` block keeps when its value is `l && r`.
+/// Whatever stops the `&&` is falsy (`nil` or `false`), and
+/// `filter_map` drops it, so only `r`'s type reaches the result. The
+/// caller strips `r`'s nil as for any `filter_map`. `None` when the
+/// block's value is something else, or `r` has no type yet.
+///
+/// Only the `&&` at the block's tail: there `l`'s Bool can only be
+/// `false`. A block answering a plain Bool keeps its `true`s. A value
+/// the block yields by `next` is an element too, so its type joins
+/// `r`'s. A `break` answers the whole call instead, so a block with one
+/// keeps its usual typing.
+fn filter_map_and_value(body: &Expr) -> Option<Ty> {
+    let tail = match &*body.node {
+        ExprNode::Seq { exprs } => exprs.last()?,
+        _ => body,
+    };
+    let ExprNode::BoolOp { op: crate::expr::BoolOpKind::And, right, .. } = &*tail.node else {
+        return None;
+    };
+    let mut yielded = vec![right.ty.clone()?];
+    if !block_exits(body, &mut yielded) {
+        return None;
+    }
+    yielded.into_iter().reduce(union_of)
+}
+
+/// Collect the types of this block's `next` values (a bare `next` is
+/// nil; a literal `next false` adds nothing, since `filter_map` drops
+/// it) into `yielded`, leaving out the blocks and loops inside it,
+/// which own their `next`. `false` on a `break`, or a `next` value with
+/// no type yet.
+fn block_exits(e: &Expr, yielded: &mut Vec<Ty>) -> bool {
+    match &*e.node {
+        ExprNode::Break { .. } => false,
+        ExprNode::Next { value } => match value {
+            None => {
+                yielded.push(Ty::Nil);
+                true
+            }
+            // `filter_map` drops a `next false` as it drops the `&&`'s false: no element
+            Some(v) if matches!(&*v.node, ExprNode::Lit { value: crate::expr::Literal::Bool { value: false } }) => true,
+            Some(v) => match &v.ty {
+                Some(ty) => {
+                    yielded.push(ty.clone());
+                    block_exits(v, yielded)
+                }
+                None => false,
+            },
+        },
+        ExprNode::Lambda { .. } | ExprNode::While { .. } => true,
+        _ => {
+            let mut ok = true;
+            e.node.for_each_child(&mut |child| ok &= block_exits(child, yielded));
+            ok
         }
     }
 }

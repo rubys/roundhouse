@@ -25,7 +25,7 @@ fn data_define_block_methods_belong_to_the_data_class_natively() {
     let run = contract::DATA_BLOCK_METHODS
         .overlay()
         .write(contract::DATA_BLOCK_METHODS.path, &source)
-        .run_spinel(contract::DATA_BLOCK_METHODS.script);
+        .run_spinel_slim(&[], contract::DATA_BLOCK_METHODS.script);
     run.assert_passes();
     assert_eq!(run.stdout, contract::DATA_BLOCK_METHODS.expected, "stderr:\n{}", run.stderr);
 }
