@@ -8,7 +8,8 @@
 //! or a dynamic render's pooled `locals:`) keeps the two apart, and
 //! passes the ivar on, not the record. A helper's render does too, and
 //! no local it hands a partial (`post: other`, `author: name`) stands in
-//! for the partial's same-named ivar.
+//! for the partial's same-named ivar, not even `notice: name`, whose name
+//! the partial's flash param also goes by.
 
 use super::emit_and_run;
 
@@ -47,6 +48,7 @@ const POSTS: &str = r#"class PostsController < ApplicationController
     @post = Post.find_by(title: "Rails tips")
     @other = Post.find_by(title: "Go tips")
     @author = "Ann"
+    @notice = "Cat"
   end
 
   def pooled
@@ -114,7 +116,7 @@ fn app() -> emit_and_run::Overlay {
         .write("app/controllers/reports_controller.rb", REPORTS)
         .write(
             "app/helpers/posts_helper.rb",
-            "module PostsHelper\n  def summary_html\n    render \"posts/summary\"\n  end\n\n  def both_html(other)\n    render \"posts/both\", post: other\n  end\n\n  def byline_html(name)\n    render \"posts/byline\", author: name\n  end\nend\n",
+            "module PostsHelper\n  def summary_html\n    render \"posts/summary\"\n  end\n\n  def both_html(other)\n    render \"posts/both\", post: other\n  end\n\n  def byline_html(name)\n    render \"posts/byline\", author: name\n  end\n\n  def noted_html(name)\n    render \"posts/noted\", notice: name\n  end\nend\n",
         )
         .write("config/routes.rb", ROUTES)
         .write("app/views/layouts/application.html.erb", "<main><%= yield %></main>\n")
@@ -148,7 +150,11 @@ fn app() -> emit_and_run::Overlay {
             "<section>ivar=<%= @post.title %> local=<%= post.title %><%= render \"summary\" %></section>\n",
         )
         .write("app/views/posts/_byline.html.erb", "<i>by <%= @author %></i>\n")
-        .write("app/views/posts/helped_local.html.erb", "<div><%= both_html(@other) %><%= byline_html(\"Bob\") %></div>\n")
+        .write("app/views/posts/_noted.html.erb", "<b>by <%= @notice %></b>\n")
+        .write(
+            "app/views/posts/helped_local.html.erb",
+            "<div><%= both_html(@other) %><%= byline_html(\"Bob\") %><%= noted_html(\"Bob\") %></div>\n",
+        )
         .write("app/views/posts/pooled.html.erb", "<div><%= render @slot %></div>\n")
         .write("app/views/posts/pooled_nil.html.erb", "<div><%= render @slot %></div>\n")
         .write("app/views/reports/_box.html.erb", "<u><%= @report.title %></u>\n")
@@ -180,7 +186,7 @@ missing = []
   nested: ["<section>#{summary}"],
   prefixed: ["<p class=\"prefixed\">New: Rails tips</p>"],
   helped: [summary],
-  helped_local: ["<section>ivar=Rails tips local=Go tips#{summary}", "<i>by Ann</i>"],
+  helped_local: ["<section>ivar=Rails tips local=Go tips#{summary}", "<i>by Ann</i>", "<b>by Cat</b>"],
   pooled: ["<section>ivar=Rails tips local=Go tips#{summary}"],
   pooled_nil: ["<section>ivar=Rails tips local=none</section>"],
 }.each do |action, wants|

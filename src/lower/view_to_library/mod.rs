@@ -48,7 +48,7 @@ use crate::ident::{ClassId, Symbol, VarId};
 use crate::naming::{camelize_path, last_segment, singularize, snake_case};
 use crate::span::Span;
 
-use self::extra_params::{drop_closure_names, flash_params, rewritten_extras};
+use self::extra_params::{drop_closure_names, flash_params, local_reads, rewritten_extras};
 
 pub(crate) use self::extra_params::{flash_param_in_scope, flash_slot_of, local_key_of};
 use self::form_wrapper::{FormWrapperHelper, form_wrapper_helpers};
@@ -2971,11 +2971,12 @@ pub(crate) fn partial_call_contracts(
             .map(|s| (s.as_str().to_string(), ivar_local(&ivar_locals, s.as_str())))
             .filter(|(_, local)| local != &record)
             .unzip();
-        // Before the callers' `locals:` keys join the extras: those name what a render hands, not what the partial reads.
+        // What the body reads, not the extras: those also hold the flash pair every view takes, and a `notice:` a render hands keeps `notice` there beside an `@notice`.
+        let reads = local_reads(view, &ivar_locals, &record, keys);
         let shared_locals: Vec<String> = closure
             .iter()
             .zip(&closure_locals)
-            .filter(|(_, local)| extras.iter().any(|k| crate::naming::safe_local(k) == **local))
+            .filter(|(_, local)| reads.iter().any(|k| crate::naming::safe_local(k) == **local))
             .map(|(n, _)| n.clone())
             .collect();
         let record_ivar = closure_raw
