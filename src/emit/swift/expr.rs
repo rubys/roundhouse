@@ -2456,17 +2456,16 @@ pub(super) fn wrap_return(e: &Expr) -> String {
             }
             let held = temp_var(n);
             let coerced = coerce_for_prop(&sn, value, assign_value(value));
-            // An Integer literal held for a Float property: Swift infers the
-            // literal's `let` as `Int`, which the method returns (Ruby's
-            // `@ratio = 0` answers the Integer) and which a `Double` property
-            // won't take, so the store converts it.
-            let int_into_float = matches!(&*value.node, ExprNode::Lit { value: crate::expr::Literal::Int { .. } })
+            // An Integer held for a Float property: the `let` is an `Int`
+            // (a literal, or a local typed Integer), which the method returns
+            // (Ruby's `@ratio = 0` answers the Integer) and which a `Double`
+            // property won't take, so the store converts it.
+            let int_into_float = matches!(value.ty, Some(crate::ty::Ty::Int))
                 && matches!(instance_prop_ty(name.as_str()).as_ref().map(crate::ty::Ty::peel_nilable), Some(crate::ty::Ty::Float));
-            // The same for an array of Integer literals held for a Float-array
-            // property (`@ratios = [0]`): the method returns the `[Int]`, and
-            // the store maps each element to `Double`.
-            let ints_into_floats = matches!(&*value.node, ExprNode::Array { elements, .. }
-                    if !elements.is_empty() && elements.iter().all(|el| matches!(&*el.node, ExprNode::Lit { value: crate::expr::Literal::Int { .. } })))
+            // The same for an Integer array held for a Float-array property
+            // (`@ratios = [0]`, `@ratios = [n]`): the method returns the
+            // `[Int]`, and the store maps each element to `Double`.
+            let ints_into_floats = matches!(&value.ty, Some(crate::ty::Ty::Array { elem }) if matches!(**elem, crate::ty::Ty::Int))
                 && matches!(instance_prop_ty(name.as_str()).as_ref().map(crate::ty::Ty::peel_nilable),
                     Some(crate::ty::Ty::Array { elem }) if matches!(elem.peel_nilable(), crate::ty::Ty::Float));
             let stored = if int_into_float {

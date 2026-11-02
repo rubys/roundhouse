@@ -192,3 +192,25 @@ fn an_integer_array_stored_in_a_float_array_property_converts_at_the_store() {
     // A Float array already matches the property.
     assert!(widget.contains("let __rhRet = [1.5]\n            self.ratios = __rhRet\n"), "{widget}");
 }
+
+/// The conversion goes by the stored value's type, not its spelling: an
+/// Integer local (`n = 0; @ratio = n`, `@ratios = [n]`) is held as an
+/// `Int` or `[Int]` too (review, swift/expr.rs:2471).
+#[test]
+fn an_integer_local_stored_in_a_float_property_converts_at_the_store() {
+    let (emitted, errors) = emit_and_run::empty_app()
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n")
+        .write(
+            "app/models/widget.rb",
+            "class Widget < ApplicationRecord\n  def tune\n    @ratio = 1.5\n    @ratios = [1.5]\n  end\n\n  def reset\n    n = 0\n    @ratio = n\n  end\n\n  def reset_all\n    n = 0\n    @ratios = [n]\n  end\nend\n",
+        )
+        .emit(BuildTarget::Swift);
+    assert!(errors.is_empty(), "{errors:?}");
+    let widget = std::fs::read_to_string(emitted.join("Sources/App/app/models/Widget.swift")).unwrap();
+    let body = |name: &str| widget.split(&format!("func {name}(")).nth(1).expect(name).split("\n    }\n").next().unwrap().to_string();
+    let (reset, reset_all) = (body("reset"), body("resetAll"));
+    assert!(reset.contains("self.ratio = Double(__rhRet)\n"), "{reset}");
+    assert!(reset_all.contains("self.ratios = __rhRet.map { Double($0) }\n"), "{reset_all}");
+}
