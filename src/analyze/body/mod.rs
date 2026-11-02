@@ -1930,6 +1930,15 @@ impl<'a> BodyTyper<'a> {
             ExprNode::Defined { .. } => union_of(Ty::Str, Ty::Nil),
 
             ExprNode::Send { recv, method, args, block, parenthesized } => {
+                // Recompute this writer-result warning as parameter evidence
+                // settles; it is not a permanent missing-method refusal.
+                if method.as_str() == "content_type="
+                    && matches!(crate::expr::ExprCold::diagnostic(&expr.cold),
+                        Some(crate::diagnostic::DiagnosticKind::UnresolvedType { expr_kind, .. })
+                            if expr_kind.as_str() == "assignment result")
+                {
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, None);
+                }
                 // Not an unknown Kernel call: `lambda { |x| … }` is the stabby `->(x) { … }`, whose value is the block (svg-graph's `DataPoint::DEFAULT_SHAPE`).
                 // So is `proc { |x| … }`, whose value calls the same way.
                 if recv.is_none()
@@ -2425,9 +2434,12 @@ impl<'a> BodyTyper<'a> {
                 // registered answer does not say better — campfire's
                 // `self.join_code = generate_join_code` keeps the
                 // column's String rather than the generator's untyped.
+                let controller_writer = method.as_str() == "content_type="
+                    && recv_ty.as_ref().is_some_and(|ty| self.controller_writer_receiver(ty));
                 if recv.is_some()
                     && args.len() == 1
                     && crate::analyze::is_setter_name(method)
+                    && !controller_writer
                 {
                     if let Some(t) = args[0]
                         .ty
@@ -2519,10 +2531,40 @@ impl<'a> BodyTyper<'a> {
                 {
                     return Ty::Untyped;
                 }
-                let instance_receiver = recv.as_ref().map_or(ctx.instance_body, |r| self.is_instance(r, ctx))
+                let receiver_is_instance = recv.as_ref().map_or(ctx.instance_body, |r| self.is_instance(r, ctx));
+                let instance_receiver = receiver_is_instance
                     && recv_ty.as_ref().is_some_and(instance_shaped);
                 let mut dispatched =
                     self.dispatch_on(recv_ty.as_ref(), method, block_ret.as_ref(), args, instance_receiver);
+                // One controller arm cannot supply a missing writer on a
+                // different concrete receiver in the same union.
+                if controller_writer
+                    && recv_ty.as_ref().is_some_and(|ty|
+                        self.writer_has_missing_arm(ty, method, block_ret.as_ref(), args, receiver_is_instance))
+                {
+                    return unknown();
+                }
+                // This writer has a registered controller surface, but the
+                // assignment still answers its argument, even when gradual
+                // or unresolved, and even if an app override returns another
+                // value. Dispatch first so an unrelated receiver cannot gain
+                // the writer merely by assigning a known literal.
+                if recv.is_some()
+                    && controller_writer
+                    && args.len() == 1
+                    && (!matches!(dispatched, Ty::Var { .. })
+                        || recv_ty.as_ref().is_some_and(|ty|
+                            self.defines_writer_surface(ty, method, instance_receiver)))
+                {
+                    let assigned = args[0].ty.clone().unwrap_or_else(unknown);
+                    if matches!(assigned, Ty::Var { .. }) {
+                        crate::expr::ExprCold::set_diagnostic(&mut expr.cold,
+                            Some(crate::diagnostic::DiagnosticKind::UnresolvedType {
+                                expr_kind: Symbol::from("assignment result"), name: None,
+                            }));
+                    }
+                    return assigned;
+                }
                 // An `app/helpers` method runs in the view, so a bare call that finds nothing on the module is the
                 // view's: the helper module that answers the name (`helpers :all`; the module itself while its own
                 // definition is untyped), else ActionView's `link_to`/`tag`/`image_tag`.
