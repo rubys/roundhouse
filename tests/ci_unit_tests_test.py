@@ -269,5 +269,29 @@ class IgnoredSuiteSelectionTests(unittest.TestCase):
             unit.listed_matches({})
 
 
+
+
+class ControllerOracleDependencyTests(unittest.TestCase):
+    def test_controller_oracle_requires_successful_archive_preparation(self):
+        import ast
+        import re
+
+        workflow = (SCRIPT.parent.parent / ".github/workflows/ci.yml").read_text()
+        step = workflow.split("      - name: Controller dispatch against the Rails oracle\n", 1)[1]
+        step = step.split("      - name:", 1)[0]
+        match = re.search(r"^        if: (.+)$", step, re.M)
+        condition = match.group(1).strip().removeprefix("${{").removesuffix("}}").strip() if match else "success()"
+        for archive_ok, cancelled, expected in [(True, False, True), (False, False, False), (True, True, False)]:
+            expression = condition.replace("success()", str(archive_ok and not cancelled))
+            expression = expression.replace("cancelled()", str(cancelled)).replace("!", "not ")
+            expression = expression.replace("&&", " and ").replace("||", " or ").strip()
+            tree = ast.parse(expression, mode="eval")
+            allowed = (ast.Expression, ast.BoolOp, ast.And, ast.Or, ast.UnaryOp, ast.Not, ast.Constant)
+            self.assertTrue(all(isinstance(node, allowed) for node in ast.walk(tree)))
+            selected = eval(compile(tree, "workflow-condition", "eval"), {"__builtins__": {}}, {})
+            with self.subTest(archive_ok=archive_ok, cancelled=cancelled):
+                self.assertEqual(selected, expected)
+
+
 if __name__ == "__main__":
     unittest.main()

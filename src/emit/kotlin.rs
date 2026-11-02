@@ -142,11 +142,9 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut controller_extras = view_lower_extras;
     controller_extras.extend(crate::lower::extras_from_lcs(&view_lcs));
     let assocs = crate::lower::model_associations::compute_association_graph(app);
-    let mut controller_lcs = crate::lower::lower_controllers_with_arel_views_and_assocs(
-        &app.controllers,
+    let mut controller_lcs = crate::lower::lower_app_controllers(
+        app,
         controller_extras,
-        Some(&app.schema),
-        &app.views,
         &assocs,
     );
     // A property and a method share one Kotlin namespace, both camelCased:

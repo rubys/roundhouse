@@ -1716,7 +1716,7 @@ pub use associations::{
 };
 pub use chain::{collect_chain_modifiers, ChainModifier};
 pub use controller_to_library::{
-    lower_controller_to_library_class, lower_controllers_to_library_classes,
+    lower_app_controllers, lower_controller_to_library_class, lower_controllers_to_library_classes,
     lower_controllers_with_arel, lower_controllers_with_arel_and_views,
     lower_controllers_with_arel_views_and_assocs,
     lower_controllers_with_arel_views_assocs_and_routes, LowerControllerOptions,

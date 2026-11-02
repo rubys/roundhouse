@@ -476,11 +476,10 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
             // `compute_association_graph(app)` once the eager-load IR
             // (multi-drain + preload-each) is functionalized.
             let raw_controller_lcs =
-                crate::lower::controller_to_library::lower_controllers_with_arel_and_views(
-                    &app.controllers,
+                crate::lower::controller_to_library::lower_app_controllers(
+                    app,
                     model_extras,
-                    Some(&app.schema),
-                    &app.views,
+                    &[],
                 );
             // Materialize the AC baseline into each concrete controller
             // FIRST — the base `initialize` is what seeds the response-state
@@ -504,6 +503,10 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
                     lc
                 })
                 .collect();
+            let controller_adapters: Vec<_> = controller_lcs.iter().filter(|class| {
+                class.methods.iter().any(|m| m.receiver == crate::dialect::MethodReceiver::Instance
+                    && m.name.as_str() == crate::lower::controller_to_library::action_override::ENTRY)
+            }).map(|class| class.name.clone()).collect();
             // Register every controller (+ `<Resource>Params`) module name
             // and (post-materialization, post-functionalize) struct fields
             // BEFORE emit, so cross-refs and field-vs-method routing resolve.
@@ -577,7 +580,7 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
             // controller struct, thread the request params/format, run
             // `process_action`, wrap HTML in the layout, return the
             // captured response state.
-            out.push(emit_dispatch_file(app));
+            out.push(emit_dispatch_file(app, &controller_adapters));
 
             // W6 — the Plug/Cowboy HTTP server (`Server`), hand-written
             // like db.ex/broadcasts.ex. Dispatches through the v2 router +
@@ -627,7 +630,7 @@ fn emit_main_file() -> EmittedFile {
 /// controller struct, set `params`/`request_format`, run `process_action`,
 /// then wrap a non-empty HTML body in the app layout (when one exists) and
 /// return `{body, status, content_type, location}`.
-fn emit_dispatch_file(app: &App) -> EmittedFile {
+fn emit_dispatch_file(app: &App, controllers: &[crate::ident::ClassId]) -> EmittedFile {
     // Layout wrap only when the app ships `app/views/layouts/application`
     // (real-blog does; a layout-less app would reference an undefined
     // `Views.Layouts`).
@@ -653,17 +656,24 @@ fn emit_dispatch_file(app: &App) -> EmittedFile {
     };
 
     let mut arms = String::new();
+    let request_controllers = crate::lower::controller_to_library::action_override::request_controllers(&app.controllers);
     for ctrl in &app.controllers {
         let raw = ctrl.name.0.as_str();
         if raw == "ApplicationController" {
             continue;
         }
         let module = library::v2_module_name(raw);
+        let has_adapter = controllers.contains(&ctrl.name);
+        let entry = if has_adapter && request_controllers.iter().any(|c| c.name == ctrl.name) {
+            crate::lower::controller_to_library::action_override::ENTRY
+        } else {
+            "process_action"
+        };
         arms.push_str(&format!(
             "      {raw:?} ->\n\
              \x20       c = {module}.new()\n\
              \x20       c = %{{c | params: params, request_format: request_format, query_string: query_string, flash: ActionDispatch.Flash.new(incoming_flash)}}\n\
-             \x20       c = {module}.process_action(c, action)\n\
+             \x20       c = {module}.{entry}(c, action)\n\
              {finalize}"
         ));
     }

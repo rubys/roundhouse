@@ -322,11 +322,9 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     controller_extras.extend(library::extras_from_lcs(&view_lcs));
     controller_extras.extend(route_helper_extras);
     let assocs = crate::lower::model_associations::compute_association_graph(app);
-    let mut controller_lcs = crate::lower::lower_controllers_with_arel_views_and_assocs(
-        &app.controllers,
+    let mut controller_lcs = crate::lower::lower_app_controllers(
+        app,
         controller_extras.clone(),
-        Some(&app.schema),
-        &app.views,
         &assocs,
     );
 

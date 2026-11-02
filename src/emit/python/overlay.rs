@@ -66,11 +66,9 @@ pub fn lower_overlay(app: &App) -> OverlayLcs {
     );
     let model_extras: Vec<_> = model_registry.into_iter().collect();
     let assocs = crate::lower::model_associations::compute_association_graph(app);
-    let controllers = crate::lower::lower_controllers_with_arel_views_and_assocs(
-        &app.controllers,
+    let controllers = crate::lower::lower_app_controllers(
+        app,
         model_extras.clone(),
-        Some(&app.schema),
-        &app.views,
         &assocs,
     );
     let mut views =
@@ -186,7 +184,7 @@ pub fn emit_overlay_files(app: &App) -> Result<Vec<EmittedFile>, String> {
         .any(|lc| last_segment(lc.name.0.as_str()) == "Layouts");
     files.push(file(
         "app/v2/dispatch.py",
-        emit_dispatch(&lcs.controllers, lcs.route_table.as_ref(), has_layout),
+        emit_dispatch(&lcs.controllers, lcs.route_table.as_ref(), has_layout, &crate::lower::controller_to_library::action_override::request_controllers(&app.controllers).iter().map(|c| c.name.clone()).collect::<Vec<_>>()),
     ));
     Ok(files)
 }
@@ -522,6 +520,7 @@ fn emit_dispatch(
     controllers: &[LibraryClass],
     route_table: Option<&LibraryClass>,
     has_layout: bool,
+    request_controllers: &[crate::ident::ClassId],
 ) -> String {
     let mut out = String::from(HEADER);
     out.push_str("\nfrom app import http as _http\n");
@@ -535,22 +534,34 @@ fn emit_dispatch(
         out.push_str("from app.v2.views import Views\n");
     }
     out.push('\n');
+    let mut adapted = Vec::new();
     out.push_str("CONTROLLERS = {\n");
     for lc in controllers {
         let class_name = last_segment(lc.name.0.as_str());
-        // Routable = defines process_action. Skips the strong-param
-        // classes and the abstract ApplicationController.
+        // A controller with an inherited source override defines the
+        // internal dispatcher instead. Both identify a routable class.
         let routable = class_name != "ApplicationController"
-            && lc.methods.iter().any(|m| m.name.as_str() == "process_action");
+            && lc.methods.iter().any(|m| {
+                matches!(m.name.as_str(), "process_action" | "_roundhouse_process_action")
+            });
         if !routable {
             continue;
         }
         let resource = crate::naming::snake_case(
             class_name.strip_suffix("Controller").unwrap_or(class_name),
         );
+        if request_controllers.contains(&lc.name) && lc.methods.iter().any(|m| {
+            m.name.as_str() == crate::lower::controller_to_library::action_override::ENTRY
+                && m.receiver == crate::dialect::MethodReceiver::Instance
+        }) {
+            adapted.push(format!("{resource:?}"));
+        }
         out.push_str(&format!("    \"{resource}\": {class_name},\n"));
     }
     out.push_str("}\n\n");
+    if !adapted.is_empty() {
+        out.push_str(&format!("_REQUEST_ADAPTER_CONTROLLERS = {{{}}}\n\n", adapted.join(", ")));
+    }
     out.push_str(
         "def dispatch(controller: str, action: str, *, params=None, session=None,\n\
          \x20            flash=None, request_method: str = \"GET\",\n\
@@ -576,9 +587,14 @@ fn emit_dispatch(
          \x20   # (crystal server.cr, go slots.go, ts server.ts). Also\n\
          \x20   # what first-creates the module-singleton slots store.\n\
          \x20   ViewHelpers.reset_slots_bang()\n\
-         \x20   c.process_action(action)\n\
-         \x20   return c\n",
+",
     );
+    if !adapted.is_empty() {
+        out.push_str("    if controller in _REQUEST_ADAPTER_CONTROLLERS:\n        c._roundhouse_dispatch_action(action)\n    else:\n        c.process_action(action)\n");
+    } else {
+        out.push_str("    c.process_action(action)\n");
+    }
+    out.push_str("    return c\n");
     let Some(rt) = route_table else { return out };
 
     // `handle` — the full request cycle: transpiled Router.match over

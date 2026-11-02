@@ -301,11 +301,9 @@ func main() {\n\
         let model_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
             model_registry.into_iter().collect();
         let assocs = crate::lower::model_associations::compute_association_graph(app);
-        let controller_lcs = crate::lower::controller_to_library::lower_controllers_with_arel_views_and_assocs(
-            &app.controllers,
+        let controller_lcs = crate::lower::controller_to_library::lower_app_controllers(
+            app,
             model_extras.clone(),
-            Some(&app.schema),
-            &app.views,
             &assocs,
         );
         // Pass the lowered models as the callee-registry extras so
@@ -314,6 +312,9 @@ func main() {\n\
         // Cast inserted around the Str-flowing-into-Int arg. Without
         // extras, the controller-only ty_coerce_insertion pass can't
         // resolve Post_find and the coercion never fires.
+        if !controller_dispatch_supported(&controller_lcs) {
+            return Vec::new();
+        }
         let lowered_controllers = lower::lower_for_go_with_extras(controller_lcs, &lowered_models);
 
         // RouteHelpers module — `lower_routes_to_library_functions` produces
@@ -654,7 +655,7 @@ func main() {\n\
         // Location promoted from the embedded *ActionControllerBase)
         // sidesteps rust's thread_local + axum-extractor dance.
         out.push(emit_routes_table_file(app));
-        out.push(emit_dispatch_file(app));
+        out.push(emit_dispatch_file(app, &lowered_controllers));
 
         // Phase 6 step 1 — wire legacy test emit through v2 so
         // `go test ./app/v2/` exercises the same fixtures + per-model
@@ -912,6 +913,52 @@ fn emit_routes_table_file(app: &App) -> EmittedFile {
     }
 }
 
+// Go embeds parent pointers; an inherited method keeps its parent's receiver.
+// It cannot call a dispatcher that exists only on the concrete child.
+fn controller_dispatch_supported(classes: &[crate::dialect::LibraryClass]) -> bool {
+    use crate::dialect::MethodReceiver;
+    use crate::expr::{Expr, ExprNode};
+    fn calls_dispatch(body: &Expr) -> bool {
+        let mut found = matches!(&*body.node, ExprNode::Send { recv: Some(recv), method, .. }
+            if method.as_str() == "_roundhouse_process_action" && matches!(&*recv.node, ExprNode::SelfRef));
+        body.node.for_each_child(&mut |child| found = found || calls_dispatch(child));
+        found
+    }
+    let hook = |class: &crate::dialect::LibraryClass| class.methods.iter().find(|m| {
+        m.receiver == MethodReceiver::Instance && m.name.as_str() == "process_action"
+    }).cloned();
+    for class in classes {
+        let own_hook = hook(class);
+        let missing_dispatch = own_hook.as_ref().is_some_and(|m| calls_dispatch(&m.body))
+            && !class.methods.iter().any(|m| m.name.as_str() == "_roundhouse_process_action");
+        let mut inherited = None;
+        if own_hook.is_none() && class.methods.iter().any(|m| m.name.as_str() == crate::lower::controller_to_library::action_override::ENTRY) {
+            let mut parent = class.parent.as_ref();
+            let mut seen = crate::det::HashSet::default();
+            while let Some(id) = parent {
+                if !seen.insert(id.clone()) { break; }
+                let Some(ancestor) = classes.iter().find(|c| &c.name == id) else { break; };
+                if let Some(method) = hook(ancestor) {
+                    if calls_dispatch(&method.body) { inherited = Some(method); }
+                    break;
+                }
+                parent = ancestor.parent.as_ref();
+            }
+        }
+        if missing_dispatch || inherited.is_some() {
+            let method = inherited.or(own_hook).expect("unsupported hook");
+            crate::emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+                method.name_span,
+                Some(crate::ident::Symbol::from("go")),
+                "inherited_process_action",
+                format!("{} cannot bind an inherited framework-super process_action to its concrete Go dispatcher", class.name.0),
+            ));
+            return false;
+        }
+    }
+    true
+}
+
 /// Emit `app/v2/dispatch.go` — `Dispatch(controller, action, path_params,
 /// r)` constructs the named controller, threads request metadata + path
 /// params into it, invokes `ProcessAction(action)`, and returns the
@@ -919,7 +966,7 @@ fn emit_routes_table_file(app: &App) -> EmittedFile {
 /// reachable via Go field promotion from the embedded
 /// *ActionControllerBase). One switch arm per concrete controller in
 /// the app. Unknown controller names return a 404.
-fn emit_dispatch_file(app: &App) -> EmittedFile {
+fn emit_dispatch_file(app: &App, controllers: &[crate::dialect::LibraryClass]) -> EmittedFile {
     // Detect whether the app emits a layouts/application view —
     // real-blog has app/views/layouts/application.html.erb (View
     // name `layouts/application`); tiny-blog doesn't ship a layout
@@ -971,6 +1018,7 @@ fn emit_dispatch_file(app: &App) -> EmittedFile {
     // Not left to the next request's reset: a goroutine ID is never reused, so a finished one's entry would stay
     s.push_str("\tdefer I18nHost_reset_request()\n\n");
     s.push_str("\tswitch controller {\n");
+    let request_controllers = crate::lower::controller_to_library::action_override::request_controllers(&app.controllers);
     for ctrl in &app.controllers {
         let raw = ctrl.name.0.as_str();
         let struct_name = raw.rsplit("::").next().unwrap_or(raw);
@@ -986,7 +1034,16 @@ fn emit_dispatch_file(app: &App) -> EmittedFile {
         s.push_str("\t\tc.RequestPath = r.URL.Path\n");
         s.push_str("\t\tc.QueryString = r.URL.RawQuery\n");
         s.push_str("\t\tc.RequestFormat = requestFormat\n");
-        s.push_str("\t\tc.ProcessAction(action)\n");
+        let has_adapter = controllers.iter().any(|c| c.name == ctrl.name && c.methods.iter().any(|m| {
+            m.receiver == crate::dialect::MethodReceiver::Instance
+                && m.name.as_str() == crate::lower::controller_to_library::action_override::ENTRY
+        }));
+        let entry = if has_adapter && request_controllers.iter().any(|c| c.name == ctrl.name) {
+            shared::go_method_name(crate::lower::controller_to_library::action_override::ENTRY)
+        } else {
+            "ProcessAction".to_string()
+        };
+        s.push_str(&format!("\t\tc.{entry}(action)\n"));
         // Layout wrap — only for text/html responses with non-empty
         // body, and only when the app emits a Layouts::application
         // view. Redirects (empty body, 3xx) and JSON responses skip.

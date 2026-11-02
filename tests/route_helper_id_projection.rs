@@ -68,6 +68,7 @@ fn emitted(wire_segments: bool) -> String {
         &app.controllers,
         Vec::new(),
         LowerControllerOptions {
+            sources: &app.sources,
             schema: Some(&app.schema),
             route_id_segments: wire_segments.then_some(&segments),
             ..Default::default()

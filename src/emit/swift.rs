@@ -141,11 +141,9 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut controller_extras = view_lower_extras;
     controller_extras.extend(crate::lower::extras_from_lcs(&view_lcs));
     let assocs = crate::lower::model_associations::compute_association_graph(app);
-    let controller_lcs = crate::lower::lower_controllers_with_arel_views_and_assocs(
-        &app.controllers,
+    let controller_lcs = crate::lower::lower_app_controllers(
+        app,
         controller_extras,
-        Some(&app.schema),
-        &app.views,
         &assocs,
     );
     // Synthesize `ApplicationController` when a controller extends it but

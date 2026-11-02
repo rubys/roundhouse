@@ -7,6 +7,26 @@
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+
+#[test]
+fn controller_declarations_follow_ruby_order() {
+    for (declarations, expected) in [
+        ("attr_reader :declaration_value\n  def declaration_value; \"method\"; end", "method"),
+        ("def declaration_value; \"method\"; end\n  attr_reader :declaration_value", "reader"),
+    ] {
+        emit_and_run::real_blog()
+            .edit(
+                "app/controllers/articles_controller.rb",
+                "class ArticlesController < ApplicationController\n",
+                &format!("class ArticlesController < ApplicationController\n  {declarations}\n"),
+            )
+            .run_ruby(&format!(
+                "require_relative 'app/controllers/articles_controller'\nc = ArticlesController.new\nc.instance_variable_set(:@declaration_value, \"reader\")\nraise c.declaration_value.inspect unless c.declaration_value == \"{expected}\""
+            ))
+            .assert_passes();
+    }
+}
+
 #[path = "emit_and_run/controller_content_type_writer.rs"]
 mod controller_content_type_writer;
 #[path = "support/time_change_usec.rs"]

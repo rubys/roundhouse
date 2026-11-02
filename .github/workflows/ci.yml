@@ -2325,6 +2325,18 @@ jobs:
             --report "$RUNNER_TEMP/compare-ruby/selection.json" \
             --select framework_tests_ruby --select uuid_key_ruby \
             --select tiny_api:cruby_gate_ --select roda_toolchain
+      - name: Controller dispatch against the Rails oracle
+        env:
+          ROUNDHOUSE_CONTROLLER_ORACLE_REQUIRED: '1'
+        run: |
+          gem install --no-document actionpack -v 8.1.4
+          gem install --no-document sqlite3 -v '~> 2.9'
+          cargo nextest run --profile ci \
+            --cargo-metadata target/nextest/cargo-metadata.json \
+            --binaries-metadata target/nextest/binaries-metadata.json \
+            --ignore-default-filter --run-ignored default --retries 0 \
+            --no-fail-fast --no-tests fail --test-threads 1 \
+            -E 'binary_id(roundhouse::all_tests) & test(/^controller_process_action_override::rails_oracle_/)'
       - name: scripts/compare ruby
         if: ${{ !cancelled() }}
         run: scripts/compare ruby

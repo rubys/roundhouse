@@ -81,6 +81,44 @@ pub fn apply_spliced_concern_body_prune(app: &mut App) {
         return;
     }
 
+    // A class hook's super can still reach a concern definition that
+    // lost the splice to that class's own hook. Keep that definition
+    // until controller emission can refuse the unretained super link.
+    // Pruning it just because another helper was spliced would hide
+    // the evidence and silently ground super to the framework instead.
+    let mut hidden_hooks = HashSet::default();
+    for controller in &app.controllers {
+        let Some(hook) = controller
+            .actions()
+            .find(|a| a.name.as_str() == "process_action")
+        else {
+            continue;
+        };
+        if !super::controller_to_library::calls_super(&hook.body) {
+            continue;
+        }
+        let mut pending: Vec<_> = crate::analyze::controller_include_statements(controller)
+            .into_iter()
+            .flat_map(|(_, group)| group)
+            .collect();
+        let mut seen = HashSet::default();
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            for module in app.library_classes.iter().filter(|lc| lc.name == id) {
+                pending.extend(module.includes.iter().cloned());
+                if module.methods.iter().any(|m| {
+                    m.receiver == MethodReceiver::Instance
+                        && m.name.as_str() == "process_action"
+                        && m.name_span != hook.name_span
+                }) {
+                    hidden_hooks.insert(module.name.clone());
+                }
+            }
+        }
+    }
+
     // Every `include <M>` the emit still carries OUTSIDE a controller.
     // Controllers are excluded by construction: their include is what
     // the splice consumed.
@@ -107,13 +145,16 @@ pub fn apply_spliced_concern_body_prune(app: &mut App) {
         if !spliced.contains(&lc.name) || still_included.contains(&lc.name) {
             continue;
         }
-        let pruned: HashSet<Symbol> = lc
-            .methods
-            .iter()
-            .filter(|m| matches!(m.receiver, MethodReceiver::Instance))
-            .map(|m| m.name.clone())
-            .collect();
-        lc.methods.retain(|m| !matches!(m.receiver, MethodReceiver::Instance));
+        let keep_hook = hidden_hooks.contains(&lc.name);
+        let mut pruned: HashSet<Symbol> = HashSet::default();
+        lc.methods.retain(|m| {
+            let keep = !matches!(m.receiver, MethodReceiver::Instance)
+                || (keep_hook && m.name.as_str() == "process_action");
+            if !keep {
+                pruned.insert(m.name.clone());
+            }
+            keep
+        });
         lc.unknown_calls.retain(|call| !decorates(call, &pruned));
     }
 }
