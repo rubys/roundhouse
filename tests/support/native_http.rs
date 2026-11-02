@@ -17,6 +17,9 @@ use std::time::{Duration, Instant};
 
 /// `spin build blog` in `tree`; panics with the compiler's output.
 pub fn build(tree: &Path) {
+    if std::env::var_os("RH_SPINEL_BUNDLE_COLLECT").is_some() {
+        panic!("spinel bundle collect: not bundled");
+    }
     let output = Command::new("spin")
         .args(["build", "blog"])
         .current_dir(tree)

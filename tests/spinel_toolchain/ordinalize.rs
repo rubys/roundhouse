@@ -46,6 +46,9 @@ puts "Integer ordinalize native passed"
     )
     .expect("write native caller");
 
+    if std::env::var_os("RH_SPINEL_BUNDLE_COLLECT").is_some() {
+        panic!("spinel bundle collect: not bundled");
+    }
     let compiler = std::env::var("SPINEL").unwrap_or_else(|_| "spinel".into());
     let compiled = Command::new(&compiler)
         .args(["contract.rb", "-o", "contract"])

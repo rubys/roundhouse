@@ -929,42 +929,54 @@ fn focused_framework_loop_runs_every_selection_and_preserves_failure() {
         .as_nanos();
     let root = std::env::temp_dir().join(format!("framework-loop-{}-{unique}", std::process::id()));
     fs::create_dir(&root).unwrap();
+    // `cargo test --no-run` answers each suite's binary; the binary logs how it ran and fails for `fails`.
     let cargo = root.join("cargo");
     fs::write(
         &cargo,
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CARGO_LOG\"\n[ \"$3\" != fails ]\n",
+        concat!(
+            "#!/bin/sh\n",
+            "prev=\n",
+            "for a in \"$@\"; do\n",
+            "  if [ \"$prev\" = --test ]; then\n",
+            "    printf '{\"reason\":\"compiler-artifact\",\"target\":{\"name\":\"%s\",\"kind\":[\"test\"]},\"executable\":\"%s/%s\"}\\n' \"$a\" \"$STUBS\" \"$a\"\n",
+            "  fi\n",
+            "  prev=$a\n",
+            "done\n",
+        ),
     )
     .unwrap();
     fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
+    let stubs = root.join("stubs");
+    fs::create_dir(&stubs).unwrap();
+    for name in ["first", "second", "fails", "survivor", "param_binds", "param_binds_values", "param_binds_cleanup", "framework_tests_spinel"] {
+        let stub = stubs.join(name);
+        fs::write(&stub, format!("#!/bin/sh\nprintf '{name} %s\\n' \"$*\" >> \"$RUN_LOG\"\n[ {name} != fails ]\n")).unwrap();
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    }
     for (tests, expected_success, expected_log) in [
-        (
-            "first second",
-            true,
-            "test --test first -- --ignored --nocapture\ntest --test second -- --ignored --nocapture\n",
-        ),
-        (
-            "fails survivor",
-            false,
-            "test --test fails -- --ignored --nocapture\ntest --test survivor -- --ignored --nocapture\n",
-        ),
+        ("first second", true, "first --ignored --nocapture\nsecond --ignored --nocapture\n"),
+        ("fails survivor", false, "fails --ignored --nocapture\nsurvivor --ignored --nocapture\n"),
         (
             "param_binds param_binds_values param_binds_cleanup framework_tests_spinel",
             true,
             concat!(
-                "test --test param_binds -- --ignored --nocapture _spinel\n",
-                "test --test param_binds_values -- --ignored --nocapture _spinel\n",
-                "test --test param_binds_cleanup -- --ignored --nocapture _spinel\n",
-                "test --test framework_tests_spinel -- --ignored --nocapture\n",
+                "framework_tests_spinel --ignored --nocapture\n",
+                "param_binds --ignored --nocapture _spinel\n",
+                "param_binds_cleanup --ignored --nocapture _spinel\n",
+                "param_binds_values --ignored --nocapture _spinel\n",
             ),
         ),
         ("", false, ""),
     ] {
-        let log = root.join("cargo.log");
+        let log = root.join("run.log");
         fs::write(&log, "").unwrap();
         let result = Command::new("bash")
             .args(["-e", "-o", "pipefail", "-c", step["run"].as_str().unwrap()])
             .env("TESTS", tests)
-            .env("CARGO_LOG", &log)
+            .env("RUN_LOG", &log)
+            .env("STUBS", &stubs)
+            .env("RUNNER_TEMP", &root)
+            .env_remove("CI_SPINEL_TIMINGS_OUT")
             .env(
                 "PATH",
                 format!("{}:{}", root.display(), std::env::var("PATH").unwrap()),
@@ -972,7 +984,12 @@ fn focused_framework_loop_runs_every_selection_and_preserves_failure() {
             .output()
             .unwrap();
         assert_eq!(result.status.success(), expected_success, "{result:?}");
-        assert_eq!(fs::read_to_string(log).unwrap(), expected_log);
+        // The suites run side by side, so in any order.
+        let mut ran: Vec<String> = fs::read_to_string(log).unwrap().lines().map(String::from).collect();
+        ran.sort();
+        let mut expected: Vec<&str> = expected_log.lines().collect();
+        expected.sort();
+        assert_eq!(ran, expected, "{result:?}");
     }
     fs::remove_dir_all(root).unwrap();
 }

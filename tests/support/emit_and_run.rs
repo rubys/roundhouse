@@ -219,6 +219,13 @@ impl Overlay {
     }
 
     fn run_spinel_with_flags(self, script: &str, flags: &[&str]) -> Run {
+        if let Some(dir) = bundle::collect_dir() {
+            bundle::record(&dir, &self, script, flags);
+            panic!("spinel bundle collect: recorded, not run");
+        }
+        if let Some(run) = bundle::run_shared(&self, script, flags) {
+            return run;
+        }
         let (emitted, errors) = self.emit_tree(BuildTarget::Spinel);
         std::fs::write(emitted.join("contract.rb"), format!("require_relative \"boot\"\n{script}"))
             .expect("write native consumer");
@@ -616,5 +623,236 @@ fn copy_tree(src: &Path, dst: &Path) {
         }
     } else {
         std::fs::copy(src, dst).expect("copy file");
+    }
+}
+
+// Not a compile per contract: the shared runtime's analysis was most of the spinel-toolchain lane.
+pub mod bundle {
+    use super::{copy_tree, scratch_dir, BuildTarget, Edit, Overlay, Run};
+    use std::collections::BTreeMap;
+    use std::hash::{Hash, Hasher};
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    const GROUP: usize = 8;
+
+    pub fn collect_dir() -> Option<PathBuf> {
+        std::env::var_os("RH_SPINEL_BUNDLE_COLLECT").map(PathBuf::from)
+    }
+
+    pub fn collecting() -> bool {
+        collect_dir().is_some()
+    }
+
+    // Not the scratch path itself: an `empty_app` base is a fresh empty dir each time.
+    fn base_tag(overlay: &Overlay) -> Option<String> {
+        if !overlay.scratch_base {
+            return Some(overlay.base.display().to_string());
+        }
+        let empty = std::fs::read_dir(&overlay.base).ok()?.next().is_none();
+        empty.then(|| EMPTY.to_string())
+    }
+
+    const EMPTY: &str = "<empty>";
+
+    fn key(overlay: &Overlay, script: &str, flags: &[&str]) -> Option<String> {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        base_tag(overlay)?.hash(&mut h);
+        for edit in &overlay.edits {
+            match edit {
+                Edit::Write { path, content } => {
+                    std::str::from_utf8(content).ok()?;
+                    ("w", path, content).hash(&mut h);
+                }
+                Edit::Replace { path, find, replace } => ("r", path, find, replace).hash(&mut h),
+                Edit::Remove { path } => ("d", path).hash(&mut h),
+            }
+        }
+        flags.hash(&mut h);
+        script.hash(&mut h);
+        Some(format!("{:016x}", h.finish()))
+    }
+
+    pub fn record(dir: &Path, overlay: &Overlay, script: &str, flags: &[&str]) {
+        let Some(key) = key(overlay, script, flags) else { return };
+        let edits: Vec<serde_json::Value> = overlay
+            .edits
+            .iter()
+            .map(|e| match e {
+                Edit::Write { path, content } => serde_json::json!({"write": path, "content": String::from_utf8_lossy(content)}),
+                Edit::Replace { path, find, replace } => serde_json::json!({"replace": path, "find": find, "with": replace}),
+                Edit::Remove { path } => serde_json::json!({"remove": path}),
+            })
+            .collect();
+        let case = serde_json::json!({
+            "key": key,
+            "base": base_tag(overlay),
+            "flags": flags,
+            "script": script,
+            "edits": edits,
+        });
+        std::fs::create_dir_all(dir).expect("bundle collect dir");
+        std::fs::write(dir.join(format!("{key}.json")), case.to_string()).expect("write bundle case");
+    }
+
+    fn manifest() -> Option<&'static (PathBuf, BTreeMap<String, (String, usize)>)> {
+        static MANIFEST: std::sync::OnceLock<Option<(PathBuf, BTreeMap<String, (String, usize)>)>> = std::sync::OnceLock::new();
+        MANIFEST
+            .get_or_init(|| {
+                let dir = PathBuf::from(std::env::var_os("RH_SPINEL_BUNDLE")?);
+                let text = std::fs::read_to_string(dir.join("manifest.json")).ok()?;
+                let map: BTreeMap<String, (String, usize)> = serde_json::from_str(&text).ok()?;
+                Some((dir, map))
+            })
+            .as_ref()
+    }
+
+    // Not the group's tree itself: a contract may write into its tree, and tests run in parallel.
+    pub fn run_shared(overlay: &Overlay, script: &str, flags: &[&str]) -> Option<Run> {
+        let (dir, map) = manifest()?;
+        let (group, case) = map.get(&key(overlay, script, flags)?)?;
+        let emitted = scratch_dir().join("emitted");
+        copy_tree(&dir.join(group), &emitted);
+        let output = Command::new(emitted.join("contract"))
+            .arg(case.to_string())
+            .current_dir(&emitted)
+            .output()
+            .expect("run bundled native consumer");
+        Some(Run::new(format!("spinel bundle {group} && ./contract {case}"), emitted, Vec::new(), output))
+    }
+
+    struct Case {
+        key: String,
+        base: PathBuf,
+        flags: Vec<String>,
+        script: String,
+        edits: Vec<Edit>,
+    }
+
+    fn read_case(path: &Path) -> Option<Case> {
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+        let edits = v["edits"]
+            .as_array()?
+            .iter()
+            .map(|e| {
+                if let Some(p) = e["write"].as_str() {
+                    Some(Edit::Write { path: p.into(), content: e["content"].as_str()?.as_bytes().to_vec() })
+                } else if let Some(p) = e["replace"].as_str() {
+                    Some(Edit::Replace { path: p.into(), find: e["find"].as_str()?.into(), replace: e["with"].as_str()?.into() })
+                } else {
+                    Some(Edit::Remove { path: e["remove"].as_str()?.into() })
+                }
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(Case {
+            key: v["key"].as_str()?.into(),
+            base: PathBuf::from(v["base"].as_str()?),
+            flags: v["flags"].as_array()?.iter().filter_map(|f| f.as_str().map(String::from)).collect(),
+            script: v["script"].as_str()?.into(),
+            edits,
+        })
+    }
+
+    fn build(cases: &[&Case]) -> Option<PathBuf> {
+        // Not merged blindly: two cases writing one path differently would leave only the last.
+        let mut written: BTreeMap<&str, Option<&[u8]>> = BTreeMap::new();
+        for case in cases {
+            let mut own: BTreeMap<&str, Option<&[u8]>> = BTreeMap::new();
+            for edit in &case.edits {
+                match edit {
+                    Edit::Write { path, content } => own.insert(path.as_str(), Some(content.as_slice())),
+                    Edit::Remove { path } => own.insert(path.as_str(), None),
+                    Edit::Replace { .. } => None,
+                };
+            }
+            for (path, now) in own {
+                if written.insert(path, now).is_some_and(|before| before != now) {
+                    return None;
+                }
+            }
+        }
+        let empty = cases[0].base.as_os_str() == EMPTY;
+        let overlay = Overlay {
+            base: if empty { scratch_dir() } else { cases[0].base.clone() },
+            scratch_base: empty,
+            edits: cases.iter().flat_map(|c| c.edits.iter().map(clone_edit)).collect(),
+        };
+        let (emitted, errors) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| overlay.emit_tree(BuildTarget::Spinel))).ok()?;
+        if !errors.is_empty() {
+            return None;
+        }
+        let mut contract = String::from("require_relative \"boot\"\n");
+        for (i, case) in cases.iter().enumerate() {
+            contract.push_str(&format!("if ARGV[0] == \"{i}\"\n{}\nend\n", case.script));
+        }
+        std::fs::write(emitted.join("contract.rb"), contract).ok()?;
+        let compiler = std::env::var("SPINEL").unwrap_or_else(|_| "spinel".into());
+        let compiled = Command::new(&compiler)
+            .args(&cases[0].flags)
+            .args(["contract.rb", "-o", "contract"])
+            .current_dir(&emitted)
+            .output()
+            .ok()?;
+        std::fs::write(emitted.join("compile.stdout"), &compiled.stdout).ok()?;
+        std::fs::write(emitted.join("compile.stderr"), &compiled.stderr).ok()?;
+        compiled.status.success().then_some(emitted)
+    }
+
+    fn clone_edit(e: &Edit) -> Edit {
+        match e {
+            Edit::Write { path, content } => Edit::Write { path: path.clone(), content: content.clone() },
+            Edit::Replace { path, find, replace } => Edit::Replace { path: path.clone(), find: find.clone(), replace: replace.clone() },
+            Edit::Remove { path } => Edit::Remove { path: path.clone() },
+        }
+    }
+
+    fn build_split(cases: Vec<&Case>, out: &Path, name: &str, manifest: &std::sync::Mutex<BTreeMap<String, (String, usize)>>) {
+        if cases.len() < 2 {
+            return;
+        }
+        if let Some(tree) = build(&cases) {
+            let dest = out.join(name);
+            let _ = std::fs::remove_dir_all(&dest);
+            copy_tree(&tree, &dest);
+            let mut m = manifest.lock().unwrap();
+            for (i, case) in cases.iter().enumerate() {
+                m.insert(case.key.clone(), (name.to_string(), i));
+            }
+            eprintln!("spinel bundle {name}: {} cases", cases.len());
+            return;
+        }
+        eprintln!("spinel bundle {name}: {} cases do not combine; halving", cases.len());
+        let mid = cases.len() / 2;
+        let (a, b) = cases.split_at(mid);
+        build_split(a.to_vec(), out, &format!("{name}a"), manifest);
+        build_split(b.to_vec(), out, &format!("{name}b"), manifest);
+    }
+
+    pub fn build_all(collected: &Path, out: &Path) {
+        let mut cases: Vec<Case> = std::fs::read_dir(collected)
+            .map(|d| d.filter_map(|e| read_case(&e.ok()?.path())).collect())
+            .unwrap_or_default();
+        cases.sort_by(|a, b| a.key.cmp(&b.key));
+        let mut groups: BTreeMap<(PathBuf, Vec<String>), Vec<&Case>> = BTreeMap::new();
+        for case in &cases {
+            groups.entry((case.base.clone(), case.flags.clone())).or_default().push(case);
+        }
+        std::fs::create_dir_all(out).expect("bundle out dir");
+        let manifest = std::sync::Mutex::new(BTreeMap::new());
+        let chunks: Vec<Vec<&Case>> = groups.values().flat_map(|g| g.chunks(GROUP).map(|c| c.to_vec())).collect();
+        let workers = std::thread::available_parallelism().map_or(2, |n| n.get());
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            for _ in 0..workers {
+                s.spawn(|| loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let Some(chunk) = chunks.get(i) else { break };
+                    build_split(chunk.clone(), out, &format!("g{i}"), &manifest);
+                });
+            }
+        });
+        let manifest = manifest.into_inner().unwrap();
+        eprintln!("spinel bundle: {} of {} cases bundled", manifest.len(), cases.len());
+        std::fs::write(out.join("manifest.json"), serde_json::to_string(&manifest).unwrap()).expect("write manifest");
     }
 }
