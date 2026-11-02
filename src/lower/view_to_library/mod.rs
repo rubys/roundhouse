@@ -264,6 +264,8 @@ pub struct ViewLowerCtx<'a> {
     /// record). Render call sites consult it to bind provided locals by
     /// name and to suppress convention closure-threading.
     strict_locals: std::rc::Rc<crate::det::HashMap<ViewKey, Vec<Param>>>,
+    /// Partials whose body has a bare `yield` (`yielding_partials`).
+    yielding_partials: std::rc::Rc<crate::det::HashSet<ViewKey>>,
     /// For a partial rendered as a COLLECTION with an explicit name, the
     /// local its callers bind each element to — `as:` when given, else
     /// the partial's own base name. Rails' rule, read off the call site;
@@ -300,16 +302,15 @@ impl<'a> ViewLowerCtx<'a> {
                     (f.name.as_str().to_string(), required)
                 })
                 .collect();
+        let known_models: Vec<String> = app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
+        let element_locals = collection_element_locals(&app.views, app);
+        let yielding = yielding_partials(&app.views, &element_locals, &known_models);
         Self {
             app,
             model_param_keys: std::rc::Rc::new(app.models.iter().map(|m| &m.name)
                 .chain(app.library_classes.iter().map(|c| &c.name))
                 .map(|id| (id.0.as_str().to_owned(), app.model_param_key(id.0.as_str()))).collect()),
-            known_models: app
-                .models
-                .iter()
-                .map(|m| m.name.0.as_str().to_string())
-                .collect(),
+            known_models,
             closures: std::rc::Rc::new(view_ivar_closures(&app.views, &app.controllers)),
             view_formats: std::rc::Rc::new(view_formats(&app.views)),
             dyn_pools: std::rc::Rc::new(dynamic_partial_pools(&app.controllers)),
@@ -353,7 +354,8 @@ impl<'a> ViewLowerCtx<'a> {
             ),
             route_helper_arity: std::rc::Rc::new(route_helpers.into_iter().collect()),
             strict_locals: std::rc::Rc::new(strict_locals_by_key(&app.views)),
-            collection_element_locals: std::rc::Rc::new(collection_element_locals(&app.views, app)),
+            yielding_partials: std::rc::Rc::new(yielding),
+            collection_element_locals: std::rc::Rc::new(element_locals),
             form_wrappers: std::rc::Rc::new(form_wrapper_helpers(app)),
             form_with_entry: false,
         }
@@ -525,6 +527,13 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     let is_partial = base.starts_with('_');
     let is_layout = dir == "layouts";
     let is_action_view = !is_partial && !is_layout && !dir.is_empty();
+    // A layout, or a partial that yields and never reads its record local,
+    // takes the yielded markup in its record slot (`render "x" do … end`,
+    // `render layout: "x" do … end`), a String. A partial under `layouts/`
+    // is a partial: a strict-locals `layouts/_card` takes its declared
+    // local there, which its `yield` must not append unescaped.
+    let body_arg = (is_layout && !is_partial)
+        || (is_partial && view_key_of(view, &lx.partial_stems).is_some_and(|k| lx.yielding_partials.contains(&k)));
 
     // Render-tree ivar closure: the ivars this view needs (its own reads ∪
     // the ivars every partial it renders needs, transitively). Action views
@@ -627,7 +636,9 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         // signature, so the other targets' `Layouts.application(body)`
         // dispatch call sites are arity-stable.
         if !arg_name.is_empty() {
-            typed.push((arg_name.clone(), record_arg_ty(dir, is_layout, &known_models)));
+            // A partial under `layouts/` keeps its `String` slot whether or
+            // not it carries the yield (`body_arg`), as before this change.
+            typed.push((arg_name.clone(), record_arg_ty(dir, body_arg || is_layout, &known_models)));
         }
         for iv in &closure_ivars {
             // The record arg already covers a same-named ivar (a `_form`
@@ -855,6 +866,8 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         multipart_partials: lx.multipart_partials.clone(),
         partial_extras: lx.partial_extras.clone(),
         strict_locals: lx.strict_locals.clone(),
+        yielding_partials: lx.yielding_partials.clone(),
+        record_carries_yield: body_arg,
         view_name: crate::lower::view::fragment_template_path(view.name.as_str(), view.format.as_str()),
         ivar_models: std::rc::Rc::new(view_ivar_models(app, &view.name)),
         record_classes: std::rc::Rc::new(app.view_ivar_types.get(&view.name).into_iter()
@@ -3776,6 +3789,71 @@ fn strict_locals_by_key(views: &[View]) -> crate::det::HashMap<ViewKey, Vec<Para
     out
 }
 
+/// Whether a view body has a bare `yield` (no arguments): a partial that
+/// renders its caller's block.
+pub(crate) fn yields_body(e: &Expr) -> bool {
+    if matches!(&*e.node, ExprNode::Yield { args } if args.is_empty()) {
+        return true;
+    }
+    let mut found = false;
+    e.node.for_each_child(&mut |c| found = found || yields_body(c));
+    found
+}
+
+/// A partial body that yields and never reads its record local `record`:
+/// the record slot can carry the yielded markup.
+pub(crate) fn carries_yield(body: &Expr, record: &str) -> bool {
+    fn reads(e: &Expr, name: &str) -> bool {
+        let hit = match &*e.node {
+            ExprNode::Var { name: n, .. } => n.as_str() == name,
+            ExprNode::Send { recv: None, method, args, .. } => method.as_str() == name && args.is_empty(),
+            _ => false,
+        };
+        let mut found = hit;
+        e.node.for_each_child(&mut |c| found = found || reads(c, name));
+        found
+    }
+    !record.is_empty() && yields_body(body) && !reads(body, record)
+}
+
+/// The partials that carry their yielded markup in the record slot,
+/// keyed like `strict_locals_by_key`: every format of the partial
+/// (`_card.html.erb`, `_card.text.erb` share one key) yields and never
+/// reads its effective record local (`carries_yield`).
+fn yielding_partials(
+    views: &[View],
+    element_locals: &crate::det::HashMap<ViewKey, String>,
+    known_models: &[String],
+) -> crate::det::HashSet<ViewKey> {
+    let stems = PartialStems::of(views);
+    let mut carries: crate::det::HashMap<ViewKey, bool> = crate::det::HashMap::default();
+    for v in views.iter().filter(|v| split_view_name(v.name.as_str()).1.starts_with('_')) {
+        let Some(key) = view_key_of(v, &stems) else { continue };
+        // A strict-locals partial's first slot is its declared local, which
+        // `check` keeps from carrying a block (it refuses the render).
+        let this = v.strict_locals.is_none()
+            && carries_yield(&v.body, &effective_record_arg(v, element_locals, known_models, &stems));
+        let all = carries.entry(key).or_insert(true);
+        *all = *all && this;
+    }
+    carries.into_iter().filter(|(_, all)| *all).map(|(k, _)| k).collect()
+}
+
+/// The view names of the partials that carry their yield in the record
+/// slot (`yielding_partials`), for `analyze::diagnostics`, which refuses
+/// a block render to any other partial.
+pub(crate) fn yield_carrying_partials(app: &crate::App) -> crate::det::HashSet<String> {
+    let known_models: Vec<String> = app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
+    let element_locals = collection_element_locals(&app.views, app);
+    let keys = yielding_partials(&app.views, &element_locals, &known_models);
+    let stems = PartialStems::of(&app.views);
+    app.views
+        .iter()
+        .filter(|v| view_key_of(v, &stems).is_some_and(|k| keys.contains(&k)))
+        .map(|v| v.name.as_str().to_string())
+        .collect()
+}
+
 fn collect_ivar_str_assigns(
     e: &Expr,
     dir: &str,
@@ -4946,6 +5024,16 @@ pub(super) struct ViewCtx {
     /// bound by name.
     pub(super) strict_locals:
         std::rc::Rc<crate::det::HashMap<ViewKey, Vec<Param>>>,
+    /// Partials whose body has a bare `yield` (`yielding_partials`): their
+    /// record arg is the yielded markup, a String, so a render with no
+    /// block passes "" (Rails' `yield` with no block is nil, rendered as
+    /// nothing).
+    pub(super) yielding_partials: std::rc::Rc<crate::det::HashSet<ViewKey>>,
+    /// This view's record slot carries the yielded markup (a layout, or a
+    /// partial in `yielding_partials`). A partial whose `yield` doesn't
+    /// read it renders "" there: a block render to it is refused, so it
+    /// is only rendered without one, where Rails' `yield` is nil.
+    pub(super) record_carries_yield: bool,
     /// THIS view's ivar/local name → model snake-singular, from
     /// `App::view_ivar_types` (`edit_user` → `user`). `form_with model:
     /// @edit_user` names its fields after the record's model exactly as

@@ -101,7 +101,7 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
                 bound = bind_effectful_locals(entries, record.span, ctx, &mut binds);
                 locals = Some(&bound);
             }
-            let mut call_args = vec![record_ref];
+            let mut call_args = vec![record_slot(ctx, &plural_camel, &stem, record_ref)];
             call_args.extend(partial_extra_args(ctx, &plural_camel, &stem));
             call_args.extend(locals_extra_args(locals, &plural_camel, &stem, ctx));
             let method = ctx.render_method(ViewKind::Partial, &plural_camel, &stem);
@@ -288,7 +288,7 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
                         .unwrap_or_else(nil_lit),
                     None => nil_lit(),
                 };
-                let mut call_args = vec![record];
+                let mut call_args = vec![record_slot(ctx, &module_camel, &method_sym, record)];
                 call_args.extend(partial_extra_args(ctx, &module_camel, &method_sym));
                 if let Some(decl) = strict_decl {
                     if let Some(hash) = strict_kwargs(&decl[1..], &lookup, context_kwargs(ctx, &module_camel, &method_sym)) {
@@ -626,7 +626,7 @@ fn named_collection_item_render(
         &extra,
     );
 
-    let mut call_args = vec![var_ref(var_name.clone())];
+    let mut call_args = vec![record_slot(ctx, &module_camel, &method_sym, var_ref(var_name.clone()))];
     call_args.extend(extra);
     let method = ctx.render_method(ViewKind::Partial, &module_camel, &method_sym);
     let render_call = send(
@@ -1138,7 +1138,7 @@ fn emit_partial_each(
     extra.extend(locals_extra_args(locals, &plural_camel, &stem, ctx));
     let var_name = unshadowed(singular.chars().next().unwrap_or('x').to_string(), &extra);
 
-    let mut call_args = vec![var_ref(var_name.clone())];
+    let mut call_args = vec![record_slot(ctx, &plural_camel, &stem, var_ref(var_name.clone()))];
     call_args.extend(extra);
     let method = ctx.render_method(ViewKind::Partial, &plural_camel, &stem);
     let render_call = send(
@@ -1172,6 +1172,18 @@ fn emit_partial_each(
     )
 }
 
+/// What a block-less render passes in a partial's record slot: the
+/// record, or "" for a partial that carries its yield there
+/// (`yielding_partials`). Such a partial never reads that local, and its
+/// `yield` with no block renders nothing, as Rails' nil does.
+fn record_slot(ctx: &ViewCtx, module_camel: &str, stem: &str, record: Expr) -> Expr {
+    if ctx.yielding_partials.contains(&(module_camel.to_string(), stem.to_string())) {
+        Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Str { value: String::new() } })
+    } else {
+        record
+    }
+}
+
 // ── yield ────────────────────────────────────────────────────────
 
 /// Lower a Yield expr the layout body can produce:
@@ -1185,6 +1197,12 @@ pub(super) fn emit_yield(args: &[Expr], ctx: &ViewCtx) -> Expr {
         if let ExprNode::Lit { value: Literal::Sym { value } } = &*first.node {
             return view_helpers_call("get_slot", vec![lit_sym(value.clone())]);
         }
+    }
+    // A partial whose record slot is its record, not the yielded markup:
+    // only rendered without a block (`check` refuses a block render to
+    // it), where Rails' `yield` is nil and renders nothing.
+    if !ctx.arg_name.is_empty() && !ctx.record_carries_yield {
+        return Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Str { value: String::new() } });
     }
     let local_name = if ctx.arg_name.is_empty() {
         "body".to_string()
@@ -1264,6 +1282,7 @@ pub(super) fn named_partial_call_with_record(
             // name; an omitted record falls to the header default. The
             // dir-convention singular governs only convention-inferred
             // partials.
+            let record_override_given = record_override.is_some();
             let arg_expr = match (record_override, strict_decl, locals.is_some()) {
                 (Some(record), _, _) => record,
                 (None, strict_decl, has_locals) => match (strict_decl, has_locals) {
@@ -1278,6 +1297,11 @@ pub(super) fn named_partial_call_with_record(
                 (None, false) => arg.cloned().unwrap_or_else(nil_lit),
                 },
             };
+            // A partial carrying its yield in the record slot, rendered with
+            // no block: Rails' `yield` is nil there and renders nothing, so
+            // its String body is "" whatever record the call names (the
+            // partial never reads it).
+            let arg_expr = if record_override_given { arg_expr } else { record_slot(ctx, &module_camel, &method_sym, arg_expr) };
             let mut call_args = vec![arg_expr];
             call_args.extend(partial_extra_args(ctx, &module_camel, &method_sym));
             if let Some(decl) = strict_decl {

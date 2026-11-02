@@ -1601,6 +1601,8 @@ mod tests {
             partial_stems: Default::default(),
             partial_extras: Default::default(),
             strict_locals: Default::default(),
+            yielding_partials: Default::default(),
+            record_carries_yield: false,
             record_classes: Default::default(),
             str_ivars: Default::default(),
             ivar_locals: Default::default(),

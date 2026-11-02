@@ -229,10 +229,11 @@ pub enum RenderPartial<'a> {
 /// there's a receiver, or when a one-arg Var/Ivar doesn't name a
 /// view-scope local (`is_local`).
 ///
-/// A block is accepted for exactly ONE shape — `render layout: "…" do …
-/// end` (`LayoutBlock`), where the block IS the render's content. Every
-/// other block-form render still returns `None`: the block would be a
-/// Rails feature nothing here models, and saying so beats guessing.
+/// A block is accepted for two shapes, both `LayoutBlock`, where the block
+/// IS the partial's `yield`: `render layout: "…" do … end` and `render
+/// "…"[, k: v] do … end`. Every other block-form render still returns
+/// `None`: the block would be a Rails feature nothing here models, and
+/// saying so beats guessing.
 pub fn classify_render_partial<'a>(
     recv: Option<&'a Expr>,
     method: &str,
@@ -245,6 +246,23 @@ pub fn classify_render_partial<'a>(
         return None;
     }
     if let Some(block) = block {
+        // `render "x"[, k: v] do … end`: Rails renders the partial with the
+        // block as its `yield`, as `render layout: "x"` does. (`render
+        // partial: "x", locals: … do` raises in Rails; it stays
+        // unrecognized.)
+        if let Some(first) = args.first()
+            && let ExprNode::Lit { value: Literal::Str { value } } = &*first.node
+        {
+            let locals = match &args[1..] {
+                [] => None,
+                [h] => match &*h.node {
+                    ExprNode::Hash { entries, .. } => Some(entries.as_slice()),
+                    _ => return None,
+                },
+                _ => return None,
+            };
+            return Some(RenderPartial::LayoutBlock { layout: value.as_str(), locals, block });
+        }
         let [arg] = args else { return None };
         let ExprNode::Hash { entries, .. } = &*arg.node else { return None };
         return classify_render_layout(entries, block);

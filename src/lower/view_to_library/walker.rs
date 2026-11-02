@@ -1862,6 +1862,8 @@ mod tests {
             partial_stems: Default::default(),
             partial_extras: Default::default(),
             strict_locals: Default::default(),
+            yielding_partials: Default::default(),
+            record_carries_yield: false,
             view_name: "messages/_message".to_string(),
             ivar_models: Default::default(),
             record_classes: Default::default(),
