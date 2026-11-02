@@ -2729,6 +2729,7 @@ end
     let (rate_limit_stores, rate_limit_store_values) = super::rate_limit::install_boot_stores(&mut app, rate_limit_stores, &const_resolver.for_sources(&sources));
     if app.queue_adapter.as_deref() == Some("sidekiq") {
         sidekiq_warnings.into_iter().for_each(warn_sidekiq);
+        require_sidekiq_redis_url(&app);
     }
     if app.queue_adapter.as_deref() == Some("sidekiq") && app.cable_redis.is_none() {
         warn_sidekiq(format!(
@@ -6452,7 +6453,7 @@ fn filter_from_send(
         return None;
     };
     let kind = match method.as_str() {
-        "before_action" => FilterKind::Before,
+        "before_action" | "prepend_before_action" => FilterKind::Before,
         "around_action" => FilterKind::Around,
         "after_action" => FilterKind::After,
         "skip_before_action" => FilterKind::Skip,
@@ -6483,6 +6484,8 @@ fn filter_from_send(
     let mut targets: Vec<(crate::ident::Symbol, crate::span::Span)> = Vec::new();
     let mut only: Vec<crate::ident::Symbol> = Vec::new();
     let mut except: Vec<crate::ident::Symbol> = Vec::new();
+    let mut only_present = false;
+    let mut prepend = method.as_str() == "prepend_before_action";
     for arg in args {
         if let Some(sym) = sym_of(arg) {
             targets.push((sym, arg.span));
@@ -6502,8 +6505,16 @@ fn filter_from_send(
         };
         for (key, value) in entries {
             match sym_of(key).as_ref().map(|k| k.as_str().to_string()).as_deref() {
-                Some("only") => only = sym_list(value)?,
+                Some("only") => {
+                    only_present = true;
+                    only = sym_list(value)?;
+                }
                 Some("except") => except = sym_list(value)?,
+                Some("prepend") => match &*value.node {
+                    ExprNode::Lit { value: Literal::Bool { value: true } } => prepend = true,
+                    ExprNode::Lit { value: Literal::Bool { value: false } | Literal::Nil } => {}
+                    _ => return None,
+                },
                 // if:/unless: guards on a macro-expanded filter would
                 // need the predicate to resolve in the INCLUDER; not
                 // modeled, and silently dropping a guard changes when a
@@ -6536,8 +6547,11 @@ fn filter_from_send(
                 unless_cond: None,
                 if_cond_expr: None,
                 unless_cond_expr: None,
+                unread_guard: false,
+                unread_options: false,
+                only_present,
                 block: None,
-                prepend: false,
+                prepend,
             })
             .collect(),
     )
@@ -12100,8 +12114,9 @@ fn read_sidekiq_redis<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> crate::app::Sidek
 /// such assignment. Only those two keys are read, each as a String
 /// literal, `ENV["NAME"]` or `ENV.fetch("NAME"[, "default"])`. Any other
 /// key, a value in another form, or a `config.redis =` that isn't a Hash
-/// literal is a warning: the push then takes that setting from the
-/// environment fallbacks, or not at all.
+/// literal is a warning, and the setting is not read. A tree on
+/// `:sidekiq` whose blocks leave it no `url:` is an error
+/// (`require_sidekiq_redis_url`): there is no environment fallback.
 pub(super) fn sidekiq_client_redis(source: &[u8], file: &str) -> Option<crate::app::SidekiqRedisConfig> {
     let src = String::from_utf8_lossy(source);
     // Cheap skip before parsing, as `kaminari_default_per_page` does.
@@ -12155,7 +12170,7 @@ pub(super) fn sidekiq_client_redis(source: &[u8], file: &str) -> Option<crate::a
             let mut config = crate::app::SidekiqRedisConfig::default();
             let Some(hash) = value.as_hash_node() else {
                 warn_sidekiq(format!(
-                    "`{param}.redis = {}` in {file} is not a Hash literal, so it is not read; jobs are pushed to REDIS_PROVIDER, REDIS_URL or localhost",
+                    "`{param}.redis = {}` in {file} is not a Hash literal, so it is not read",
                     text(value)
                 ));
                 found = Some(config);
@@ -12221,6 +12236,30 @@ fn redis_setting(node: &Node<'_>, src: &str) -> Option<crate::app::RedisSetting>
         }
         _ => None,
     }
+}
+
+/// An app on `:sidekiq` names its Redis in `Sidekiq.configure_client`.
+/// Without a `url:` ingest reads, the push would have nowhere to go:
+/// that is an error, not a fallback to `REDIS_PROVIDER`, `REDIS_URL` or
+/// localhost, so the app's own config stays the only source of where
+/// jobs land.
+fn require_sidekiq_redis_url(app: &App) {
+    // `url: ""` names nothing: the push would raise at run time, so it
+    // is refused here with the rest.
+    let empty = matches!(&app.sidekiq_redis.url, Some(crate::app::RedisSetting::Literal(url)) if url.is_empty());
+    if app.sidekiq_redis.url.is_some() && !empty {
+        return;
+    }
+    let detail = "an app on `queue_adapter :sidekiq` must name its Redis in config/initializers: \
+                  `Sidekiq.configure_client do |config| config.redis = { url: ... } end`, the URL a String \
+                  literal, ENV[\"NAME\"] or ENV.fetch(\"NAME\"[, \"default\"]); there is no fallback to \
+                  REDIS_PROVIDER, REDIS_URL or localhost";
+    super::prism::push(crate::diagnostic::Diagnostic::unsupported(
+        crate::span::Span::synthetic(),
+        None,
+        "Sidekiq",
+        detail,
+    ));
 }
 
 /// A warning about what ingest reads from the app's Sidekiq settings.

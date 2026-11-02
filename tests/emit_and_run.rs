@@ -7,6 +7,8 @@
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "emit_and_run/controller_content_type_writer.rs"]
+mod controller_content_type_writer;
 #[path = "support/time_change_usec.rs"]
 mod time_change_usec_contract;
 #[path = "emit_and_run/time_change_usec.rs"]

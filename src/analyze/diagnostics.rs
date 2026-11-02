@@ -919,7 +919,13 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
             }
         }
         ExprNode::Send { recv: Some(r), method, .. } => {
-            if !is_unknown_ty(r.ty.as_ref()) && is_unknown_ty(expr.ty.as_ref()) {
+            // A resolved content-type writer can answer an unresolved RHS.
+            // Its result warning is already carried by the typer; it is not
+            // evidence that the receiver lacks the writer.
+            let unresolved_assignment = method.as_str() == "content_type="
+                && matches!(expr.diagnostic(), Some(DiagnosticKind::UnresolvedType { expr_kind, .. })
+                    if expr_kind.as_str() == "assignment result");
+            if !is_unknown_ty(r.ty.as_ref()) && is_unknown_ty(expr.ty.as_ref()) && !unresolved_assignment {
                 let recv_ty = r.ty.clone().unwrap_or_else(|| Ty::Var { var: crate::ident::TyVar(0) });
                 let kind = DiagnosticKind::SendDispatchFailed {
                     method: method.clone(),
