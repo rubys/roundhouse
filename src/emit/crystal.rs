@@ -328,7 +328,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     };
     super::controller_ivars::rename_ivars_shadowing_controller_base(&mut controller_lcs, &runtime_classes_for_typing, |name| {
         vec![name.clone()]
-    }, implied);
+    }, |name| name.clone(), implied);
     let controller_synth: Vec<(String, String)> = controller_lcs
         .iter()
         .filter(|lc| lc.origin.is_some())
