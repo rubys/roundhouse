@@ -1821,8 +1821,9 @@ come from the job's `perform_later` call sites, and
   envelope (`runtime/spinel/sidekiq_push.rb`, `sidekiq_redis.rb`):
   `SADD queues` and `LPUSH queue:<name>`, or `ZADD schedule` for a
   literal `set(wait:)` or `set(wait_until:)` that lands in the future.
-  Redis comes from `Sidekiq.configure_client`'s `url:` and `password:`,
-  then `REDIS_PROVIDER`, then `REDIS_URL`. The connection is one per
+  Redis comes from `Sidekiq.configure_client`'s `url:` and `password:`
+  only: an app on `:sidekiq` without a `url:` there is an error, with
+  no fallback to `REDIS_PROVIDER`, `REDIS_URL` or localhost. The connection is one per
   process, with 1-second connect and read timeouts, and a refused or
   dropped connection, the first one included, is retried once. A job
   held for COMMIT is dropped when an `after_commit` callback raises, as
