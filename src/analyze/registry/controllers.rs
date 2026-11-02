@@ -468,6 +468,10 @@ pub(in crate::analyze) fn register(
         app_ctrl.class_methods.insert(Symbol::from(m), Ty::Nil);
     }
     app_ctrl.class_methods.insert(Symbol::from("response"), Ty::Untyped);
+    // The controller delegates this writer to its response. Its assignment
+    // value is the RHS, which need not have a concrete type yet. Register
+    // the surface without claiming that every assigned value is a String.
+    app_ctrl.instance_methods.insert(Symbol::from("content_type="), Ty::Untyped);
     // The response surface the shared runtime's Base defines on the
     // controller itself: `self.response_body = body` (campfire's
     // MessagesController / CachedResponses) and `media_type`.

@@ -7,6 +7,8 @@
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "emit_and_run/controller_content_type_writer.rs"]
+mod controller_content_type_writer;
 #[path = "support/time_change_usec.rs"]
 mod time_change_usec_contract;
 #[path = "emit_and_run/time_change_usec.rs"]
@@ -28,6 +30,8 @@ mod session_cookie_key;
 mod inertia_runtime_props;
 #[path = "emit_and_run/form_builder_fields.rs"]
 mod form_builder_fields;
+#[path = "emit_and_run/time_tag.rs"]
+mod time_tag;
 #[path = "emit_and_run/multiparameter_params.rs"]
 mod multiparameter_params;
 #[path = "emit_and_run/session_options_key.rs"]
@@ -20603,3 +20607,5 @@ mod csrf_meta_tag_alias;
 
 #[path = "emit_and_run/python_route_format.rs"]
 mod python_route_format;
+#[path = "emit_and_run/boolop_precedence.rs"]
+mod boolop_precedence;

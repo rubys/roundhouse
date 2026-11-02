@@ -59,3 +59,12 @@ require_relative "job_registry"
 require_relative "sidekiq_envelope"
 require_relative "sidekiq_worker"
 
+
+# The app's `Sidekiq.configure_client` `url: ENV["REDIS_URL"]`, as the
+# registry generates it: the worker has no environment fallback of its
+# own.
+module JobRegistry
+  def self.sidekiq_redis_url
+    SidekiqPush.setting("REDIS_URL")
+  end
+end
