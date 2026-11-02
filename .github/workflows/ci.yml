@@ -996,23 +996,9 @@ jobs:
           SPINEL_PG_DIR: ${{ github.workspace }}/spinel-pg
           ROUNDHOUSE_PG_TEST_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
           ROUNDHOUSE_PG_TEST_REQUIRED: "1"
+          CI_SPINEL_TIMINGS: ${{ needs.plan.outputs.spinel-timings }}
           CI_SPINEL_TIMINGS_OUT: ${{ runner.temp }}/spinel-timings/framework-${{ matrix.shard }}.jsonl
-        run: |
-          test -n "$TESTS"
-          status=0
-          for suite in $TESTS; do
-            timed=(python3 scripts/ci-plan.py timed --kind framework --name "$suite" --)
-            case "$suite" in
-              param_binds|param_binds_values|param_binds_cleanup)
-                # These suites also contain JRuby tests, run in compare-jruby.
-                "${timed[@]}" cargo test --test "$suite" -- --ignored --nocapture _spinel || status=1
-                ;;
-              *)
-                "${timed[@]}" cargo test --test "$suite" -- --ignored --nocapture || status=1
-                ;;
-            esac
-          done
-          exit "$status"
+        run: scripts/ci-spinel-framework.sh
       - name: Upload recorded test seconds
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
