@@ -644,12 +644,20 @@ pub mod bundle {
         collect_dir().is_some()
     }
 
-    fn key(overlay: &Overlay, script: &str, flags: &[&str]) -> Option<String> {
-        if overlay.scratch_base {
-            return None;
+    // Not the scratch path itself: an `empty_app` base is a fresh empty dir each time.
+    fn base_tag(overlay: &Overlay) -> Option<String> {
+        if !overlay.scratch_base {
+            return Some(overlay.base.display().to_string());
         }
+        let empty = std::fs::read_dir(&overlay.base).ok()?.next().is_none();
+        empty.then(|| EMPTY.to_string())
+    }
+
+    const EMPTY: &str = "<empty>";
+
+    fn key(overlay: &Overlay, script: &str, flags: &[&str]) -> Option<String> {
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        overlay.base.hash(&mut h);
+        base_tag(overlay)?.hash(&mut h);
         for edit in &overlay.edits {
             match edit {
                 Edit::Write { path, content } => {
@@ -678,7 +686,7 @@ pub mod bundle {
             .collect();
         let case = serde_json::json!({
             "key": key,
-            "base": overlay.base,
+            "base": base_tag(overlay),
             "flags": flags,
             "script": script,
             "edits": edits,
@@ -746,9 +754,27 @@ pub mod bundle {
     }
 
     fn build(cases: &[&Case]) -> Option<PathBuf> {
+        // Not merged blindly: two cases writing one path differently would leave only the last.
+        let mut written: BTreeMap<&str, Option<&[u8]>> = BTreeMap::new();
+        for case in cases {
+            let mut own: BTreeMap<&str, Option<&[u8]>> = BTreeMap::new();
+            for edit in &case.edits {
+                match edit {
+                    Edit::Write { path, content } => own.insert(path.as_str(), Some(content.as_slice())),
+                    Edit::Remove { path } => own.insert(path.as_str(), None),
+                    Edit::Replace { .. } => None,
+                };
+            }
+            for (path, now) in own {
+                if written.insert(path, now).is_some_and(|before| before != now) {
+                    return None;
+                }
+            }
+        }
+        let empty = cases[0].base.as_os_str() == EMPTY;
         let overlay = Overlay {
-            base: cases[0].base.clone(),
-            scratch_base: false,
+            base: if empty { scratch_dir() } else { cases[0].base.clone() },
+            scratch_base: empty,
             edits: cases.iter().flat_map(|c| c.edits.iter().map(clone_edit)).collect(),
         };
         let (emitted, errors) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| overlay.emit_tree(BuildTarget::Spinel))).ok()?;
