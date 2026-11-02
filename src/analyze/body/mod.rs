@@ -2280,6 +2280,19 @@ impl<'a> BodyTyper<'a> {
                 } else {
                     None
                 };
+                // `filter_map` drops the false an `l && r` block answers, so
+                // the result holds only `r`'s values, not the Bool of `l`.
+                // Not an app's own `filter_map`, which may answer the false.
+                let owner_ty = if recv.is_some() { recv_ty.as_ref() } else { ctx.self_ty.as_ref() };
+                let block_ret = match block.as_ref().map(|b| &*b.node) {
+                    Some(ExprNode::Lambda { body, .. })
+                        if method.as_str() == "filter_map"
+                            && !self.owns_operator(owner_ty, method, class_object_receiver) =>
+                    {
+                        filter_map_and_value(body).or(block_ret)
+                    }
+                    _ => block_ret,
+                };
                 if recv_ty.as_ref() == Some(&Ty::Str) && method.as_str() == "bytes"
                     && let Some(b) = block.as_ref()
                     && let ExprNode::Lambda { body, .. } = &*b.node
@@ -6841,6 +6854,64 @@ mod tests {
                 value.ty.is_none(),
                 "{method} block return must not inherit the enclosing Hash return"
             );
+        }
+    }
+}
+
+/// The type a `filter_map` block keeps when its value is `l && r`.
+/// Whatever stops the `&&` is falsy (`nil` or `false`), and
+/// `filter_map` drops it, so only `r`'s type reaches the result. The
+/// caller strips `r`'s nil as for any `filter_map`. `None` when the
+/// block's value is something else, or `r` has no type yet.
+///
+/// Only the `&&` at the block's tail: there `l`'s Bool can only be
+/// `false`. A block answering a plain Bool keeps its `true`s. A value
+/// the block yields by `next` is an element too, so its type joins
+/// `r`'s. A `break` answers the whole call instead, so a block with one
+/// keeps its usual typing.
+fn filter_map_and_value(body: &Expr) -> Option<Ty> {
+    let tail = match &*body.node {
+        ExprNode::Seq { exprs } => exprs.last()?,
+        _ => body,
+    };
+    let ExprNode::BoolOp { op: crate::expr::BoolOpKind::And, right, .. } = &*tail.node else {
+        return None;
+    };
+    let mut yielded = vec![right.ty.clone()?];
+    if !block_exits(body, &mut yielded) {
+        return None;
+    }
+    yielded.into_iter().reduce(union_of)
+}
+
+/// Collect the types of this block's `next` values (a bare `next` is
+/// nil; a literal `next false` adds nothing, since `filter_map` drops
+/// it) into `yielded`, leaving out the blocks and loops inside it,
+/// which own their `next`. `false` on a `break`, or a `next` value with
+/// no type yet.
+fn block_exits(e: &Expr, yielded: &mut Vec<Ty>) -> bool {
+    match &*e.node {
+        ExprNode::Break { .. } => false,
+        ExprNode::Next { value } => match value {
+            None => {
+                yielded.push(Ty::Nil);
+                true
+            }
+            // `filter_map` drops a `next false` as it drops the `&&`'s false: no element
+            Some(v) if matches!(&*v.node, ExprNode::Lit { value: crate::expr::Literal::Bool { value: false } }) => true,
+            Some(v) => match &v.ty {
+                Some(ty) => {
+                    yielded.push(ty.clone());
+                    block_exits(v, yielded)
+                }
+                None => false,
+            },
+        },
+        ExprNode::Lambda { .. } | ExprNode::While { .. } => true,
+        _ => {
+            let mut ok = true;
+            e.node.for_each_child(&mut |child| ok &= block_exits(child, yielded));
+            ok
         }
     }
 }
