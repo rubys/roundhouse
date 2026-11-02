@@ -746,7 +746,7 @@ fn scan_lookup_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
     let mut calls = Vec::new();
     let mut blocked = Vec::new();
     let mut written: Vec<(ClassId, Symbol, Ty)> = Vec::new();
-    let mut merged: Vec<(ClassId, Symbol)> = Vec::new();
+    let mut merged: Vec<(ClassId, Symbol, Ty)> = Vec::new();
     let mut direct: Vec<(ClassId, Symbol)> = Vec::new();
     for controller in controllers {
         let actions: Vec<_> = controller.actions().cloned().collect();
@@ -781,11 +781,10 @@ fn scan_lookup_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
                     })
                 {
                     for (k, v) in entries {
-                        if let (Some(key), Some(ty)) = (literal_key(k), written_ty(v))
+                        if let (Some(key), Some(ty)) = (literal_key(k), v.ty.clone())
                             && !permitted.contains(&key)
                         {
-                            merged.push((class.clone(), key.clone()));
-                            written.push((class.clone(), key, ty));
+                            merged.push((class.clone(), key, ty));
                         }
                     }
                 }
@@ -837,10 +836,15 @@ fn scan_lookup_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
             spec.lookup_blocked = true;
         }
     }
-    for (class, key) in merged.into_iter().filter(|m| !direct.contains(m)) {
-        if let Some(spec) = specs.specs.iter_mut().find(|spec| spec.class_id == class) {
-            spec.merged_only.insert(key);
+    for (class, key, ty) in merged {
+        if !direct.contains(&(class.clone(), key.clone())) {
+            if let Some(spec) = specs.specs.iter_mut().find(|spec| spec.class_id == class) {
+                spec.merged_only.insert(key.clone());
+            }
+        } else if ty.mentions_unknown() {
+            continue;
         }
+        written.push((class, key, ty));
     }
     for (class, key, ty) in written {
         if let Some(spec) = specs.specs.iter_mut().find(|spec| spec.class_id == class) {
