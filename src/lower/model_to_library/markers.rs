@@ -1513,10 +1513,10 @@ fn str_method(model: &Model, name: &str, body: Expr) -> MethodDef {
 /// `attached.rs` already uses for the same reason.
 ///
 /// Rails guards the update hook with `if: :saved_changes?` and skips
-/// the touch when nothing actually changed. This runtime's `save`
-/// issues an unconditional UPDATE, so there is no no-op save to skip
-/// and the guard would never be false — omitted rather than emitted
-/// as a constant true.
+/// the touch when nothing actually changed. The update hook here asks
+/// `_wrote_on_update?`: the ruby-family runtime skips an update with
+/// nothing pending and answers from `saved_changes`; a strict target's
+/// `save` writes the whole row every time and answers true.
 fn push_belongs_to_touches(methods: &mut Vec<MethodDef>, model: &Model) {
     for assoc in model.associations() {
         let crate::dialect::Association::BelongsTo { name, touch: Some(touch), .. } = assoc else {
@@ -1615,7 +1615,29 @@ fn push_belongs_to_touches(methods: &mut Vec<MethodDef>, model: &Model) {
         );
 
         for hook in ["after_create", "after_update", "after_destroy", "after_touch"] {
-            fold_into_or_push(methods, model, hook, seq(vec![bind.clone(), stmt.clone()]));
+            let body = seq(vec![bind.clone(), stmt.clone()]);
+            let body = if hook == "after_update" {
+                Expr::new(
+                    span,
+                    ExprNode::If {
+                        cond: Expr::new(
+                            span,
+                            ExprNode::Send {
+                                recv: None,
+                                method: Symbol::from("_wrote_on_update?"),
+                                args: vec![],
+                                block: None,
+                                parenthesized: false,
+                            },
+                        ),
+                        then_branch: body,
+                        else_branch: Expr::new(span, ExprNode::Lit { value: Literal::Nil }),
+                    },
+                )
+            } else {
+                body
+            };
+            fold_into_or_push(methods, model, hook, body);
         }
     }
 }

@@ -519,6 +519,12 @@ module ActiveRecord
       !saved_changes.empty?
     end
 
+    # See base.rb: an update with nothing pending wrote nothing, so the
+    # parent a `belongs_to …, touch: true` names is left alone.
+    def _wrote_on_update?
+      saved_changes?
+    end
+
     # Rails' `attribute_in_database`: the stored value, before any change
     # pending on this record. The changes are String-keyed; Rails takes a
     # Symbol as well.
@@ -2036,12 +2042,22 @@ module ActiveRecord
       true
     end
 
+    # The partial UPDATE writes every pending column (the one the call
+    # site assigned among them), so afterwards none of them is pending:
+    # the baseline moves to what was written. Left behind, a later
+    # assignment back to the old value (campfire's `decrement!` after an
+    # `increment!`) would match the stale baseline and never be written.
     def touch_written
       _raise_readonly_record_error if readonly?
       self.class.transaction do
         fill_timestamps(false)
         _adapter_update
-        _note_touched
+        if @__last_saved_attributes.nil?
+          _note_touched
+        else
+          @__last_saved_attributes = _attributes_snapshot
+          @__touched_updated_at = nil
+        end
         after_touch
         _save_committed(false)
       end
@@ -2253,7 +2269,7 @@ module ActiveRecord
         prev = previous.nil? ? nil : previous[key]
         changes[key] = [prev, value] if prev != value
       end
-      @__last_saved_attributes = current
+      @__last_saved_attributes = _attributes_snapshot
       @__touched_updated_at = nil
       @saved_changes = changes
       @id_previously_changed = was_new
@@ -2280,8 +2296,22 @@ module ActiveRecord
       pair.nil? ? nil : pair[0]
     end
 
+    # The Dirty baseline: `attributes` with each Array value copied.
+    # `attributes` hands back the record's own Array for an array
+    # column, so a baseline holding it would follow `labels << "z"` and
+    # the append would never read as pending; partial writes would
+    # then leave it out of the UPDATE. A JSON column decodes a fresh
+    # value on every read, so it needs no copy.
+    def _attributes_snapshot
+      snap = {}
+      attributes.each do |key, value|
+        snap[key] = value.is_a?(Array) ? value.dup : value
+      end
+      snap
+    end
+
     def _note_hydrated
-      @__last_saved_attributes = attributes
+      @__last_saved_attributes = _attributes_snapshot
       @__touched_updated_at = nil
       nil
     end
@@ -2357,7 +2387,8 @@ module ActiveRecord
     def clear_attribute_change(name)
       baseline = @__last_saved_attributes
       baseline = baseline.nil? ? {} : baseline.dup
-      baseline[name] = attributes[name]
+      value = attributes[name]
+      baseline[name] = value.is_a?(Array) ? value.dup : value
       @__last_saved_attributes = baseline
       @__touched_updated_at = nil if name == "updated_at"
       nil

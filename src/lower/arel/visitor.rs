@@ -963,10 +963,12 @@ fn visit_update(upd: &Update, schema: &Schema) -> Expr {
 /// UPDATE sets only the columns named in `cols` (an `Array[String]`
 /// local the caller assigns), and runs nothing when none is named.
 ///
-///     sets = ""
-///     sets = sets + ", name = " + Db.escape_string_opt(@name) if cols.include?("name")
-///     …
-///     Db.exec("UPDATE t SET " + sets[2, sets.length - 2] + " WHERE …") unless sets.empty?
+/// ```ruby
+/// sets = ""
+/// sets = sets + ", name = " + Db.escape_string_opt(@name) if cols.include?("name")
+/// # …one line per column…
+/// Db.exec("UPDATE t SET " + sets[2, sets.length - 2] + " WHERE …") unless sets.empty?
+/// ```
 ///
 /// `sets` grows by `+`, never `<<`: a String mutated in place through a
 /// second name is a shape Spinel refuses.

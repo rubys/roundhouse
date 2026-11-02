@@ -97,6 +97,8 @@ module ActiveRecord
     def write_attribute: (Symbol name, untyped value) -> untyped
     def slice: (*(Symbol | String | Array[Symbol | String]) names) -> Hash[String, untyped]
     def saved_changes?: () -> bool
+    def _wrote_on_update?: () -> bool
+    def _attributes_snapshot: () -> Hash[String, untyped]
     def attribute_in_database: (Symbol | String name) -> untyped
     def self.schema_column_types: () -> Hash[Symbol, Symbol]
     def self.type_for_attribute: (String name) -> ActiveRecord::Type::Value
