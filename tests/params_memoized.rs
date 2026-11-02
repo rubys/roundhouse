@@ -166,13 +166,14 @@ end
 "#))
 }
 
-fn create_item(modes: &[&str], name: &str) -> String {
+fn create_item(names: &[(&str, &str)]) -> String {
+    let names = names.iter().map(|(mode, name)| format!("{mode:?} => {name:?}")).collect::<Vec<_>>().join(", ");
     format!(r##"require "json"
 require "stringio"
-{modes:?}.each do |mode|
+{{ {names} }}.each do |mode, name|
   input = JSON.generate("mode" => mode, "item" => {{ "name" => "provided", "ignored" => "removed" }})
   status, _, body = Main.run_rack("REQUEST_METHOD" => "POST", "PATH_INFO" => "/items", "QUERY_STRING" => "", "CONTENT_TYPE" => "application/json", "CONTENT_LENGTH" => input.bytesize.to_s, "rack.input" => StringIO.new(input))
-  raise "#{{mode}}: #{{status}} #{{body.inspect}}" unless status == 200 && JSON.parse(body.join) == {{ "name" => {name:?} }}
+  raise "#{{mode}}: #{{status}} #{{body.inspect}}" unless status == 200 && JSON.parse(body.join) == {{ "name" => name }}
 end
 puts "PASS"
 "##)
@@ -198,7 +199,7 @@ fn helpers_returning_permit_filters_construct_models_through_the_params_factory(
     @item_params ||= params.expect(item: [:name])
   end"#,
     ] {
-        let run = model_app(helper).run_ruby(&create_item(&["first", "second"], "provided"));
+        let run = model_app(helper).run_ruby(&create_item(&[("first", "provided"), ("second", "provided")]));
         run.assert_passes();
         let controller = emitted_controller(&run.emitted);
         assert!(controller.contains("Item.from_params(self.item_params)"), "{controller}");
@@ -263,7 +264,77 @@ fn filters_outside_returned_values_leave_hash_helpers_on_the_model_constructor()
     end
   end"#,
     ] {
-        let run = model_app(helper).run_ruby(&create_item(&["raw"], "kept"));
+        let run = model_app(helper).run_ruby(&create_item(&[("raw", "kept")]));
+        run.assert_passes();
+        let controller = emitted_controller(&run.emitted);
+        assert!(controller.contains("Item.new(self.item_params)"), "{controller}");
+    }
+}
+
+#[test]
+fn helpers_returning_a_hash_on_one_path_and_a_filter_on_another_keep_the_model_constructor() {
+    for helper in [
+        r#"  def item_params
+    case params[:mode]
+    when "raw"
+      { name: "kept" }
+    else
+      params.require(:item).permit(:name)
+    end
+  end"#,
+        r#"  def item_params
+    case params[:mode]
+    when "raw"
+      values = { name: "kept" }
+    else
+      values = params.require(:item).permit(:name)
+    end
+    values
+  end"#,
+        r#"  def item_params
+    if params[:mode] == "raw"
+      { name: "kept" }
+    else
+      params.expect(item: [:name])
+    end
+  end"#,
+        r#"  def item_params
+    if params[:mode] == "raw"
+      values = { name: "kept" }
+    else
+      values = params.expect(item: [:name])
+    end
+    values
+  end"#,
+    ] {
+        let run = model_app(helper).run_ruby(&create_item(&[("raw", "kept"), ("filtered", "provided")]));
+        run.assert_passes();
+        let controller = emitted_controller(&run.emitted);
+        assert!(controller.contains("Item.new(self.item_params)"), "{controller}");
+    }
+}
+
+#[test]
+fn filters_returned_through_other_calls_keep_the_model_constructor() {
+    for helper in [
+        r#"  def item_params
+    params.require(:item).permit(:name).tap { |values| values }
+  end"#,
+        r#"  def item_params
+    same(params.require(:item).permit(:name))
+  end
+
+  def same(values)
+    values
+  end"#,
+        r#"  def item_params
+    [1].map { params.require(:item).permit(:name) }.first
+  end"#,
+        r#"  def item_params
+    { name: params.require(:item).permit(:name)[:name] }
+  end"#,
+    ] {
+        let run = model_app(helper).run_ruby(&create_item(&[("any", "provided")]));
         run.assert_passes();
         let controller = emitted_controller(&run.emitted);
         assert!(controller.contains("Item.new(self.item_params)"), "{controller}");

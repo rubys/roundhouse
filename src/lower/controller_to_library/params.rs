@@ -1301,8 +1301,8 @@ pub fn model_assign_name(spec: &ParamsSpec) -> Symbol {
     Symbol::from(format!("assign_from_{}", crate::naming::snake_case(spec.class_id.0.as_str())))
 }
 
-/// First permit list among the values `body` can return — the way a
-/// `<resource>_params` helper body names its spec. Not the collector's
+/// The permit list a `<resource>_params` helper returns: the first one,
+/// when every value `body` can return is a permit. Not the collector's
 /// walk: it also reaches a permit in a condition, pattern, rescue list,
 /// loop or lambda, which the helper does not return.
 pub fn first_permit_in(body: &Expr) -> Option<(Symbol, Vec<Symbol>, Vec<String>)> {
@@ -1313,35 +1313,31 @@ pub fn first_permit_in(body: &Expr) -> Option<(Symbol, Vec<Symbol>, Vec<String>)
         }
     });
     returned.push(body);
-    returned.into_iter().find_map(|value| first_permit_at(value, body, &mut Vec::new()))
+    let mut permits = Vec::new();
+    let only_permits = returned.into_iter().all(|value| collect_returned_permits(value, body, &mut Vec::new(), &mut permits));
+    if only_permits { permits.into_iter().next() } else { None }
 }
 
-fn first_permit_at(expr: &Expr, body: &Expr, followed: &mut Vec<Symbol>) -> Option<(Symbol, Vec<Symbol>, Vec<String>)> {
+/// Push the permit list of each value `expr` can evaluate to, or answer
+/// false when one of them is not a permit. A local read resolves to the
+/// values `body` writes to that local.
+fn collect_returned_permits<'a>(
+    expr: &'a Expr,
+    body: &'a Expr,
+    resolving: &mut Vec<Symbol>,
+    permits: &mut Vec<(Symbol, Vec<Symbol>, Vec<String>)>,
+) -> bool {
     if let Some((resource, fields, _)) = match_reverse_merge(expr) {
-        return Some((resource, fields, nested_signature(expr)));
+        permits.push((resource, fields, nested_signature(expr)));
+        return true;
     }
     if let Some((resource, fields)) = match_permit_call(expr) {
-        return Some((resource, fields, nested_signature(expr)));
+        permits.push((resource, fields, nested_signature(expr)));
+        return true;
     }
-    value_sources(expr, body, followed).into_iter().find_map(|source| first_permit_at(source, body, followed))
-}
-
-/// The expressions `expr` evaluates to. A local read resolves to the
-/// values `body` writes to that local.
-fn value_sources<'a>(expr: &'a Expr, body: &'a Expr, followed: &mut Vec<Symbol>) -> Vec<&'a Expr> {
-    match &*expr.node {
-        ExprNode::Seq { exprs } => exprs.last().into_iter().collect(),
-        ExprNode::If { then_branch, else_branch, .. } => vec![then_branch, else_branch],
-        ExprNode::Case { arms, .. } => arms.iter().map(|arm| &arm.body).collect(),
-        ExprNode::CaseMatch { arms, else_body, .. } => arms.iter().map(|arm| &arm.body).chain(else_body).collect(),
-        ExprNode::BeginRescue { body: begun, rescues, else_branch, .. } => std::iter::once(else_branch.as_ref().unwrap_or(begun))
-            .chain(rescues.iter().map(|rescue| &rescue.body))
-            .collect(),
-        ExprNode::Assign { value, .. } | ExprNode::OpAssign { value, .. } | ExprNode::Return { value } => vec![value],
-        ExprNode::BoolOp { left, right, .. } | ExprNode::RescueModifier { expr: left, fallback: right } => vec![left, right],
-        ExprNode::Send { recv: Some(recv), method, .. } if method.as_str() == "except" => vec![recv],
-        ExprNode::Var { name, .. } if !followed.contains(name) => {
-            followed.push(name.clone());
+    let sources: Vec<&Expr> = match &*expr.node {
+        ExprNode::Var { name, .. } if resolving.contains(name) => return true,
+        ExprNode::Var { name, .. } => {
             let mut written = Vec::new();
             for_each_outside_lambdas(body, &mut |e| match &*e.node {
                 ExprNode::Assign { target: LValue::Var { name: target, .. }, value }
@@ -1349,10 +1345,27 @@ fn value_sources<'a>(expr: &'a Expr, body: &'a Expr, followed: &mut Vec<Symbol>)
                     if target == name => written.push(value),
                 _ => {}
             });
-            written
+            resolving.push(name.clone());
+            let only_permits = !written.is_empty()
+                && written.into_iter().all(|value| collect_returned_permits(value, body, resolving, permits));
+            resolving.pop();
+            return only_permits;
         }
+        ExprNode::Seq { exprs } => exprs.last().into_iter().collect(),
+        ExprNode::If { then_branch, else_branch, .. } => vec![then_branch, else_branch],
+        ExprNode::Case { arms, .. } if arms.iter().any(|arm| matches!(arm.pattern, Pattern::Wildcard)) => {
+            arms.iter().map(|arm| &arm.body).collect()
+        }
+        ExprNode::CaseMatch { arms, else_body, .. } => arms.iter().map(|arm| &arm.body).chain(else_body).collect(),
+        ExprNode::BeginRescue { body: begun, rescues, else_branch, .. } => std::iter::once(else_branch.as_ref().unwrap_or(begun))
+            .chain(rescues.iter().map(|rescue| &rescue.body))
+            .collect(),
+        ExprNode::Assign { value, .. } | ExprNode::OpAssign { value, .. } | ExprNode::Return { value } => vec![value],
+        ExprNode::BoolOp { left, right, .. } | ExprNode::RescueModifier { expr: left, fallback: right } => vec![left, right],
+        ExprNode::Send { recv: Some(recv), method, .. } if method.as_str() == "except" => vec![recv],
         _ => Vec::new(),
-    }
+    };
+    !sources.is_empty() && sources.into_iter().all(|source| collect_returned_permits(source, body, resolving, permits))
 }
 
 fn for_each_outside_lambdas<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
