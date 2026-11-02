@@ -627,7 +627,9 @@ pub(crate) fn tzinfo_reads(app: &App) -> Vec<Span> {
             }
         }
     }
-    super::for_each_hook_body_ref(app, &mut |body| visit(body, &mut out));
+    // Association scopes too (`has_many :x, -> { … }`), which the hook
+    // walk leaves out.
+    super::for_each_emit_body_ref(app, &mut |body| visit(body, &mut out));
     out.sort_by_key(|s| (s.file.0, s.start));
     out.dedup();
     out
@@ -636,7 +638,7 @@ pub(crate) fn tzinfo_reads(app: &App) -> Vec<Span> {
 fn is_time_zone_send(e: &Expr) -> bool {
     matches!(&*e.node,
         ExprNode::Send { recv: Some(z), method, args, block: None, .. }
-            if method.as_str() == "zone" && args.is_empty() && is_time_const(z))
+            if method.as_str() == "zone" && args.is_empty() && is_root_time_const(z))
 }
 
 // Not every `Time`-typed receiver: the `Time` constant and `Time.zone` flatten onto the same type as a Time value.

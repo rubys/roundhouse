@@ -130,3 +130,60 @@ fn a_time_zone_tzinfo_read_alone_is_refused_off_the_ruby_family() {
         assert!(errors.iter().any(|e| e.contains("tzinfo not supported")), "{target:?}: {errors:?}");
     }
 }
+
+/// A rooted `::Time.zone.tzinfo` is `Time.zone.tzinfo`: grounded on the
+/// ruby family and refused off it (review, time_calendar.rs:77).
+#[test]
+fn a_rooted_time_zone_tzinfo_is_grounded_and_refused_off_the_ruby_family() {
+    use roundhouse::project::BuildTarget;
+    let rooted = || {
+        emit_and_run::real_blog().edit(
+            "app/views/articles/_form.html.erb",
+            "    <%= form.label :body %>\n",
+            "    <p id=\"zone\"><%= ::Time.zone.tzinfo.name %></p>\n    <%= form.label :body %>\n",
+        )
+    };
+    let (emitted, errors) = rooted().emit(BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:?}");
+    let form = std::fs::read_to_string(emitted.join("app/views/articles/_form.rb")).unwrap();
+    assert!(form.contains("current_tzinfo"), "{form}");
+    for target in [BuildTarget::Typescript, BuildTarget::Go] {
+        let (_, errors) = rooted().emit(target);
+        assert!(errors.iter().any(|e| e.contains("tzinfo not supported")), "{target:?}: {errors:?}");
+    }
+}
+
+/// An association scope's `Time.zone.tzinfo` is refused off the ruby
+/// family like any other (review, time_calendar.rs:630).
+#[test]
+fn a_tzinfo_read_in_an_association_scope_is_refused_off_the_ruby_family() {
+    let (_, errors) = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "has_many :comments, dependent: :destroy",
+            "has_many :comments, -> { where(body: Time.zone.tzinfo.name) }, dependent: :destroy",
+        )
+        .emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.iter().any(|e| e.contains("tzinfo not supported")), "{errors:?}");
+}
+
+/// `collect` is `map` where its block makes `[text, value]` pairs; a block
+/// answering one value per element keeps the scalar loop, and one taking
+/// two parameters isn't expanded with only the first bound (review,
+/// form_builder.rs:549 and :737).
+#[test]
+fn a_select_over_collect_renders_as_rails_does() {
+    let app = emit_and_run::real_blog().edit(
+        "app/views/articles/_form.html.erb",
+        "    <%= form.label :body %>\n",
+        concat!(
+            "    <%= form.select :title, [\"a\", \"b\"].collect { |x| x.upcase } %>\n",
+            "    <%= form.select :body, { \"Kay\" => \"k\", \"Vee\" => \"v\" }.collect { |key, value| [key, value] } %>\n",
+            "    <%= form.label :body %>\n",
+        ),
+    );
+    let test = "require \"test_helper\"\n\nclass CollectSelectControllerTest < ActionDispatch::IntegrationTest\n  test \"options\" do\n    get new_article_url\n    assert_response :success\n    assert_select \"select[name='article[title]'] option[value=A]\", \"A\"\n    assert_select \"select[name='article[title]'] option[value=B]\", \"B\"\n    assert_select \"select[name='article[body]'] option[value=k]\", \"Kay\"\n    assert_select \"select[name='article[body]'] option[value=v]\", \"Vee\"\n  end\nend\n";
+    app.write("test/controllers/collect_select_controller_test.rb", test)
+        .run_test("test/controllers/collect_select_controller_test.rb")
+        .assert_passes();
+}
