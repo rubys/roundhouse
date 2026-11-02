@@ -307,6 +307,8 @@ module Tep
           # frame when it shared the request's recv.
           begin
             conn.run(input.take_pending_input)
+          rescue StandardError, ScriptError => e
+            Tep.log_dispatch_error(req.verb, req.path, e)
           ensure
             res.ws_driver.retire
           end

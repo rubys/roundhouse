@@ -7,6 +7,7 @@
 # is spawned before the previous one's dead slot has reached the tail,
 # where tick's reclaim could see it.
 class Module
+  def ffi_lib(*); end
   def ffi_func(*); end
 end
 

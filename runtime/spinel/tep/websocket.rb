@@ -5,21 +5,19 @@
 #   - Tep::WebSocket::Frame      single-frame codec (parse + emit)
 #   - Tep::WebSocket::Handshake  server-side handshake check + response
 #   - Tep::WebSocket::Driver     state machine + event dispatch + writers
-#   - Tep::WebSocket::Connection fiber-driven recv loop (one fiber per conn)
+#   - Tep::WebSocket::Connection green-thread recv loop (one per connection)
 #
-# Sinatra-style DSL (lowered by bin/tep):
+# Handler shape (with TEP_SERVER=thread):
 #
-#     set :scheduler, :scheduled
 #     websocket '/chat' do |ws|
 #       on_open    { |evt| ws.text("welcome") }
 #       on_message { |evt| ws.text("echo: " + evt.data) }
 #       on_close   { |evt| ... }
 #     end
 #
-# Requires the scheduled server (the recv loop parks on
-# Tep::Scheduler.io_wait); the blocking server returns 501 on a WS
-# upgrade attempt. See examples/websocket_echo.rb for a full app and
-# test/test_websocket_echo.rb for the end-to-end smoke harness.
+# Requires TEP_SERVER=thread: the receive loop parks on IO#wait_readable.
+# The scheduled server refuses upgrades with 501 because this loop would
+# block its scheduler; the blocking server has no upgrade implementation.
 #
 # Compliance posture (per the OriPekelman/tep#8 strict/lenient table):
 #   strict-emit: server NEVER masks; reserved bits 0 on emit
