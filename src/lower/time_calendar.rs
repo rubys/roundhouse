@@ -68,15 +68,20 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     };
     if is_time_zone_send(r) && args.is_empty() {
         let today = || time_expr(active_support_call("beginning_of_day", vec![now()]));
+        let is_tzinfo = method.as_str() == "tzinfo";
         let grounded = match method.as_str() {
             "now" => active_support_call("now", vec![]),
             "today" => active_support_call("beginning_of_day", vec![now()]),
             "yesterday" => active_support_call("yesterday", vec![today()]),
             "tomorrow" => active_support_call("tomorrow", vec![today()]),
+            "tzinfo" => active_support_call("current_tzinfo", vec![]),
             _ => return,
         };
         *expr.node = grounded;
-        expr.ty = Some(Ty::Time);
+        // `Time.zone.tzinfo` keeps the TimeZoneInfo type analysis gave it.
+        if !is_tzinfo {
+            expr.ty = Some(Ty::Time);
+        }
         return;
     }
     // Rails `Date.current` / `Date.yesterday` / `Date.tomorrow` — class-side.
@@ -591,10 +596,49 @@ fn is_date_const(e: &Expr) -> bool {
         && path.iter().rev().skip(1).all(|s| s.as_str().is_empty()))
 }
 
+/// Every `tz.tzinfo` and `Time.zone.tzinfo` the app makes, in its views,
+/// controllers, models and library classes. `ActiveSupport::TimeZone`
+/// and `TimeZoneInfo` are ruby-family runtime classes, so
+/// `project::report_tzinfo_reads` refuses these on the other targets.
+pub(crate) fn tzinfo_reads(app: &App) -> Vec<Span> {
+    fn visit(e: &Expr, out: &mut Vec<Span>) {
+        if let ExprNode::Send { recv: Some(r), method, args, .. } = &*e.node
+            && !e.span.is_synthetic()
+            && ((method.as_str() == "tzinfo"
+                && (is_time_zone_send(r)
+                    || matches!(&r.ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveSupport::TimeZone")))
+                // `Time.zone.tzinfo` as this pass grounds it, which keeps the call's span.
+                || (method.as_str() == "current_tzinfo"
+                    && args.is_empty()
+                    && matches!(&*r.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "ActiveSupport")))
+        {
+            out.push(e.span);
+        }
+        e.node.for_each_child(&mut |c| visit(c, out));
+    }
+    let mut out = Vec::new();
+    for view in &app.views {
+        visit(&view.body, &mut out);
+    }
+    for controller in &app.controllers {
+        for item in &controller.body {
+            if let crate::dialect::ControllerBodyItem::Action { action, .. } = item {
+                visit(&action.body, &mut out);
+            }
+        }
+    }
+    // Association scopes too (`has_many :x, -> { … }`), which the hook
+    // walk leaves out.
+    super::for_each_emit_body_ref(app, &mut |body| visit(body, &mut out));
+    out.sort_by_key(|s| (s.file.0, s.start));
+    out.dedup();
+    out
+}
+
 fn is_time_zone_send(e: &Expr) -> bool {
     matches!(&*e.node,
         ExprNode::Send { recv: Some(z), method, args, block: None, .. }
-            if method.as_str() == "zone" && args.is_empty() && is_time_const(z))
+            if method.as_str() == "zone" && args.is_empty() && is_root_time_const(z))
 }
 
 // Not every `Time`-typed receiver: the `Time` constant and `Time.zone` flatten onto the same type as a Time value.

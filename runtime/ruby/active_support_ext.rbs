@@ -158,7 +158,14 @@ module ActiveSupport
     def formatted_offset: () -> String
     def to_s: () -> String
     def now: () -> Time
+    def tzinfo: () -> TimeZoneInfo
   end
+  class TimeZoneInfo
+    def name: () -> String
+    def initialize: (String name) -> void
+    def identifier: () -> String
+  end
+  def self.current_tzinfo: () -> TimeZoneInfo
   def self.parse_tz_rule: (String spec) -> Array[Integer]
   def self.posix_seconds: (String text) -> Integer
   DEFAULT_ZONE: Array[TimeZoneData]

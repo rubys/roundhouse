@@ -551,27 +551,21 @@ fn emit_select_options(
                 map_loop_options(&container, selected.as_ref(), multiple, field_str, blank, ctx)?;
             Some((setup, loop_var))
         }
+        // `collect`, its alias: the pairs as `map`'s; a block answering one
+        // value per element falls to the scalar loop below, and one taking
+        // other than one parameter to the general fallback.
+        ExprNode::Send { method, block: Some(block), .. } if method.as_str() == "collect" => {
+            if let Some(found) = map_loop_options(&container, selected.as_ref(), multiple, field_str, blank.clone(), ctx) {
+                return Some(found);
+            }
+            if !matches!(&*block.node, ExprNode::Lambda { params, extra_params, .. } if params.len() == 1 && extra_params.is_empty()) {
+                return None;
+            }
+            Some(scalar_select_loop(&container, selected.as_ref(), multiple, field_str, blank, ctx))
+        }
         // Any other container expr — flat scalar loop (the corpus:
         // `@moderators`, `Category.pluck(:category)` — plain strings).
-        _ => {
-            let el = Symbol::from("_choice");
-            let el_ref = Expr::new(
-                Span::synthetic(),
-                ExprNode::Var { id: VarId(0), name: el.clone() },
-            );
-            let mut option = Vec::new();
-            push_dynamic_option(
-                &mut option,
-                to_s(el_ref.clone()),
-                to_s(el_ref),
-                &[],
-                selected.as_ref(),
-                multiple,
-            );
-            let (setup, var) =
-                each_loop(&container, el, string_interp(option), field_str, blank, ctx);
-            Some((setup, var))
-        }
+        _ => Some(scalar_select_loop(&container, selected.as_ref(), multiple, field_str, blank, ctx)),
     }
 }
 
@@ -717,7 +711,24 @@ fn collection_options(
     Some((setup, var))
 }
 
-/// `<coll>.map { |x| [text, value] / [text, {attrs}, value] }` — loop
+/// One `<option>` per element of `container`, its `to_s` as text and value.
+fn scalar_select_loop(
+    container: &Expr,
+    selected: Option<&Expr>,
+    multiple: bool,
+    field_str: &str,
+    blank: Vec<InterpPart>,
+    ctx: &ViewCtx,
+) -> (Vec<Expr>, Expr) {
+    let el = Symbol::from("_choice");
+    let el_ref = Expr::new(Span::synthetic(), ExprNode::Var { id: VarId(0), name: el.clone() });
+    let mut option = Vec::new();
+    push_dynamic_option(&mut option, to_s(el_ref.clone()), to_s(el_ref), &[], selected, multiple);
+    each_loop(container, el, string_interp(option), field_str, blank, ctx)
+}
+
+/// `<coll>.map { |x| [text, value] / [text, {attrs}, value] }` (or
+/// `collect`) — loop
 /// over the map SOURCE with the lambda's element exprs inlined (the
 /// loop rebinds the lambda's own param name, so the exprs read it
 /// directly).
@@ -733,11 +744,12 @@ fn map_loop_options(
     else {
         return None;
     };
-    if method.as_str() != "map" {
+    if !matches!(method.as_str(), "map" | "collect") {
         return None;
     }
     let ExprNode::Lambda { extra_params, params, body, .. } = &*block.node else { return None };
-    if !extra_params.is_empty() {
+    // One element parameter: the loop binds only that one.
+    if !extra_params.is_empty() || params.len() != 1 {
         return None;
     }
     let el = params.first().cloned()?;

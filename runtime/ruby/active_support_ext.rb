@@ -1693,5 +1693,36 @@ module ActiveSupport
       t = Time.now
       ActiveSupport.present_in_zone(t, @data)
     end
+
+    # Rails' `TimeZone#tzinfo` is the zone's TZInfo::Timezone; this
+    # models only its IANA identifier (`TimeZoneInfo`).
+    def tzinfo
+      TimeZoneInfo.new(ZONE_NAMES[@name] || @name)
+    end
+  end
+
+  # The part of a TZInfo::Timezone the runtime answers: `name` and
+  # `identifier`, both the IANA identifier ("Asia/Tokyo" for Rails'
+  # "Tokyo"). TZInfo's `to_s` ("Asia - Tokyo") and the period and offset
+  # methods are not modeled.
+  class TimeZoneInfo
+    attr_reader :name
+
+    def initialize(name)
+      @name = name
+    end
+
+    def identifier
+      @name
+    end
+  end
+
+  # `Time.zone.tzinfo`: the configured zone's identifier. The default
+  # zone is named as configured ("UTC") or by its IANA identifier, which
+  # ZONE_NAMES passes through.
+  def self.current_tzinfo
+    zone = current_zone
+    name = zone.nil? ? "UTC" : zone.name
+    TimeZoneInfo.new(ZONE_NAMES[name] || name)
   end
 end
