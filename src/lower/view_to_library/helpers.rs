@@ -821,6 +821,18 @@ fn emit_url_arg(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
     {
         return Some(route_helpers_call("rails_blob_path", vec![rewrite_helpers_in_expr(url, ctx)]));
     }
+    // The `active_storage/blobs/_blob` override's own record local, which
+    // stays untyped (`record_arg_ty`): a Blob from the app's own render,
+    // or Action Text's Attachment, which answers `blob` as Rails' delegates
+    // to it. Either links to the blob's redirect route.
+    let is_record_local = match &*url.node {
+        ExprNode::Var { name, .. } => name.as_str() == ctx.arg_name,
+        ExprNode::Send { recv: None, method, args, .. } => args.is_empty() && method.as_str() == ctx.arg_name,
+        _ => false,
+    };
+    if ctx.resource_dir == "active_storage/blobs" && !ctx.arg_name.is_empty() && is_record_local {
+        return Some(route_helpers_call("rails_blob_path", vec![rewrite_helpers_in_expr(url, ctx)]));
+    }
     // A read `case_class_narrow` pinned to a model (`ma.item` inside
     // `when ModMail`) links through that model's route.
     if let ExprNode::Cast { target_ty: crate::ty::Ty::Class { id, .. }, .. } = &*url.node {

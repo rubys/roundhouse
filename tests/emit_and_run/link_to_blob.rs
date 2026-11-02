@@ -120,3 +120,18 @@ fn a_blob_links_to_its_redirect_route_on_spinel() {
         .assert_passes();
 }
 
+
+/// Action Text renders an app's `_blob` partial with the attachment
+/// (`render_attachment`'s `ActiveStorage::Blob` arm passes it as `blob`),
+/// so the partial's record isn't typed `ActiveStorage::Blob`: campfire's
+/// Spinel build refused `runtime/action_text.rb` handing it an
+/// `ActionText::Attachment` there.
+#[test]
+fn the_blob_partial_takes_action_texts_attachment() {
+    let (out, errors) = app().emit(roundhouse::project::BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:?}");
+    let runtime = std::fs::read_to_string(out.join("runtime/action_text.rb")).unwrap();
+    assert!(runtime.contains("Views::ActiveStorage::Blobs.blob(attachment)"), "{runtime}");
+    let sig = std::fs::read_to_string(out.join("app/views/active_storage/blobs/_blob.rbs")).unwrap();
+    assert!(!sig.contains("ActiveStorage::Blob blob"), "{sig}");
+}
