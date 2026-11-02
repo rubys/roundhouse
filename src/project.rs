@@ -6431,7 +6431,9 @@ fn apply_database_pragmas(files: &mut [(String, String)], app: &App) {
 /// ActiveJob jobs at all (Mastodon's are native Sidekiq workers), gets
 /// no Redis client and no dependency.
 pub(crate) fn needs_redis(app: &App) -> bool {
-    app.queue_adapter.as_deref() == Some("sidekiq") && app.job_plans.iter().any(|p| p.is_payload())
+    app.queue_adapter.as_deref() == Some("sidekiq")
+        && (app.job_plans.iter().any(|p| p.is_payload())
+            || !crate::lower::broadcast_job::models(app).is_empty())
 }
 
 /// The `JobRegistry.sidekiq?` body `apply_job_registry` writes for a tree
@@ -6557,7 +6559,11 @@ fn apply_job_registry(files: &mut [(String, String)], app: &App) {
     let redis = format!("{redis}{}", cable_redis_source(app));
     let generated = format!(
         "{HEAD}{}\n{flag}{redis}{TAIL}",
-        crate::lower::job_payload::registry_source(&app.job_plans, needs_redis(app))
+        crate::lower::job_payload::registry_source_with_broadcasts(
+            &app.job_plans,
+            needs_redis(app),
+            &crate::lower::broadcast_job::models(app),
+        )
     );
     for (path, content) in files.iter_mut() {
         if !path.ends_with("job_registry.rb") {
