@@ -26,12 +26,16 @@ const ENQUEUE: &str = r##"  validates :title, presence: true
 "##;
 
 const SIDEKIQ: &str = "  config.active_job.queue_adapter = :sidekiq\n";
+/// The `Sidekiq.configure_client` an app on `:sidekiq` must have: ingest
+/// refuses one without a `url:`.
+const REDIS_CLIENT: &str = "Sidekiq.configure_client do |config|\n  config.redis = { url: ENV.fetch(\"REDIS_URL\", \"redis://localhost:6379/0\") }\nend\n";
 
 fn on_sidekiq() -> emit_and_run::Overlay {
     emit_and_run::real_blog()
         .write("app/jobs/article_job.rb", JOB)
         .edit("app/models/article.rb", "  validates :title, presence: true\n", ENQUEUE)
         .edit("config/environments/production.rb", "  config.active_job.queue_adapter = :solid_queue\n", SIDEKIQ)
+        .write("config/initializers/sidekiq.rb", REDIS_CLIENT)
 }
 
 fn read(emitted: &std::path::Path, path: &str) -> String {
@@ -159,6 +163,7 @@ fn the_worker_role_runs_the_apps_jobs() {
 fn an_app_on_sidekiq_with_no_jobs_gets_no_redis() {
     let (emitted, errors) = emit_and_run::real_blog()
         .edit("config/environments/production.rb", "  config.active_job.queue_adapter = :solid_queue\n", SIDEKIQ)
+        .write("config/initializers/sidekiq.rb", REDIS_CLIENT)
         .emit(BuildTarget::Spinel);
     assert!(errors.is_empty(), "{errors:#?}");
     assert!(read(&emitted, "runtime/sidekiq_redis.rb").contains("this tree has no Redis client"));
@@ -179,7 +184,8 @@ const COMMIT_CALLBACK: &str = r#"  validates :title, presence: true
   end
 "#;
 
-const FAILED_PUSH_SCRIPT: &str = r#"SidekiqRedis.define_singleton_method(:push) { |_url, _queue, _json| raise "redis down" }
+const FAILED_PUSH_SCRIPT: &str = r#"JobRegistry.define_singleton_method(:sidekiq_redis_url) { "redis://localhost:6379/0" }
+SidekiqRedis.define_singleton_method(:push) { |_url, _queue, _json| raise "redis down" }
 begin
   Article.transaction do
     Article.create!(title: "Pushed title", body: "A long enough article body.")
@@ -347,8 +353,9 @@ fn the_redis_cable_publishes_what_rails_does() {
 const CONFIGURE_CLIENT: &str = "Sidekiq.configure_client do |config|\n  config.redis = { url: ENV.fetch(\"JOBS_REDIS_URL\", \"redis://jobs:6379/1\"), password: ENV[\"JOBS_REDIS_PASSWORD\"] }\nend\n";
 
 /// The app's `configure_client` settings reach the registry the push
-/// reads them from, on every Ruby-family lane; an app without them gets
-/// `""`, so the push falls back to REDIS_PROVIDER, REDIS_URL, localhost.
+/// reads them from, on every Ruby-family lane. An app on `:sidekiq`
+/// without a `url:` is an error: there is no REDIS_PROVIDER, REDIS_URL
+/// or localhost fallback to push to.
 #[test]
 fn configure_client_settings_reach_the_registry() {
     for target in [BuildTarget::Spinel, BuildTarget::Ruby] {
@@ -367,9 +374,11 @@ fn configure_client_settings_reach_the_registry() {
             "{registry}"
         );
     }
-    let (emitted, _) = on_sidekiq().emit(BuildTarget::Ruby);
-    let registry = read(&emitted, "runtime/job_registry.rb");
-    assert!(registry.contains("  def self.sidekiq_redis_url\n    \"\"\n  end\n"), "{registry}");
+    for init in ["Rails.application.config.x.jobs = 1\n", "Sidekiq.configure_client do |config|\n  config.redis = { password: \"hunter2\" }\nend\n"] {
+        let (_, errors) = on_sidekiq().write("config/initializers/sidekiq.rb", init).emit(BuildTarget::Ruby);
+        assert_eq!(errors.len(), 1, "{init}: {errors:#?}");
+        assert!(errors[0].contains("must name its Redis") && errors[0].contains("no fallback"), "{errors:#?}");
+    }
 }
 
 /// `self.queue_adapter = :sidekiq` in ApplicationJob puts the whole app
@@ -384,6 +393,7 @@ fn application_job_on_sidekiq_gets_a_redis_client() {
             "class ApplicationJob < ActiveJob::Base\n",
             "class ApplicationJob < ActiveJob::Base\n  self.queue_adapter = :sidekiq\n",
         )
+        .write("config/initializers/sidekiq.rb", REDIS_CLIENT)
         .emit(BuildTarget::Ruby);
     assert!(errors.is_empty(), "{errors:#?}");
     assert!(read(&emitted, "Gemfile").contains("gem \"redis\""));
@@ -469,6 +479,7 @@ fn an_after_commit_job_is_pushed_at_commit() {
         .write("app/jobs/commit_job.rb", COMMIT_JOB)
         .edit("app/models/article.rb", "  validates :title, presence: true\n", COMMIT_ENQUEUE)
         .edit("config/environments/production.rb", "  config.active_job.queue_adapter = :solid_queue\n", SIDEKIQ)
+        .write("config/initializers/sidekiq.rb", REDIS_CLIENT)
         .run_ruby(COMMIT_SCRIPT);
     run.assert_passes();
     assert!(run.stdout.contains("after commit push passed"), "{}", run.stdout);
@@ -500,6 +511,7 @@ fn an_unplannable_job_is_an_error_only_under_sidekiq() {
     };
     let (_, errors) = overlay()
         .edit("config/environments/production.rb", "  config.active_job.queue_adapter = :solid_queue\n", SIDEKIQ)
+        .write("config/initializers/sidekiq.rb", REDIS_CLIENT)
         .emit(BuildTarget::Ruby);
     assert_eq!(errors.len(), 1, "{errors:#?}");
     assert!(errors[0].contains("OptionsJob") && errors[0].contains("queue_adapter :sidekiq"), "{errors:#?}");
@@ -527,6 +539,7 @@ fn strict_targets_warn_once_and_emit_the_same_tree() {
 
     let (_, no_jobs, _) = emit_and_run::real_blog()
         .edit("config/environments/production.rb", "  config.active_job.queue_adapter = :solid_queue\n", SIDEKIQ)
+        .write("config/initializers/sidekiq.rb", REDIS_CLIENT)
         .emit_with_app(BuildTarget::Ruby);
     assert!(sidekiq_adapter_target_warning(&no_jobs, BuildTarget::Go).is_none());
 
@@ -684,6 +697,7 @@ fn a_job_whose_parameters_are_named_queue_at_and_q_still_pushes_its_arguments() 
         .write("app/jobs/collider_job.rb", COLLIDER_JOB)
         .edit("app/models/article.rb", "  validates :title, presence: true\n", COLLIDER_ENQUEUE)
         .edit("config/environments/production.rb", "  config.active_job.queue_adapter = :solid_queue\n", SIDEKIQ)
+        .write("config/initializers/sidekiq.rb", REDIS_CLIENT)
         .run_ruby(COLLIDER_SCRIPT);
     run.assert_passes();
     assert!(run.stdout.contains("collider passed"), "{}", run.stdout);
@@ -717,6 +731,7 @@ fn priority_warns_and_a_computed_set_is_an_error() {
         .write("app/jobs/article_job.rb", JOB)
         .edit("app/models/article.rb", "  validates :title, presence: true\n", PRIORITY_ENQUEUE)
         .edit("config/environments/production.rb", "  config.active_job.queue_adapter = :solid_queue\n", SIDEKIQ)
+        .write("config/initializers/sidekiq.rb", REDIS_CLIENT)
         .emit(BuildTarget::Ruby);
     assert!(errors.is_empty(), "{errors:#?}");
 
@@ -724,6 +739,7 @@ fn priority_warns_and_a_computed_set_is_an_error() {
         .write("app/jobs/article_job.rb", JOB)
         .edit("app/models/article.rb", "  validates :title, presence: true\n", DYNAMIC_ENQUEUE)
         .edit("config/environments/production.rb", "  config.active_job.queue_adapter = :solid_queue\n", SIDEKIQ)
+        .write("config/initializers/sidekiq.rb", REDIS_CLIENT)
         .emit(BuildTarget::Ruby);
     assert_eq!(errors.len(), 1, "{errors:#?}");
     assert!(errors[0].contains("can't be honored"), "{errors:#?}");

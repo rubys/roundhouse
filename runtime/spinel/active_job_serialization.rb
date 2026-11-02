@@ -115,6 +115,24 @@ module ActiveJob
       "[" + parts.join(",") + "]"
     end
 
+    # The keyword hash `Turbo::Streams::ActionBroadcastJob` takes, as
+    # turbo-rails 2.0 writes it for a model's `broadcasts_to` (create and
+    # update): `perform_later(stream, action:, target:, targets:,
+    # attributes:, locals:, partial:)`. Keys in that order; `targets` nil
+    # and `attributes` empty, as `broadcast_action_later_to` passes them;
+    # the record as the one local, under its `model_name.element`; and
+    # the `_aj_ruby2_keywords` list, because ActiveJob flags the hash as
+    # keywords. `tests/broadcast_job.rs` holds it to Rails' own payload.
+    def self.turbo_broadcast_options(action, target, partial, local, gid_uri)
+      "{\"action\":{\"" + SERIALIZER_KEY + "\":\"" + SYMBOL_SERIALIZER + "\",\"value\":" + str(action) + "}" +
+        ",\"target\":" + str(target) +
+        ",\"targets\":null" +
+        ",\"attributes\":{\"_aj_symbol_keys\":[]}" +
+        ",\"locals\":{" + str(local) + ":" + record(gid_uri) + ",\"_aj_symbol_keys\":[" + str(local) + "]}" +
+        ",\"partial\":" + str(partial) +
+        ",\"_aj_ruby2_keywords\":[\"action\",\"target\",\"targets\",\"attributes\",\"locals\",\"partial\"]}"
+    end
+
     # ---- Read side: one argument out of the parsed array --------------
 
     # Not `count`: a second user `count(x)` in the program turns Spinel's
@@ -190,6 +208,20 @@ module ActiveJob
       out.clear
       args[i].each { |v| out << serialized_value(v, SYMBOL_SERIALIZER).to_sym }
       out
+    end
+
+    # Readers for a keyword-hash argument (the ActionBroadcastJob's
+    # options): a String, the name of a Symbol, and one of its `locals`.
+    def self.option_str_at(args, i, key)
+      key_of(args[i], key).to_s
+    end
+
+    def self.option_sym_name_at(args, i, key)
+      serialized_value(key_of(args[i], key), SYMBOL_SERIALIZER)
+    end
+
+    def self.option_local_at(args, i, name)
+      key_of(key_of(args[i], "locals"), name)
     end
 
     # `[app, model, id]` from one `{"_aj_globalid": ...}` argument.

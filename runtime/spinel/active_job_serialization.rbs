@@ -17,6 +17,7 @@ module ActiveJob
     def self.record: (String gid_uri) -> String
     def self.time: (Time value) -> String
     def self.list: (Array[String] parts) -> String
+    def self.turbo_broadcast_options: (String action, String target, String partial, String local, String gid_uri) -> String
 
     def self.arg_count: (untyped args) -> Integer
     def self.null_at: (untyped args, Integer i) -> bool
@@ -31,6 +32,9 @@ module ActiveJob
     def self.str_array_at: (untyped args, Integer i) -> Array[String]
     def self.bool_array_at: (untyped args, Integer i) -> Array[bool]
     def self.sym_array_at: (untyped args, Integer i) -> Array[Symbol]
+    def self.option_str_at: (untyped args, Integer i, String key) -> String
+    def self.option_sym_name_at: (untyped args, Integer i, String key) -> String
+    def self.option_local_at: (untyped args, Integer i, String name) -> untyped
     def self.gid_parts: (untyped value) -> Array[String]
     def self.missing_record_message: (String model_name, String id) -> String
     def self.deserialize_message: (String detail) -> String

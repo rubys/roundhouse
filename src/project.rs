@@ -1309,6 +1309,50 @@ fn report_block_render_partials(app: &App, target: BuildTarget) {
     }
 }
 
+/// `time_tag`'s `datetime` is the time's `iso8601`, which Rails 8.1.4
+/// writes without a fraction and with `Z` for UTC (`2026-11-01T09:30:15Z`).
+/// Measured on a datetime column through each target's own test runner,
+/// TypeScript writes `2026-11-01T09:30:15.500Z` and Python
+/// `2026-11-01T09:30:15.500000+00:00`, and Crystal's, Go's and Rust's emits
+/// of the read don't build, so off the ruby family (and on Roda, which has
+/// no ActionView) the call is refused.
+fn report_time_tag_calls(app: &App, target: BuildTarget) {
+    // Not Roda: it converts the views from their ERB source, with no
+    // ActionView behind them to answer `time_tag`.
+    if matches!(
+        target,
+        BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Futamura
+    ) {
+        return;
+    }
+    // A template no request reaches keeps its errors as warnings, as analysis
+    // does. By the view's name: a view body's own span can be synthetic (a
+    // Jbuilder template's leading `return if …` guard).
+    fn collect(e: &crate::expr::Expr, calls: &crate::det::HashSet<crate::span::Span>, out: &mut crate::det::HashSet<crate::span::Span>) {
+        if calls.contains(&e.span) {
+            out.insert(e.span);
+        }
+        e.node.for_each_child(&mut |c| collect(c, calls, out));
+    }
+    let calls: crate::det::HashSet<crate::span::Span> = app.time_tag_calls.iter().copied().collect();
+    let mut unreachable = crate::det::HashSet::default();
+    for v in app.views.iter().filter(|v| app.unreachable_views.contains(&v.name)) {
+        collect(&v.body, &calls, &mut unreachable);
+    }
+    for span in &app.time_tag_calls {
+        let mut d = crate::diagnostic::Diagnostic::unsupported(
+            *span,
+            Some(crate::ident::Symbol::from(target.as_str())),
+            "time_tag",
+            "its `datetime` is the time's `iso8601`, which this target writes otherwise than Rails (fraction or zone suffix)",
+        );
+        if unreachable.contains(span) {
+            d.severity = crate::diagnostic::Severity::Warning;
+        }
+        emit::diagnostics::push(d);
+    }
+}
+
 /// A non-integer primary key (`create_table …, id: :uuid`,
 /// `primary_key: "identifier", id: :string`) is carried end to end by
 /// the ruby-shape emit — CRuby, JRuby and Spinel: the analyzer types
@@ -1642,6 +1686,63 @@ fn reject_unsupported_forwarded_procs(app: &App, target: BuildTarget) -> Result<
 /// conversion have no run proving one either way.
 fn emits_namespaced_controllers(target: BuildTarget) -> bool {
     matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel)
+}
+
+/// Only the Ruby response layer normalizes the writer's charset and nil
+/// behavior. A source override is the app's method, not this runtime surface.
+fn report_controller_content_type_writers(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel) {
+        return;
+    }
+    fn owner(app: &App, id: &crate::ident::ClassId, depth: usize) -> Option<bool> {
+        if depth > 32 { return None; }
+        let (parent, includes) = if let Some(c) = app.controllers.iter().find(|c| &c.name == id) {
+            if c.actions().any(|a| a.name.as_str() == "content_type=") { return Some(false); }
+            (c.parent.as_ref(), crate::analyze::controller_includes(c))
+        } else if let Some(c) = app.library_classes.iter().find(|c| &c.name == id) {
+            if c.methods.iter().any(|m| m.name.as_str() == "content_type="
+                && m.receiver == crate::dialect::MethodReceiver::Instance) { return Some(false); }
+            (c.parent.as_ref(), c.includes.clone())
+        } else {
+            (None, Vec::new())
+        };
+        for included in includes.iter().rev() {
+            if let Some(found) = owner(app, included, depth + 1) { return Some(found); }
+        }
+        if id.0.as_str() == "ActionController::Base" { return Some(true); }
+        if let Some(parent) = parent { return owner(app, parent, depth + 1); }
+        (id.0.as_str() == "ApplicationController").then_some(true)
+    }
+    fn visit(expr: &crate::expr::Expr, app: &App, target: BuildTarget) {
+        fn uses_framework_writer(app: &App, ty: &crate::ty::Ty) -> bool {
+            match ty {
+                crate::ty::Ty::Class { id, .. } => owner(app, id, 0) == Some(true),
+                crate::ty::Ty::Union { variants } => variants.iter().any(|v| uses_framework_writer(app, v)),
+                _ => false,
+            }
+        }
+        fn writer_call(method: &crate::ident::Symbol, args: &[crate::expr::Expr]) -> bool {
+            use crate::expr::{ExprNode, Literal};
+            method.as_str() == "content_type="
+                || matches!(method.as_str(), "send" | "public_send" | "__send__")
+                    && args.first().is_some_and(|arg| match &*arg.node {
+                        ExprNode::Lit { value: Literal::Sym { value } } => value.as_str() == "content_type=",
+                        ExprNode::Lit { value: Literal::Str { value } } => value == "content_type=",
+                        _ => false,
+                    })
+        }
+        if let crate::expr::ExprNode::Send { recv: Some(recv), method, args, .. } = &*expr.node
+            && writer_call(method, args)
+            && !matches!(&*recv.node, crate::expr::ExprNode::Const { .. })
+            && recv.ty.as_ref().is_some_and(|ty| uses_framework_writer(app, ty))
+        {
+            emit::diagnostics::report_unsupported(expr.span, target.as_str(),
+                "ActionController#content_type=",
+                "this target's response runtime does not implement the controller writer's charset and nil behavior; use a Ruby target");
+        }
+        expr.node.for_each_child(&mut |child| visit(child, app, target));
+    }
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, app, target));
 }
 
 /// A `t` that reads the translation table or the whole catalog when it
@@ -2925,6 +3026,7 @@ fn target_files_inner(
     // errors than the app has.
     report_unsupported_bundled_constants(app, target);
     report_i18n_table_sites(app, target);
+    report_controller_content_type_writers(app, target);
     // Snapshot the optional measurement override at the target boundary. The
     // lowerers receive a value; they never consult process-global environment.
     let param_binds = target.param_binds_enabled(
@@ -2937,6 +3039,7 @@ fn target_files_inner(
     reject_unsupported_forwarded_procs(app, target)?;
     report_unsupported_keys(app, target);
     report_block_render_partials(app, target);
+    report_time_tag_calls(app, target);
     report_unemitted_library_classes(app, target);
     report_relation_class_calls(app, target);
     report_typescript_error_class(app, target);
@@ -3463,7 +3566,7 @@ fn with_sidekiq_readme(mut files: Vec<(String, String)>, target: BuildTarget, ap
     let section = format!(
         "### Jobs on Sidekiq\n\
          The app is on `queue_adapter :sidekiq`, so `perform_later` pushes each job \
-         to Redis (`REDIS_URL`, or `redis://localhost:6379`) in Sidekiq 8's format. \
+         to the Redis its `Sidekiq.configure_client` names, in Sidekiq 8's format. \
          Run them with the same build in a second process (or with a Ruby Sidekiq \
          process on the Rails app):\n\
          ```sh\n\
@@ -6474,7 +6577,9 @@ fn apply_database_pragmas(files: &mut [(String, String)], app: &App) {
 /// ActiveJob jobs at all (Mastodon's are native Sidekiq workers), gets
 /// no Redis client and no dependency.
 pub(crate) fn needs_redis(app: &App) -> bool {
-    app.queue_adapter.as_deref() == Some("sidekiq") && app.job_plans.iter().any(|p| p.is_payload())
+    app.queue_adapter.as_deref() == Some("sidekiq")
+        && (app.job_plans.iter().any(|p| p.is_payload())
+            || !crate::lower::broadcast_job::models(app).is_empty())
 }
 
 /// The `JobRegistry.sidekiq?` body `apply_job_registry` writes for a tree
@@ -6505,8 +6610,9 @@ const SIDEKIQ_REDIS_CLIENT: &str = "runtime/spinel/sidekiq/sidekiq_redis.rb";
 const SIDEKIQ_WORKER: &str = "runtime/spinel/sidekiq/sidekiq_worker.rb";
 
 /// The body of `JobRegistry.sidekiq_redis_url` or `_password` for one
-/// `configure_client` setting: `""` when the app gives none, so the push
-/// falls back to the environment. `SidekiqPush.setting` reads a variable
+/// `configure_client` setting: `""` when the app gives none (a password;
+/// ingest refuses a tree on `:sidekiq` with no `url:`, so an empty URL
+/// only reaches the push past that error). `SidekiqPush.setting` reads a variable
 /// when the push first needs it, as Sidekiq reads it at boot.
 fn redis_setting_source(setting: Option<&crate::app::RedisSetting>) -> String {
     use crate::app::RedisSetting;
@@ -6600,7 +6706,11 @@ fn apply_job_registry(files: &mut [(String, String)], app: &App) {
     let redis = format!("{redis}{}", cable_redis_source(app));
     let generated = format!(
         "{HEAD}{}\n{flag}{redis}{TAIL}",
-        crate::lower::job_payload::registry_source(&app.job_plans, needs_redis(app))
+        crate::lower::job_payload::registry_source_with_broadcasts(
+            &app.job_plans,
+            needs_redis(app),
+            &crate::lower::broadcast_job::models(app),
+        )
     );
     for (path, content) in files.iter_mut() {
         if !path.ends_with("job_registry.rb") {
