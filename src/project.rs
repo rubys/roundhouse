@@ -1267,6 +1267,32 @@ fn is_plain_ruby_class(app: &App, lc: &crate::dialect::LibraryClass) -> bool {
     true
 }
 
+/// `current_page?` reads the request a view renders for. The ruby
+/// family's views reach it (`ActionController::Current.request`); measured
+/// through each target's own test runner, TypeScript's (`request is not
+/// defined`), Crystal's, Python's and Rust's views have none, and Roda
+/// converts views from their ERB with no ActionView, so the call is refused
+/// there. In a template no request reaches it is a warning, as analysis
+/// makes its errors there.
+fn report_current_page_calls(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Futamura) {
+        return;
+    }
+    for (span, unreachable) in crate::ingest::current_page::rewritten_calls(app) {
+        let mut d = crate::diagnostic::Diagnostic::unsupported(
+            span,
+            Some(crate::ident::Symbol::from(target.as_str())),
+            "current_page?",
+            "it reads the request the view renders for, which this target's views don't have",
+        );
+        // A template no request reaches keeps its errors as warnings, as analysis does.
+        if unreachable {
+            d.severity = crate::diagnostic::Severity::Warning;
+        }
+        emit::diagnostics::push(d);
+    }
+}
+
 /// `time_tag`'s `datetime` is the time's `iso8601`, which Rails 8.1.4
 /// writes without a fraction and with `Z` for UTC (`2026-11-01T09:30:15Z`).
 /// Measured on a datetime column through each target's own test runner,
@@ -2996,6 +3022,7 @@ fn target_files_inner(
     reject_unsupported_dates(app, target)?;
     reject_unsupported_forwarded_procs(app, target)?;
     report_unsupported_keys(app, target);
+    report_current_page_calls(app, target);
     report_time_tag_calls(app, target);
     report_unemitted_library_classes(app, target);
     report_relation_class_calls(app, target);

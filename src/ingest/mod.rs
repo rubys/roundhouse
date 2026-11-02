@@ -131,6 +131,7 @@ pub(crate) mod rake_tasks;
 pub mod util;
 pub mod view;
 pub mod vite;
+pub mod current_page;
 pub mod time_tag;
 mod visibility;
 
