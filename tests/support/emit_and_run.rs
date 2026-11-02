@@ -618,3 +618,41 @@ fn copy_tree(src: &Path, dst: &Path) {
         std::fs::copy(src, dst).expect("copy file");
     }
 }
+
+
+/// One request-dispatch contract for the interpreted backend toolchains.
+pub fn controller_dispatch_files(kind: &str) -> Vec<(&'static str, String)> {
+    let callback = if kind == "auth_except" { "except: [:index]" } else { "only: [:secret]" };
+    let hook = match kind {
+        "ordinary" | "parent_hook" | "parent_action_hook" | "parent_no_super" | "concern_hook" => "",
+        "string_selector" => "  private\n  def process_action(action)\n    if action == \"secret\"\n      head :accepted\n    else\n      head :forbidden\n    end\n    self\n  end\n",
+        _ => "  private\n  def process_action(action)\n    super(action)\n  end\n",
+    };
+    let inherited = matches!(kind, "parent_hook" | "parent_action_hook" | "parent_no_super");
+    let parent = if inherited { "HookParentController" } else { "ApplicationController" };
+    let filter = if kind == "string_selector" { String::new() } else { format!("  before_action :authenticate, {callback}\n") };
+    let include = if kind == "concern_hook" { "  include RequestHook\n" } else { "" };
+    let controller = format!("class VaultController < {parent}\n{include}{filter}  def index\n    head :ok\n  end\n  def secret\n    head :accepted\n  end\n{hook}  private\n  def authenticate\n    head :forbidden\n  end\nend\n");
+    let mut files = vec![
+        ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"items\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n".into()),
+        ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n".into()),
+        ("app/models/item.rb", "class Item < ApplicationRecord\nend\n".into()),
+        ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n".into()),
+        ("app/controllers/vault_controller.rb", controller),
+        ("app/views/vault/index.html.erb", "public\n".into()),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  get \"/\", to: \"vault#index\"\n  get \"/secret\", to: \"vault#secret\"\nend\n".into()),
+    ];
+    if inherited {
+        let action = if kind == "parent_action_hook" { "  def inherited_action; head :ok; end\n" } else { "" };
+        let body = if kind == "parent_no_super" { "head :forbidden" } else { "super(action)" };
+        files.push(("app/controllers/hook_parent_controller.rb", format!("class HookParentController < ApplicationController\n{action}  private\n  def process_action(action)\n    {body}\n  end\nend\n")));
+    }
+    if kind == "concern_hook" {
+        files.push(("app/controllers/concerns/request_hook.rb", "module RequestHook\n  extend ActiveSupport::Concern\n  private\n  def process_action(action); super(action); end\nend\n".into()));
+    }
+    files
+}
+
+pub fn controller_dispatch_app(kind: &str) -> Overlay {
+    controller_dispatch_files(kind).into_iter().fold(empty_app(), |app, (path, body)| app.write(path, &body))
+}

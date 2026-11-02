@@ -258,3 +258,21 @@ end
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+
+#[test]
+#[ignore = "requires the Elixir toolchain"]
+fn string_hook_receives_request_selector_as_string() {
+    let _guard=mix_guard();
+    let (out,errors)=emit_and_run::controller_dispatch_app("string_selector").emit(roundhouse::project::BuildTarget::Elixir);
+    assert!(errors.is_empty(),"{errors:?}");
+    std::fs::write(out.join("probe.exs"),r##"files=Enum.map(["action_controller_base.ex","flash.ex","session.ex","params.ex","vaultcontroller.ex","dispatch.ex"], &("lib/" <> &1))
+{:ok,_,_}=Kernel.ParallelCompiler.compile(files)
+for {action,expected} <- [{:index,403},{:secret,202}] do
+ {_,status,_,_,_}=Dispatch.call("VaultController",action,%{},%{},:html,%{})
+ if status != expected, do: raise("#{action}: #{status}")
+end
+"##).unwrap();
+    let run=Command::new("elixir").arg("probe.exs").current_dir(&out).output().unwrap();
+    assert!(run.status.success(),"{}\n{}",String::from_utf8_lossy(&run.stdout),String::from_utf8_lossy(&run.stderr));
+}

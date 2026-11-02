@@ -2320,7 +2320,6 @@ jobs:
             --select framework_tests_ruby --select uuid_key_ruby \
             --select tiny_api:cruby_gate_ --select roda_toolchain
       - name: Controller dispatch against the Rails oracle
-        if: ${{ !cancelled() }}
         env:
           ROUNDHOUSE_CONTROLLER_ORACLE_REQUIRED: '1'
         run: |

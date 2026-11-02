@@ -273,3 +273,26 @@ func TestFlashEachYieldsPopulatedFields(t *testing.T) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+
+#[test]
+#[ignore = "requires the Go toolchain"]
+fn overridden_request_dispatch_runs_scoped_callbacks() {
+    for kind in ["auth_only", "auth_except", "ordinary", "concern_hook", "parent_no_super"] {
+        let (out, errors) = emit_and_run::controller_dispatch_app(kind).emit(roundhouse::project::BuildTarget::Go);
+        assert!(errors.is_empty(), "{errors:?}");
+        let expected_index = if kind == "parent_no_super" { 403 } else { 200 };
+        std::fs::write(out.join("app/v2/request_dispatch_test.go"), format!(r#"package v2
+import("net/http/httptest"; "testing")
+func TestRequestDispatch(t *testing.T) {{
+ for action, expected := range map[string]int64{{"index":{expected_index},"secret":403}} {{
+  request:=httptest.NewRequest("GET", "/"+action, nil)
+  _,status,_,_,_:=Dispatch("VaultController",action,nil,request)
+  if status!=expected {{t.Fatalf("%s: %d",action,status)}}
+ }}
+}}
+"#)).unwrap();
+        let run=Command::new("go").args(["test","-mod=mod","./app/v2","-run","^TestRequestDispatch$","-count=1"]).current_dir(&out).output().unwrap();
+        assert!(run.status.success(), "{kind}: {}\n{}",String::from_utf8_lossy(&run.stdout),String::from_utf8_lossy(&run.stderr));
+    }
+}

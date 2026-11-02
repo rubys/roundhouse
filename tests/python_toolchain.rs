@@ -175,3 +175,26 @@ print("slice passed")
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success() && stdout.contains("slice passed"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
 }
+
+
+#[test]
+#[ignore = "requires the Python toolchain"]
+fn overridden_request_dispatch_runs_scoped_callbacks() {
+    for kind in ["auth_only", "auth_except", "ordinary", "concern_hook"] {
+        let app = emit_and_run::controller_dispatch_app(kind);
+        let app = if kind == "auth_only" {
+            app.write("app/controllers/plain_controller.rb", "class PlainController < ApplicationController\n def index; head :ok; end\n def _roundhouse_dispatch_action(action); head :im_a_teapot; end\nend\n")
+        } else { app };
+        let (out, errors) = app.emit(roundhouse::project::BuildTarget::Python);
+        assert!(errors.is_empty(), "{errors:?}");
+        std::fs::write(out.join("probe.py"), r#"from app.v2.dispatch import dispatch, CONTROLLERS
+if "plain" in CONTROLLERS:
+    assert dispatch("plain", "index").status == 200
+for action, expected in [("index", 200), ("secret", 403)]:
+    response = dispatch("vault", action)
+    assert response.status == expected, (action, response.status)
+"#).unwrap();
+        let run = Command::new("python3").arg("probe.py").current_dir(&out).output().unwrap();
+        assert!(run.status.success(), "{kind}: {}", String::from_utf8_lossy(&run.stderr));
+    }
+}

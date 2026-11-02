@@ -1662,3 +1662,41 @@ fn representative_overrides_compile_with_their_final_sidecars() {
         "{errors:?}"
     );
 }
+
+
+#[test]
+fn go_refuses_inherited_framework_super_but_keeps_source_hooks_without_super() {
+    for kind in ["parent_hook", "parent_action_hook"] {
+        let (_,errors)=emit_and_run::controller_dispatch_app(kind).emit(BuildTarget::Go);
+        assert!(errors.iter().any(|e| e.contains("inherited_process_action")),"{kind}: {errors:?}");
+    }
+    let (_,errors)=emit_and_run::controller_dispatch_app("parent_no_super").emit(BuildTarget::Go);
+    assert!(errors.is_empty(),"{errors:?}");
+}
+
+#[test]
+fn rails_oracle_request_dispatch_filters_and_string_selectors() {
+    if !require_rails_oracle() {return;}
+    for kind in ["auth_only", "auth_except", "ordinary", "parent_hook", "parent_no_super", "string_selector"] {
+        let mut controllers:Vec<_>=emit_and_run::controller_dispatch_files(kind).into_iter()
+            .filter(|(path,_)| path.starts_with("app/controllers/")).collect();
+        controllers.sort_by_key(|(path,_)| *path);
+        let source=controllers.into_iter().map(|(_,body)| body).collect::<Vec<_>>().join("\n");
+        let program=format!(r#"gem "actionpack", "8.1.4"
+require "action_controller"
+require "action_controller/test_case"
+{source}
+%w[index secret].each do |action|
+ c=VaultController.new
+ c.request=ActionController::TestRequest.create(VaultController)
+ c.response=ActionDispatch::TestResponse.new
+ c.process(action)
+ puts c.response.status
+end
+"#);
+        let output=ruby_command().args(["-e",&program]).output().unwrap();
+        assert!(output.status.success(),"{kind}: {}",String::from_utf8_lossy(&output.stderr));
+        let expected=if kind=="string_selector" {"403\n202\n"} else if kind=="parent_no_super" {"403\n403\n"} else {"200\n403\n"};
+        assert_eq!(String::from_utf8_lossy(&output.stdout),expected,"{kind}");
+    }
+}
