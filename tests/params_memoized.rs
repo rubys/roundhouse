@@ -141,6 +141,159 @@ puts "PASS"
 "##).assert_passes();
 }
 
+fn model_app(helper: &str) -> emit_and_run::Overlay {
+    app()
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table :items do |t|\n    t.string :name\n  end\nend\n",
+        )
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write("app/models/item.rb", "class Item < ApplicationRecord\nend\n")
+        .write("app/controllers/items_controller.rb", &format!(r#"class ItemsController < ApplicationController
+  def create
+    @mode = params[:mode]
+    item = Item.new(item_params)
+    render json: {{ name: item.name }}
+  end
+
+  private
+
+{helper}
+end
+"#))
+}
+
+fn create_item(modes: &[&str], name: &str) -> String {
+    format!(r##"require "json"
+require "stringio"
+{modes:?}.each do |mode|
+  input = JSON.generate("mode" => mode, "item" => {{ "name" => "provided", "ignored" => "removed" }})
+  status, _, body = Main.run_rack("REQUEST_METHOD" => "POST", "PATH_INFO" => "/items", "QUERY_STRING" => "", "CONTENT_TYPE" => "application/json", "CONTENT_LENGTH" => input.bytesize.to_s, "rack.input" => StringIO.new(input))
+  raise "#{{mode}}: #{{status}} #{{body.inspect}}" unless status == 200 && JSON.parse(body.join) == {{ "name" => {name:?} }}
+end
+puts "PASS"
+"##)
+}
+
+fn emitted_controller(emitted: &std::path::Path) -> String {
+    std::fs::read_to_string(emitted.join("app/controllers/items_controller.rb")).expect("controller")
+}
+
+#[test]
+fn helpers_returning_permit_filters_construct_models_through_the_params_factory() {
+    for helper in [
+        r#"  def item_params
+    @item_params ||= if params[:mode] == "first"
+      params.require(:item).permit(:name)
+    else
+      values = params.expect(item: [:name])
+      values
+    end
+  end"#,
+        r#"  def item_params
+    return params.require(:item).permit(:name) if params[:mode] == "first"
+    @item_params ||= params.expect(item: [:name])
+  end"#,
+    ] {
+        let run = model_app(helper).run_ruby(&create_item(&["first", "second"], "provided"));
+        run.assert_passes();
+        let controller = emitted_controller(&run.emitted);
+        assert!(controller.contains("Item.from_params(self.item_params)"), "{controller}");
+    }
+}
+
+#[test]
+fn filters_outside_returned_values_leave_hash_helpers_on_the_model_constructor() {
+    for helper in [
+        r#"  def item_params
+    case params[:mode]
+    when "raw"
+      { name: "kept" }
+    when params.expect(item: [:name])
+      { name: "matched" }
+    else
+      { name: "other" }
+    end
+  end"#,
+        r#"  def item_params
+    case @mode
+    in "raw"
+      { name: "kept" }
+    in ^(params.expect(item: [:name]))
+      { name: "matched" }
+    else
+      { name: "other" }
+    end
+  end"#,
+        r#"  def item_params
+    case
+    when params[:mode] == "raw"
+      { name: "kept" }
+    when params.expect(item: [:name])
+      { name: "matched" }
+    else
+      { name: "other" }
+    end
+  end"#,
+        r#"  def item_params
+    begin
+      { name: "kept" }
+    rescue (params.expect(item: [:name]))
+      { name: "rescued" }
+    end
+  end"#,
+        r#"  def item_params
+    unused = ->(value = params.expect(item: [:name])) { value }
+    { name: "kept" }
+  end"#,
+        r#"  def item_params
+    while params[:mode] != "raw" && params.expect(item: [:name])
+      break
+    end
+    { name: "kept" }
+  end"#,
+        r#"  def item_params
+    begin
+      { name: "kept" }
+    ensure
+      unused = -> { params.expect(item: [:name]) }
+    end
+  end"#,
+    ] {
+        let run = model_app(helper).run_ruby(&create_item(&["raw"], "kept"));
+        run.assert_passes();
+        let controller = emitted_controller(&run.emitted);
+        assert!(controller.contains("Item.new(self.item_params)"), "{controller}");
+    }
+}
+
+#[test]
+fn filters_in_case_patterns_and_default_arguments_leave_the_model_constructor() {
+    for helper in [
+        r#"  def item_params
+    case params[:mode]
+    in "raw"
+      { name: "kept" }
+    in ^(params.expect(item: [:name]))
+      { name: "matched" }
+    else
+      { name: "other" }
+    end
+  end"#,
+        r#"  def item_params(unused = params.expect(item: [:name]))
+    { name: "kept" }
+  end"#,
+    ] {
+        let (emitted, errors) = model_app(helper).emit(roundhouse::project::BuildTarget::Ruby);
+        assert!(errors.is_empty(), "{errors:?}");
+        let controller = emitted_controller(&emitted);
+        assert!(controller.contains("Item.new(self.item_params)"), "{controller}");
+    }
+}
+
 #[test]
 #[ignore = "requires the Spinel toolchain"]
 fn memoized_params_run_with_emitted_rbs() {

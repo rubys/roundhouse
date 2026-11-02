@@ -1146,7 +1146,7 @@ fn collect_from_expr(
         // register a second, narrower class for the same call site.
         return;
     }
-    walk_children(expr, &mut |c| collect_from_expr(c, controller, index, specs, report));
+    expr.node.for_each_child(&mut |c| collect_from_expr(c, controller, index, specs, report));
 }
 
 /// Record the NON-SCALAR permit keys this pass drops.
@@ -1301,26 +1301,65 @@ pub fn model_assign_name(spec: &ParamsSpec) -> Symbol {
     Symbol::from(format!("assign_from_{}", crate::naming::snake_case(spec.class_id.0.as_str())))
 }
 
-/// First permit list in `expr`, in the same pre-order the collector
-/// uses — the way a `<resource>_params` helper body names its spec.
+/// First permit list among the values `body` can return — the way a
+/// `<resource>_params` helper body names its spec. Not the collector's
+/// walk: it also reaches a permit in a condition, pattern, rescue list,
+/// loop or lambda, which the helper does not return.
 pub fn first_permit_in(body: &Expr) -> Option<(Symbol, Vec<Symbol>, Vec<String>)> {
-    first_permit_at(body)
+    let mut returned = Vec::new();
+    for_each_outside_lambdas(body, &mut |e| {
+        if let ExprNode::Return { value } = &*e.node {
+            returned.push(value);
+        }
+    });
+    returned.push(body);
+    returned.into_iter().find_map(|value| first_permit_at(value, body, &mut Vec::new()))
 }
 
-fn first_permit_at(expr: &Expr) -> Option<(Symbol, Vec<Symbol>, Vec<String>)> {
+fn first_permit_at(expr: &Expr, body: &Expr, followed: &mut Vec<Symbol>) -> Option<(Symbol, Vec<Symbol>, Vec<String>)> {
     if let Some((resource, fields, _)) = match_reverse_merge(expr) {
         return Some((resource, fields, nested_signature(expr)));
     }
     if let Some((resource, fields)) = match_permit_call(expr) {
         return Some((resource, fields, nested_signature(expr)));
     }
-    let mut found = None;
-    walk_children(expr, &mut |c| {
-        if found.is_none() {
-            found = first_permit_at(c);
+    value_sources(expr, body, followed).into_iter().find_map(|source| first_permit_at(source, body, followed))
+}
+
+/// The expressions `expr` evaluates to. A local read resolves to the
+/// values `body` writes to that local.
+fn value_sources<'a>(expr: &'a Expr, body: &'a Expr, followed: &mut Vec<Symbol>) -> Vec<&'a Expr> {
+    match &*expr.node {
+        ExprNode::Seq { exprs } => exprs.last().into_iter().collect(),
+        ExprNode::If { then_branch, else_branch, .. } => vec![then_branch, else_branch],
+        ExprNode::Case { arms, .. } => arms.iter().map(|arm| &arm.body).collect(),
+        ExprNode::CaseMatch { arms, else_body, .. } => arms.iter().map(|arm| &arm.body).chain(else_body).collect(),
+        ExprNode::BeginRescue { body: begun, rescues, else_branch, .. } => std::iter::once(else_branch.as_ref().unwrap_or(begun))
+            .chain(rescues.iter().map(|rescue| &rescue.body))
+            .collect(),
+        ExprNode::Assign { value, .. } | ExprNode::OpAssign { value, .. } | ExprNode::Return { value } => vec![value],
+        ExprNode::BoolOp { left, right, .. } | ExprNode::RescueModifier { expr: left, fallback: right } => vec![left, right],
+        ExprNode::Send { recv: Some(recv), method, .. } if method.as_str() == "except" => vec![recv],
+        ExprNode::Var { name, .. } if !followed.contains(name) => {
+            followed.push(name.clone());
+            let mut written = Vec::new();
+            for_each_outside_lambdas(body, &mut |e| match &*e.node {
+                ExprNode::Assign { target: LValue::Var { name: target, .. }, value }
+                | ExprNode::OpAssign { target: LValue::Var { name: target, .. }, value, .. }
+                    if target == name => written.push(value),
+                _ => {}
+            });
+            written
         }
-    });
-    found
+        _ => Vec::new(),
+    }
+}
+
+fn for_each_outside_lambdas<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
+    f(expr);
+    if !matches!(&*expr.node, ExprNode::Lambda { .. }) {
+        expr.node.for_each_child(&mut |child| for_each_outside_lambdas(child, f));
+    }
 }
 
 /// Map each `<x>_params`-shaped helper to the spec its body declares.
@@ -1885,10 +1924,6 @@ fn is_bare_params(e: &Expr) -> bool {
         &*e.node,
         ExprNode::Ivar { name } if name.as_str() == "params"
     )
-}
-
-fn walk_children<F: FnMut(&Expr)>(expr: &Expr, f: &mut F) {
-    expr.node.for_each_child(f);
 }
 
 /// Companion slot naming: `bio` → `bio_provided`.
