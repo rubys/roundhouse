@@ -1354,6 +1354,7 @@ module ActiveRecord
     # path `save` uses.
     def update_column(name, value)
       _raise_readonly_record_error if readonly?
+      _enlist_direct_write
       self[name] = value
       key = name.to_s
       @__write_only = [key]
@@ -1373,6 +1374,7 @@ module ActiveRecord
     # changes, as in Rails; other unsaved changes stay pending.
     def update_columns(attributes)
       _raise_readonly_record_error if readonly?
+      _enlist_direct_write
       names = [""]
       names.pop
       attributes.each do |name, value|
@@ -1985,6 +1987,22 @@ module ActiveRecord
       _enlist_or_run(kind)
     end
 
+    # A write that runs no callbacks (`update_column`, `update_columns`,
+    # `touch_written`) moves the Dirty baseline too, so a ROLLBACK has to
+    # put it back, or the rolled-back value would read as saved and the
+    # next partial save would skip it. Inside a transaction the record is
+    # enlisted for that alone (kind 4): the COMMIT runs no callback for
+    # it. Outside one there is nothing to roll back.
+    def _enlist_direct_write
+      return nil if Db._txn_depth == 0
+      unless @__rollback_saved
+        @__rollback_saved = true
+        @__rollback_baseline = @__last_saved_attributes
+      end
+      Db._txn_records << ActiveRecord::EnlistedRecord.new(self, 4)
+      nil
+    end
+
     # The transaction that enlisted the record ended: nothing to put back.
     def _forget_rollback_state
       @__rollback_saved = false
@@ -2050,6 +2068,7 @@ module ActiveRecord
     def touch_written
       _raise_readonly_record_error if readonly?
       self.class.transaction do
+        _enlist_direct_write
         fill_timestamps(false)
         _adapter_update
         if @__last_saved_attributes.nil?
@@ -2210,13 +2229,20 @@ module ActiveRecord
         record = entry.record
         next if seen.any? { |other| other.equal?(record) }
         seen << record
-        kind = entry.kind
+        # -1 until a save or destroy is found: a record enlisted only for
+        # a callback-free write (kind 4) runs no commit callback, but its
+        # rollback state is done with all the same.
+        kind = -1
         held.each do |other|
           next unless other.record.equal?(record)
-          next if other.kind == 3
-          kind = other.kind if other.kind == 2 || (other.kind == 0 && kind == 1)
+          next if other.kind == 3 || other.kind == 4
+          kind = other.kind if kind == -1 || other.kind == 2 || (other.kind == 0 && kind == 1)
         end
-        record._run_commit_callbacks(kind)
+        if kind == -1
+          record._forget_rollback_state
+        else
+          record._run_commit_callbacks(kind)
+        end
       end
       nil
     end

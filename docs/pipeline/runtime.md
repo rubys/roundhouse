@@ -1473,13 +1473,15 @@ Two residues, both smaller than they look:
   touch each run inside `Model.transaction`, an exception from their
   callbacks rolls the whole write back, and a ROLLBACK drops the held
   commit callbacks.
-* **The update hook is unguarded.** Rails registers its touch with
-  `if: :saved_changes?` and skips the parent when the child's save
-  changed nothing. This runtime's `save` issues an unconditional
-  UPDATE, so there is no no-op save for the guard to catch and the
-  condition would never be false. A save that writes the same bytes
-  therefore moves the parent's `updated_at` where Rails leaves it —
-  which busts a cache entry early rather than serving a stale one.
+* **The update hook asks `_wrote_on_update?`.** Rails registers its
+  touch with `if: :saved_changes?` and skips the parent when the
+  child's save changed nothing. On the Ruby family a save with nothing
+  pending writes nothing, and `_wrote_on_update?` answers from
+  `saved_changes`, so the parent is left alone as in Rails. A strict
+  target's `save` writes the whole row every time and answers true, so
+  there a save that writes the same bytes still moves the parent's
+  `updated_at` — which busts a cache entry early rather than serving a
+  stale one.
 
 Rails also SKIPS the create and destroy registrations when the
 association carries a `counter_cache:` (the counter update touches on

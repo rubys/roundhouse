@@ -5,7 +5,8 @@
 //! `updated_at` alone, and `update_columns` writes only the columns it
 //! names. A column write that finishes with `touch` is no longer pending
 //! afterwards, and a save with nothing pending does not touch the parent
-//! a `belongs_to …, touch: true` names.
+//! a `belongs_to …, touch: true` names. A rolled-back write that runs no
+//! callbacks leaves its columns pending, so the next save writes them.
 
 use super::emit_and_run;
 
@@ -58,6 +59,23 @@ w.retitle!("two")
 check("a touched column write lands", Article.find(a.id).title, "two")
 w.update!(title: "one")
 check("and the value before it is written back", Article.find(a.id).title, "one")
+
+Article.transaction do
+  w.retitle!("rolled back")
+  raise ActiveRecord::Rollback
+end
+check("a rolled-back touched write is not saved", Article.find(a.id).title, "one")
+w.save!
+check("and the next save writes it after all", Article.find(a.id).title, "rolled back")
+
+Article.transaction do
+  w.update_columns(title: "columns rolled back")
+  raise ActiveRecord::Rollback
+end
+check("a rolled-back update_columns is not saved", Article.find(a.id).title, "rolled back")
+w.save!
+check("and the next save writes it", Article.find(a.id).title, "columns rolled back")
+w.update!(title: "one")
 
 c = Comment.create!(article: w, commenter: "ann", body: "a comment body")
 w.update_columns(updated_at: "2001-02-03 04:05:06")
