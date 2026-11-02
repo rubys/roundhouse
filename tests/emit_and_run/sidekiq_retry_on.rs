@@ -78,6 +78,9 @@ const ENQUEUE: &str = r##"  validates :title, presence: true
 "##;
 
 const SIDEKIQ: &str = "  config.active_job.queue_adapter = :sidekiq\n";
+/// The `Sidekiq.configure_client` an app on `:sidekiq` must have: ingest
+/// refuses one without a `url:`.
+const REDIS_CLIENT: &str = "Sidekiq.configure_client do |config|\n  config.redis = { url: ENV.fetch(\"REDIS_URL\", \"redis://localhost:6379/0\") }\nend\n";
 
 /// The oracle loads no Rails app, so its `retry_jitter` is ActiveJob's
 /// own 0.0 rather than the 0.15 `load_defaults` 6.1+ sets.
@@ -85,6 +88,7 @@ const NO_JITTER: &str = "  config.active_job.queue_adapter = :sidekiq\n  config.
 
 fn on_sidekiq() -> emit_and_run::Overlay {
     jobs().edit("config/environments/production.rb", "  config.active_job.queue_adapter = :solid_queue\n", NO_JITTER)
+        .write("config/initializers/sidekiq.rb", REDIS_CLIENT)
 }
 
 fn jobs() -> emit_and_run::Overlay {
@@ -370,6 +374,7 @@ fn carried_handlers_report_nothing() {
 fn load_defaults_sets_the_retry_jitter() {
     let (emitted, errors) = jobs()
         .edit("config/environments/production.rb", "  config.active_job.queue_adapter = :solid_queue\n", SIDEKIQ)
+        .write("config/initializers/sidekiq.rb", REDIS_CLIENT)
         .emit(BuildTarget::Ruby);
     assert!(errors.is_empty(), "{errors:#?}");
     let registry = std::fs::read_to_string(emitted.join("runtime/job_registry.rb")).unwrap();
@@ -404,6 +409,7 @@ fn an_uncarried_handler_is_an_error_only_under_sidekiq() {
     };
     let (_, errors) = overlay()
         .edit("config/environments/production.rb", "  config.active_job.queue_adapter = :solid_queue\n", SIDEKIQ)
+        .write("config/initializers/sidekiq.rb", REDIS_CLIENT)
         .emit(BuildTarget::Ruby);
     assert_eq!(errors.len(), 4, "{errors:#?}");
     assert!(errors.iter().any(|e| e.contains("`discard_on`'s `report: true` isn't supported")), "{errors:#?}");

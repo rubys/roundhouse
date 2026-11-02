@@ -107,6 +107,7 @@ pub mod job_class_side;
 pub mod transaction_after_commit;
 pub mod module_mattr_storage;
 pub mod job_payload;
+pub mod broadcast_job;
 pub mod mailer_class_side;
 pub mod mailer_templates;
 pub mod as_json_shape;

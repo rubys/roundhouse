@@ -26,10 +26,15 @@
 /// outside the controllers changes. The
 /// lowering's own framework ivars (`@params`, `@flash`, `@session`) refer
 /// to the runtime's state on purpose and keep their names.
+///
+/// Every name is compared as `emitted` spells it in the target: Kotlin
+/// writes `@app_status_2` and `@appStatus2` both as `appStatus2`, so a
+/// candidate is taken when ANY taken name emits the same identifier.
 pub(crate) fn rename_ivars_shadowing_controller_base(
     controllers: &mut [crate::dialect::LibraryClass],
     runtime: &[crate::dialect::LibraryClass],
     method_names: impl Fn(&crate::ident::Symbol) -> Vec<crate::ident::Symbol>,
+    emitted: impl Fn(&crate::ident::Symbol) -> crate::ident::Symbol,
     implied_parents: &[(&str, &str)],
 ) {
     use crate::expr::{Expr, ExprNode, LValue};
@@ -75,8 +80,10 @@ pub(crate) fn rename_ivars_shadowing_controller_base(
     let mut taken: crate::det::HashSet<Symbol> = crate::det::HashSet::default();
     for class in runtime.iter().filter(|c| c.name.0.as_str() == BASE) {
         for m in &class.methods {
-            taken.extend(method_names(&m.name));
-            ivars_in(&m.body, &mut taken);
+            taken.extend(method_names(&m.name).iter().map(&emitted));
+            let mut ivars = crate::det::HashSet::default();
+            ivars_in(&m.body, &mut ivars);
+            taken.extend(ivars.iter().map(&emitted));
         }
     }
     if taken.is_empty() {
@@ -113,7 +120,7 @@ pub(crate) fn rename_ivars_shadowing_controller_base(
     let mut app_ivars: crate::det::HashSet<Symbol> = crate::det::HashSet::default();
     for &i in &controller_idx {
         for m in &controllers[i].methods {
-            taken.extend(method_names(&m.name));
+            taken.extend(method_names(&m.name).iter().map(&emitted));
             ivars_in(&m.body, &mut app_ivars);
         }
     }
@@ -122,14 +129,14 @@ pub(crate) fn rename_ivars_shadowing_controller_base(
     let framework = crate::lower::controller_to_library::FRAMEWORK_IVARS;
     let mut shadowing: Vec<Symbol> = app_ivars
         .iter()
-        .filter(|n| taken.contains(*n) && !framework.contains(&n.as_str()))
+        .filter(|n| taken.contains(&emitted(n)) && !framework.contains(&n.as_str()))
         .cloned()
         .collect();
     shadowing.sort();
     if shadowing.is_empty() {
         return;
     }
-    taken.extend(app_ivars.iter().cloned());
+    taken.extend(app_ivars.iter().map(&emitted));
     let mut map: crate::det::HashMap<Symbol, Symbol> = crate::det::HashMap::default();
     for name in shadowing {
         let mut n = 1;
@@ -139,12 +146,12 @@ pub(crate) fn rename_ivars_shadowing_controller_base(
             } else {
                 Symbol::from(format!("app_{}_{n}", name.as_str()))
             };
-            if !taken.contains(&candidate) {
+            if !taken.contains(&emitted(&candidate)) {
                 break candidate;
             }
             n += 1;
         };
-        taken.insert(to.clone());
+        taken.insert(emitted(&to));
         map.insert(name, to);
     }
     for &i in &controller_idx {

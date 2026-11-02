@@ -28,14 +28,15 @@
 # does only under `:sidekiq`.
 #
 # The Redis URL is the app's own `Sidekiq.configure_client` `url:`
-# (`JobRegistry.sidekiq_redis_url`) when it gives one. Only without it
-# does the push fall back to Sidekiq's `ENV[ENV["REDIS_PROVIDER"]]`,
-# then `REDIS_URL`, then `redis://localhost:6379/0`. A `password:` from
-# the same block overrides one in the URL, as redis-rb's option does.
-# Both are read at the first push in each process. Errors reach the
-# caller, as in Rails: a down Redis makes `perform_later` raise.
+# (`JobRegistry.sidekiq_redis_url`), and nothing else: ingest refuses a
+# tree on `:sidekiq` that gives none, so there is no fallback to
+# `REDIS_PROVIDER`, `REDIS_URL` or localhost. A `url:` read from an
+# environment variable that is unset or empty at run time raises at the
+# first push. A `password:` from the same block overrides one in the
+# URL, as redis-rb's option does. Both are read at the first push in
+# each process. Errors reach the caller, as in Rails: a down Redis makes
+# `perform_later` raise.
 module SidekiqPush
-  DEFAULT_URL = "redis://localhost:6379/0"
   URL = [""]
   URL_PID = [0]
 
@@ -174,8 +175,7 @@ module SidekiqPush
     Process.clock_gettime(Process::CLOCK_REALTIME, :millisecond)
   end
 
-  # The app's `configure_client` URL, else Sidekiq's
-  # `determine_redis_provider`, else its default.
+  # The app's `configure_client` URL.
   def self.url
     if URL_PID[0] != Process.pid
       URL[0] = resolve_url
@@ -186,19 +186,10 @@ module SidekiqPush
 
   def self.resolve_url
     configured = JobRegistry.sidekiq_redis_url
-    if configured != ""
-      return configured
+    if configured == ""
+      raise ArgumentError.new("Sidekiq.configure_client's Redis url: is empty (is the environment variable it reads set?); there is no fallback to REDIS_PROVIDER, REDIS_URL or localhost")
     end
-    provider = ENV["REDIS_PROVIDER"].to_s
-    if provider.include?(":")
-      raise ArgumentError.new("REDIS_PROVIDER should be set to the name of the variable which contains the Redis URL, not a URL itself")
-    end
-    named = provider == "" ? "" : ENV[provider].to_s
-    if named != ""
-      return named
-    end
-    env = ENV["REDIS_URL"].to_s
-    env == "" ? DEFAULT_URL : env
+    configured
   end
 
   # The app's `configure_client` `password:`, `""` for none (the URL's
