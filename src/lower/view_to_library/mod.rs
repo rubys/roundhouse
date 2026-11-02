@@ -529,8 +529,10 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     let is_action_view = !is_partial && !is_layout && !dir.is_empty();
     // A layout, or a partial that yields and never reads its record local,
     // takes the yielded markup in its record slot (`render "x" do … end`,
-    // `render layout: "x" do … end`), a String.
-    let body_arg = is_layout
+    // `render layout: "x" do … end`), a String. A partial under `layouts/`
+    // is a partial: a strict-locals `layouts/_card` takes its declared
+    // local there, which its `yield` must not append unescaped.
+    let body_arg = (is_layout && !is_partial)
         || (is_partial && view_key_of(view, &lx.partial_stems).is_some_and(|k| lx.yielding_partials.contains(&k)));
 
     // Render-tree ivar closure: the ivars this view needs (its own reads ∪

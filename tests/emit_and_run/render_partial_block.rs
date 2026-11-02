@@ -195,8 +195,27 @@ fn a_strict_locals_partial_keeps_its_declared_local() {
     let (out, errors) = overlay().emit(roundhouse::project::BuildTarget::Ruby);
     assert!(errors.is_empty(), "{errors:?}");
     let show = std::fs::read_to_string(out.join("app/views/articles/show.rb")).unwrap();
-    let call = show.lines().find(|l| l.contains("Articles.card")).unwrap_or_default().to_string();
-    assert!(!call.contains("(io, \"\"") && !call.contains("card(\"\""), "{call}");
+    let call = show.lines().find(|l| l.contains("Articles.card")).unwrap_or_else(|| panic!("{show}"));
+    assert!(call.contains("card_into(io, article)") || call.contains("card(article)"), "{call}");
     let test = "require \"test_helper\"\n\nclass StrictCardControllerTest < ActionDispatch::IntegrationTest\n  test \"card\" do\n    get article_url(articles(:one))\n    assert_match(%r{<p class=\"card\"></p>}, response.body)\n  end\nend\n";
     overlay().write("test/controllers/strict_card_controller_test.rb", test).run_test("test/controllers/strict_card_controller_test.rb").assert_passes();
+}
+
+/// A strict-locals partial under `layouts/` is a partial, not a layout:
+/// rendered without a block, its `yield` is empty, as in Rails 8.1.4
+/// (`cr_layouts_oracle.rb`), and its declared local is never appended
+/// unescaped (review, mod.rs:3830).
+#[test]
+fn a_strict_locals_partial_under_layouts_yields_nothing_without_a_block() {
+    let overlay = || {
+        emit_and_run::real_blog()
+            .write("app/views/layouts/_card.html.erb", "<%# locals: (body:) -%>\n<div class=\"card\"><%= yield %></div>\n")
+            .edit("app/views/articles/show.html.erb", "<% content_for :title, \"Showing article\" %>\n", "<% content_for :title, \"Showing article\" %>\n<%= render \"layouts/card\", body: \"<i>x</i>\" %>\n")
+    };
+    let (out, errors) = overlay().emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:?}");
+    let card = std::fs::read_to_string(out.join("app/views/layouts/_card.rb")).unwrap();
+    assert!(!card.contains("io << body"), "{card}");
+    let test = "require \"test_helper\"\n\nclass LayoutsCardControllerTest < ActionDispatch::IntegrationTest\n  test \"card\" do\n    get article_url(articles(:one))\n    assert_match(%r{<div class=\"card\"></div>}, response.body)\n    assert_no_match(%r{<i>x</i>}, response.body)\n  end\nend\n";
+    overlay().write("test/controllers/layouts_card_controller_test.rb", test).run_test("test/controllers/layouts_card_controller_test.rb").assert_passes();
 }
