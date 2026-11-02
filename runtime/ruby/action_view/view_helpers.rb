@@ -975,9 +975,86 @@ module ActionView
     end
   
     def self.stylesheet_link_tag(name, opts = EMPTY_HTML_OPTS)
-      href = digested_asset_path("#{name}.css")
+      href = stylesheet_href(name.to_s)
       attrs = render_attrs({ rel: "stylesheet", href: href }.merge(opts.to_h))
       "<link#{attrs}>"
+    end
+
+    # Rails 8.1.4's `path_to_stylesheet` (actionview `asset_path`, type
+    # :stylesheet): a blank source is ""; a URL (`scheme://`, `//`, `cid:`,
+    # `data:`) as given; otherwise `.css` unless the name already ends in it,
+    # then the pipeline unless the path is absolute, with a `?…`/`#…` tail
+    # kept at the end. String ops only: no portable Regexp.
+    def self.stylesheet_href(source)
+      return "" if blank_source?(source)
+      return source if asset_url?(source)
+      cut = first_char_index(source, "?")
+      fragment = first_char_index(source, "#")
+      # Two flat statements, not `a && (b || c)` (Crystal's and Go's emits
+      # drop those parentheses) nor a nested modifier `if` (Python's emit
+      # writes it on one line).
+      cut = fragment if fragment >= 0 && cut < 0
+      cut = fragment if fragment >= 0 && fragment < cut
+      # Rails splits a tail of at least one character after the mark.
+      cut = source.length if cut < 0 || cut == source.length - 1
+      path = source[0, cut]
+      tail = source[cut, source.length - cut]
+      path = path + ".css" unless css_extname?(path)
+      path = digested_asset_path(path) unless path.start_with?("/")
+      path + tail
+    end
+
+    # Rails' asset `URI_REGEXP`: `[-a-z]+://` (any case), `cid:`, `data:`, `//`.
+    def self.asset_url?(source)
+      return true if source.start_with?("//")
+      lower = source.downcase
+      return true if lower.start_with?("cid:") || lower.start_with?("data:")
+      i = scheme_letter_count(lower)
+      i > 0 && lower[i, 3] == "://"
+    end
+
+    # Rails' `String#blank?`: empty, or every character `[[:space:]]`.
+    def self.blank_source?(s)
+      i = 0
+      while i < s.length
+        return false unless " \t\n\u000b\u000c\r\u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000".include?(s[i, 1])
+        i += 1
+      end
+      true
+    end
+
+    # How many of `s`'s first characters are `-` or `a`-`z`. Its own
+    # method, a counter loop at the top, as Elixir's loop lowering takes it.
+    def self.scheme_letter_count(s)
+      i = 0
+      while i < s.length
+        return i unless "-abcdefghijklmnopqrstuvwxyz".include?(s[i, 1])
+        i += 1
+      end
+      s.length
+    end
+
+    # `File.extname(path) == ".css"`: the last segment ends in `.css` after
+    # a name (`.css` alone has no extname).
+    def self.css_extname?(path)
+      slash = -1
+      i = 0
+      while i < path.length
+        slash = i if path[i, 1] == "/"
+        i += 1
+      end
+      base = path[slash + 1, path.length - slash - 1]
+      base.length > 4 && base.end_with?(".css")
+    end
+
+    # The index of the first `ch` in `s`, or -1.
+    def self.first_char_index(s, ch)
+      i = 0
+      while i < s.length
+        return i if s[i, 1] == ch
+        i += 1
+      end
+      -1
     end
 
     # `<script src>` include for a JS source. The source resolves through
