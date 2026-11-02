@@ -908,7 +908,13 @@ fn emit_bool_op(
     if matches!(op, BoolOpKind::Or) {
         return format!("{} {} {}", emit_or_left(left), op_s, emit_expr(right));
     }
-    format!("{} {} {}", emit_expr(left), op_s, emit_expr(right))
+    // `&&` binds tighter than `||` here as in Ruby, so an `||` operand
+    // (`a && (b || c)`, `(a || b) && c`) keeps its parentheses.
+    let operand = |e: &Expr| match &*e.node {
+        ExprNode::BoolOp { op: BoolOpKind::Or, .. } => format!("({})", emit_expr(e)),
+        _ => emit_expr(e),
+    };
+    format!("{} {} {}", operand(left), op_s, operand(right))
 }
 
 /// The left side of `||`, a Hash read as `hash[k]?` so a missing key is nil and the default runs.

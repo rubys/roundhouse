@@ -2267,6 +2267,9 @@ fn default_forgery_protection() -> Filter {
         unless_cond: None,
         if_cond_expr: None,
         unless_cond_expr: None,
+        unread_guard: false,
+        unread_options: false,
+        only_present: false,
         block: None,
         prepend: false,
     }
@@ -2827,6 +2830,11 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
     info.instance_methods
         .entry(Symbol::from("media_type"))
         .or_insert_with(|| fn_sig(vec![], Ty::Str));
+    // Re-typing a lowered controller needs the same writer surface as
+    // source analysis. Its assignment value is still the RHS, not String.
+    info.instance_methods
+        .entry(Symbol::from("content_type="))
+        .or_insert(Ty::Untyped);
 
     // Rails' implicit `protect_from_forgery` heads every chain; the
     // preamble emits a bare `verify_authenticity_token` send that must

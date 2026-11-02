@@ -27,6 +27,8 @@ fn controller_declarations_follow_ruby_order() {
     }
 }
 
+#[path = "emit_and_run/controller_content_type_writer.rs"]
+mod controller_content_type_writer;
 #[path = "support/time_change_usec.rs"]
 mod time_change_usec_contract;
 #[path = "emit_and_run/time_change_usec.rs"]
@@ -48,6 +50,8 @@ mod session_cookie_key;
 mod inertia_runtime_props;
 #[path = "emit_and_run/form_builder_fields.rs"]
 mod form_builder_fields;
+#[path = "emit_and_run/time_tag.rs"]
+mod time_tag;
 #[path = "emit_and_run/multiparameter_params.rs"]
 mod multiparameter_params;
 #[path = "emit_and_run/session_options_key.rs"]
@@ -20620,3 +20624,6 @@ mod record_slice;
 
 #[path = "emit_and_run/csrf_meta_tag_alias.rs"]
 mod csrf_meta_tag_alias;
+
+#[path = "emit_and_run/boolop_precedence.rs"]
+mod boolop_precedence;
