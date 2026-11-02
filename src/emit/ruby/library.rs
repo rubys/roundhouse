@@ -7402,7 +7402,7 @@ pub(crate) fn apply_zoned_json_time_lowering(lcs: &mut [LibraryClass], app: &App
 /// `London` is `+00:00`, not `Z` — so the offset cannot be fixed here.
 /// Ingest lifts the zone into a `config_time_zone` method on the
 /// `Rails::Application` reopen; an app with none presents UTC.
-fn app_presents_time_zoned(app: &App) -> bool {
+pub(crate) fn app_presents_time_zoned(app: &App) -> bool {
     const UTC_ZONES: [&str; 8] =
         ["UTC", "Etc/UTC", "Universal", "Etc/Universal", "Zulu", "Etc/Zulu", "UCT", "Etc/UCT"];
     let Some(application) = &app.rails_application else { return false };

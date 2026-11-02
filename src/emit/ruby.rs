@@ -24,6 +24,7 @@ const SPINEL_TEST_HELPER: &str =
 pub(crate) mod expr;
 mod library;
 pub(crate) use library::install_lookup_indexes;
+pub(crate) use library::app_presents_time_zoned;
 mod rbs;
 /// Host-only, like the `project` tree passes that run it and whose RBS
 /// declaration spans it shares; excluded from the wasm build.

@@ -237,6 +237,11 @@ module ActionView
     def self.form_with: (?Hash[Symbol, untyped] opts) -> String
     # Schema column union (plus nil). Bodies nil-check and stringify.
     def self.optional_value_attr: (String | Integer | Float | bool | nil value) -> String
+    def self.color_value_attr: (String | Integer | Float | bool | nil value) -> String
+    def self.color_field_value_attr: (String | Integer | Float | bool | nil option, String | Integer | Float | bool | nil value) -> String
+    def self.validated_color: (String s) -> String
+    def self.datetime_local_value_attr: (String | Integer | Float | bool | nil value) -> String
+    def self.hex_digits?: (String s) -> bool
     def self.escape_or_empty: (String | Integer | Float | bool | nil value) -> String
 
     # ── attribute rendering ────────────────────────────────────────

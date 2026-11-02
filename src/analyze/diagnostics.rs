@@ -59,7 +59,7 @@ fn attribute_macro_refusals(app: &App) -> Vec<Diagnostic> {
 /// option its Rails `render` rewrites and the lowering would pass
 /// through as a plain attribute.
 fn unlowered_form_builder_calls(app: &App) -> Vec<Diagnostic> {
-    fn visit(expr: &Expr, out: &mut Vec<Diagnostic>) {
+    fn visit(app: &App, expr: &Expr, out: &mut Vec<Diagnostic>) {
         if let ExprNode::Send { recv: Some(r), method, args, .. } = &*expr.node
             && !expr.span.is_synthetic()
             && matches!(&r.ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "ActionView::Helpers::FormBuilder")
@@ -72,7 +72,7 @@ fn unlowered_form_builder_calls(app: &App) -> Vec<Diagnostic> {
                     None,
                     "form builder method",
                     format!(
-                        "`form.{m}` has no lowering (the form lowering expands label, text_field, text_area, password_field, hidden_field, email_field, url_field, number_field, range_field, search_field, telephone_field/phone_field, check_box, radio_button, select, file_field, rich_text_area, button, submit and fields_for), so the call reaches no method at render"
+                        "`form.{m}` has no lowering (the form lowering expands label, text_field, text_area, password_field, hidden_field, email_field, url_field, number_field, range_field, search_field, telephone_field/phone_field, color_field, datetime_local_field, check_box, radio_button, select, file_field, rich_text_area, button, submit and fields_for), so the call reaches no method at render"
                     ),
                 ));
             } else if let Some(opt) = rewritten_option(m, args) {
@@ -84,17 +84,29 @@ fn unlowered_form_builder_calls(app: &App) -> Vec<Diagnostic> {
                         "`form.{m}` with `{opt}:` is not modeled: Rails' field rewrites that option when it renders, and the lowering would write it as a plain attribute"
                     ),
                 ));
+            } else if m == "datetime_local_field"
+                && let Some(reason) = datetime_local_refusal(app, r.ty.as_ref(), args)
+            {
+                out.push(Diagnostic::unsupported(
+                    expr.span,
+                    None,
+                    "form builder field",
+                    format!("`form.datetime_local_field`: {reason}"),
+                ));
             }
         }
-        expr.node.for_each_child(&mut |child| visit(child, out));
+        expr.node.for_each_child(&mut |child| visit(app, child, out));
     }
     /// The option of `method`'s call that Rails' `Tags::*#render`
     /// rewrites: `NumberField` (and `RangeField`) turn `in:`/`within:`
-    /// into `min`/`max`; `SearchField` expands `autosave:`/`onsearch:`.
+    /// into `min`/`max`; `SearchField` expands `autosave:`/`onsearch:`;
+    /// `DatetimeLocalField` reparses `min:`/`max:` and reads
+    /// `include_seconds:`.
     fn rewritten_option(method: &str, args: &[Expr]) -> Option<&'static str> {
         let rewritten: &[&'static str] = match method {
             "number_field" | "range_field" => &["in", "within"],
             "search_field" => &["autosave", "onsearch"],
+            "datetime_local_field" => &["min", "max", "include_seconds"],
             _ => return None,
         };
         let (_, opts) = crate::lower::classify_form_builder_args(args);
@@ -109,7 +121,89 @@ fn unlowered_form_builder_calls(app: &App) -> Vec<Diagnostic> {
     }
     let mut out = Vec::new();
     for view in &app.views {
-        visit(&view.body, &mut out);
+        visit(app, &view.body, &mut out);
+    }
+    out
+}
+
+/// Why the lowering can't write Rails' value for a `datetime_local_field`
+/// call, if it can't. Rails (`Tags::DatetimeField#render`, actionview
+/// 8.1.4) writes a String `value:` as given and formats any other value
+/// as `%Y-%m-%dT%T`; with no `value:` it formats the record's. The
+/// lowering formats a datetime or date column's stored text, which is the
+/// zone's wall time only when the app's zone is UTC, and writes a string
+/// column's value as given. `min:`/`max:`/`include_seconds:` are refused
+/// with the other rewritten options.
+fn datetime_local_refusal(app: &App, builder: Option<&Ty>, args: &[Expr]) -> Option<String> {
+    use crate::expr::Literal;
+    use crate::schema::ColumnType;
+    let (field, opts) = crate::lower::classify_form_builder_args(args);
+    let value = opts.unwrap_or_default().iter().find_map(|(k, v)| {
+        matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "value").then_some(v)
+    });
+    if let Some(v) = value {
+        return (!matches!(&*v.node, ExprNode::Lit { value: Literal::Str { .. } | Literal::Nil }))
+            .then(|| "a `value:` that is not a String literal (or nil) is formatted by Rails at render, which the lowering doesn't model".to_string());
+    }
+    let field = field?;
+    let model = match builder {
+        Some(Ty::Class { args, .. }) => match args.as_slice() {
+            [Ty::Class { id, .. }] => app.models.iter().find(|m| m.name.0 == id.0),
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some(model) = model else {
+        return Some(format!("the form's record isn't a known model, so the type of `{field}` that decides Rails' value is unknown"));
+    };
+    let column = app.schema.tables.get(&model.table.0).and_then(|t| t.columns.iter().find(|c| c.name.as_str() == field));
+    match column.map(|c| &c.col_type) {
+        Some(ColumnType::DateTime) if crate::emit::ruby::app_presents_time_zoned(app) => Some(format!(
+            "`{field}` is shown in the app's `config.time_zone`, and the lowering writes the stored UTC time"
+        )),
+        Some(ColumnType::DateTime | ColumnType::Date | ColumnType::String { .. } | ColumnType::Text) => None,
+        Some(_) => Some(format!("`{field}` is not a datetime, date or string column, so its value isn't one the lowering formats")),
+        None => Some(format!("`{field}` is not a column of {}, so its value isn't one the lowering formats", model.name.0)),
+    }
+}
+
+/// The `form.datetime_local_field` calls whose value is a datetime or
+/// date column's, read from the record (no `value:`): what
+/// `ViewHelpers.datetime_local_value_attr` formats from the column's
+/// text. `project::report_datetime_local_reads` refuses them on the
+/// targets whose runtime reads the column as anything else.
+pub(crate) fn datetime_local_time_reads(app: &App) -> Vec<crate::span::Span> {
+    fn visit(app: &App, expr: &Expr, out: &mut Vec<crate::span::Span>) {
+        if let ExprNode::Send { recv: Some(r), method, args, .. } = &*expr.node
+            && !expr.span.is_synthetic()
+            && method.as_str() == "datetime_local_field"
+            && let Some(Ty::Class { id, args: model, .. }) = &r.ty
+            && id.0.as_str() == "ActionView::Helpers::FormBuilder"
+        {
+            let (field, opts) = crate::lower::classify_form_builder_args(args);
+            let has_value = opts.unwrap_or_default().iter().any(|(k, _)| {
+                matches!(&*k.node, ExprNode::Lit { value: crate::expr::Literal::Sym { value } } if value.as_str() == "value")
+            });
+            let column = match (field, model.as_slice()) {
+                (Some(field), [Ty::Class { id, .. }]) => app
+                    .models
+                    .iter()
+                    .find(|m| m.name.0 == id.0)
+                    .and_then(|m| app.schema.tables.get(&m.table.0))
+                    .and_then(|t| t.columns.iter().find(|c| c.name.as_str() == field)),
+                _ => None,
+            };
+            if !has_value
+                && column.is_some_and(|c| matches!(c.col_type, crate::schema::ColumnType::DateTime | crate::schema::ColumnType::Date))
+            {
+                out.push(expr.span);
+            }
+        }
+        expr.node.for_each_child(&mut |child| visit(app, child, out));
+    }
+    let mut out = Vec::new();
+    for view in &app.views {
+        visit(app, &view.body, &mut out);
     }
     out
 }

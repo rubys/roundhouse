@@ -1398,6 +1398,75 @@ module ActionView
       end
     end
 
+    # ` value="…"` for a `form.color_field` with no `value:` (Rails
+    # 8.1.4's `ColorField#render`): the record's value through
+    # `validate_color_string`, so nil, or a value with no color, is
+    # "#000000". Takes the column's value as `optional_value_attr` does.
+    def self.color_value_attr(value)
+      if value.nil?
+        %( value="#000000")
+      else
+        %( value="#{html_escape(validated_color(value.to_s))}")
+      end
+    end
+
+    # `ColorField#render`'s `options["value"] ||= …` for a computed
+    # `value:`: the option as given, or the record's value through
+    # `color_value_attr` when it is nil. One call, so the option is
+    # evaluated once.
+    def self.color_field_value_attr(option, value)
+      if option.nil?
+        color_value_attr(value)
+      else
+        %( value="#{html_escape(option.to_s)}")
+      end
+    end
+
+    # ` value="…"` for a `form.datetime_local_field` on a datetime or
+    # date column (Rails 8.1.4's `DatetimeLocalField`, `%Y-%m-%dT%T`),
+    # from the value's text: a stored timestamp, or a Time's `to_s`,
+    # starts `YYYY-MM-DD HH:MM:SS` (any fraction or zone after it is
+    # dropped), and a date is `YYYY-MM-DD`, at midnight. nil, or the
+    # empty text an unsaved record's column reads as, writes no value.
+    # The text is the app zone's wall time when that zone is UTC, which
+    # analyze requires for a datetime column.
+    def self.datetime_local_value_attr(value)
+      return "" if value.nil?
+      s = value.to_s
+      if s.empty?
+        ""
+      elsif s.length >= 19
+        %( value="#{html_escape(s[0, 10] + "T" + s[11, 8])}")
+      elsif s.length == 10
+        %( value="#{html_escape(s + "T00:00:00")}")
+      else
+        %( value="#{html_escape(s)}")
+      end
+    end
+
+    # `s` lowercased when it holds `#` and six hex digits anywhere (the
+    # Regexp is unanchored), else "#000000". Probes with `s[i, n]` and
+    # `include?`, not the Regexp (no portable match?).
+    def self.validated_color(s)
+      i = 0
+      while i + 7 <= s.length
+        return s.downcase if s[i, 1] == "#" && hex_digits?(s[i + 1, 6])
+        i += 1
+      end
+      "#000000"
+    end
+
+    # Every character of `s` is a hex digit. Its own method: no nested
+    # `while` (Elixir).
+    def self.hex_digits?(s)
+      i = 0
+      while i < s.length
+        return false unless "0123456789abcdefABCDEF".include?(s[i, 1])
+        i += 1
+      end
+      true
+    end
+
     # Inverse of `html_escape`'s nil-discipline: returns html_escape
     # on the value when present, empty string when nil. Used by the
     # macro-inline `form.text_area` expansion for the textarea body
