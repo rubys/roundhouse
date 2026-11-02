@@ -636,7 +636,9 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         // signature, so the other targets' `Layouts.application(body)`
         // dispatch call sites are arity-stable.
         if !arg_name.is_empty() {
-            typed.push((arg_name.clone(), record_arg_ty(dir, body_arg, &known_models)));
+            // A partial under `layouts/` keeps its `String` slot whether or
+            // not it carries the yield (`body_arg`), as before this change.
+            typed.push((arg_name.clone(), record_arg_ty(dir, body_arg || is_layout, &known_models)));
         }
         for iv in &closure_ivars {
             // The record arg already covers a same-named ivar (a `_form`
