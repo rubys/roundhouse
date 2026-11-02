@@ -1225,6 +1225,16 @@ module ActiveRecord
       touch
     end
 
+    # Whether the update that just ran wrote the row, which is what
+    # Rails' `belongs_to …, touch: true` asks (`if: :saved_changes?`)
+    # before touching the parent from `after_update`. A strict target's
+    # `save` writes the whole row every time, so the answer is always
+    # yes; the ruby-family reopen (connection.rb) skips an update with
+    # nothing pending and answers from `saved_changes`.
+    def _wrote_on_update?
+      true
+    end
+
     # `touch` after a call-site column write (`touch :connected_at`,
     # `increment!(:connections, touch: true)`): the whole row, so the
     # assigned column is written with the timestamp.

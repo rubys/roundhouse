@@ -65,7 +65,7 @@ pub(super) fn push_adapter_methods(
     methods.push(synth_adapter_all(owner, table, schema));
     methods.push(synth_adapter_last(owner, table, schema));
     methods.push(synth_adapter_insert(owner, table, schema, writes_supplied_keys));
-    methods.push(synth_adapter_update(owner, table, schema));
+    methods.push(synth_adapter_update(owner, table, schema, writes_supplied_keys));
     methods.push(synth_adapter_touch(owner, table, schema));
     methods.push(synth_adapter_delete(owner, table, schema));
     methods.push(synth_adapter_count(owner, table, schema));
@@ -646,7 +646,14 @@ fn hydrate_generated_after_insert(
 
 /// `def _adapter_update` — instance method; reads ivars + @id.
 /// See `synth_adapter_insert` for the receiver-rationale.
-fn synth_adapter_update(owner: &ClassId, table: &Table, schema: &Schema) -> MethodDef {
+///
+/// `partial` (the ruby-family targets, whose runtime tracks pending
+/// changes in connection.rb) writes only the columns the runtime's
+/// `_columns_to_write` names, as Rails' partial updates do: a column
+/// another process changed since the record loaded keeps that write
+/// unless this record changed it too. The strict targets' runtime
+/// tracks no changes, so they keep the full-row write.
+fn synth_adapter_update(owner: &ClassId, table: &Table, schema: &Schema, partial: bool) -> MethodDef {
     // Same storage-ivar convention as `synth_adapter_insert`.
     let assignments: Vec<Assignment> = table
         .columns
@@ -676,10 +683,26 @@ fn synth_adapter_update(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
         // A model whose only non-key attributes are generated columns has
         // nothing to write on update. Do not render `UPDATE ... SET WHERE`;
         // generated values are database-owned and a no-op save stays a no-op.
-        body: if has_assignments {
-            SqliteVisitor::default().visit(&op, schema, owner)
-        } else {
+        body: if !has_assignments {
             super::nil_lit()
+        } else if partial {
+            let ArelOp::Update(update) = &op else { unreachable!() };
+            let cols = Symbol::from("cols");
+            let mut columns = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: None,
+                    method: Symbol::from("_columns_to_write"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            columns.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
+            let write = crate::lower::arel::visitor::visit_partial_update(update, schema, &cols, &Symbol::from("sets"));
+            Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![arel_assign(&cols, columns), write] })
+        } else {
+            SqliteVisitor::default().visit(&op, schema, owner)
         },
         signature: Some(fn_sig(vec![], Ty::Nil)),
         effects: EffectSet::default(),

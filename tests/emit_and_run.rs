@@ -90,6 +90,8 @@ mod discard;
 mod callback_abort;
 #[path = "emit_and_run/dirty_clear_restore.rs"]
 mod dirty_clear_restore;
+#[path = "emit_and_run/partial_writes.rs"]
+mod partial_writes;
 #[path = "emit_and_run/pundit_source.rs"]
 mod pundit_source;
 #[path = "emit_and_run/constantize_by_name.rs"]

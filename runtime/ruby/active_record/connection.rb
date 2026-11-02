@@ -519,6 +519,12 @@ module ActiveRecord
       !saved_changes.empty?
     end
 
+    # See base.rb: an update with nothing pending wrote nothing, so the
+    # parent a `belongs_to …, touch: true` names is left alone.
+    def _wrote_on_update?
+      saved_changes?
+    end
+
     # Rails' `attribute_in_database`: the stored value, before any change
     # pending on this record. The changes are String-keyed; Rails takes a
     # Symbol as well.
@@ -1348,17 +1354,40 @@ module ActiveRecord
     # path `save` uses.
     def update_column(name, value)
       _raise_readonly_record_error if readonly?
+      _enlist_direct_write
       self[name] = value
-      _adapter_update
+      key = name.to_s
+      @__write_only = [key]
+      begin
+        _adapter_update
+      ensure
+        @__write_only = nil
+      end
+      clear_attribute_change(key) unless @__last_saved_attributes.nil?
       true
     end
 
     # `record.update_columns(a: 1, b: 2)` — several attributes at once,
     # the same way: no validations, no callbacks, no timestamps.
+    #
+    # Only the named columns are written, and they stop being pending
+    # changes, as in Rails; other unsaved changes stay pending.
     def update_columns(attributes)
       _raise_readonly_record_error if readonly?
-      attributes.each { |name, value| self[name] = value }
-      _adapter_update
+      _enlist_direct_write
+      names = [""]
+      names.pop
+      attributes.each do |name, value|
+        self[name] = value
+        names.push(name.to_s)
+      end
+      @__write_only = names
+      begin
+        _adapter_update
+      ensure
+        @__write_only = nil
+      end
+      names.each { |name| clear_attribute_change(name) } unless @__last_saved_attributes.nil?
       true
     end
 
@@ -1927,7 +1956,10 @@ module ActiveRecord
           @_save_halted = true
           return false
         end
-        fill_timestamps(false) if stamps_timestamps?
+        # Rails stamps `updated_at` only when the save writes something
+        # (`should_record_timestamps?`), and with nothing pending the
+        # UPDATE itself is skipped.
+        fill_timestamps(false) if stamps_timestamps? && changed?
         _adapter_update
         _enlist_write(1)
         __track_saved_changes(was_new)
@@ -1953,6 +1985,22 @@ module ActiveRecord
         @__rollback_baseline = @__last_saved_attributes
       end
       _enlist_or_run(kind)
+    end
+
+    # A write that runs no callbacks (`update_column`, `update_columns`,
+    # `touch_written`) moves the Dirty baseline too, so a ROLLBACK has to
+    # put it back, or the rolled-back value would read as saved and the
+    # next partial save would skip it. Inside a transaction the record is
+    # enlisted for that alone (kind 4): the COMMIT runs no callback for
+    # it. Outside one there is nothing to roll back.
+    def _enlist_direct_write
+      return nil if Db._txn_depth == 0
+      unless @__rollback_saved
+        @__rollback_saved = true
+        @__rollback_baseline = @__last_saved_attributes
+      end
+      Db._txn_records << ActiveRecord::EnlistedRecord.new(self, 4)
+      nil
     end
 
     # The transaction that enlisted the record ended: nothing to put back.
@@ -2012,12 +2060,23 @@ module ActiveRecord
       true
     end
 
+    # The partial UPDATE writes every pending column (the one the call
+    # site assigned among them), so afterwards none of them is pending:
+    # the baseline moves to what was written. Left behind, a later
+    # assignment back to the old value (campfire's `decrement!` after an
+    # `increment!`) would match the stale baseline and never be written.
     def touch_written
       _raise_readonly_record_error if readonly?
       self.class.transaction do
+        _enlist_direct_write
         fill_timestamps(false)
         _adapter_update
-        _note_touched
+        if @__last_saved_attributes.nil?
+          _note_touched
+        else
+          @__last_saved_attributes = _attributes_snapshot
+          @__touched_updated_at = nil
+        end
         after_touch
         _save_committed(false)
       end
@@ -2170,13 +2229,20 @@ module ActiveRecord
         record = entry.record
         next if seen.any? { |other| other.equal?(record) }
         seen << record
-        kind = entry.kind
+        # -1 until a save or destroy is found: a record enlisted only for
+        # a callback-free write (kind 4) runs no commit callback, but its
+        # rollback state is done with all the same.
+        kind = -1
         held.each do |other|
           next unless other.record.equal?(record)
-          next if other.kind == 3
-          kind = other.kind if other.kind == 2 || (other.kind == 0 && kind == 1)
+          next if other.kind == 3 || other.kind == 4
+          kind = other.kind if kind == -1 || other.kind == 2 || (other.kind == 0 && kind == 1)
         end
-        record._run_commit_callbacks(kind)
+        if kind == -1
+          record._forget_rollback_state
+        else
+          record._run_commit_callbacks(kind)
+        end
       end
       nil
     end
@@ -2229,7 +2295,7 @@ module ActiveRecord
         prev = previous.nil? ? nil : previous[key]
         changes[key] = [prev, value] if prev != value
       end
-      @__last_saved_attributes = current
+      @__last_saved_attributes = _attributes_snapshot
       @__touched_updated_at = nil
       @saved_changes = changes
       @id_previously_changed = was_new
@@ -2256,8 +2322,22 @@ module ActiveRecord
       pair.nil? ? nil : pair[0]
     end
 
+    # The Dirty baseline: `attributes` with each Array value copied.
+    # `attributes` hands back the record's own Array for an array
+    # column, so a baseline holding it would follow `labels << "z"` and
+    # the append would never read as pending; partial writes would
+    # then leave it out of the UPDATE. A JSON column decodes a fresh
+    # value on every read, so it needs no copy.
+    def _attributes_snapshot
+      snap = {}
+      attributes.each do |key, value|
+        snap[key] = value.is_a?(Array) ? value.dup : value
+      end
+      snap
+    end
+
     def _note_hydrated
-      @__last_saved_attributes = attributes
+      @__last_saved_attributes = _attributes_snapshot
       @__touched_updated_at = nil
       nil
     end
@@ -2307,6 +2387,18 @@ module ActiveRecord
       changes
     end
 
+    # The columns the emitted `_adapter_update` writes, as Rails' partial
+    # updates choose them: the ones with a pending change. A record with
+    # no Dirty baseline (one this runtime didn't load or save) writes
+    # every column, so nothing it holds is skipped; `update_columns`
+    # names its own.
+    def _columns_to_write
+      only = @__write_only
+      return only unless only.nil?
+      return attributes.keys if @__last_saved_attributes.nil?
+      changes_to_save.keys
+    end
+
     # Rails' `<col>_was`: the value before the pending change, or the
     # current value when nothing is pending. Both halves are the
     # `attributes` form, so a datetime column answers its raw stored
@@ -2321,7 +2413,8 @@ module ActiveRecord
     def clear_attribute_change(name)
       baseline = @__last_saved_attributes
       baseline = baseline.nil? ? {} : baseline.dup
-      baseline[name] = attributes[name]
+      value = attributes[name]
+      baseline[name] = value.is_a?(Array) ? value.dup : value
       @__last_saved_attributes = baseline
       @__touched_updated_at = nil if name == "updated_at"
       nil

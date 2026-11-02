@@ -309,6 +309,7 @@ module ActiveRecord
     # `touch` is no-arg on purpose; see the note on the body.
     def touch: () -> bool
     def touch_later: () -> bool
+    def _wrote_on_update?: () -> bool
     def touch_written: () -> bool
 
     # Lifecycle hooks — no-op defaults. Subclasses override.
